@@ -431,6 +431,11 @@ fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
 fn parse_completion(value: Value) -> Result<CompletionResponse> {
     let mut assistant_blocks = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut stop_reason = value
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop")
+        .to_string();
     for item in value
         .get("output")
         .and_then(Value::as_array)
@@ -450,6 +455,7 @@ fn parse_completion(value: Value) -> Result<CompletionResponse> {
                             }
                             Some("refusal") => {
                                 if let Some(text) = part.get("refusal").and_then(Value::as_str) {
+                                    stop_reason = "refusal".to_string();
                                     assistant_blocks
                                         .push(AssistantContentBlock::Text(TextContent::new(text)));
                                 }
@@ -489,6 +495,6 @@ fn parse_completion(value: Value) -> Result<CompletionResponse> {
         assistant_blocks,
         tool_calls,
         usage: Usage::default(),
-        stop_reason: "stop".to_string(),
+        stop_reason,
     })
 }

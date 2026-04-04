@@ -44,6 +44,10 @@ impl ModelDescriptor {
             },
         ]
     }
+
+    pub fn by_id(id: &str) -> Option<Self> {
+        Self::defaults().into_iter().find(|model| model.id == id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

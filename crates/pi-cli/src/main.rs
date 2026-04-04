@@ -1,12 +1,13 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use pi_acp::run_acp_stdio;
 use pi_core::agent::{AgentSession, AllowAllPermissions, EventSink, NullEventSink, SessionEvent};
 use pi_core::config::SettingsManager;
+use pi_core::messages::{AssistantContentBlock, UserContentBlock};
 use pi_core::models::ModelDescriptor;
 use pi_core::session::SessionManager;
 use pi_openai::OpenAiCodexProvider;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -21,9 +22,20 @@ enum Commands {
     Login,
     Logout,
     Acp,
-    Print { prompt: String },
-    Rpc,
-    Repl,
+    Print {
+        prompt: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Rpc {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Repl {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Sessions,
 }
 
 struct StdoutSink;
@@ -32,8 +44,20 @@ struct StdoutSink;
 impl EventSink for StdoutSink {
     async fn emit(&self, event: SessionEvent) -> anyhow::Result<()> {
         match event {
-            SessionEvent::AssistantMessage(text) => {
-                println!("{text}");
+            SessionEvent::AssistantMessage { content } => {
+                let text = content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        AssistantContentBlock::Text(text) => Some(text.text),
+                        AssistantContentBlock::Thinking(_) | AssistantContentBlock::ToolCall(_) => {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    println!("{text}");
+                }
             }
             SessionEvent::ToolCallStart {
                 tool_name, title, ..
@@ -49,8 +73,7 @@ impl EventSink for StdoutSink {
                         .content
                         .iter()
                         .filter_map(|block| match block {
-                            pi_core::messages::UserContentBlock::Text(text) =>
-                                Some(text.text.as_str()),
+                            UserContentBlock::Text(text) => Some(text.text.as_str()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -68,53 +91,60 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let provider = Arc::new(OpenAiCodexProvider::new()?);
 
-    match cli.command.unwrap_or(Commands::Repl) {
+    match cli.command.unwrap_or(Commands::Repl { session: None }) {
         Commands::Login => provider.login().await,
         Commands::Logout => provider.logout(),
         Commands::Acp => run_acp_stdio().await,
-        Commands::Print { prompt } => {
-            let mut session = open_session(provider.clone()).await?;
+        Commands::Print { prompt, session } => {
+            let mut session = open_session(provider.clone(), session.as_deref()).await?;
             let sink = NullEventSink;
             let permissions = AllowAllPermissions;
-            let output = session.prompt(prompt, &sink, &permissions).await?;
-            if !output.is_empty() {
-                println!("{output}");
+            let output = session.prompt_text(prompt, &sink, &permissions).await?;
+            if !output.output.is_empty() {
+                println!("{}", output.output);
             }
             Ok(())
         }
-        Commands::Rpc => run_rpc(provider.clone()).await,
-        Commands::Repl => run_repl(provider.clone()).await,
+        Commands::Rpc { session } => run_rpc(provider.clone(), session.as_deref()).await,
+        Commands::Repl { session } => run_repl(provider.clone(), session.as_deref()).await,
+        Commands::Sessions => list_sessions(),
     }
 }
 
-async fn open_session(provider: Arc<OpenAiCodexProvider>) -> Result<AgentSession> {
+async fn open_session(
+    provider: Arc<OpenAiCodexProvider>,
+    session_id: Option<&str>,
+) -> Result<AgentSession> {
     let cwd = std::env::current_dir()?;
     let settings = SettingsManager::new(&cwd)?.merged()?;
-    let default_model = settings
-        .default_model
+    let manager = match session_id {
+        Some(session_id) => SessionManager::load_by_id(&cwd, session_id)?,
+        None => SessionManager::new(&cwd)?,
+    };
+    let model_id = manager
+        .current_model_id()
+        .or(settings.default_model)
         .unwrap_or_else(|| "gpt-5.4".to_string());
-    let model = ModelDescriptor::defaults()
-        .into_iter()
-        .find(|model| model.id == default_model)
-        .unwrap_or_else(|| ModelDescriptor::defaults().into_iter().next().unwrap());
-    AgentSession::new(
-        cwd.clone(),
-        SessionManager::new(&cwd)?,
-        model,
-        settings
-            .default_thinking_level
-            .unwrap_or_else(|| "medium".to_string()),
-        provider,
-    )
+    let model = ModelDescriptor::by_id(&model_id)
+        .or_else(|| ModelDescriptor::defaults().into_iter().next())
+        .ok_or_else(|| anyhow!("no default models available"))?;
+    let thinking_level = manager
+        .current_thinking_level()
+        .or(settings.default_thinking_level)
+        .unwrap_or_else(|| "medium".to_string());
+
+    AgentSession::new(cwd, manager, model, thinking_level, provider)
 }
 
-async fn run_repl(provider: Arc<OpenAiCodexProvider>) -> Result<()> {
-    let mut session = open_session(provider).await?;
+async fn run_repl(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -> Result<()> {
+    let mut session = open_session(provider.clone(), session_id).await?;
     let sink = StdoutSink;
     let permissions = AllowAllPermissions;
-    println!("pi-rs headless REPL. Ctrl+D to exit.");
+    println!(
+        "pi-rs headless REPL. Session {}. Ctrl+D to exit.",
+        session.session_manager.header().id
+    );
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -123,18 +153,26 @@ async fn run_repl(provider: Arc<OpenAiCodexProvider>) -> Result<()> {
         if line.trim() == "/exit" || line.trim() == "/quit" {
             break;
         }
-        let output = session.prompt(line, &sink, &permissions).await?;
-        if !output.is_empty() {
-            writeln!(stdout, "{output}")?;
+        if line.trim() == "/new" {
+            session = open_session(provider.clone(), None).await?;
+            println!(
+                "Switched to new session {}",
+                session.session_manager.header().id
+            );
+            continue;
         }
-        write!(stdout, "> ")?;
-        stdout.flush()?;
+        if let Some(next_session) = line.trim().strip_prefix("/resume ") {
+            session = open_session(provider.clone(), Some(next_session.trim())).await?;
+            println!("Resumed session {}", session.session_manager.header().id);
+            continue;
+        }
+        let _ = session.prompt_text(line, &sink, &permissions).await?;
     }
     Ok(())
 }
 
-async fn run_rpc(provider: Arc<OpenAiCodexProvider>) -> Result<()> {
-    let mut session = open_session(provider).await?;
+async fn run_rpc(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -> Result<()> {
+    let mut session = open_session(provider.clone(), session_id).await?;
     let sink = NullEventSink;
     let permissions = AllowAllPermissions;
     let stdin = io::stdin();
@@ -159,8 +197,8 @@ async fn run_rpc(provider: Arc<OpenAiCodexProvider>) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let output = session.prompt(prompt, &sink, &permissions).await?;
-                serde_json::json!({"id": id, "ok": true, "output": output})
+                let output = session.prompt_text(prompt, &sink, &permissions).await?;
+                serde_json::json!({"id": id, "ok": true, "output": output.output, "stopReason": format!("{:?}", output.stop_reason)})
             }
             "session" => serde_json::json!({
                 "id": id,
@@ -168,11 +206,56 @@ async fn run_rpc(provider: Arc<OpenAiCodexProvider>) -> Result<()> {
                 "sessionId": session.session_manager.header().id,
                 "path": session.session_manager.session_file().display().to_string()
             }),
+            "new_session" => {
+                session = open_session(provider.clone(), None).await?;
+                serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "sessionId": session.session_manager.header().id,
+                    "path": session.session_manager.session_file().display().to_string()
+                })
+            }
+            "resume_session" => {
+                let target = request
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .context("missing sessionId")?;
+                session = open_session(provider.clone(), Some(target)).await?;
+                serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "sessionId": session.session_manager.header().id,
+                    "path": session.session_manager.session_file().display().to_string()
+                })
+            }
+            "list_sessions" => {
+                let cwd = std::env::current_dir()?;
+                let sessions = SessionManager::list_for_cwd(&cwd)?
+                    .into_iter()
+                    .map(|session| {
+                        serde_json::json!({
+                            "sessionId": session.id,
+                            "title": session.title,
+                            "updatedAt": session.updated_at,
+                            "path": session.path.display().to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({"id": id, "ok": true, "sessions": sessions})
+            }
             _ => {
                 serde_json::json!({"id": id, "ok": false, "error": format!("unknown command {command}")})
             }
         };
         println!("{}", serde_json::to_string(&response)?);
+    }
+    Ok(())
+}
+
+fn list_sessions() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    for session in SessionManager::list_for_cwd(&cwd)? {
+        println!("{}\t{}\t{}", session.id, session.updated_at, session.title);
     }
     Ok(())
 }

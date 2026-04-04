@@ -8,7 +8,8 @@ pub mod tools;
 
 pub use agent::{
     AgentSession, EventSink, NullEventSink, PermissionDecision, PermissionHandler,
-    PermissionRequest,
+    PermissionRequest, PromptOutcome, PromptStopReason, SessionControl, SessionEvent,
+    SessionRunState,
 };
 pub use config::{AuthStorage, SettingsManager};
 pub use messages::{
