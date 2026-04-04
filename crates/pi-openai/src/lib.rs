@@ -420,6 +420,10 @@ fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
                 "role": "developer",
                 "content": [{"type": "input_text", "text": summary}]
             }),
+            AgentMessage::BranchSummary { summary, .. } => json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": format!("The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{}\n</summary>", summary)}]
+            }),
         })
         .flat_map(|value| match value {
             Value::Array(values) => values,

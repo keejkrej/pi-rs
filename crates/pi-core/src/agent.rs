@@ -1,11 +1,12 @@
+use crate::config::SettingsManager;
 use crate::messages::{
     AgentMessage, AssistantContentBlock, TextContent, UserContentBlock, UserMessage,
 };
 use crate::models::{CompletionRequest, ModelDescriptor, ModelProvider};
-use crate::session::{SessionInfo, SessionManager};
+use crate::session::{SessionEntry, SessionInfo, SessionManager};
 use crate::skills::build_system_prompt;
 use crate::tools::{BuiltInToolRegistry, ToolExecutionResult};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,19 @@ pub enum SessionRunState {
 pub struct PromptOutcome {
     pub output: String,
     pub stop_reason: PromptStopReason,
+}
+
+#[derive(Debug, Clone)]
+pub struct NavigationOutcome {
+    pub editor_text: Option<String>,
+    pub leaf_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForkOutcome {
+    pub editor_text: Option<String>,
+    pub session_id: String,
+    pub session_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -231,26 +245,77 @@ impl AgentSession {
     }
 
     pub async fn compact(&mut self) -> Result<String> {
-        let messages = self.session_manager.messages();
-        if messages.len() <= 12 {
+        let branch = self.session_manager.get_branch(None);
+        if branch.len() <= 12 {
             return Ok("Session is already compact.".to_string());
         }
-        let dropped = &messages[..messages.len() - 8];
+        let dropped = &branch[..branch.len() - 8];
+        let first_kept_entry_id = branch[branch.len() - 8]
+            .id()
+            .map(str::to_string)
+            .context("missing first kept entry id")?;
         let summary = dropped
             .iter()
-            .map(|message| message.as_text())
+            .map(|entry| session_entry_text(entry))
             .collect::<Vec<_>>()
             .join("\n")
             .chars()
             .take(4_000)
             .collect::<String>();
-        self.session_manager
-            .push_message(AgentMessage::CompactionSummary {
-                summary: format!("Compacted prior context:\n{summary}"),
-                tokens_before: dropped.len() as u64,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            })?;
+        self.session_manager.append_compaction(
+            summary,
+            first_kept_entry_id,
+            dropped.len() as u64,
+            None,
+            None,
+        )?;
         Ok("Compacted older messages into a summary entry.".to_string())
+    }
+
+    pub fn new_session(&mut self, parent_session: Option<String>) -> Result<()> {
+        let manager = SessionManager::new_with_parent(&self.cwd, parent_session)?;
+        self.apply_session_manager(manager)
+    }
+
+    pub fn switch_session_target(&mut self, target: &str) -> Result<()> {
+        let manager = SessionManager::load_target(&self.cwd, target)?;
+        self.apply_session_manager(manager)
+    }
+
+    pub fn fork(&mut self, entry_id: &str) -> Result<ForkOutcome> {
+        let target = self
+            .session_manager
+            .get_entry(entry_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown entry {entry_id}"))?;
+        let navigation = navigation_target(&target);
+        let fork = self
+            .session_manager
+            .create_fork(navigation.leaf_id.as_deref())?;
+        let session_id = fork.header().id.clone();
+        let session_path = fork.session_file().to_path_buf();
+        self.apply_session_manager(fork)?;
+        Ok(ForkOutcome {
+            editor_text: navigation.editor_text,
+            session_id,
+            session_path,
+        })
+    }
+
+    pub fn navigate_tree(&mut self, target_id: &str) -> Result<NavigationOutcome> {
+        let target = self
+            .session_manager
+            .get_entry(target_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown entry {target_id}"))?;
+        let navigation = navigation_target(&target);
+        if let Some(leaf_id) = navigation.leaf_id.as_deref() {
+            self.session_manager.branch(leaf_id)?;
+        } else {
+            self.session_manager.reset_leaf();
+        }
+        self.refresh_branch_state()?;
+        Ok(navigation)
     }
 
     pub async fn prompt_text(
@@ -439,14 +504,16 @@ impl AgentSession {
         tool_name: &str,
         output: ToolExecutionResult,
     ) -> Result<()> {
-        self.session_manager.push_message(AgentMessage::ToolResult {
-            tool_call_id: tool_call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            content: output.content,
-            is_error: output.is_error,
-            details: output.details,
-            timestamp: chrono::Utc::now().timestamp_millis(),
-        })
+        self.session_manager
+            .push_message(AgentMessage::ToolResult {
+                tool_call_id: tool_call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                content: output.content,
+                is_error: output.is_error,
+                details: output.details,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            })?;
+        Ok(())
     }
 
     async fn emit_session_info(&self, sink: &dyn EventSink) -> Result<()> {
@@ -475,6 +542,46 @@ impl AgentSession {
         let rest = parts.next().unwrap_or("").trim();
         let text = match command {
             "compact" => self.compact().await?,
+            "new" => {
+                self.new_session(Some(
+                    self.session_manager.session_file().display().to_string(),
+                ))?;
+                format!("Started new session {}", self.session_manager.header().id)
+            }
+            "resume" => {
+                if rest.is_empty() {
+                    return Err(anyhow!("usage: /resume <session-id-or-path>"));
+                }
+                self.switch_session_target(rest)?;
+                format!("Resumed session {}", self.session_manager.header().id)
+            }
+            "fork" => {
+                if rest.is_empty() {
+                    return Err(anyhow!("usage: /fork <entry-id>"));
+                }
+                let outcome = self.fork(rest)?;
+                let mut text = format!("Forked to session {}", outcome.session_id);
+                if let Some(editor_text) = outcome.editor_text {
+                    text.push_str("\n\n");
+                    text.push_str(&editor_text);
+                }
+                text
+            }
+            "tree" | "goto" => {
+                if rest.is_empty() {
+                    return Err(anyhow!("usage: /{command} <entry-id>"));
+                }
+                let outcome = self.navigate_tree(rest)?;
+                let mut text = format!(
+                    "Switched to leaf {}",
+                    self.session_manager.get_leaf_id().unwrap_or("root")
+                );
+                if let Some(editor_text) = outcome.editor_text {
+                    text.push_str("\n\n");
+                    text.push_str(&editor_text);
+                }
+                text
+            }
             "model" => {
                 if rest.is_empty() {
                     format!("Current model: {}", self.model.id)
@@ -488,9 +595,10 @@ impl AgentSession {
                 }
             }
             "session" => format!(
-                "Session {}\n{}",
+                "Session {}\n{}\nLeaf {}",
                 self.session_manager.header().id,
-                self.session_manager.session_file().display()
+                self.session_manager.session_file().display(),
+                self.session_manager.get_leaf_id().unwrap_or("root")
             ),
             _ => return Ok(None),
         };
@@ -503,6 +611,25 @@ impl AgentSession {
             output: text,
             stop_reason: PromptStopReason::EndTurn,
         }))
+    }
+
+    fn apply_session_manager(&mut self, manager: SessionManager) -> Result<()> {
+        let cwd = PathBuf::from(manager.header().cwd.clone());
+        let system_prompt = build_system_prompt(&cwd)?;
+        let (model, thinking_level) = resolve_branch_state(&manager, &cwd)?;
+        self.cwd = cwd;
+        self.session_manager = manager;
+        self.model = model;
+        self.thinking_level = thinking_level;
+        self.system_prompt = system_prompt;
+        Ok(())
+    }
+
+    fn refresh_branch_state(&mut self) -> Result<()> {
+        let (model, thinking_level) = resolve_branch_state(&self.session_manager, &self.cwd)?;
+        self.model = model;
+        self.thinking_level = thinking_level;
+        Ok(())
     }
 }
 
@@ -523,6 +650,60 @@ fn plain_text_command(content: &[UserContentBlock]) -> Option<String> {
         }
     }
     Some(text.join("\n").trim().to_string())
+}
+
+fn navigation_target(entry: &SessionEntry) -> NavigationOutcome {
+    match entry {
+        SessionEntry::Message {
+            parent_id,
+            message: AgentMessage::User { content, .. },
+            ..
+        } => NavigationOutcome {
+            editor_text: Some(extract_user_text(content)),
+            leaf_id: parent_id.clone(),
+        },
+        _ => NavigationOutcome {
+            editor_text: None,
+            leaf_id: entry.id().map(str::to_string),
+        },
+    }
+}
+
+fn extract_user_text(content: &[UserContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            UserContentBlock::Text(text) => Some(text.text.as_str()),
+            UserContentBlock::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn session_entry_text(entry: &SessionEntry) -> String {
+    match entry {
+        SessionEntry::Message { message, .. } => message.as_text(),
+        SessionEntry::BranchSummary { summary, .. } => summary.clone(),
+        SessionEntry::Compaction { summary, .. } => summary.clone(),
+        SessionEntry::SessionInfo { name, .. } => name.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn resolve_branch_state(manager: &SessionManager, cwd: &Path) -> Result<(ModelDescriptor, String)> {
+    let settings = SettingsManager::new(cwd)?.merged()?;
+    let model_id = manager
+        .current_model_id()
+        .or(settings.default_model)
+        .unwrap_or_else(|| "gpt-5.4".to_string());
+    let model = ModelDescriptor::by_id(&model_id)
+        .or_else(|| ModelDescriptor::defaults().into_iter().next())
+        .ok_or_else(|| anyhow!("no default models available"))?;
+    let thinking_level = manager
+        .current_thinking_level()
+        .or(settings.default_thinking_level)
+        .unwrap_or_else(|| "medium".to_string());
+    Ok((model, thinking_level))
 }
 
 #[cfg(test)]
@@ -615,5 +796,65 @@ mod tests {
             })
             .await;
         assert_eq!(outcome.stop_reason, PromptStopReason::Cancelled);
+    }
+
+    #[test]
+    fn navigate_tree_restores_branch_model_state() {
+        let provider = Arc::new(TestProvider::default());
+        let mut session = test_session(provider);
+
+        let root = session
+            .session_manager
+            .push_message(AgentMessage::User {
+                content: vec![UserContentBlock::Text(TextContent::new("root"))],
+                timestamp: 1,
+            })
+            .unwrap();
+        session
+            .session_manager
+            .push_model_change("openai-codex", "gpt-5.4-mini")
+            .unwrap();
+        let mini_leaf = session.session_manager.get_leaf_id().unwrap().to_string();
+        session.refresh_branch_state().unwrap();
+        assert_eq!(session.current_model().id, "gpt-5.4-mini");
+
+        session.session_manager.branch(&root).unwrap();
+        let legacy_branch = session
+            .session_manager
+            .push_message(AgentMessage::User {
+                content: vec![UserContentBlock::Text(TextContent::new("legacy"))],
+                timestamp: 2,
+            })
+            .unwrap();
+
+        session.navigate_tree(&legacy_branch).unwrap();
+        assert_eq!(session.current_model().id, "gpt-5.4");
+
+        session.navigate_tree(&mini_leaf).unwrap();
+        assert_eq!(session.current_model().id, "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn forking_user_entry_returns_editor_text_and_switches_session() {
+        let provider = Arc::new(TestProvider::default());
+        let mut session = test_session(provider);
+        let parent_path = session.session_manager.session_file().display().to_string();
+        let user_id = session
+            .session_manager
+            .push_message(AgentMessage::User {
+                content: vec![UserContentBlock::Text(TextContent::new("draft prompt"))],
+                timestamp: 1,
+            })
+            .unwrap();
+
+        let outcome = session.fork(&user_id).unwrap();
+
+        assert_eq!(outcome.editor_text.as_deref(), Some("draft prompt"));
+        assert_eq!(outcome.session_id, session.session_manager.header().id);
+        assert_eq!(
+            session.session_manager.header().parent_session.as_deref(),
+            Some(parent_path.as_str())
+        );
+        assert!(session.session_manager.messages().is_empty());
     }
 }

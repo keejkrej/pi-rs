@@ -26,14 +26,20 @@ enum Commands {
         prompt: String,
         #[arg(long)]
         session: Option<String>,
+        #[arg(long)]
+        resume: bool,
     },
     Rpc {
         #[arg(long)]
         session: Option<String>,
+        #[arg(long)]
+        resume: bool,
     },
     Repl {
         #[arg(long)]
         session: Option<String>,
+        #[arg(long)]
+        resume: bool,
     },
     Sessions,
 }
@@ -91,12 +97,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let provider = Arc::new(OpenAiCodexProvider::new()?);
 
-    match cli.command.unwrap_or(Commands::Repl { session: None }) {
+    match cli.command.unwrap_or(Commands::Repl {
+        session: None,
+        resume: false,
+    }) {
         Commands::Login => provider.login().await,
         Commands::Logout => provider.logout(),
         Commands::Acp => run_acp_stdio().await,
-        Commands::Print { prompt, session } => {
-            let mut session = open_session(provider.clone(), session.as_deref()).await?;
+        Commands::Print {
+            prompt,
+            session,
+            resume,
+        } => {
+            let mut session = open_session(provider.clone(), session.as_deref(), resume).await?;
             let sink = NullEventSink;
             let permissions = AllowAllPermissions;
             let output = session.prompt_text(prompt, &sink, &permissions).await?;
@@ -105,20 +118,26 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Rpc { session } => run_rpc(provider.clone(), session.as_deref()).await,
-        Commands::Repl { session } => run_repl(provider.clone(), session.as_deref()).await,
+        Commands::Rpc { session, resume } => {
+            run_rpc(provider.clone(), session.as_deref(), resume).await
+        }
+        Commands::Repl { session, resume } => {
+            run_repl(provider.clone(), session.as_deref(), resume).await
+        }
         Commands::Sessions => list_sessions(),
     }
 }
 
 async fn open_session(
     provider: Arc<OpenAiCodexProvider>,
-    session_id: Option<&str>,
+    session_target: Option<&str>,
+    resume_recent: bool,
 ) -> Result<AgentSession> {
     let cwd = std::env::current_dir()?;
     let settings = SettingsManager::new(&cwd)?.merged()?;
-    let manager = match session_id {
-        Some(session_id) => SessionManager::load_by_id(&cwd, session_id)?,
+    let manager = match session_target {
+        Some(session_target) => SessionManager::load_target(&cwd, session_target)?,
+        None if resume_recent => SessionManager::continue_recent(&cwd)?,
         None => SessionManager::new(&cwd)?,
     };
     let model_id = manager
@@ -136,8 +155,12 @@ async fn open_session(
     AgentSession::new(cwd, manager, model, thinking_level, provider)
 }
 
-async fn run_repl(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -> Result<()> {
-    let mut session = open_session(provider.clone(), session_id).await?;
+async fn run_repl(
+    provider: Arc<OpenAiCodexProvider>,
+    session_target: Option<&str>,
+    resume_recent: bool,
+) -> Result<()> {
+    let mut session = open_session(provider.clone(), session_target, resume_recent).await?;
     let sink = StdoutSink;
     let permissions = AllowAllPermissions;
     println!(
@@ -153,26 +176,17 @@ async fn run_repl(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) 
         if line.trim() == "/exit" || line.trim() == "/quit" {
             break;
         }
-        if line.trim() == "/new" {
-            session = open_session(provider.clone(), None).await?;
-            println!(
-                "Switched to new session {}",
-                session.session_manager.header().id
-            );
-            continue;
-        }
-        if let Some(next_session) = line.trim().strip_prefix("/resume ") {
-            session = open_session(provider.clone(), Some(next_session.trim())).await?;
-            println!("Resumed session {}", session.session_manager.header().id);
-            continue;
-        }
         let _ = session.prompt_text(line, &sink, &permissions).await?;
     }
     Ok(())
 }
 
-async fn run_rpc(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -> Result<()> {
-    let mut session = open_session(provider.clone(), session_id).await?;
+async fn run_rpc(
+    provider: Arc<OpenAiCodexProvider>,
+    session_target: Option<&str>,
+    resume_recent: bool,
+) -> Result<()> {
+    let mut session = open_session(provider.clone(), session_target, resume_recent).await?;
     let sink = NullEventSink;
     let permissions = AllowAllPermissions;
     let stdin = io::stdin();
@@ -204,10 +218,18 @@ async fn run_rpc(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -
                 "id": id,
                 "ok": true,
                 "sessionId": session.session_manager.header().id,
-                "path": session.session_manager.session_file().display().to_string()
+                "path": session.session_manager.session_file().display().to_string(),
+                "leafId": session.session_manager.get_leaf_id(),
+                "model": session.current_model().id,
+                "thinkingLevel": session.current_thinking_level(),
             }),
             "new_session" => {
-                session = open_session(provider.clone(), None).await?;
+                let parent_session = request
+                    .get("parentSession")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| Some(session.session_manager.session_file().display().to_string()));
+                session.new_session(parent_session)?;
                 serde_json::json!({
                     "id": id,
                     "ok": true,
@@ -220,12 +242,56 @@ async fn run_rpc(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -
                     .get("sessionId")
                     .and_then(|v| v.as_str())
                     .context("missing sessionId")?;
-                session = open_session(provider.clone(), Some(target)).await?;
+                session.switch_session_target(target)?;
                 serde_json::json!({
                     "id": id,
                     "ok": true,
                     "sessionId": session.session_manager.header().id,
                     "path": session.session_manager.session_file().display().to_string()
+                })
+            }
+            "switch_session" => {
+                let target = request
+                    .get("session")
+                    .or_else(|| request.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .context("missing session")?;
+                session.switch_session_target(target)?;
+                serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "sessionId": session.session_manager.header().id,
+                    "path": session.session_manager.session_file().display().to_string(),
+                    "leafId": session.session_manager.get_leaf_id(),
+                })
+            }
+            "navigate_tree" => {
+                let target = request
+                    .get("targetId")
+                    .and_then(|v| v.as_str())
+                    .context("missing targetId")?;
+                let outcome = session.navigate_tree(target)?;
+                serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "leafId": session.session_manager.get_leaf_id(),
+                    "editorText": outcome.editor_text,
+                    "model": session.current_model().id,
+                    "thinkingLevel": session.current_thinking_level(),
+                })
+            }
+            "fork" => {
+                let entry_id = request
+                    .get("entryId")
+                    .and_then(|v| v.as_str())
+                    .context("missing entryId")?;
+                let outcome = session.fork(entry_id)?;
+                serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "sessionId": outcome.session_id,
+                    "path": outcome.session_path.display().to_string(),
+                    "editorText": outcome.editor_text,
                 })
             }
             "list_sessions" => {
@@ -255,7 +321,13 @@ async fn run_rpc(provider: Arc<OpenAiCodexProvider>, session_id: Option<&str>) -
 fn list_sessions() -> Result<()> {
     let cwd = std::env::current_dir()?;
     for session in SessionManager::list_for_cwd(&cwd)? {
-        println!("{}\t{}\t{}", session.id, session.updated_at, session.title);
+        println!(
+            "{}\t{}\t{}\t{}",
+            session.id,
+            session.updated_at,
+            session.leaf_id.as_deref().unwrap_or("root"),
+            session.title
+        );
     }
     Ok(())
 }

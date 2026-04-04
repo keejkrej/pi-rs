@@ -572,6 +572,16 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 })
                 .await?;
             }
+            pi_core::messages::AgentMessage::BranchSummary { summary, .. } => {
+                sink.emit(SessionEvent::UserMessage {
+                    content: vec![UserContentBlock::Text(pi_core::messages::TextContent::new(
+                        format!(
+                            "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{summary}\n</summary>"
+                        ),
+                    ))],
+                })
+                .await?;
+            }
         }
     }
     Ok(())

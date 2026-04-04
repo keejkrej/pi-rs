@@ -263,6 +263,13 @@ pub enum AgentMessage {
         tokens_before: u64,
         timestamp: i64,
     },
+    #[serde(rename = "branchSummary")]
+    BranchSummary {
+        summary: String,
+        #[serde(rename = "fromId")]
+        from_id: String,
+        timestamp: i64,
+    },
 }
 
 impl AgentMessage {
@@ -271,7 +278,8 @@ impl AgentMessage {
             AgentMessage::User { timestamp, .. }
             | AgentMessage::Assistant { timestamp, .. }
             | AgentMessage::ToolResult { timestamp, .. }
-            | AgentMessage::CompactionSummary { timestamp, .. } => *timestamp,
+            | AgentMessage::CompactionSummary { timestamp, .. }
+            | AgentMessage::BranchSummary { timestamp, .. } => *timestamp,
         }
     }
 
@@ -281,6 +289,7 @@ impl AgentMessage {
             AgentMessage::Assistant { content, .. } => assistant_content_to_text(content),
             AgentMessage::ToolResult { content, .. } => user_content_to_text(content),
             AgentMessage::CompactionSummary { summary, .. } => summary.clone(),
+            AgentMessage::BranchSummary { summary, .. } => summary.clone(),
         }
     }
 }
