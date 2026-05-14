@@ -1,15 +1,15 @@
 use agent_client_protocol::{self as acp, Client as _};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pi_core::agent::{
+use pi_agent_core::agent::{
     AgentSession, EventSink, PermissionDecision, PermissionHandler, PermissionRequest,
     PromptStopReason, SessionControl, SessionEvent,
 };
-use pi_core::config::{AuthStorage, SettingsManager, StoredCredential};
-use pi_core::messages::{AssistantContentBlock, ImageContent, UserContentBlock};
-use pi_core::models::ModelDescriptor;
-use pi_core::session::SessionManager;
-use pi_openai::OpenAiCodexProvider;
+use pi_agent_core::config::{AuthStorage, SettingsManager, StoredCredential};
+use pi_agent_core::messages::{AssistantContentBlock, ImageContent, UserContentBlock};
+use pi_agent_core::models::ModelDescriptor;
+use pi_agent_core::session::SessionManager;
+use pi_ai::OpenAiCodexProvider;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -214,7 +214,7 @@ impl PiAcpAgent {
         let auth = AuthStorage::new().map_err(internal_error)?;
         match auth.load("openai-codex").map_err(internal_error)? {
             Some(StoredCredential::OAuth { .. }) => Ok(()),
-            None => Err(acp::Error::auth_required()),
+            Some(StoredCredential::ApiKey { .. }) | None => Err(acp::Error::auth_required()),
         }
     }
 
@@ -268,7 +268,9 @@ impl acp::Agent for PiAcpAgent {
 
         Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1)
             .agent_capabilities(capabilities)
-            .agent_info(acp::Implementation::new("pi-rs", "0.1.0").title("pi-rs"))
+            .agent_info(
+                acp::Implementation::new("pi-coding-agent", env!("CARGO_PKG_VERSION")).title("pi"),
+            )
             .auth_methods(vec![acp::AuthMethod::Terminal(
                 acp::AuthMethodTerminal::new("terminal-login", "Terminal Login")
                     .description("Run `pi login` in a terminal to authenticate with ChatGPT Codex.")
@@ -481,8 +483,11 @@ fn build_agent_session(
     let model_id = manager
         .current_model_id()
         .or(settings.default_model)
-        .unwrap_or_else(|| "gpt-5.4".to_string());
-    let model = ModelDescriptor::by_id(&model_id)
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+    let configured_provider = manager
+        .current_model_provider()
+        .or(settings.default_provider);
+    let model = ModelDescriptor::resolve(configured_provider.as_deref(), Some(&model_id))
         .or_else(|| ModelDescriptor::defaults().into_iter().next())
         .ok_or_else(|| anyhow!("no default models available"))?;
     let thinking_level = manager
@@ -507,10 +512,15 @@ fn session_config_options(session: &AgentSession) -> Vec<acp::SessionConfigOptio
         acp::SessionConfigOption::select(
             MODEL_CONFIG_ID,
             "Model",
-            session.current_model().id.clone(),
+            session.current_model().canonical_id(),
             ModelDescriptor::defaults()
                 .into_iter()
-                .map(|model| acp::SessionConfigSelectOption::new(model.id, model.name))
+                .map(|model| {
+                    acp::SessionConfigSelectOption::new(
+                        model.canonical_id(),
+                        format!("{} ({})", model.name, model.provider),
+                    )
+                })
                 .collect::<Vec<_>>(),
         )
         .category(acp::SessionConfigOptionCategory::Model)
@@ -538,14 +548,14 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
     .await?;
     for message in session.session_manager.messages() {
         match message {
-            pi_core::messages::AgentMessage::User { content, .. } => {
+            pi_agent_core::messages::AgentMessage::User { content, .. } => {
                 sink.emit(SessionEvent::UserMessage { content }).await?;
             }
-            pi_core::messages::AgentMessage::Assistant { content, .. } => {
+            pi_agent_core::messages::AgentMessage::Assistant { content, .. } => {
                 sink.emit(SessionEvent::AssistantMessage { content })
                     .await?;
             }
-            pi_core::messages::AgentMessage::ToolResult {
+            pi_agent_core::messages::AgentMessage::ToolResult {
                 tool_call_id,
                 tool_name,
                 content,
@@ -556,7 +566,7 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 sink.emit(SessionEvent::ToolCallResult {
                     tool_call_id,
                     tool_name,
-                    output: pi_core::tools::ToolExecutionResult {
+                    output: pi_agent_core::tools::ToolExecutionResult {
                         content,
                         is_error,
                         details,
@@ -564,17 +574,17 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 })
                 .await?;
             }
-            pi_core::messages::AgentMessage::CompactionSummary { summary, .. } => {
+            pi_agent_core::messages::AgentMessage::CompactionSummary { summary, .. } => {
                 sink.emit(SessionEvent::AssistantMessage {
                     content: vec![AssistantContentBlock::Text(
-                        pi_core::messages::TextContent::new(summary),
+                        pi_agent_core::messages::TextContent::new(summary),
                     )],
                 })
                 .await?;
             }
-            pi_core::messages::AgentMessage::BranchSummary { summary, .. } => {
+            pi_agent_core::messages::AgentMessage::BranchSummary { summary, .. } => {
                 sink.emit(SessionEvent::UserMessage {
-                    content: vec![UserContentBlock::Text(pi_core::messages::TextContent::new(
+                    content: vec![UserContentBlock::Text(pi_agent_core::messages::TextContent::new(
                         format!(
                             "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{summary}\n</summary>"
                         ),
@@ -592,16 +602,16 @@ fn prompt_content_to_user_blocks(prompt: Vec<acp::ContentBlock>) -> Result<Vec<U
     for block in prompt {
         match block {
             acp::ContentBlock::Text(text) => blocks.push(UserContentBlock::Text(
-                pi_core::messages::TextContent::new(text.text),
+                pi_agent_core::messages::TextContent::new(text.text),
             )),
             acp::ContentBlock::Image(image) => blocks.push(UserContentBlock::Image(
                 ImageContent::new(image.data, image.mime_type),
             )),
             acp::ContentBlock::Resource(resource) => blocks.push(UserContentBlock::Text(
-                pi_core::messages::TextContent::new(resource_text(resource)),
+                pi_agent_core::messages::TextContent::new(resource_text(resource)),
             )),
             acp::ContentBlock::ResourceLink(resource) => blocks.push(UserContentBlock::Text(
-                pi_core::messages::TextContent::new(format!("Resource: {}", resource.uri)),
+                pi_agent_core::messages::TextContent::new(format!("Resource: {}", resource.uri)),
             )),
             acp::ContentBlock::Audio(_) => {
                 return Err(anyhow!("audio prompts are not supported"));

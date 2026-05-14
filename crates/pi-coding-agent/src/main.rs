@@ -1,14 +1,24 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
-use pi_acp::run_acp_stdio;
-use pi_core::agent::{AgentSession, AllowAllPermissions, EventSink, NullEventSink, SessionEvent};
-use pi_core::config::SettingsManager;
-use pi_core::messages::{AssistantContentBlock, UserContentBlock};
-use pi_core::models::ModelDescriptor;
-use pi_core::session::SessionManager;
-use pi_openai::OpenAiCodexProvider;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{execute, terminal};
+use pi_agent_core::agent::{
+    AgentSession, AllowAllPermissions, EventSink, NullEventSink, SessionEvent,
+};
+use pi_agent_core::config::SettingsManager;
+use pi_agent_core::messages::{AssistantContentBlock, UserContentBlock};
+use pi_agent_core::models::ModelDescriptor;
+use pi_agent_core::session::SessionManager;
+use pi_ai::OpenAiCodexProvider;
+use pi_coding_agent::acp::run_acp_stdio;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io::{self, BufRead};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "pi")]
@@ -22,6 +32,12 @@ enum Commands {
     Login,
     Logout,
     Acp,
+    Tui {
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        resume: bool,
+    },
     Print {
         prompt: String,
         #[arg(long)]
@@ -41,6 +57,7 @@ enum Commands {
         #[arg(long)]
         resume: bool,
     },
+    Models,
     Sessions,
 }
 
@@ -97,13 +114,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let provider = Arc::new(OpenAiCodexProvider::new()?);
 
-    match cli.command.unwrap_or(Commands::Repl {
+    match cli.command.unwrap_or(Commands::Tui {
         session: None,
         resume: false,
     }) {
         Commands::Login => provider.login().await,
         Commands::Logout => provider.logout(),
         Commands::Acp => run_acp_stdio().await,
+        Commands::Tui { session, resume } => {
+            run_tui(provider.clone(), session.as_deref(), resume).await
+        }
         Commands::Print {
             prompt,
             session,
@@ -124,6 +144,7 @@ async fn main() -> Result<()> {
         Commands::Repl { session, resume } => {
             run_repl(provider.clone(), session.as_deref(), resume).await
         }
+        Commands::Models => list_models(),
         Commands::Sessions => list_sessions(),
     }
 }
@@ -143,8 +164,11 @@ async fn open_session(
     let model_id = manager
         .current_model_id()
         .or(settings.default_model)
-        .unwrap_or_else(|| "gpt-5.4".to_string());
-    let model = ModelDescriptor::by_id(&model_id)
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+    let configured_provider = manager
+        .current_model_provider()
+        .or(settings.default_provider);
+    let model = ModelDescriptor::resolve(configured_provider.as_deref(), Some(&model_id))
         .or_else(|| ModelDescriptor::defaults().into_iter().next())
         .ok_or_else(|| anyhow!("no default models available"))?;
     let thinking_level = manager
@@ -153,6 +177,175 @@ async fn open_session(
         .unwrap_or_else(|| "medium".to_string());
 
     AgentSession::new(cwd, manager, model, thinking_level, provider)
+}
+
+struct TuiSink {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl EventSink for TuiSink {
+    async fn emit(&self, event: SessionEvent) -> anyhow::Result<()> {
+        let mut lines = self.lines.lock().expect("lock poisoned");
+        match event {
+            SessionEvent::AssistantMessage { content } => {
+                let text = content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        AssistantContentBlock::Text(text) => Some(text.text),
+                        AssistantContentBlock::Thinking(thinking) => {
+                            Some(format!("[thinking]\n{}", thinking.thinking))
+                        }
+                        AssistantContentBlock::ToolCall(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    lines.push(format!("Assistant: {text}"));
+                }
+            }
+            SessionEvent::ToolCallStart {
+                tool_name, title, ..
+            } => {
+                lines.push(format!("Tool {tool_name}: {title}"));
+            }
+            SessionEvent::ToolCallResult {
+                tool_name, output, ..
+            } => {
+                let text = output
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        UserContentBlock::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let status = if output.is_error { "failed" } else { "done" };
+                lines.push(format!("Tool {tool_name} {status}: {text}"));
+            }
+            SessionEvent::SessionInfo { title, .. } => {
+                lines.push(format!("Session: {title}"));
+            }
+            SessionEvent::UserMessage { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+async fn run_tui(
+    provider: Arc<OpenAiCodexProvider>,
+    session_target: Option<&str>,
+    resume_recent: bool,
+) -> Result<()> {
+    let mut session = open_session(provider.clone(), session_target, resume_recent).await?;
+    let _guard = TerminalGuard::enter()?;
+    let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    let messages = Arc::new(Mutex::new(vec![format!(
+        "pi · session {} · model {} · Ctrl-C/Esc to quit",
+        session.session_manager.header().id,
+        session.current_model().canonical_id()
+    )]));
+    let sink = TuiSink {
+        lines: messages.clone(),
+    };
+    let permissions = AllowAllPermissions;
+    let mut input = String::new();
+
+    loop {
+        let snapshot = messages.lock().expect("lock poisoned").join("\n\n");
+        terminal.draw(|frame| {
+            let [body_area, editor_area] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
+            let body = Paragraph::new(snapshot.clone())
+                .block(Block::new().title("Conversation").borders(Borders::ALL))
+                .wrap(Wrap { trim: false });
+            let editor = Paragraph::new(input.as_str())
+                .block(Block::new().title("Prompt").borders(Borders::ALL))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(body, body_area);
+            frame.render_widget(editor, editor_area);
+        })?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc => break,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Enter => {
+                let prompt = input.trim().to_string();
+                if prompt.is_empty() {
+                    continue;
+                }
+                input.clear();
+                messages
+                    .lock()
+                    .expect("lock poisoned")
+                    .push(format!("You: {prompt}"));
+                terminal.draw(|frame| {
+                    let [body, editor] =
+                        Layout::vertical([Constraint::Min(1), Constraint::Length(3)])
+                            .areas(frame.area());
+                    let snapshot = messages.lock().expect("lock poisoned").join("\n\n");
+                    frame.render_widget(
+                        Paragraph::new(snapshot)
+                            .block(Block::new().title("Conversation").borders(Borders::ALL))
+                            .wrap(Wrap { trim: false }),
+                        body,
+                    );
+                    frame.render_widget(
+                        Paragraph::new("waiting for model...").block(
+                            Block::new()
+                                .title("Prompt (running...)")
+                                .borders(Borders::ALL),
+                        ),
+                        editor,
+                    );
+                })?;
+                let result = session.prompt_text(prompt, &sink, &permissions).await;
+                if let Err(error) = result {
+                    messages
+                        .lock()
+                        .expect("lock poisoned")
+                        .push(format!("Error: {error:#}"));
+                }
+            }
+            KeyCode::Char(ch) => input.push(ch),
+            _ => {}
+        }
+    }
+
+    terminal::disable_raw_mode()?;
+    Ok(())
 }
 
 async fn run_repl(
@@ -164,7 +357,7 @@ async fn run_repl(
     let sink = StdoutSink;
     let permissions = AllowAllPermissions;
     println!(
-        "pi-rs headless REPL. Session {}. Ctrl+D to exit.",
+        "pi headless REPL. Session {}. Ctrl+D to exit.",
         session.session_manager.header().id
     );
     let stdin = io::stdin();
@@ -314,6 +507,19 @@ async fn run_rpc(
             }
         };
         println!("{}", serde_json::to_string(&response)?);
+    }
+    Ok(())
+}
+
+fn list_models() -> Result<()> {
+    for model in ModelDescriptor::defaults() {
+        println!(
+            "{}\t{}\t{}\t{}",
+            model.provider,
+            model.id,
+            model.api,
+            model.base_url.as_deref().unwrap_or("")
+        );
     }
     Ok(())
 }

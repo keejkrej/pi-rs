@@ -1,0 +1,15 @@
+[package]
+name = "pi-web-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reusable web UI components for AI chat interfaces powered by pi-ai"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pi-agent-core = { path = "../pi-agent-core" }
+pi-ai = { path = "../pi-ai" }
+pi-tui = { path = "../pi-tui" }

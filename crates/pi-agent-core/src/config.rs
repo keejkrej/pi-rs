@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 pub struct SettingsFile {
     #[serde(rename = "defaultModel")]
     pub default_model: Option<String>,
+    #[serde(rename = "defaultProvider")]
+    pub default_provider: Option<String>,
     #[serde(rename = "defaultThinkingLevel")]
     pub default_thinking_level: Option<String>,
 }
@@ -24,6 +26,8 @@ pub enum StoredCredential {
         #[serde(rename = "accountId")]
         account_id: String,
     },
+    #[serde(rename = "api_key")]
+    ApiKey { key: String },
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +58,7 @@ impl SettingsManager {
         let project = self.load_project().unwrap_or_default();
         Ok(SettingsFile {
             default_model: project.default_model.or(global.default_model),
+            default_provider: project.default_provider.or(global.default_provider),
             default_thinking_level: project
                 .default_thinking_level
                 .or(global.default_thinking_level),
@@ -93,6 +98,13 @@ impl AuthStorage {
         let mut data = self.load_all().unwrap_or_default();
         data.insert(provider.to_string(), credential);
         save_json_file(&self.path, &data)
+    }
+
+    pub fn api_key(&self, provider: &str) -> Result<Option<String>> {
+        Ok(match self.load(provider)? {
+            Some(StoredCredential::ApiKey { key }) => Some(key),
+            _ => None,
+        })
     }
 
     pub fn remove(&self, provider: &str) -> Result<()> {

@@ -58,7 +58,7 @@ pub fn load_skills(cwd: &Path) -> Result<Vec<Skill>> {
 
 pub fn build_system_prompt(cwd: &Path) -> Result<String> {
     let mut parts = vec![String::from(
-        "You are pi-rs, a headless Rust coding agent. Use tools precisely, prefer minimal diffs, and explain concrete results.",
+        "You are pi, a headless Rust coding agent. Use tools precisely, prefer minimal diffs, and explain concrete results.",
     )];
     for (path, content) in load_agent_docs(cwd) {
         parts.push(format!(

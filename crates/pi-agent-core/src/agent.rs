@@ -586,9 +586,12 @@ impl AgentSession {
                 if rest.is_empty() {
                     format!("Current model: {}", self.model.id)
                 } else {
-                    let next = ModelDescriptor::defaults()
-                        .into_iter()
-                        .find(|model| model.id == rest)
+                    let next = ModelDescriptor::by_id(rest)
+                        .or_else(|| {
+                            ModelDescriptor::defaults()
+                                .into_iter()
+                                .find(|model| model.id == rest)
+                        })
                         .ok_or_else(|| anyhow!("unknown model {rest}"))?;
                     self.set_model(next)?;
                     format!("Model set to {}", self.model.id)
@@ -695,8 +698,11 @@ fn resolve_branch_state(manager: &SessionManager, cwd: &Path) -> Result<(ModelDe
     let model_id = manager
         .current_model_id()
         .or(settings.default_model)
-        .unwrap_or_else(|| "gpt-5.4".to_string());
-    let model = ModelDescriptor::by_id(&model_id)
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+    let provider = manager
+        .current_model_provider()
+        .or(settings.default_provider);
+    let model = ModelDescriptor::resolve(provider.as_deref(), Some(&model_id))
         .or_else(|| ModelDescriptor::defaults().into_iter().next())
         .ok_or_else(|| anyhow!("no default models available"))?;
     let thinking_level = manager
@@ -828,7 +834,13 @@ mod tests {
             .unwrap();
 
         session.navigate_tree(&legacy_branch).unwrap();
-        assert_eq!(session.current_model().id, "gpt-5.4");
+        let expected_default_model = SettingsManager::new(session.cwd())
+            .unwrap()
+            .merged()
+            .unwrap()
+            .default_model
+            .unwrap_or_else(|| "gpt-5.5".to_string());
+        assert_eq!(session.current_model().id, expected_default_model);
 
         session.navigate_tree(&mini_leaf).unwrap();
         assert_eq!(session.current_model().id, "gpt-5.4-mini");

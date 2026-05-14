@@ -373,6 +373,12 @@ impl SessionManager {
             .map(|model| model.model_id)
     }
 
+    pub fn current_model_provider(&self) -> Option<String> {
+        self.build_session_context()
+            .model
+            .map(|model| model.provider)
+    }
+
     pub fn current_thinking_level(&self) -> Option<String> {
         let thinking_level = self.build_session_context().thinking_level;
         if thinking_level == "off" {

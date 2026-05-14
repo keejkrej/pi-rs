@@ -1,8 +1,10 @@
 [package]
-name = "pi-core"
+name = "pi-agent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+description = "General-purpose agent with transport abstraction, state management, and attachment support"
 
 [dependencies]
 anyhow.workspace = true
