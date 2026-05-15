@@ -840,7 +840,16 @@ mod tests {
             .unwrap()
             .default_model
             .unwrap_or_else(|| "gpt-5.5".to_string());
-        assert_eq!(session.current_model().id, expected_default_model);
+        let default_model_provider = SettingsManager::new(session.cwd())
+            .unwrap()
+            .merged()
+            .unwrap()
+            .default_provider;
+        let expected_default_model_resolved = ModelDescriptor::resolve(default_model_provider.as_deref(), Some(&expected_default_model))
+            .or_else(|| ModelDescriptor::defaults().into_iter().next())
+            .unwrap().id;
+
+        assert_eq!(session.current_model().id, expected_default_model_resolved);
 
         session.navigate_tree(&mini_leaf).unwrap();
         assert_eq!(session.current_model().id, "gpt-5.4-mini");
