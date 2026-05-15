@@ -263,6 +263,16 @@ pub enum AgentMessage {
         tokens_before: u64,
         timestamp: i64,
     },
+    #[serde(rename = "custom")]
+    Custom {
+        #[serde(rename = "customType")]
+        custom_type: String,
+        content: Value,
+        display: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
+        timestamp: i64,
+    },
     #[serde(rename = "branchSummary")]
     BranchSummary {
         summary: String,
@@ -279,6 +289,7 @@ impl AgentMessage {
             | AgentMessage::Assistant { timestamp, .. }
             | AgentMessage::ToolResult { timestamp, .. }
             | AgentMessage::CompactionSummary { timestamp, .. }
+            | AgentMessage::Custom { timestamp, .. }
             | AgentMessage::BranchSummary { timestamp, .. } => *timestamp,
         }
     }
@@ -289,6 +300,16 @@ impl AgentMessage {
             AgentMessage::Assistant { content, .. } => assistant_content_to_text(content),
             AgentMessage::ToolResult { content, .. } => user_content_to_text(content),
             AgentMessage::CompactionSummary { summary, .. } => summary.clone(),
+            AgentMessage::Custom { content, .. } => {
+                if let Some(text) = content.as_str() {
+                    text.to_string()
+                } else if let Some(arr) = content.as_array() {
+                    let blocks = arr.iter().filter_map(|val| serde_json::from_value::<UserContentBlock>(val.clone()).ok()).collect::<Vec<_>>();
+                    user_content_to_text(&blocks)
+                } else {
+                    String::new()
+                }
+            }
             AgentMessage::BranchSummary { summary, .. } => summary.clone(),
         }
     }

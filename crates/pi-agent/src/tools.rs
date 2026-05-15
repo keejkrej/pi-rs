@@ -76,6 +76,14 @@ impl BuiltInToolRegistry {
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
     }
+
+    pub fn clear(&mut self) {
+        self.tools.clear();
+    }
+
+    pub fn retain_only(&mut self, allowed: &[String]) {
+        self.tools.retain(|name, _| allowed.iter().any(|allowed| allowed == name));
+    }
 }
 
 struct ReadTool;

@@ -433,8 +433,8 @@ fn parse_code_from_input(input: &str, expected_state: &str) -> Result<String> {
 fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
     messages
         .iter()
-        .map(|message| match message {
-            AgentMessage::User { content, .. } => json!({
+        .filter_map(|message| match message {
+            AgentMessage::User { content, .. } => Some(json!({
                 "role": "user",
                 "content": content.iter().map(|block| match block {
                     UserContentBlock::Text(text) => json!({"type": "input_text", "text": text.text}),
@@ -444,7 +444,7 @@ fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
                         "image_url": format!("data:{};base64,{}", image.mime_type, image.data)
                     }),
                 }).collect::<Vec<_>>()
-            }),
+            })),
             AgentMessage::Assistant {
                 content,
                 provider: _,
@@ -480,7 +480,7 @@ fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
                         AssistantContentBlock::Thinking { .. } => {}
                     }
                 }
-                json!(output)
+                Some(json!(output))
             }
             AgentMessage::ToolResult {
                 tool_call_id,
@@ -496,20 +496,49 @@ fn convert_messages(messages: &[AgentMessage]) -> Vec<Value> {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                json!({
+                Some(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": text
-                })
+                }))
             }
-            AgentMessage::CompactionSummary { summary, .. } => json!({
+            AgentMessage::CompactionSummary { summary, .. } => Some(json!({
                 "role": "developer",
                 "content": [{"type": "input_text", "text": summary}]
-            }),
-            AgentMessage::BranchSummary { summary, .. } => json!({
+            })),
+            AgentMessage::BranchSummary { summary, .. } => Some(json!({
                 "role": "user",
                 "content": [{"type": "input_text", "text": format!("The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{}\n</summary>", summary)}]
-            }),
+            })),
+            AgentMessage::Custom { content, display, .. } => {
+                if !*display {
+                    None
+                } else {
+                    let blocks = if let Some(text) = content.as_str() {
+                        vec![json!({"type": "input_text", "text": text})]
+                    } else if let Some(arr) = content.as_array() {
+                        arr.iter().map(|block| match serde_json::from_value::<UserContentBlock>(block.clone()) {
+                            Ok(UserContentBlock::Text(text)) => json!({"type": "input_text", "text": text.text}),
+                            Ok(UserContentBlock::Image(image)) => json!({
+                                "type": "input_image",
+                                "detail": "auto",
+                                "image_url": format!("data:{};base64,{}", image.mime_type, image.data)
+                            }),
+                            _ => json!({"type": "input_text", "text": " "})
+                        }).collect::<Vec<_>>()
+                    } else {
+                        vec![]
+                    };
+                    if blocks.is_empty() {
+                        None
+                    } else {
+                        Some(json!({
+                            "role": "user",
+                            "content": blocks
+                        }))
+                    }
+                }
+            }
         })
         .flat_map(|value| match value {
             Value::Array(values) => values,
@@ -751,6 +780,27 @@ fn convert_messages_to_chat_completions(
                 "role": "user",
                 "content": format!("The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{}\n</summary>", summary),
             })),
+            AgentMessage::Custom { content, display, .. } => {
+                if *display {
+                    if let Some(text) = content.as_str() {
+                        converted.push(json!({
+                            "role": "user",
+                            "content": text
+                        }));
+                    } else if let Some(arr) = content.as_array() {
+                        let text = arr.iter().filter_map(|val| {
+                            match serde_json::from_value::<UserContentBlock>(val.clone()) {
+                                Ok(UserContentBlock::Text(text)) => Some(text.text),
+                                _ => None
+                            }
+                        }).collect::<Vec<_>>().join("\n");
+                        converted.push(json!({
+                            "role": "user",
+                            "content": text
+                        }));
+                    }
+                }
+            }
         }
     }
     converted

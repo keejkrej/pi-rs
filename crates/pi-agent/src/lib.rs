@@ -19,5 +19,8 @@ pub use messages::{
 };
 pub use models::{CompletionRequest, CompletionResponse, ModelDescriptor, ModelProvider, ToolSpec};
 pub use session::{SessionEntry, SessionInfo, SessionManager};
-pub use skills::{Skill, build_system_prompt, load_agent_docs, load_skills};
+pub use skills::{
+    Skill, build_system_prompt, format_skills_for_prompt, load_agent_docs, load_skills,
+    skill_description, skill_disable_model_invocation, skill_name,
+};
 pub use tools::{BuiltInToolRegistry, ToolExecutionResult};

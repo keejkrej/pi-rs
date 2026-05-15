@@ -327,10 +327,12 @@ impl<T: Terminal> TUI<T> {
         None
     }
 
+    #[allow(dead_code)]
     fn expand_last_changed_for_kitty_images(&self, _first: usize, last: usize) -> usize {
         last
     }
 
+    #[allow(dead_code)]
     fn delete_changed_kitty_images(&self, _first: usize, _last: usize) -> String {
         String::new()
     }

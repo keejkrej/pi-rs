@@ -146,6 +146,7 @@ pub struct SessionManager {
     by_id: HashMap<String, usize>,
     leaf_id: Option<String>,
     labels_by_id: BTreeMap<String, String>,
+    in_memory: bool,
 }
 
 impl SessionManager {
@@ -171,10 +172,23 @@ impl SessionManager {
             by_id: HashMap::new(),
             leaf_id: None,
             labels_by_id: BTreeMap::new(),
+            in_memory: false,
         };
         manager.persist()?;
         register_session_path(cwd, &manager.header.id, &manager.session_file)?;
         Ok(manager)
+    }
+
+    pub fn in_memory(cwd: &Path) -> Self {
+        Self {
+            session_file: PathBuf::from(":memory:"),
+            header: SessionHeader::new(cwd.display().to_string()),
+            entries: Vec::new(),
+            by_id: HashMap::new(),
+            leaf_id: None,
+            labels_by_id: BTreeMap::new(),
+            in_memory: true,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -197,6 +211,7 @@ impl SessionManager {
             by_id: HashMap::new(),
             leaf_id: None,
             labels_by_id: BTreeMap::new(),
+            in_memory: false,
         };
         manager.rebuild_index();
         Ok(manager)
@@ -234,7 +249,13 @@ impl SessionManager {
                 Err(_) => continue,
             };
             register_session_path(cwd, &manager.header.id, &path)?;
-            if manager.header.id == session_id {
+            if manager.header.id == session_id || manager.header.id.starts_with(session_id) {
+                if found.is_some() {
+                    anyhow::bail!(
+                        "session id prefix {session_id} is ambiguous for {}",
+                        cwd.display()
+                    );
+                }
                 found = Some(manager);
             }
         }
@@ -336,6 +357,24 @@ impl SessionManager {
     }
 
     pub fn session_info(&self) -> Result<SessionInfo> {
+        if self.in_memory {
+            let now = Utc::now();
+            return Ok(SessionInfo {
+                id: self.header.id.clone(),
+                path: self.session_file.clone(),
+                cwd: PathBuf::from(&self.header.cwd),
+                created: now,
+                modified: now,
+                updated_at: now.to_rfc3339(),
+                title: self.title(),
+                name: self.session_name(),
+                parent_session_path: self.header.parent_session.clone(),
+                first_message: self.first_user_message_text(),
+                current_model_id: self.current_model_id(),
+                current_thinking_level: self.current_thinking_level(),
+                leaf_id: self.leaf_id.clone(),
+            });
+        }
         let metadata = fs::metadata(&self.session_file)?;
         Ok(self.build_session_info(metadata))
     }
@@ -526,6 +565,9 @@ impl SessionManager {
     }
 
     pub fn persist(&self) -> Result<()> {
+        if self.in_memory {
+            return Ok(());
+        }
         if let Some(parent) = self.session_file.parent() {
             fs::create_dir_all(parent)?;
         }

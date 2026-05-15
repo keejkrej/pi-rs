@@ -244,6 +244,18 @@ impl AgentSession {
         Ok(())
     }
 
+    pub fn disable_tools(&mut self) {
+        self.tools.clear();
+    }
+
+    pub fn retain_tools(&mut self, allowed: &[String]) {
+        self.tools.retain_only(allowed);
+    }
+
+    pub fn set_system_prompt(&mut self, system_prompt: impl Into<String>) {
+        self.system_prompt = system_prompt.into();
+    }
+
     pub async fn compact(&mut self) -> Result<String> {
         let branch = self.session_manager.get_branch(None);
         if branch.len() <= 12 {
@@ -316,6 +328,26 @@ impl AgentSession {
         }
         self.refresh_branch_state()?;
         Ok(navigation)
+    }
+
+    pub fn record_bash_result(
+        &mut self,
+        command: &str,
+        result: &serde_json::Value,
+        exclude_from_context: bool,
+    ) -> Result<()> {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        self.session_manager.push_message(crate::messages::AgentMessage::Custom {
+            custom_type: "bash_execution".to_string(),
+            content: serde_json::Value::String(format!(
+                "Command:\n{command}\n\nOutput:\n{}",
+                result.get("output").and_then(|v| v.as_str()).unwrap_or_default()
+            )),
+            display: !exclude_from_context,
+            details: Some(result.clone()),
+            timestamp,
+        })?;
+        Ok(())
     }
 
     pub async fn prompt_text(

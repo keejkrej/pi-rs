@@ -592,6 +592,18 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 })
                 .await?;
             }
+            pi_agent::messages::AgentMessage::Custom {
+                content, display, ..
+            } => {
+                if display {
+                    if let Some(text) = content.as_str() {
+                        sink.emit(SessionEvent::UserMessage {
+                            content: vec![UserContentBlock::Text(pi_agent::messages::TextContent::new(text))],
+                        })
+                        .await?;
+                    }
+                }
+            }
         }
     }
     Ok(())

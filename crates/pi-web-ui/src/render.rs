@@ -105,6 +105,29 @@ pub fn render_message(message: &AgentMessage) -> String {
         AgentMessage::BranchSummary { summary, .. } => {
             render_block("summary", "Branch summary", &escape_html(summary))
         }
+        AgentMessage::Custom {
+            custom_type,
+            content,
+            display,
+            ..
+        } => {
+            if !*display {
+                String::new()
+            } else {
+                let html = if let Some(text) = content.as_str() {
+                    escape_html(text)
+                } else if let Some(arr) = content.as_array() {
+                    let blocks = arr
+                        .iter()
+                        .filter_map(|val| serde_json::from_value::<pi_agent::messages::UserContentBlock>(val.clone()).ok())
+                        .collect::<Vec<_>>();
+                    render_user_content(&blocks)
+                } else {
+                    String::new()
+                };
+                render_block("custom", custom_type, &html)
+            }
+        }
     }
 }
 
