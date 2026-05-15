@@ -845,9 +845,13 @@ mod tests {
             .merged()
             .unwrap()
             .default_provider;
-        let expected_default_model_resolved = ModelDescriptor::resolve(default_model_provider.as_deref(), Some(&expected_default_model))
-            .or_else(|| ModelDescriptor::defaults().into_iter().next())
-            .unwrap().id;
+        let expected_default_model_resolved = ModelDescriptor::resolve(
+            default_model_provider.as_deref(),
+            Some(&expected_default_model),
+        )
+        .or_else(|| ModelDescriptor::defaults().into_iter().next())
+        .unwrap()
+        .id;
 
         assert_eq!(session.current_model().id, expected_default_model_resolved);
 

@@ -232,7 +232,7 @@ impl Tool for EditTool {
             .context("missing edits")?;
 
         let mut content = fs::read_to_string(&path)?;
-        
+
         for edit in edits {
             let old_text = edit
                 .get("oldText")
@@ -256,7 +256,7 @@ impl Tool for EditTool {
                 )));
             }
         }
-        
+
         fs::write(&path, content)?;
         Ok(ToolExecutionResult::text(format!(
             "Edited {}",
@@ -318,13 +318,18 @@ impl Tool for GrepTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "grep".into(),
-            description: "Search text recursively with a regex pattern".into(),
+            description: "Search file contents recursively. Uses ripgrep-style regex matching. Returns matched lines with line numbers. Optionally includes context lines and glob filtering. Output is truncated to 100 matches or 50KB (whichever is hit first). Non-UTF-8 files are ignored.".into(),
             input_schema: json!({
                 "type": "object",
                 "required": ["pattern"],
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "path": {"type": "string"}
+                    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+                    "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
+                    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"},
+                    "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal string instead of regex (default: false)"},
+                    "context": {"type": "number", "description": "Number of lines to show before and after each match (default: 0)"},
+                    "limit": {"type": "number", "description": "Maximum number of matches to return (default: 100)"}
                 }
             }),
             requires_permission: false,
