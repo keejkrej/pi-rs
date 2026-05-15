@@ -187,15 +187,30 @@ impl Tool for EditTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit".into(),
-            description: "Replace text in an existing file".into(),
+            description: "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.".into(),
             input_schema: json!({
                 "type": "object",
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path", "edits"],
                 "properties": {
-                    "path": {"type": "string"},
-                    "old_text": {"type": "string"},
-                    "new_text": {"type": "string"},
-                    "replace_all": {"type": "boolean"}
+                    "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
+                    "edits": {
+                        "type": "array",
+                        "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+                        "items": {
+                            "type": "object",
+                            "required": ["oldText", "newText"],
+                            "properties": {
+                                "oldText": {
+                                    "type": "string",
+                                    "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+                                },
+                                "newText": {
+                                    "type": "string",
+                                    "description": "Replacement text for this targeted edit."
+                                }
+                            }
+                        }
+                    }
                 }
             }),
             requires_permission: true,
@@ -211,34 +226,38 @@ impl Tool for EditTool {
                 .and_then(Value::as_str)
                 .context("missing path")?,
         );
-        let old_text = arguments
-            .get("old_text")
-            .and_then(Value::as_str)
-            .context("missing old_text")?;
-        let new_text = arguments
-            .get("new_text")
-            .and_then(Value::as_str)
-            .context("missing new_text")?;
-        let replace_all = arguments
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let content = fs::read_to_string(&path)?;
-        let next = if replace_all {
-            content.replace(old_text, new_text)
-        } else if let Some(idx) = content.find(old_text) {
-            let mut updated = String::with_capacity(content.len() + new_text.len());
-            updated.push_str(&content[..idx]);
-            updated.push_str(new_text);
-            updated.push_str(&content[idx + old_text.len()..]);
-            updated
-        } else {
-            return Ok(ToolExecutionResult::error(format!(
-                "pattern not found in {}",
-                path.display()
-            )));
-        };
-        fs::write(&path, next)?;
+        let edits = arguments
+            .get("edits")
+            .and_then(Value::as_array)
+            .context("missing edits")?;
+
+        let mut content = fs::read_to_string(&path)?;
+        
+        for edit in edits {
+            let old_text = edit
+                .get("oldText")
+                .and_then(Value::as_str)
+                .context("missing oldText in edit")?;
+            let new_text = edit
+                .get("newText")
+                .and_then(Value::as_str)
+                .context("missing newText in edit")?;
+
+            if let Some(idx) = content.find(old_text) {
+                let mut updated = String::with_capacity(content.len() + new_text.len());
+                updated.push_str(&content[..idx]);
+                updated.push_str(new_text);
+                updated.push_str(&content[idx + old_text.len()..]);
+                content = updated;
+            } else {
+                return Ok(ToolExecutionResult::error(format!(
+                    "pattern not found in {}",
+                    path.display()
+                )));
+            }
+        }
+        
+        fs::write(&path, content)?;
         Ok(ToolExecutionResult::text(format!(
             "Edited {}",
             path.display()
@@ -451,8 +470,12 @@ mod tests {
             &temp,
             json!({
                 "path": path.display().to_string(),
-                "old_text": "beta",
-                "new_text": "gamma"
+                "edits": [
+                    {
+                        "oldText": "beta",
+                        "newText": "gamma"
+                    }
+                ]
             }),
         )
         .await
