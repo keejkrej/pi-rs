@@ -1,5 +1,5 @@
 use crate::format::format_usage;
-use pi_agent_core::messages::{
+use pi_agent::messages::{
     AgentMessage, AssistantContentBlock, TextContent, UserContentBlock, assistant_content_to_text,
     user_content_to_text,
 };

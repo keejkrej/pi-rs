@@ -1,4 +1,4 @@
-use pi_agent_core::messages::Usage;
+use pi_agent::messages::Usage;
 
 pub fn format_token_count(tokens: u64) -> String {
     if tokens >= 1_000_000 {

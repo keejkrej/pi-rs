@@ -1353,7 +1353,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pi-agent-core"
+name = "pi-agent"
 version = "0.74.0"
 dependencies = [
  "anyhow",
@@ -1378,7 +1378,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
- "pi-agent-core",
+ "pi-agent",
  "reqwest",
  "serde",
  "serde_json",
@@ -1398,7 +1398,7 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "futures",
- "pi-agent-core",
+ "pi-agent",
  "pi-ai",
  "ratatui",
  "serde",
@@ -1424,7 +1424,7 @@ name = "pi-web-ui"
 version = "0.74.0"
 dependencies = [
  "anyhow",
- "pi-agent-core",
+ "pi-agent",
  "pi-ai",
  "pi-tui",
  "serde",

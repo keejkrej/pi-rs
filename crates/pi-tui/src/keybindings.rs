@@ -245,4 +245,44 @@ mod tests {
     fn default_bindings_match() {
         assert!(KeybindingsManager::default().matches("\u{1b}", "tui.select.cancel"));
     }
+
+    #[test]
+    fn user_bindings_do_not_evict_shared_defaults() {
+        let mut user = BTreeMap::new();
+        user.insert(
+            "tui.input.submit".to_string(),
+            vec!["enter".to_string(), "ctrl+enter".to_string()],
+        );
+        let keybindings = KeybindingsManager::new(tui_keybindings(), user);
+        assert_eq!(
+            keybindings.get_keys("tui.input.submit"),
+            vec!["enter".to_string(), "ctrl+enter".to_string()]
+        );
+        assert_eq!(
+            keybindings.get_keys("tui.select.confirm"),
+            vec!["enter".to_string()]
+        );
+    }
+
+    #[test]
+    fn direct_user_binding_conflicts_are_reported() {
+        let mut user = BTreeMap::new();
+        user.insert("tui.input.submit".to_string(), vec!["ctrl+x".to_string()]);
+        user.insert("tui.select.confirm".to_string(), vec!["ctrl+x".to_string()]);
+        let keybindings = KeybindingsManager::new(tui_keybindings(), user);
+        assert_eq!(
+            keybindings.get_conflicts(),
+            vec![KeybindingConflict {
+                key: "ctrl+x".to_string(),
+                keybindings: vec![
+                    "tui.input.submit".to_string(),
+                    "tui.select.confirm".to_string()
+                ],
+            }]
+        );
+        assert_eq!(
+            keybindings.get_keys("tui.editor.cursorLeft"),
+            vec!["left".to_string(), "ctrl+b".to_string()]
+        );
+    }
 }

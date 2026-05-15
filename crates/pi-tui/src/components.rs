@@ -1,8 +1,11 @@
 use std::boxed::Box as StdBox;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 
+use crate::autocomplete::{AutocompleteProvider, AutocompleteSuggestions};
 use crate::editor_component::EditorComponent;
-use crate::keys::parse_key;
+use crate::keybindings::get_keybindings;
+use crate::keys::{decode_printable_key, parse_key};
 use crate::kill_ring::KillRing;
 use crate::terminal_image::{
     ImageDimensions, ImageProtocol, ImageRenderOptions, allocate_image_id, get_capabilities,
@@ -10,7 +13,9 @@ use crate::terminal_image::{
 };
 use crate::tui::{CURSOR_MARKER, Component, Focusable};
 use crate::undo_stack::UndoStack;
-use crate::utils::{truncate_to_width, truncate_to_width_with, visible_width, wrap_text};
+use crate::utils::{
+    slice_by_column, truncate_to_width, truncate_to_width_with, visible_width, wrap_text,
+};
 
 #[derive(Debug, Clone)]
 pub struct Text {
@@ -448,11 +453,20 @@ impl Input {
 
 impl Component for Input {
     fn render(&self, width: usize) -> Vec<String> {
-        let mut value = self.value.clone();
-        if self.focused {
-            value.insert_str(self.cursor.min(value.len()), CURSOR_MARKER);
+        if !self.focused || width == 0 {
+            return vec![truncate_to_width(&self.value, width)];
         }
-        vec![truncate_to_width(&value, width)]
+
+        let cursor = self.cursor.min(self.value.len());
+        let before = &self.value[..cursor];
+        let after = &self.value[cursor..];
+        let before_width = visible_width(before);
+        let start_col = before_width.saturating_sub(width.saturating_sub(1));
+        let before_visible = slice_by_column(before, start_col, width.saturating_sub(1), false);
+        let before_visible_width = visible_width(&before_visible);
+        let remaining_width = width.saturating_sub(before_visible_width);
+        let after_visible = truncate_to_width_with(after, remaining_width, "", false);
+        vec![format!("{before_visible}{CURSOR_MARKER}{after_visible}")]
     }
 
     fn handle_input(&mut self, data: &str) {
@@ -623,7 +637,19 @@ pub struct EditorOptions {
     pub theme: Option<EditorTheme>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EditorCursor {
+    pub line: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorState {
+    text: String,
+    cursor: usize,
+}
+
+#[derive(Default)]
 pub struct Editor {
     text: String,
     cursor: usize,
@@ -632,6 +658,20 @@ pub struct Editor {
     history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
+    kill_ring: KillRing,
+    undo_stack: UndoStack<EditorState>,
+    last_action: Option<InputAction>,
+    last_yank: Option<(usize, usize)>,
+    is_in_paste: bool,
+    paste_buffer: String,
+    pastes: BTreeMap<usize, String>,
+    paste_counter: usize,
+    autocomplete_provider: Option<std::boxed::Box<dyn AutocompleteProvider>>,
+    autocomplete_state: Option<AutocompleteSuggestions>,
+    autocomplete_selected: usize,
+    autocomplete_force: bool,
+    on_submit: Option<std::boxed::Box<dyn FnMut(String)>>,
+    on_change: Option<std::boxed::Box<dyn FnMut(String)>>,
 }
 
 impl Editor {
@@ -650,15 +690,53 @@ impl Editor {
         &self.text
     }
 
+    pub fn set_autocomplete_provider<P: AutocompleteProvider + 'static>(&mut self, provider: P) {
+        self.autocomplete_provider = Some(std::boxed::Box::new(provider));
+    }
+
+    pub fn is_showing_autocomplete(&self) -> bool {
+        self.autocomplete_state.is_some()
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
+        let normalized = normalize_editor_text(&text.into());
+        if self.text != normalized {
+            self.push_undo();
+        }
+        self.text = normalized;
         self.cursor = self.text.len();
         self.history_index = None;
         self.history_draft.clear();
+        self.last_action = None;
+        self.last_yank = None;
+        self.notify_change();
+    }
+
+    pub fn set_on_submit<F>(&mut self, callback: F)
+    where
+        F: FnMut(String) + 'static,
+    {
+        self.on_submit = Some(std::boxed::Box::new(callback));
+    }
+
+    pub fn set_on_change<F>(&mut self, callback: F)
+    where
+        F: FnMut(String) + 'static,
+    {
+        self.on_change = Some(std::boxed::Box::new(callback));
     }
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub fn get_cursor(&self) -> EditorCursor {
+        let (line, col) = self.cursor_line_col();
+        EditorCursor { line, col }
+    }
+
+    pub fn get_lines(&self) -> Vec<String> {
+        self.text.split('\n').map(str::to_string).collect()
     }
 
     pub fn add_to_history(&mut self, text: impl Into<String>) {
@@ -670,10 +748,40 @@ impl Editor {
             return;
         }
         self.history.push(text);
+        if self.history.len() > 100 {
+            let overflow = self.history.len() - 100;
+            self.history.drain(0..overflow);
+        }
     }
 
     pub fn history(&self) -> &[String] {
         &self.history
+    }
+
+    pub fn paste_ids(&self) -> Vec<usize> {
+        self.pastes.keys().copied().collect()
+    }
+
+    fn state(&self) -> EditorState {
+        EditorState {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn push_undo(&mut self) {
+        self.undo_stack.push(&self.state());
+    }
+
+    fn undo(&mut self) {
+        if let Some(state) = self.undo_stack.pop() {
+            self.text = state.text;
+            self.cursor = state.cursor.min(self.text.len());
+            self.exit_history_mode();
+            self.last_action = None;
+            self.last_yank = None;
+            self.notify_change();
+        }
     }
 
     fn previous_boundary(&self, cursor: usize) -> usize {
@@ -692,9 +800,87 @@ impl Editor {
             .unwrap_or(self.text.len())
     }
 
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let before_cursor = &self.text[..self.cursor.min(self.text.len())];
+        let line = before_cursor.bytes().filter(|byte| *byte == b'\n').count();
+        let col = before_cursor
+            .rsplit_once('\n')
+            .map(|(_, suffix)| suffix.chars().count())
+            .unwrap_or_else(|| before_cursor.chars().count());
+        (line, col)
+    }
+
+    fn line_count(&self) -> usize {
+        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+
+    fn byte_index_for_line_col(&self, target_line: usize, target_col: usize) -> usize {
+        let mut line = 0;
+        let mut col = 0;
+        for (idx, ch) in self.text.char_indices() {
+            if line == target_line && col == target_col {
+                return idx;
+            }
+            if ch == '\n' {
+                if line == target_line {
+                    return idx;
+                }
+                line += 1;
+                col = 0;
+            } else if line == target_line {
+                col += 1;
+            }
+        }
+        self.text.len()
+    }
+
+    fn move_cursor_vertical(&mut self, direction: isize) -> bool {
+        let (line, col) = self.cursor_line_col();
+        let line_count = self.line_count();
+        let Some(target_line) = line.checked_add_signed(direction) else {
+            return false;
+        };
+        if target_line >= line_count {
+            return false;
+        }
+        self.cursor = self.byte_index_for_line_col(target_line, col);
+        true
+    }
+
     fn exit_history_mode(&mut self) {
         self.history_index = None;
         self.history_draft.clear();
+    }
+
+    fn break_yank(&mut self) {
+        if self.last_action != Some(InputAction::Yank) {
+            self.last_yank = None;
+        }
+    }
+
+    fn notify_change(&mut self) {
+        if let Some(on_change) = self.on_change.as_mut() {
+            on_change(self.text.clone());
+        }
+    }
+
+    fn submit_value(&mut self) {
+        let submitted = self.expand_paste_markers(&self.text).trim().to_string();
+        self.text.clear();
+        self.cursor = 0;
+        self.exit_history_mode();
+        self.kill_ring = KillRing::default();
+        self.undo_stack.clear();
+        self.last_action = None;
+        self.last_yank = None;
+        self.is_in_paste = false;
+        self.paste_buffer.clear();
+        self.pastes.clear();
+        self.paste_counter = 0;
+        self.notify_change();
+        if let Some(on_submit) = self.on_submit.as_mut() {
+            on_submit(submitted);
+        }
     }
 
     fn navigate_history_up(&mut self) {
@@ -712,6 +898,7 @@ impl Editor {
         self.history_index = Some(next_index);
         self.text = self.history[next_index].clone();
         self.cursor = self.text.len();
+        self.notify_change();
     }
 
     fn navigate_history_down(&mut self) {
@@ -727,22 +914,439 @@ impl Editor {
             self.text = self.history[next].clone();
         }
         self.cursor = self.text.len();
+        self.notify_change();
+    }
+
+    fn line_start_index(&self) -> usize {
+        self.text[..self.cursor.min(self.text.len())]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0)
+    }
+
+    fn line_end_index(&self) -> usize {
+        self.text[self.cursor.min(self.text.len())..]
+            .find('\n')
+            .map(|idx| self.cursor + idx)
+            .unwrap_or(self.text.len())
+    }
+
+    fn delete_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        kill_prepend: bool,
+        kill_action: Option<InputAction>,
+    ) -> String {
+        if start >= end || end > self.text.len() {
+            return String::new();
+        }
+        self.push_undo();
+        let deleted = self.text[start..end].to_string();
+        self.text.drain(start..end);
+        self.cursor = start;
+        if let Some(action) = kill_action {
+            let accumulate = self.last_action == Some(action);
+            self.kill_ring
+                .push(deleted.clone(), kill_prepend, accumulate);
+            self.last_action = Some(action);
+        } else {
+            self.last_action = None;
+        }
+        self.last_yank = None;
+        self.exit_history_mode();
+        self.notify_change();
+        deleted
+    }
+
+    fn word_start_before_cursor(&self) -> usize {
+        let mut pos = self.cursor;
+        while pos > 0 {
+            let prev = self.previous_boundary(pos);
+            let ch = self.text[prev..pos].chars().next().unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = prev;
+        }
+        while pos > 0 {
+            let prev = self.previous_boundary(pos);
+            let ch = self.text[prev..pos].chars().next().unwrap_or_default();
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = prev;
+        }
+        pos
+    }
+
+    fn word_end_after_cursor(&self) -> usize {
+        let mut pos = self.cursor;
+        while pos < self.text.len() {
+            let next = self.next_boundary(pos);
+            let ch = self.text[pos..next].chars().next().unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = next;
+        }
+        while pos < self.text.len() {
+            let next = self.next_boundary(pos);
+            let ch = self.text[pos..next].chars().next().unwrap_or_default();
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = next;
+        }
+        pos
+    }
+
+    fn move_word_backwards(&mut self) {
+        self.cursor = self.word_start_before_cursor();
+        self.last_action = None;
+    }
+
+    fn move_word_forwards(&mut self) {
+        self.cursor = self.word_end_after_cursor();
+        self.last_action = None;
+    }
+
+    fn delete_to_line_start(&mut self) {
+        let start = self.line_start_index();
+        if self.cursor > start {
+            self.delete_range(start, self.cursor, true, Some(InputAction::KillBackward));
+        } else if self.cursor > 0 {
+            let prev = self.previous_boundary(self.cursor);
+            self.delete_range(prev, self.cursor, true, Some(InputAction::KillBackward));
+        }
+    }
+
+    fn delete_to_line_end(&mut self) {
+        let end = self.line_end_index();
+        if self.cursor < end {
+            self.delete_range(self.cursor, end, false, Some(InputAction::KillForward));
+        } else if self.cursor < self.text.len() {
+            let next = self.next_boundary(self.cursor);
+            self.delete_range(self.cursor, next, false, Some(InputAction::KillForward));
+        }
+    }
+
+    fn yank(&mut self) {
+        let Some(text) = self.kill_ring.peek().map(str::to_string) else {
+            return;
+        };
+        self.push_undo();
+        let start = self.cursor;
+        self.text.insert_str(self.cursor, &text);
+        self.cursor += text.len();
+        self.last_yank = Some((start, self.cursor));
+        self.last_action = Some(InputAction::Yank);
+        self.notify_change();
+    }
+
+    fn yank_pop(&mut self) {
+        if self.last_action != Some(InputAction::Yank) || self.kill_ring.len() <= 1 {
+            return;
+        }
+        let Some((start, end)) = self.last_yank else {
+            return;
+        };
+        if start > end || end > self.text.len() {
+            return;
+        }
+        self.kill_ring.rotate();
+        let Some(text) = self.kill_ring.peek().map(str::to_string) else {
+            return;
+        };
+        self.text.replace_range(start..end, &text);
+        self.cursor = start + text.len();
+        self.last_yank = Some((start, self.cursor));
+        self.last_action = Some(InputAction::Yank);
+        self.notify_change();
+    }
+
+    fn char_before_cursor(&self) -> Option<char> {
+        self.text[..self.cursor.min(self.text.len())]
+            .chars()
+            .next_back()
+    }
+
+    fn insert_text_without_undo(&mut self, text: &str) {
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.last_action = None;
+        self.last_yank = None;
+        self.exit_history_mode();
+        self.notify_change();
+    }
+
+    fn decode_ctrl_csi_u_in_paste(text: &str) -> String {
+        let mut result = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("\u{1b}[") {
+            result.push_str(&rest[..start]);
+            let after_prefix = &rest[start + 2..];
+            if let Some(end) = after_prefix.find(";5u") {
+                let code_str = &after_prefix[..end];
+                if !code_str.is_empty() && code_str.chars().all(|ch| ch.is_ascii_digit()) {
+                    if let Ok(cp) = code_str.parse::<u32>() {
+                        let decoded = match cp {
+                            65..=90 => char::from_u32(cp - 64),
+                            97..=122 => char::from_u32(cp - 96),
+                            _ => None,
+                        };
+                        if let Some(ch) = decoded {
+                            result.push(ch);
+                            rest = &after_prefix[end + 3..];
+                            continue;
+                        }
+                    }
+                }
+            }
+            result.push_str("\u{1b}[");
+            rest = after_prefix;
+        }
+        result.push_str(rest);
+        result
+    }
+
+    fn handle_paste(&mut self, pasted_text: &str) {
+        if pasted_text.is_empty() {
+            return;
+        }
+        let decoded = Self::decode_ctrl_csi_u_in_paste(pasted_text);
+        let clean = normalize_editor_text(&decoded)
+            .chars()
+            .filter(|ch| *ch == '\n' || !ch.is_control())
+            .collect::<String>();
+        if clean.is_empty() {
+            return;
+        }
+
+        let mut filtered = clean;
+        if matches!(filtered.chars().next(), Some('/') | Some('~') | Some('.'))
+            && self
+                .char_before_cursor()
+                .is_some_and(|ch| ch == '_' || ch.is_alphanumeric())
+        {
+            filtered.insert(0, ' ');
+        }
+
+        let line_count = filtered.split('\n').count();
+        let total_chars = filtered.chars().count();
+        let insert = if line_count > 10 || total_chars > 1000 {
+            self.paste_counter += 1;
+            let paste_id = self.paste_counter;
+            self.pastes.insert(paste_id, filtered);
+            if line_count > 10 {
+                format!("[paste #{paste_id} +{line_count} lines]")
+            } else {
+                format!("[paste #{paste_id} {total_chars} chars]")
+            }
+        } else {
+            filtered
+        };
+
+        self.push_undo();
+        self.insert_text_without_undo(&insert);
+    }
+
+    fn expand_paste_markers(&self, text: &str) -> String {
+        let mut expanded = text.to_string();
+        for (paste_id, paste_content) in &self.pastes {
+            let prefix = format!("[paste #{paste_id}");
+            let mut search_from = 0;
+            while let Some(relative_start) = expanded[search_from..].find(&prefix) {
+                let start = search_from + relative_start;
+                let Some(relative_end) = expanded[start..].find(']') else {
+                    break;
+                };
+                let end = start + relative_end + 1;
+                expanded.replace_range(start..end, paste_content);
+                search_from = start + paste_content.len();
+            }
+        }
+        expanded
     }
 
     fn insert_text(&mut self, text: &str) {
-        let printable = text
+        let normalized = normalize_editor_text(text);
+        let printable = normalized
             .chars()
-            .filter(|ch| !ch.is_control())
+            .filter(|ch| *ch == '\n' || !ch.is_control())
             .collect::<String>();
         if printable.is_empty() {
             return;
         }
         self.exit_history_mode();
+        let all_word = printable
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '_');
+        let all_whitespace = printable.chars().all(char::is_whitespace);
+        if all_whitespace || !(all_word && self.last_action == Some(InputAction::TypeWord)) {
+            self.push_undo();
+        }
         for ch in printable.chars() {
             self.text.insert(self.cursor, ch);
             self.cursor += ch.len_utf8();
         }
+        self.last_action = if all_word || all_whitespace {
+            Some(InputAction::TypeWord)
+        } else {
+            None
+        };
+        self.last_yank = None;
+        if self.autocomplete_state.is_none() {
+            self.try_trigger_autocomplete(false);
+        } else {
+            self.update_autocomplete();
+        }
+        self.notify_change();
     }
+
+    fn try_trigger_autocomplete(&mut self, explicit_tab: bool) {
+        let (lines, line, col, force) = {
+            let force = explicit_tab && self.autocomplete_force;
+            (
+                self.get_lines(),
+                self.cursor_line_col().0,
+                self.cursor_line_col().1,
+                force,
+            )
+        };
+
+        let result = if let Some(provider) = self.autocomplete_provider.as_ref() {
+            if force && !provider.should_trigger_file_completion(&lines, line, col) {
+                None
+            } else {
+                provider.get_suggestions(&lines, line, col, force)
+            }
+        } else {
+            None
+        };
+
+        if let Some(suggestions) = result {
+            if !suggestions.items.is_empty() {
+                if force && explicit_tab && suggestions.items.len() == 1 {
+                    let (new_lines, new_line, new_col) = self
+                        .autocomplete_provider
+                        .as_ref()
+                        .unwrap()
+                        .apply_completion(
+                            &lines,
+                            line,
+                            col,
+                            &suggestions.items[0],
+                            &suggestions.prefix,
+                        );
+                    self.push_undo();
+                    self.text = new_lines.join("\n");
+                    self.cursor = self.byte_index_for_line_col(new_line, new_col);
+                    self.last_action = None;
+                    self.cancel_autocomplete();
+                    self.notify_change();
+                } else {
+                    self.autocomplete_selected = 0;
+                    self.autocomplete_state = Some(suggestions);
+                }
+            } else {
+                self.cancel_autocomplete();
+            }
+        } else {
+            self.cancel_autocomplete();
+        }
+    }
+
+    fn update_autocomplete(&mut self) {
+        let force = self.autocomplete_force;
+        self.autocomplete_force = force;
+        self.try_trigger_autocomplete(false);
+    }
+
+    fn cancel_autocomplete(&mut self) {
+        self.autocomplete_state = None;
+        self.autocomplete_force = false;
+        self.autocomplete_selected = 0;
+    }
+
+    fn apply_selected_completion(&mut self) -> bool {
+        let (lines, line, col, item, prefix) = {
+            if let Some(state) = self.autocomplete_state.as_ref() {
+                if let Some(item) = state.items.get(self.autocomplete_selected) {
+                    (
+                        self.get_lines(),
+                        self.cursor_line_col().0,
+                        self.cursor_line_col().1,
+                        item.clone(),
+                        state.prefix.clone(),
+                    )
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        };
+
+        if let Some(provider) = self.autocomplete_provider.as_ref() {
+            let (new_lines, new_line, new_col) =
+                provider.apply_completion(&lines, line, col, &item, &prefix);
+            self.push_undo();
+            self.text = new_lines.join("\n");
+            self.cursor = self.byte_index_for_line_col(new_line, new_col);
+            self.last_action = None;
+            self.cancel_autocomplete();
+            self.notify_change();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_tab_completion(&mut self) {
+        if self.autocomplete_provider.is_none() {
+            return;
+        }
+        let lines = self.get_lines();
+        let (line, col) = self.cursor_line_col();
+        let current_line = lines.get(line).map_or("", String::as_str);
+        let text_before_cursor = &current_line[..col.min(current_line.len())];
+        if text_before_cursor.trim_start().starts_with('/')
+            && !text_before_cursor.trim_start().contains(' ')
+        {
+            self.autocomplete_force = false;
+        } else {
+            self.autocomplete_force = true;
+        }
+        self.try_trigger_autocomplete(true);
+    }
+
+    fn add_newline(&mut self) {
+        self.exit_history_mode();
+        self.push_undo();
+        self.text.insert(self.cursor, '\n');
+        self.cursor += 1;
+        self.last_action = None;
+        self.last_yank = None;
+        self.notify_change();
+    }
+
+    fn backslash_enter_newline(&mut self) {
+        if self.char_before_cursor() == Some('\\') {
+            let prev = self.previous_boundary(self.cursor);
+            self.text.drain(prev..self.cursor);
+            self.cursor = prev;
+            self.add_newline();
+        } else {
+            self.submit_value();
+        }
+    }
+}
+
+fn normalize_editor_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ")
 }
 
 impl Component for Editor {
@@ -764,37 +1368,137 @@ impl Component for Editor {
     }
 
     fn handle_input(&mut self, data: &str) {
-        match parse_key(data).as_deref() {
-            Some("backspace") => {
-                if self.cursor > 0 {
-                    self.exit_history_mode();
-                    let prev = self.previous_boundary(self.cursor);
-                    self.text.drain(prev..self.cursor);
-                    self.cursor = prev;
+        let mut data_owned = data.to_string();
+        if data_owned.contains("\u{1b}[200~") {
+            self.is_in_paste = true;
+            self.paste_buffer.clear();
+            data_owned = data_owned.replacen("\u{1b}[200~", "", 1);
+        }
+        if self.is_in_paste {
+            self.paste_buffer.push_str(&data_owned);
+            if let Some(end_index) = self.paste_buffer.find("\u{1b}[201~") {
+                let paste_content = self.paste_buffer[..end_index].to_string();
+                let remaining = self.paste_buffer[end_index + 6..].to_string();
+                self.is_in_paste = false;
+                self.paste_buffer.clear();
+                self.handle_paste(&paste_content);
+                if !remaining.is_empty() {
+                    self.handle_input(&remaining);
                 }
             }
-            Some("enter") if self.options.multiline => {
-                self.exit_history_mode();
-                self.text.insert(self.cursor, '\n');
-                self.cursor += 1;
+            return;
+        }
+
+        if let Some(printable) = decode_printable_key(data) {
+            self.insert_text(&printable);
+            return;
+        }
+
+        if self.autocomplete_state.is_some() {
+            match parse_key(data).as_deref() {
+                Some("escape") | Some("ctrl+c") => {
+                    self.cancel_autocomplete();
+                    return;
+                }
+                Some("up") => {
+                    if let Some(state) = &self.autocomplete_state {
+                        if !state.items.is_empty() {
+                            if self.autocomplete_selected == 0 {
+                                self.autocomplete_selected = state.items.len() - 1;
+                            } else {
+                                self.autocomplete_selected -= 1;
+                            }
+                        }
+                    }
+                    return;
+                }
+                Some("down") => {
+                    if let Some(state) = &self.autocomplete_state {
+                        if !state.items.is_empty() {
+                            self.autocomplete_selected =
+                                (self.autocomplete_selected + 1) % state.items.len();
+                        }
+                    }
+                    return;
+                }
+                Some("tab") | Some("enter") => {
+                    if self.apply_selected_completion() {
+                        return;
+                    }
+                }
+                _ => {}
             }
-            Some("enter") => {}
-            Some("up") => self.navigate_history_up(),
-            Some("down") => self.navigate_history_down(),
-            Some("left") => {
+        }
+
+        match parse_key(data).as_deref() {
+            Some("tab") if self.autocomplete_state.is_none() => self.handle_tab_completion(),
+            Some("ctrl+-") => self.undo(),
+            Some("backspace") => {
+                if self.cursor > 0 {
+                    let prev = self.previous_boundary(self.cursor);
+                    self.delete_range(prev, self.cursor, false, None);
+                }
+            }
+            Some("delete") | Some("ctrl+d") => {
+                if self.cursor < self.text.len() {
+                    let next = self.next_boundary(self.cursor);
+                    self.delete_range(self.cursor, next, false, None);
+                }
+            }
+            Some("ctrl+w") | Some("alt+backspace") => {
+                let start = self.word_start_before_cursor();
+                self.delete_range(start, self.cursor, true, Some(InputAction::KillBackward));
+            }
+            Some("alt+d") | Some("alt+delete") => {
+                let end = self.word_end_after_cursor();
+                self.delete_range(self.cursor, end, false, Some(InputAction::KillForward));
+            }
+            Some("ctrl+u") => self.delete_to_line_start(),
+            Some("ctrl+k") => self.delete_to_line_end(),
+            Some("ctrl+y") => self.yank(),
+            Some("alt+y") => self.yank_pop(),
+            Some("enter") if self.options.multiline => self.add_newline(),
+            Some("shift+enter") => self.add_newline(),
+            Some("enter") => self.backslash_enter_newline(),
+            Some("up") => {
+                if !self.move_cursor_vertical(-1)
+                    && (self.text.is_empty() || self.history_index.is_some())
+                {
+                    self.navigate_history_up();
+                }
+                self.last_action = None;
+            }
+            Some("down") => {
+                if !self.move_cursor_vertical(1) && self.history_index.is_some() {
+                    self.navigate_history_down();
+                }
+                self.last_action = None;
+            }
+            Some("left") | Some("ctrl+b") => {
                 if self.cursor > 0 {
                     self.cursor = self.previous_boundary(self.cursor);
                 }
+                self.last_action = None;
             }
-            Some("right") => {
+            Some("right") | Some("ctrl+f") => {
                 if self.cursor < self.text.len() {
                     self.cursor = self.next_boundary(self.cursor);
                 }
+                self.last_action = None;
             }
-            Some("home") | Some("ctrl+a") => self.cursor = 0,
-            Some("end") | Some("ctrl+e") => self.cursor = self.text.len(),
+            Some("alt+left") | Some("ctrl+left") | Some("alt+b") => self.move_word_backwards(),
+            Some("alt+right") | Some("ctrl+right") | Some("alt+f") => self.move_word_forwards(),
+            Some("home") | Some("ctrl+a") => {
+                self.cursor = self.line_start_index();
+                self.last_action = None;
+            }
+            Some("end") | Some("ctrl+e") => {
+                self.cursor = self.line_end_index();
+                self.last_action = None;
+            }
             _ => self.insert_text(data),
         }
+        self.break_yank();
     }
 }
 
@@ -880,7 +1584,63 @@ impl Component for Loader {
     }
 }
 
-pub type CancellableLoader = Loader;
+pub struct CancellableLoader {
+    loader: Loader,
+    aborted: bool,
+    on_abort: Option<std::boxed::Box<dyn FnMut()>>,
+}
+
+impl CancellableLoader {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            loader: Loader::new(message),
+            aborted: false,
+            on_abort: None,
+        }
+    }
+
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.loader.set_message(message);
+    }
+
+    pub fn tick(&mut self) {
+        self.loader.tick();
+    }
+
+    pub fn aborted(&self) -> bool {
+        self.aborted
+    }
+
+    pub fn set_on_abort<F>(&mut self, callback: F)
+    where
+        F: FnMut() + 'static,
+    {
+        self.on_abort = Some(std::boxed::Box::new(callback));
+    }
+
+    pub fn dispose(&mut self) {
+        // No timer resources in the Rust loader yet; keep API parity.
+    }
+}
+
+impl Component for CancellableLoader {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.loader.render(width)
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        if get_keybindings().matches(data, "tui.select.cancel") {
+            self.aborted = true;
+            if let Some(on_abort) = self.on_abort.as_mut() {
+                on_abort();
+            }
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.loader.invalidate();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectItem {
@@ -1719,6 +2479,7 @@ impl Component for Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autocomplete::CombinedAutocompleteProvider;
 
     #[test]
     fn input_kill_ring_yank_and_yank_pop() {
@@ -1762,6 +2523,17 @@ mod tests {
     }
 
     #[test]
+    fn input_render_keeps_cursor_visible_for_long_wide_text() {
+        let mut input = Input::new();
+        input.set_value("가나다라마바사아자차카타파하");
+        input.set_focused(true);
+        input.handle_input("\u{5}");
+        let line = input.render(10).remove(0);
+        assert!(line.contains(CURSOR_MARKER));
+        assert!(visible_width(&line) <= 10);
+    }
+
+    #[test]
     fn editor_navigates_prompt_history() {
         let mut editor = Editor::new(EditorOptions::default());
         editor.add_to_history("first");
@@ -1777,6 +2549,177 @@ mod tests {
     }
 
     #[test]
+    fn editor_submits_trimmed_value_and_clears() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let submitted = Rc::new(RefCell::new(None));
+        let changed = Rc::new(RefCell::new(Vec::new()));
+        let mut editor = Editor::new(EditorOptions::default());
+        let submitted_ref = Rc::clone(&submitted);
+        editor.set_on_submit(move |text| *submitted_ref.borrow_mut() = Some(text));
+        let changed_ref = Rc::clone(&changed);
+        editor.set_on_change(move |text| changed_ref.borrow_mut().push(text));
+        editor.set_text("  hello\r\nworld  ");
+        editor.handle_input("\r");
+        assert_eq!(submitted.borrow().as_deref(), Some("hello\nworld"));
+        assert_eq!(editor.get_text(), "");
+        assert_eq!(changed.borrow().last().map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn editor_moves_vertically_before_history_and_limits_history() {
+        let mut editor = Editor::new(EditorOptions::default());
+        for index in 0..105 {
+            editor.add_to_history(format!("prompt {index}"));
+        }
+        assert_eq!(
+            editor.history().first().map(String::as_str),
+            Some("prompt 5")
+        );
+        assert_eq!(editor.history().len(), 100);
+
+        editor.set_text("line1\nline2");
+        assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 5 });
+        editor.handle_input("\u{1b}[A");
+        assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 5 });
+        editor.handle_input("X");
+        assert_eq!(editor.get_text(), "line1X\nline2");
+
+        editor.set_text("");
+        for _ in 0..100 {
+            editor.handle_input("\u{1b}[A");
+        }
+        assert_eq!(editor.get_text(), "prompt 5");
+    }
+
+    #[test]
+    fn editor_handles_backslash_enter_and_printable_key_sequences() {
+        let mut editor = Editor::new(EditorOptions::default());
+        editor.handle_input("\\");
+        editor.handle_input("\r");
+        assert_eq!(editor.get_text(), "\n");
+
+        editor.set_text("");
+        editor.handle_input("\u{1b}[69;2u");
+        editor.handle_input("\u{1b}[27;2;70~");
+        assert_eq!(editor.get_text(), "EF");
+
+        editor.set_text("a\tb");
+        assert_eq!(editor.get_text(), "a    b");
+    }
+
+    #[test]
+    fn editor_deletes_moves_words_and_yanks_like_ts_editor() {
+        let mut editor = Editor::new(EditorOptions::default());
+        editor.set_text("hello world");
+        editor.handle_input("\u{1}");
+        for _ in 0..6 {
+            editor.handle_input("\u{1b}[C");
+        }
+        editor.handle_input("\u{b}");
+        assert_eq!(editor.get_text(), "hello ");
+        editor.handle_input("\u{19}");
+        assert_eq!(editor.get_text(), "hello world");
+
+        editor.set_text("abc\ndef");
+        editor.handle_input("\u{1}");
+        assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 0 });
+        editor.handle_input("\u{5}");
+        assert_eq!(editor.get_cursor(), EditorCursor { line: 1, col: 3 });
+        editor.handle_input("\u{1}");
+        editor.handle_input("\u{4}");
+        assert_eq!(editor.get_text(), "abc\nef");
+
+        editor.set_text("one two three");
+        editor.handle_input("\u{1}");
+        editor.handle_input("\u{1b}f");
+        assert_eq!(editor.get_cursor(), EditorCursor { line: 0, col: 3 });
+        editor.handle_input("\u{1b}d");
+        assert_eq!(editor.get_text(), "one three");
+    }
+
+    #[test]
+    fn editor_undo_coalesces_words_and_restores_edits() {
+        let mut editor = Editor::new(EditorOptions::default());
+        for ch in "hello world".chars() {
+            editor.handle_input(&ch.to_string());
+        }
+        assert_eq!(editor.get_text(), "hello world");
+        editor.handle_input("\u{1b}[45;5u");
+        assert_eq!(editor.get_text(), "hello");
+        editor.handle_input("\u{1b}[45;5u");
+        assert_eq!(editor.get_text(), "");
+
+        editor.set_text("abc");
+        editor.handle_input("\u{7f}");
+        assert_eq!(editor.get_text(), "ab");
+        editor.handle_input("\u{1b}[45;5u");
+        assert_eq!(editor.get_text(), "abc");
+    }
+
+    #[test]
+    fn editor_handles_bracketed_paste_markers_and_submit_expansion() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut editor = Editor::new(EditorOptions::default());
+        editor.set_text("open");
+        editor.handle_input("\u{1b}[200~/tmp/file\u{1b}[201~");
+        assert_eq!(editor.get_text(), "open /tmp/file");
+        editor.handle_input("\u{1b}[45;5u");
+        assert_eq!(editor.get_text(), "open");
+
+        editor.set_text("");
+        editor.handle_input("\u{1b}[200~line1\u{1b}[106;5uline2\u{1b}[201~");
+        assert_eq!(editor.get_text(), "line1\nline2");
+
+        let submitted = Rc::new(RefCell::new(None));
+        let submitted_ref = Rc::clone(&submitted);
+        editor.set_on_submit(move |text| *submitted_ref.borrow_mut() = Some(text));
+        let large = (0..11)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.set_text("");
+        editor.handle_input(&format!("\u{1b}[200~{large}\u{1b}[201~"));
+        assert_eq!(editor.paste_ids(), vec![1]);
+        assert_eq!(editor.get_text(), "[paste #1 +11 lines]");
+        editor.handle_input("\r");
+        assert_eq!(submitted.borrow().as_deref(), Some(large.as_str()));
+        assert!(editor.paste_ids().is_empty());
+    }
+
+    #[test]
+    fn editor_triggers_and_applies_autocomplete() {
+        let provider = CombinedAutocompleteProvider::new(
+            vec![crate::autocomplete::SlashCommand::new("help")],
+            ".",
+        );
+        let mut editor = Editor::new(EditorOptions::default());
+        editor.set_autocomplete_provider(provider);
+
+        editor.handle_input("/");
+        editor.handle_input("h");
+        editor.handle_input("e");
+        assert!(editor.is_showing_autocomplete());
+
+        editor.handle_input("\t"); // Applies first suggestion
+        assert!(!editor.is_showing_autocomplete());
+        assert_eq!(editor.get_text(), "/help ");
+
+        // Tab triggers it again
+        editor.set_text("src/");
+        editor.handle_input("\t"); // Force triggers file suggestion
+        assert!(
+            editor.is_showing_autocomplete(),
+            "Tab should trigger file autocomplete"
+        );
+        editor.handle_input("\u{1b}"); // Escape cancels it
+        assert!(!editor.is_showing_autocomplete());
+    }
+
+    #[test]
     fn word_wrap_line_tracks_original_indices() {
         let chunks = word_wrap_line("alpha beta gamma", 10);
         assert_eq!(chunks[0].text, "alpha ");
@@ -1785,6 +2728,13 @@ mod tests {
         assert_eq!(chunks[1].text, "beta gamma");
         assert_eq!(chunks[1].start_index, 6);
         assert_eq!(chunks[1].end_index, "alpha beta gamma".len());
+    }
+
+    #[test]
+    fn cancellable_loader_aborts_on_cancel() {
+        let mut loader = CancellableLoader::new("Working...");
+        loader.handle_input("\u{1b}");
+        assert!(loader.aborted());
     }
 
     #[test]

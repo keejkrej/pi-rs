@@ -2,13 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
-use pi_agent_core::config::{AuthStorage, StoredCredential};
-use pi_agent_core::messages::{
+use pi_agent::config::{AuthStorage, StoredCredential};
+use pi_agent::messages::{
     AgentMessage, AssistantContentBlock, TextContent, ToolCallContent, Usage, UserContentBlock,
 };
-use pi_agent_core::models::{
-    CompletionRequest, CompletionResponse, CompletionToolCall, ModelProvider,
-};
+use pi_agent::models::{CompletionRequest, CompletionResponse, CompletionToolCall, ModelProvider};
 use reqwest::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::{Value, json};

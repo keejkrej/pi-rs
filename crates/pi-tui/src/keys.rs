@@ -44,6 +44,18 @@ impl Key {
     pub fn super_key(key: impl AsRef<str>) -> String {
         format!("super+{}", key.as_ref())
     }
+    pub fn ctrl_shift(key: impl AsRef<str>) -> String {
+        format!("ctrl+shift+{}", key.as_ref())
+    }
+    pub fn ctrl_alt(key: impl AsRef<str>) -> String {
+        format!("ctrl+alt+{}", key.as_ref())
+    }
+    pub fn ctrl_super(key: impl AsRef<str>) -> String {
+        format!("ctrl+super+{}", key.as_ref())
+    }
+    pub fn ctrl_shift_super(key: impl AsRef<str>) -> String {
+        format!("ctrl+shift+super+{}", key.as_ref())
+    }
 }
 
 pub fn set_kitty_protocol_active(active: bool) {
@@ -144,34 +156,177 @@ fn legacy_sequence(data: &str) -> Option<&'static str> {
     })
 }
 
-fn parse_csi_u(data: &str) -> Option<(char, u8)> {
+fn parse_csi_u_parts(data: &str) -> Option<(u32, Option<u32>, Option<u32>, u8)> {
     let body = data.strip_prefix("\u{1b}[")?.strip_suffix('u')?;
-    let (code_str, mod_str) = body.split_once(';').unwrap_or((body, "1"));
-    let code = code_str.split(':').next()?.parse::<u32>().ok()?;
+    let (code_part, mod_str) = body.split_once(';').unwrap_or((body, "1"));
+    let mut code_parts = code_part.split(':');
+    let codepoint = code_parts.next()?.parse::<u32>().ok()?;
+    let shifted = code_parts.next().and_then(|part| {
+        (!part.is_empty())
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    });
+    let base = code_parts.next().and_then(|part| {
+        (!part.is_empty())
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    });
     let modifier = mod_str
         .split(':')
         .next()
         .and_then(|s| s.parse::<u8>().ok())
-        .unwrap_or(1);
-    Some((char::from_u32(code)?, modifier.saturating_sub(1)))
+        .unwrap_or(1)
+        .saturating_sub(1);
+    Some((codepoint, shifted, base, modifier))
+}
+
+fn normalize_kitty_functional_codepoint(codepoint: u32) -> u32 {
+    match codepoint {
+        57399 => b'0' as u32,
+        57400 => b'1' as u32,
+        57401 => b'2' as u32,
+        57402 => b'3' as u32,
+        57403 => b'4' as u32,
+        57404 => b'5' as u32,
+        57405 => b'6' as u32,
+        57406 => b'7' as u32,
+        57407 => b'8' as u32,
+        57408 => b'9' as u32,
+        57409 => b'.' as u32,
+        57410 => b'/' as u32,
+        57411 => b'*' as u32,
+        57412 => b'-' as u32,
+        57413 => b'+' as u32,
+        57415 => b'=' as u32,
+        57416 => b',' as u32,
+        other => other,
+    }
+}
+
+fn kitty_navigation_key(codepoint: u32) -> Option<&'static str> {
+    Some(match codepoint {
+        57417 => "left",
+        57418 => "right",
+        57419 => "up",
+        57420 => "down",
+        57421 => "pageUp",
+        57422 => "pageDown",
+        57423 => "home",
+        57424 => "end",
+        57425 => "insert",
+        57426 => "delete",
+        _ => return None,
+    })
+}
+
+fn is_known_symbol(codepoint: u32) -> bool {
+    matches!(
+        codepoint,
+        33..=47 | 58..=64 | 91..=96 | 123..=126
+    )
+}
+
+fn parse_csi_u_key(data: &str) -> Option<String> {
+    let (codepoint, _shifted, base, modifier) = parse_csi_u_parts(data)?;
+    let normalized = normalize_kitty_functional_codepoint(codepoint);
+    if let Some(key) = kitty_navigation_key(normalized).or_else(|| kitty_navigation_key(codepoint))
+    {
+        return Some(format_key_with_modifier(key, modifier));
+    }
+
+    let identity = if modifier & 1 != 0 && (65..=90).contains(&normalized) {
+        normalized + 32
+    } else {
+        normalized
+    };
+    let is_latin = (b'a' as u32..=b'z' as u32).contains(&identity);
+    let is_digit = (b'0' as u32..=b'9' as u32).contains(&identity);
+    let effective = if is_latin || is_digit || is_known_symbol(identity) {
+        identity
+    } else {
+        base.unwrap_or(identity)
+    };
+
+    let key = match effective {
+        27 => "escape".to_string(),
+        9 => "tab".to_string(),
+        13 | 57414 => "enter".to_string(),
+        32 => "space".to_string(),
+        127 => "backspace".to_string(),
+        cp if (b'A' as u32..=b'Z' as u32).contains(&cp) => char::from_u32(cp + 32)?.to_string(),
+        cp if (b'a' as u32..=b'z' as u32).contains(&cp)
+            || (b'0' as u32..=b'9' as u32).contains(&cp)
+            || is_known_symbol(cp) =>
+        {
+            char::from_u32(cp)?.to_string()
+        }
+        _ => return None,
+    };
+    Some(format_key_with_modifier(&key, modifier))
+}
+
+fn parse_modify_other_keys(data: &str) -> Option<String> {
+    let body = data.strip_prefix("\u{1b}[27;")?.strip_suffix('~')?;
+    let mut parts = body.split(';');
+    let modifier = parts.next()?.parse::<u8>().ok()?.saturating_sub(1);
+    let codepoint = parts.next()?.parse::<u32>().ok()?;
+    let key = match codepoint {
+        27 => "escape".to_string(),
+        9 => "tab".to_string(),
+        13 => "enter".to_string(),
+        32 => "space".to_string(),
+        127 => "backspace".to_string(),
+        cp if (b'A' as u32..=b'Z' as u32).contains(&cp) => char::from_u32(cp + 32)?.to_string(),
+        cp if (b'a' as u32..=b'z' as u32).contains(&cp)
+            || (b'0' as u32..=b'9' as u32).contains(&cp)
+            || is_known_symbol(cp) =>
+        {
+            char::from_u32(cp)?.to_string()
+        }
+        _ => return None,
+    };
+    Some(format_key_with_modifier(&key, modifier))
 }
 
 pub fn decode_kitty_printable(data: &str) -> Option<String> {
-    let (ch, modifier) = parse_csi_u(data)?;
-    if modifier & !(1 | 64 | 128) != 0 || ch.is_control() {
+    let (codepoint, shifted, _, modifier) = parse_csi_u_parts(data)?;
+    const SHIFT: u8 = 1;
+    const LOCK_MASK: u8 = 64 | 128;
+    if modifier & !(SHIFT | LOCK_MASK) != 0 {
         return None;
     }
-    Some(ch.to_string())
+    let effective = if modifier & SHIFT != 0 {
+        shifted.unwrap_or(codepoint)
+    } else {
+        codepoint
+    };
+    if effective < 32 {
+        return None;
+    }
+    Some(char::from_u32(normalize_kitty_functional_codepoint(effective))?.to_string())
+}
+
+fn decode_modify_other_keys_printable(data: &str) -> Option<String> {
+    let body = data.strip_prefix("\u{1b}[27;")?.strip_suffix('~')?;
+    let mut parts = body.split(';');
+    let modifier = parts.next()?.parse::<u8>().ok()?.saturating_sub(1);
+    let codepoint = parts.next()?.parse::<u32>().ok()?;
+    if modifier & !1 != 0 || codepoint < 32 {
+        return None;
+    }
+    Some(char::from_u32(codepoint)?.to_string())
 }
 
 pub fn decode_printable_key(data: &str) -> Option<String> {
-    decode_kitty_printable(data).or_else(|| {
-        if data.chars().count() == 1 && data.chars().next().is_some_and(|ch| !ch.is_control()) {
-            Some(data.to_string())
-        } else {
-            None
-        }
-    })
+    decode_kitty_printable(data)
+        .or_else(|| decode_modify_other_keys_printable(data))
+        .or_else(|| {
+            if data.chars().count() == 1 && data.chars().next().is_some_and(|ch| !ch.is_control()) {
+                Some(data.to_string())
+            } else {
+                None
+            }
+        })
 }
 
 fn format_key_with_modifier(key: &str, modifier: u8) -> String {
@@ -247,17 +402,12 @@ fn parse_kitty_functional(data: &str) -> Option<String> {
 }
 
 pub fn parse_key(data: &str) -> Option<String> {
-    if let Some((ch, modifier)) = parse_csi_u(data) {
-        let key = match ch as u32 {
-            27 => "escape".to_string(),
-            9 => "tab".to_string(),
-            13 => "enter".to_string(),
-            32 => "space".to_string(),
-            127 => "backspace".to_string(),
-            _ if ch.is_ascii_graphic() => ch.to_ascii_lowercase().to_string(),
-            _ => return None,
-        };
-        return Some(format_key_with_modifier(&key, modifier));
+    if let Some(key) = parse_csi_u_key(data) {
+        return Some(key);
+    }
+
+    if let Some(key) = parse_modify_other_keys(data) {
+        return Some(key);
     }
 
     if let Some(key) = parse_kitty_functional(data) {
@@ -317,13 +467,10 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
     };
 
     if let Some(parsed) = parse_key(data) {
-        let normalized = match parsed.as_str() {
-            "esc" => "escape".to_string(),
-            "return" => "enter".to_string(),
-            other => other.to_string(),
-        };
-        if normalized.eq_ignore_ascii_case(key_id) {
-            return true;
+        if let Some((parsed_key, parsed_modifier)) = parse_key_id(&parsed) {
+            if parsed_key == key && parsed_modifier == modifier {
+                return true;
+            }
         }
     }
 
@@ -351,5 +498,39 @@ mod tests {
         assert_eq!(parse_key("\u{1b}[1;5D").as_deref(), Some("ctrl+left"));
         assert_eq!(parse_key("\u{1b}[3;1:3~").as_deref(), Some("delete"));
         assert!(matches_key("\u{3}", "ctrl+c"));
+    }
+
+    #[test]
+    fn parses_kitty_base_layout_and_keypad() {
+        assert!(matches_key("\u{1b}[1089::99;5u", "ctrl+c"));
+        assert!(matches_key("\u{1b}[1079::112;6u", "ctrl+shift+p"));
+        assert_eq!(parse_key("\u{1b}[107;13u").as_deref(), Some("ctrl+super+k"));
+        assert_eq!(parse_key("\u{1b}[57400u").as_deref(), Some("1"));
+        assert_eq!(parse_key("\u{1b}[57417u").as_deref(), Some("left"));
+    }
+
+    #[test]
+    fn parses_modify_other_keys() {
+        assert!(matches_key("\u{1b}[27;5;99~", "ctrl+c"));
+        assert_eq!(parse_key("\u{1b}[27;2;9~").as_deref(), Some("shift+tab"));
+        assert_eq!(parse_key("\u{1b}[27;5;13~").as_deref(), Some("ctrl+enter"));
+        assert_eq!(
+            parse_key("\u{1b}[27;3;127~").as_deref(),
+            Some("alt+backspace")
+        );
+    }
+
+    #[test]
+    fn decodes_printable_key_sequences() {
+        assert_eq!(
+            decode_kitty_printable("\u{1b}[49:33;2u").as_deref(),
+            Some("!")
+        );
+        assert_eq!(decode_kitty_printable("\u{1b}[97;5u"), None);
+        assert_eq!(
+            decode_printable_key("\u{1b}[27;2;65~").as_deref(),
+            Some("A")
+        );
+        assert_eq!(decode_printable_key("x").as_deref(), Some("x"));
     }
 }

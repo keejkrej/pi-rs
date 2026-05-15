@@ -1,14 +1,14 @@
 use agent_client_protocol::{self as acp, Client as _};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pi_agent_core::agent::{
+use pi_agent::agent::{
     AgentSession, EventSink, PermissionDecision, PermissionHandler, PermissionRequest,
     PromptStopReason, SessionControl, SessionEvent,
 };
-use pi_agent_core::config::{AuthStorage, SettingsManager, StoredCredential};
-use pi_agent_core::messages::{AssistantContentBlock, ImageContent, UserContentBlock};
-use pi_agent_core::models::ModelDescriptor;
-use pi_agent_core::session::SessionManager;
+use pi_agent::config::{AuthStorage, SettingsManager, StoredCredential};
+use pi_agent::messages::{AssistantContentBlock, ImageContent, UserContentBlock};
+use pi_agent::models::ModelDescriptor;
+use pi_agent::session::SessionManager;
 use pi_ai::OpenAiCodexProvider;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -548,14 +548,14 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
     .await?;
     for message in session.session_manager.messages() {
         match message {
-            pi_agent_core::messages::AgentMessage::User { content, .. } => {
+            pi_agent::messages::AgentMessage::User { content, .. } => {
                 sink.emit(SessionEvent::UserMessage { content }).await?;
             }
-            pi_agent_core::messages::AgentMessage::Assistant { content, .. } => {
+            pi_agent::messages::AgentMessage::Assistant { content, .. } => {
                 sink.emit(SessionEvent::AssistantMessage { content })
                     .await?;
             }
-            pi_agent_core::messages::AgentMessage::ToolResult {
+            pi_agent::messages::AgentMessage::ToolResult {
                 tool_call_id,
                 tool_name,
                 content,
@@ -566,7 +566,7 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 sink.emit(SessionEvent::ToolCallResult {
                     tool_call_id,
                     tool_name,
-                    output: pi_agent_core::tools::ToolExecutionResult {
+                    output: pi_agent::tools::ToolExecutionResult {
                         content,
                         is_error,
                         details,
@@ -574,17 +574,17 @@ async fn replay_session(session: &AgentSession, sink: &dyn EventSink) -> Result<
                 })
                 .await?;
             }
-            pi_agent_core::messages::AgentMessage::CompactionSummary { summary, .. } => {
+            pi_agent::messages::AgentMessage::CompactionSummary { summary, .. } => {
                 sink.emit(SessionEvent::AssistantMessage {
                     content: vec![AssistantContentBlock::Text(
-                        pi_agent_core::messages::TextContent::new(summary),
+                        pi_agent::messages::TextContent::new(summary),
                     )],
                 })
                 .await?;
             }
-            pi_agent_core::messages::AgentMessage::BranchSummary { summary, .. } => {
+            pi_agent::messages::AgentMessage::BranchSummary { summary, .. } => {
                 sink.emit(SessionEvent::UserMessage {
-                    content: vec![UserContentBlock::Text(pi_agent_core::messages::TextContent::new(
+                    content: vec![UserContentBlock::Text(pi_agent::messages::TextContent::new(
                         format!(
                             "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{summary}\n</summary>"
                         ),
@@ -602,16 +602,16 @@ fn prompt_content_to_user_blocks(prompt: Vec<acp::ContentBlock>) -> Result<Vec<U
     for block in prompt {
         match block {
             acp::ContentBlock::Text(text) => blocks.push(UserContentBlock::Text(
-                pi_agent_core::messages::TextContent::new(text.text),
+                pi_agent::messages::TextContent::new(text.text),
             )),
             acp::ContentBlock::Image(image) => blocks.push(UserContentBlock::Image(
                 ImageContent::new(image.data, image.mime_type),
             )),
             acp::ContentBlock::Resource(resource) => blocks.push(UserContentBlock::Text(
-                pi_agent_core::messages::TextContent::new(resource_text(resource)),
+                pi_agent::messages::TextContent::new(resource_text(resource)),
             )),
             acp::ContentBlock::ResourceLink(resource) => blocks.push(UserContentBlock::Text(
-                pi_agent_core::messages::TextContent::new(format!("Resource: {}", resource.uri)),
+                pi_agent::messages::TextContent::new(format!("Resource: {}", resource.uri)),
             )),
             acp::ContentBlock::Audio(_) => {
                 return Err(anyhow!("audio prompts are not supported"));

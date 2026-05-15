@@ -23,5 +23,5 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
-pi-agent-core = { path = "../pi-agent-core" }
+pi-agent = { path = "../pi-agent" }
 pi-ai = { path = "../pi-ai" }

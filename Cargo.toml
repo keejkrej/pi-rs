@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/pi-agent-core",
+  "crates/pi-agent",
   "crates/pi-ai",
   "crates/pi-coding-agent",
   "crates/pi-tui",

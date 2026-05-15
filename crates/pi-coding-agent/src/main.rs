@@ -5,13 +5,11 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, terminal};
-use pi_agent_core::agent::{
-    AgentSession, AllowAllPermissions, EventSink, NullEventSink, SessionEvent,
-};
-use pi_agent_core::config::SettingsManager;
-use pi_agent_core::messages::{AssistantContentBlock, UserContentBlock};
-use pi_agent_core::models::ModelDescriptor;
-use pi_agent_core::session::SessionManager;
+use pi_agent::agent::{AgentSession, AllowAllPermissions, EventSink, NullEventSink, SessionEvent};
+use pi_agent::config::SettingsManager;
+use pi_agent::messages::{AssistantContentBlock, UserContentBlock};
+use pi_agent::models::ModelDescriptor;
+use pi_agent::session::SessionManager;
 use pi_ai::OpenAiCodexProvider;
 use pi_coding_agent::acp::run_acp_stdio;
 use ratatui::prelude::*;
