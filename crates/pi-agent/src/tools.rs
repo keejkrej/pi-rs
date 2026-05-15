@@ -414,10 +414,13 @@ impl Tool for LsTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "ls".into(),
-            description: "List files in a directory".into(),
+            description: "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string"}}
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list (default: current directory)"},
+                    "limit": {"type": "number", "description": "Maximum number of entries to return (default: 500)"}
+                }
             }),
             requires_permission: false,
         }
@@ -429,18 +432,25 @@ impl Tool for LsTool {
             .and_then(Value::as_str)
             .map(|value| resolve_path(cwd, value))
             .unwrap_or_else(|| cwd.to_path_buf());
+        let limit = arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(500) as usize;
+
         let mut rows = Vec::new();
-        for entry in fs::read_dir(&path)? {
-            let entry = entry?;
+        let mut entries: Vec<_> = fs::read_dir(&path)?.filter_map(Result::ok).collect();
+        entries.sort_by_cached_key(|e| e.file_name().to_string_lossy().to_lowercase());
+
+        for entry in entries.into_iter().take(limit) {
             let metadata = entry.metadata()?;
-            rows.push(format!(
-                "{}\t{}\t{}",
-                if metadata.is_dir() { "dir" } else { "file" },
-                metadata.len(),
-                entry.file_name().to_string_lossy()
-            ));
+            let suffix = if metadata.is_dir() { "/" } else { "" };
+            rows.push(format!("{}{}", entry.file_name().to_string_lossy(), suffix));
         }
-        rows.sort();
+
+        if rows.is_empty() {
+            return Ok(ToolExecutionResult::text("(empty directory)"));
+        }
+
         Ok(ToolExecutionResult::text(rows.join("\n")))
     }
 }
