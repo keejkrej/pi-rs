@@ -201,6 +201,11 @@ pub struct TUI<T: Terminal> {
     max_lines_rendered: usize,
     clear_on_shrink: bool,
     full_redraws: usize,
+    previous_lines: Vec<String>,
+    cursor_row: usize,
+    hardware_cursor_row: usize,
+    show_hardware_cursor: bool,
+    previous_viewport_top: usize,
 }
 
 impl<T: Terminal> TUI<T> {
@@ -218,6 +223,11 @@ impl<T: Terminal> TUI<T> {
             max_lines_rendered: 0,
             clear_on_shrink: std::env::var("PI_CLEAR_ON_SHRINK").is_ok_and(|value| value == "1"),
             full_redraws: 0,
+            previous_lines: Vec::new(),
+            cursor_row: 0,
+            hardware_cursor_row: 0,
+            show_hardware_cursor: false,
+            previous_viewport_top: 0,
         }
     }
 
@@ -308,42 +318,264 @@ impl<T: Terminal> TUI<T> {
             .collect()
     }
 
-    pub fn render_now(&mut self) -> anyhow::Result<()> {
-        self.render_now_with_full_redraw(false)
+    fn extract_cursor_position(&self, lines: &[String], _height: usize) -> Option<(usize, usize)> {
+        for (row, line) in lines.iter().enumerate() {
+            if let Some(col) = line.find(CURSOR_MARKER) {
+                return Some((row, col));
+            }
+        }
+        None
     }
 
-    pub fn render_now_with_full_redraw(&mut self, full_redraw: bool) -> anyhow::Result<()> {
+    fn expand_last_changed_for_kitty_images(&self, _first: usize, last: usize) -> usize {
+        last
+    }
+
+    fn delete_changed_kitty_images(&self, _first: usize, _last: usize) -> String {
+        String::new()
+    }
+
+    fn position_hardware_cursor(&mut self, cursor_pos: Option<(usize, usize)>, total_lines: usize) {
+        // Move hardware cursor if cursor_pos given
+        if let Some((target_row, target_col)) = cursor_pos {
+            if total_lines > 0 {
+                let target_row = target_row.clamp(0, total_lines.saturating_sub(1));
+                let mut buffer = String::new();
+
+                #[allow(clippy::comparison_chain)]
+                if target_row > self.hardware_cursor_row {
+                    buffer.push_str(&format!(
+                        "\u{1b}[{}B",
+                        target_row - self.hardware_cursor_row
+                    ));
+                } else if target_row < self.hardware_cursor_row {
+                    buffer.push_str(&format!(
+                        "\u{1b}[{}A",
+                        self.hardware_cursor_row - target_row
+                    ));
+                }
+                buffer.push_str(&format!("\u{1b}[{}G", target_col + 1));
+
+                if !buffer.is_empty() {
+                    let _ = self.terminal.write(&buffer);
+                }
+                self.hardware_cursor_row = target_row;
+                if self.show_hardware_cursor {
+                    let _ = self.terminal.show_cursor();
+                }
+                return;
+            }
+        }
+        let _ = self.terminal.hide_cursor();
+    }
+
+    pub fn render_now_with_full_redraw(&mut self, force_full_redraw: bool) -> anyhow::Result<()> {
         let width = self.terminal.columns();
         let height = self.terminal.rows();
-        let lines = self.render_lines();
-        let current_image_ids = extract_kitty_image_ids_from_lines(&lines);
-        let resized = self.previous_width != 0
-            && (self.previous_width != width
-                || (self.previous_height != height && std::env::var("TERMUX_VERSION").is_err()));
+        let mut new_lines = self.container.render(width);
+
+        for overlay in &self.overlays {
+            if overlay.hidden {
+                continue;
+            }
+            let overlay_width = overlay
+                .options
+                .width
+                .map(|v| v.resolve(width))
+                .unwrap_or_else(|| width.min(80))
+                .max(overlay.options.min_width.unwrap_or(0))
+                .min(width);
+            let mut overlay_lines = overlay.component.render(overlay_width);
+            if let Some(max_height) = overlay.options.max_height.map(|v| v.resolve(height)) {
+                overlay_lines.truncate(max_height);
+            }
+            let overlay_lines: Vec<_> = overlay_lines
+                .into_iter()
+                .map(|l| truncate_to_width_with(&l, overlay_width, "", true))
+                .collect();
+            let (row, col) = resolve_overlay_position(
+                &overlay.options,
+                width,
+                height,
+                overlay_width,
+                overlay_lines.len(),
+            );
+            composite_overlay(&mut new_lines, &overlay_lines, row, col, width);
+        }
+
+        let cursor_pos = self.extract_cursor_position(&new_lines, height);
+        let new_lines: Vec<_> = new_lines
+            .into_iter()
+            .map(|l| truncate_to_width(&l.replace(CURSOR_MARKER, ""), width))
+            .collect();
+        let current_image_ids = extract_kitty_image_ids_from_lines(&new_lines);
+
+        let width_changed = self.previous_width != 0 && self.previous_width != width;
+        let height_changed = self.previous_height != 0
+            && self.previous_height != height
+            && std::env::var_os("TERMUX_VERSION").is_none();
+
         let shrunk = self.clear_on_shrink
             && self.max_lines_rendered > 0
-            && lines.len() < self.max_lines_rendered;
-        let full_redraw = full_redraw || resized || shrunk;
-        let mut prefix = String::new();
+            && new_lines.len() < self.max_lines_rendered
+            && self.overlays.is_empty();
 
-        for image_id in &self.previous_kitty_image_ids {
-            prefix.push_str(&delete_kitty_image(*image_id));
+        let mut first_changed = None;
+        let mut last_changed = 0;
+        let max_lines = new_lines.len().max(self.previous_lines.len());
+        for i in 0..max_lines {
+            let old = self.previous_lines.get(i).map_or("", String::as_str);
+            let new = new_lines.get(i).map_or("", String::as_str);
+            if old != new {
+                if first_changed.is_none() {
+                    first_changed = Some(i);
+                }
+                last_changed = i;
+            }
         }
 
-        if full_redraw {
+        let appended_lines = new_lines.len() > self.previous_lines.len();
+        if appended_lines {
+            if first_changed.is_none() {
+                first_changed = Some(self.previous_lines.len());
+            }
+            last_changed = new_lines.len().saturating_sub(1);
+        }
+
+        let append_start = appended_lines
+            && first_changed == Some(self.previous_lines.len())
+            && first_changed.unwrap_or(0) > 0;
+
+        let mut clear_screen = force_full_redraw || width_changed || height_changed || shrunk;
+        if let Some(first) = first_changed {
+            if first < self.previous_viewport_top {
+                clear_screen = true;
+            }
+        }
+        let total_full =
+            clear_screen || (self.previous_lines.is_empty() && !width_changed && !height_changed);
+
+        if clear_screen {
             self.full_redraws += 1;
-            prefix.push_str("\u{1b}[2J\u{1b}[H");
         }
 
+        if total_full {
+            let mut buffer = String::from("\u{1b}[?2026h");
+            if clear_screen {
+                for image_id in &self.previous_kitty_image_ids {
+                    buffer.push_str(&delete_kitty_image(*image_id));
+                }
+                buffer.push_str("\u{1b}[2J\u{1b}[H\u{1b}[3J");
+            }
+
+            for (i, line) in new_lines.iter().enumerate() {
+                if i > 0 {
+                    buffer.push_str("\r\n");
+                }
+                buffer.push_str(line);
+            }
+            buffer.push_str("\u{1b}[?2026l");
+            self.terminal.write(&buffer)?;
+
+            self.cursor_row = new_lines.len().saturating_sub(1);
+            self.hardware_cursor_row = self.cursor_row;
+            self.max_lines_rendered = new_lines.len();
+            let buffer_length = height.max(new_lines.len());
+            self.previous_viewport_top = buffer_length.saturating_sub(height);
+        } else if let Some(first_changed) = first_changed {
+            if first_changed >= new_lines.len() {
+                if self.previous_lines.len() > new_lines.len() {
+                    let mut buffer = String::from("\u{1b}[?2026h");
+                    let target_row = new_lines.len().saturating_sub(1);
+                    if target_row < self.previous_viewport_top {
+                        return self.render_now_with_full_redraw(true);
+                    }
+
+                    let line_diff = target_row as isize - self.hardware_cursor_row as isize;
+                    if line_diff > 0 {
+                        buffer.push_str(&format!("\u{1b}[{}B", line_diff));
+                    } else if line_diff < 0 {
+                        buffer.push_str(&format!("\u{1b}[{}A", -line_diff));
+                    }
+                    buffer.push('\r');
+                    let extra_lines = self.previous_lines.len() - new_lines.len();
+                    if extra_lines > height {
+                        return self.render_now_with_full_redraw(true);
+                    }
+                    if extra_lines > 0 {
+                        buffer.push_str("\u{1b}[1B");
+                    }
+                    for i in 0..extra_lines {
+                        buffer.push_str("\r\u{1b}[2K");
+                        if i < extra_lines - 1 {
+                            buffer.push_str("\u{1b}[1B");
+                        }
+                    }
+                    if extra_lines > 0 {
+                        buffer.push_str(&format!("\u{1b}[{}A", extra_lines));
+                    }
+                    buffer.push_str("\u{1b}[?2026l");
+                    self.terminal.write(&buffer)?;
+                    self.cursor_row = target_row;
+                    self.hardware_cursor_row = target_row;
+                }
+            } else {
+                let mut buffer = String::from("\u{1b}[?2026h");
+                let prev_viewport_bottom = self.previous_viewport_top + height.saturating_sub(1);
+                let move_target_row = if append_start {
+                    first_changed.saturating_sub(1)
+                } else {
+                    first_changed
+                };
+
+                if move_target_row > prev_viewport_bottom {
+                    let current_screen_row = (height.saturating_sub(1)).min(
+                        self.hardware_cursor_row
+                            .saturating_sub(self.previous_viewport_top),
+                    );
+                    let move_to_bottom =
+                        (height.saturating_sub(1)).saturating_sub(current_screen_row);
+                    if move_to_bottom > 0 {
+                        buffer.push_str(&format!("\u{1b}[{}B", move_to_bottom));
+                    }
+                    let scroll = move_target_row - prev_viewport_bottom;
+                    buffer.push_str(&"\r\n".repeat(scroll));
+                    self.previous_viewport_top += scroll;
+                    self.hardware_cursor_row = move_target_row;
+                }
+
+                let line_diff = move_target_row as isize - self.hardware_cursor_row as isize;
+                if line_diff > 0 {
+                    buffer.push_str(&format!("\u{1b}[{}B", line_diff));
+                } else if line_diff < 0 {
+                    buffer.push_str(&format!("\u{1b}[{}A", -line_diff));
+                }
+                buffer.push_str(if append_start { "\r\n" } else { "\r" });
+
+                let render_end = last_changed.min(new_lines.len().saturating_sub(1));
+                for i in first_changed..=render_end {
+                    if i > first_changed {
+                        buffer.push_str("\r\n");
+                    }
+                    buffer.push_str("\u{1b}[2K");
+                    buffer.push_str(&new_lines[i]);
+                }
+
+                buffer.push_str("\u{1b}[?2026l");
+                self.terminal.write(&buffer)?;
+                self.cursor_row = render_end;
+                self.hardware_cursor_row = render_end;
+            }
+        }
+
+        self.position_hardware_cursor(cursor_pos, new_lines.len());
         self.previous_width = width;
         self.previous_height = height;
-        self.max_lines_rendered = self.max_lines_rendered.max(lines.len());
-        if full_redraw {
-            self.max_lines_rendered = lines.len();
-        }
+        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
         self.previous_kitty_image_ids = current_image_ids;
-        let output = format!("{prefix}{}", lines.join("\r\n"));
-        self.terminal.write(&output)
+        self.previous_lines = new_lines;
+
+        Ok(())
     }
 
     pub fn handle_input(&mut self, data: &str) {

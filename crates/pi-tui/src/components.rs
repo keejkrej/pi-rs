@@ -2163,6 +2163,9 @@ pub struct MarkdownTheme {
     pub link: DefaultTextStyle,
     pub heading: DefaultTextStyle,
     pub quote: DefaultTextStyle,
+    pub bold: DefaultTextStyle,
+    pub italic: DefaultTextStyle,
+    pub strikethrough: DefaultTextStyle,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2214,6 +2217,77 @@ impl Markdown {
         format!("{}{}{}", style.prefix, text, style.suffix)
     }
 
+    fn apply_inline_formatting(&self, text: &str) -> String {
+        let mut result = String::new();
+        let mut chars = text.chars().peekable();
+        let mut in_bold = false;
+        let mut in_italic = false;
+        let mut in_code = false;
+        let mut in_strike = false;
+
+        while let Some(ch) = chars.next() {
+            if ch == '`' {
+                if in_code {
+                    result.push_str(&self.theme.code.suffix);
+                } else {
+                    result.push_str(&self.theme.code.prefix);
+                }
+                in_code = !in_code;
+                continue;
+            }
+            if !in_code {
+                if ch == '*' {
+                    if chars.peek() == Some(&'*') {
+                        chars.next();
+                        if in_bold {
+                            result.push_str(&self.theme.bold.suffix);
+                        } else {
+                            result.push_str(&self.theme.bold.prefix);
+                        }
+                        in_bold = !in_bold;
+                        continue;
+                    } else {
+                        if in_italic {
+                            result.push_str(&self.theme.italic.suffix);
+                        } else {
+                            result.push_str(&self.theme.italic.prefix);
+                        }
+                        in_italic = !in_italic;
+                        continue;
+                    }
+                }
+                if ch == '~' {
+                    if chars.peek() == Some(&'~') {
+                        chars.next();
+                        if in_strike {
+                            result.push_str(&self.theme.strikethrough.suffix);
+                        } else {
+                            result.push_str(&self.theme.strikethrough.prefix);
+                        }
+                        in_strike = !in_strike;
+                        continue;
+                    }
+                }
+            }
+            result.push(ch);
+        }
+
+        if in_bold {
+            result.push_str(&self.theme.bold.suffix);
+        }
+        if in_italic {
+            result.push_str(&self.theme.italic.suffix);
+        }
+        if in_code {
+            result.push_str(&self.theme.code.suffix);
+        }
+        if in_strike {
+            result.push_str(&self.theme.strikethrough.suffix);
+        }
+
+        result
+    }
+
     fn render_markdown_line(&self, line: &str, width: usize, in_code: bool) -> Vec<String> {
         if in_code {
             return wrap_with_continuation_indent(
@@ -2252,9 +2326,9 @@ impl Markdown {
         }
 
         let styled = if let Some(style) = &self.default_text_style {
-            self.style(trimmed.to_string(), style)
+            self.style(self.apply_inline_formatting(trimmed), style)
         } else {
-            trimmed.to_string()
+            self.apply_inline_formatting(trimmed)
         };
         wrap_text(&styled, width)
     }
@@ -2851,5 +2925,39 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("│ quote text")));
         assert!(lines.iter().any(|line| line.contains("│ Name │ Age │")));
         assert!(lines.iter().any(|line| line.contains("─")));
+    }
+
+    #[test]
+    fn markdown_renders_inline_formatting() {
+        let theme = MarkdownTheme {
+            bold: DefaultTextStyle {
+                prefix: "<B>".into(),
+                suffix: "</B>".into(),
+            },
+            italic: DefaultTextStyle {
+                prefix: "<I>".into(),
+                suffix: "</I>".into(),
+            },
+            code: DefaultTextStyle {
+                prefix: "<C>".into(),
+                suffix: "</C>".into(),
+            },
+            strikethrough: DefaultTextStyle {
+                prefix: "<S>".into(),
+                suffix: "</S>".into(),
+            },
+            ..MarkdownTheme::default()
+        };
+        let markdown = Markdown::new(
+            "This is **bold** and *italic* and `code` and ~~strike~~!",
+            0,
+            0,
+            theme,
+        );
+        let lines = markdown.render(80);
+        assert_eq!(
+            lines[0].trim_end(),
+            "This is <B>bold</B> and <I>italic</I> and <C>code</C> and <S>strike</S>!"
+        );
     }
 }
