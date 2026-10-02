@@ -254,7 +254,11 @@ async fn promise_scenario(name: &str, t: &str) -> Option<pi_js::error::Result<()
 /// Scenarios whose outcome differs between macOS (where the vectors were generated) and
 /// other unix systems, or that need a non-root user.
 fn skip(name: &str) -> bool {
+    // `nix` is a unix-only dependency. On Windows these root-only skips are false.
+    #[cfg(unix)]
     let is_root = nix::unistd::geteuid().is_root();
+    #[cfg(not(unix))]
+    let is_root = false;
     let mac_only = ["unlink_dir", "p_unlink_dir", "rm_locked_recursive", "copyFile_dir_src"];
     (name.contains("locked") && is_root) || (!cfg!(target_os = "macos") && mac_only.contains(&name))
 }
@@ -602,7 +606,11 @@ async fn promises_mirror_the_sync_api() {
     promises::truncate("p/moved.txt", 2).await.unwrap();
     assert_eq!(promises::read_to_string("p/moved.txt").await.unwrap(), "ab");
     promises::unlink("p/moved.txt").await.unwrap();
-    assert_eq!(promises::realpath("p/q").await.unwrap(), join(&t, "p/q"));
+    // `fsp.realpath` is the native call. On Windows it drops the `\\?\` prefix that
+    // `std::fs::canonicalize` (and therefore `t`) includes; `path.join` keeps it.
+    let joined = join(&t, "p/q");
+    let want = joined.strip_prefix(r"\\?\").unwrap_or(&joined);
+    assert_eq!(promises::realpath("p/q").await.unwrap(), want);
 
     let made = promises::mkdtemp(&join(&t, "tmp-")).await.unwrap();
     assert_eq!(made.len(), join(&t, "tmp-").len() + 6);

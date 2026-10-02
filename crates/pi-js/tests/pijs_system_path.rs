@@ -2381,6 +2381,13 @@ const WIN32_NAMESPACED_PCWD: &[(&str, &str)] = &[
     ("C:\\\\a\\\\\\b", "\\\\?\\C:\\a\\b"),
 ];
 
+/// POSIX `process.env` is case-sensitive, so `=d:` misses `=D:` and the drive root is used.
+/// Windows folds the key, and Node 24 resolves `d:x` + `..\y` against `D:\dcwd`.
+#[cfg(windows)]
+const RESOLVE_DX_DOTDOT_Y: &str = "d:\\dcwd\\y";
+#[cfg(not(windows))]
+const RESOLVE_DX_DOTDOT_Y: &str = "d:\\y";
+
 const WIN32_RESOLVE_WCWD: &[(&[&str], &str)] = &[
     (&[], "C:\\Users\\me\\proj"),
     (&[""], "C:\\Users\\me\\proj"),
@@ -2409,7 +2416,7 @@ const WIN32_RESOLVE_WCWD: &[(&[&str], &str)] = &[
     (&["C:"], "C:\\Users\\me\\proj"),
     (&["D:"], "D:\\dcwd"),
     (&["D:x"], "D:\\dcwd\\x"),
-    (&["d:x", "..\\y"], "d:\\y"),
+    (&["d:x", "..\\y"], RESOLVE_DX_DOTDOT_Y),
     (&["c:/ignore", "d:\\a/b\\c/d", "\\e.exe"], "d:\\e.exe"),
     (&["c:/ignore", "c:/some/file"], "c:\\some\\file"),
     (&["d:/ignore", "d:some/dir//"], "d:\\ignore\\some\\dir"),

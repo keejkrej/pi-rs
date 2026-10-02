@@ -193,9 +193,13 @@ fn cwd_guard_overrides_cwd_and_chdir() {
         let _g = CwdGuard::set(canonical.clone());
         assert_eq!(env::cwd(), canonical);
         env::chdir("sub").unwrap();
-        assert_eq!(env::cwd(), pi_js::path::join(&[&canonical, "sub"]));
+        // `uv_cwd` drops the `\\?\` prefix that `canonicalize` and `path.join` keep.
+        let sub = pi_js::path::join(&[&canonical, "sub"]);
+        let sub = sub.strip_prefix(r"\\?\").unwrap_or(&sub);
+        assert_eq!(env::cwd(), sub);
         env::chdir("..").unwrap();
-        assert_eq!(env::cwd(), canonical);
+        let canonical_cwd = canonical.strip_prefix(r"\\?\").unwrap_or(&canonical);
+        assert_eq!(env::cwd(), canonical_cwd);
 
         let err = env::chdir("missing").unwrap_err();
         let Error::Node(e) = err else {
@@ -205,20 +209,27 @@ fn cwd_guard_overrides_cwd_and_chdir() {
         assert_eq!(e.syscall, "chdir");
         assert_eq!(
             e.message,
-            format!("ENOENT: no such file or directory, chdir '{canonical}' -> 'missing'")
+            format!("ENOENT: no such file or directory, chdir '{canonical_cwd}' -> 'missing'")
         );
-        assert_eq!(e.path.as_deref(), Some(canonical.as_str()));
+        assert_eq!(e.path.as_deref(), Some(canonical_cwd));
         assert_eq!(e.dest.as_deref(), Some("missing"));
 
         let err = env::chdir("file").unwrap_err();
+        // Unix `chdir` of a file is ENOTDIR. Windows `SetCurrentDirectoryW` returns
+        // ERROR_DIRECTORY, which libuv reports as ENOENT.
+        let file_code = if cfg!(windows) {
+            "ENOENT: no such file or directory"
+        } else {
+            "ENOTDIR: not a directory"
+        };
         assert_eq!(
             err.to_string(),
-            format!("ENOTDIR: not a directory, chdir '{canonical}' -> 'file'")
+            format!("{file_code}, chdir '{canonical_cwd}' -> 'file'")
         );
         let err = env::chdir("").unwrap_err();
         assert_eq!(
             err.to_string(),
-            format!("ENOENT: no such file or directory, chdir '{canonical}' -> ''")
+            format!("ENOENT: no such file or directory, chdir '{canonical_cwd}' -> ''")
         );
         // The real process cwd is untouched.
         assert!(env::testing::cwd_overridden());

@@ -128,8 +128,10 @@ pub fn remove_var(k: &str) {
 
 /// `os.homedir()`.
 ///
-/// libuv returns `HOME` (`USERPROFILE` on Windows) whenever it is set, even when empty,
-/// and otherwise falls back to the password database / user profile directory.
+/// Returns `HOME` or `USERPROFILE` when set, including the empty string, and otherwise
+/// falls back to the password database / profile directory. On Windows, Node's
+/// `uv_os_homedir` throws ENOENT when `USERPROFILE` is shorter than 3 UTF-8 bytes.
+/// Appendix A returns `String`, so a short value is returned as-is.
 pub fn home_dir() -> String {
     if cfg!(windows) {
         if let Some(h) = var("USERPROFILE") {
@@ -239,6 +241,7 @@ pub fn chdir(p: &str) -> Result<()> {
                     if m.is_dir() {
                         std::fs::canonicalize(&target)
                     } else {
+                        // Windows: ERROR_DIRECTORY (267) → ENOENT, matching `process.chdir`.
                         Err(std::io::Error::from_raw_os_error(enotdir_raw()))
                     }
                 })
@@ -291,7 +294,7 @@ fn enotdir_raw() -> i32 {
     }
     #[cfg(not(unix))]
     {
-        267 // ERROR_DIRECTORY
+        267 // ERROR_DIRECTORY; libuv maps this to UV_ENOENT
     }
 }
 
@@ -392,14 +395,95 @@ mod os_info {
     }
 
     pub fn version() -> String {
-        // PORT: libuv reports the product name from the registry (e.g. "Windows 11 Pro").
-        let ver = VER.as_str();
-        ver.split(" [").next().unwrap_or("").to_string()
+        VERSION.clone()
     }
 
+    /// `GetComputerNameExW(ComputerNameDnsHostname)`. Node uses winsock `GetHostNameW`
+    /// (not enabled here). Neither call reads `COMPUTERNAME`.
+    #[cfg(windows)]
     pub fn hostname() -> String {
-        super::var("COMPUTERNAME").unwrap_or_default()
+        use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+        unsafe {
+            let mut len = 0u32;
+            let _ = GetComputerNameExW(ComputerNameDnsHostname, std::ptr::null_mut(), &mut len);
+            if len == 0 {
+                return String::new();
+            }
+            let mut buf = vec![0u16; len as usize];
+            if GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) == 0 {
+                return String::new();
+            }
+            String::from_utf16_lossy(&buf[..len as usize])
+        }
     }
+
+    #[cfg(not(windows))]
+    pub fn hostname() -> String {
+        String::new()
+    }
+
+    fn reg_sz(name: &str) -> String {
+        let Ok(out) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                "/v",
+                name,
+            ])
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::new();
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix(name) else {
+                continue;
+            };
+            if !rest.is_empty() && !rest.starts_with(|c: char| c.is_whitespace()) {
+                continue;
+            }
+            let mut toks = rest.split_whitespace();
+            let Some(kind) = toks.next() else {
+                continue;
+            };
+            if !kind.starts_with("REG_") {
+                continue;
+            }
+            return toks.collect::<Vec<_>>().join(" ");
+        }
+        String::new()
+    }
+
+    /// libuv `uv_os_uname`: ProductName, with `Windows 10` → `Windows 11` when the build is
+    /// at least 22000, then `szCSDVersion` if present.
+    fn windows_product_version() -> String {
+        let product = reg_sz("ProductName");
+        if product.is_empty() {
+            return VER.split(" [").next().unwrap_or("").to_string();
+        }
+        let build = reg_sz("CurrentBuild")
+            .parse::<u32>()
+            .unwrap_or_else(|_| release().split('.').nth(2).unwrap_or("0").parse().unwrap_or(0));
+        let rel = release();
+        let major_is_10 = rel.starts_with("10.") || rel.is_empty();
+        let mut name = product;
+        if major_is_10 && build >= 22000 && name.starts_with("Windows 10") {
+            // wchar index 9 of "Windows 10…" is the '0'.
+            name.replace_range(9..10, "1");
+        }
+        let csd = reg_sz("CSDVersion");
+        if !csd.is_empty() {
+            name.push(' ');
+            name.push_str(&csd);
+        }
+        name
+    }
+
+    static VERSION: LazyLock<String> = LazyLock::new(windows_product_version);
 }
 
 /// `process.pid`.
@@ -543,5 +627,33 @@ pub mod testing {
     /// Whether a [`CwdGuard`] is active on this thread.
     pub fn cwd_overridden() -> bool {
         TL_CWD.with(|c| c.borrow().is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn hostname_ignores_computername() {
+        let real = hostname();
+        assert!(!real.is_empty());
+        let _g = testing::EnvGuard::set("COMPUTERNAME", Some("not-the-host"));
+        assert_eq!(var("COMPUTERNAME").as_deref(), Some("not-the-host"));
+        assert_eq!(hostname(), real);
+        assert_ne!(hostname(), "not-the-host");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn os_version_is_the_product_name() {
+        let v = os_version();
+        assert!(!v.is_empty(), "{v}");
+        assert!(!v.starts_with("Microsoft Windows"), "{v}");
+        let build: u32 = os_release().split('.').nth(2).unwrap_or("0").parse().unwrap_or(0);
+        if build >= 22000 {
+            assert!(!v.starts_with("Windows 10"), "{v}");
+        }
     }
 }

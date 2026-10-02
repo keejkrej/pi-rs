@@ -967,9 +967,14 @@ fn io_from_name(name: &str) -> io::Error {
     }
     #[cfg(not(unix))]
     {
+        // ERROR_DIRECTORY (267) translates back to ENOENT. A synthetic ENOTDIR
+        // (mkdirp when a parent is a file) must not carry that raw code, or
+        // `io_error` reports ENOENT. Node's MKDirpSync returns ENOTDIR.
+        if name == "ENOTDIR" {
+            return io::Error::new(io::ErrorKind::NotADirectory, "ENOTDIR");
+        }
         let code = match name {
             "EEXIST" => 183,
-            "ENOTDIR" => 267,
             "ENOENT" => 2,
             _ => 31,
         };
@@ -979,7 +984,20 @@ fn io_from_name(name: &str) -> io::Error {
 
 /// Node's `MKDirpSync` (src/node_file.cc).
 fn mkdirp(target: &Path, mode: u32) -> io::Result<()> {
-    let mut stack: Vec<PathBuf> = vec![target.to_path_buf()];
+    // `\\?\` paths reject `/` (ERROR_INVALID_NAME → ENOENT). Retrying that ENOENT
+    // never shortens the parent and loops. Node's ToNamespacedPath turns `/` into `\`.
+    #[cfg(windows)]
+    let target = {
+        let s = target.to_string_lossy();
+        if s.contains('/') {
+            PathBuf::from(s.replace('/', "\\"))
+        } else {
+            target.to_path_buf()
+        }
+    };
+    #[cfg(not(windows))]
+    let target = target.to_path_buf();
+    let mut stack: Vec<PathBuf> = vec![target];
     while let Some(next) = stack.pop() {
         let mut err = mkdir_raw(&next, mode).err();
         while let Some(e) = err.take() {
@@ -1036,7 +1054,20 @@ pub fn mkdir(p: &str, recursive: bool, mode: Option<u32>) -> Result<()> {
 
 fn read_dir_raw(p: &str, with_types: bool) -> Result<Vec<(OsString, u32)>> {
     let os = os_path(p);
-    let rd = std::fs::read_dir(&os).map_err(|e| io_error(e, "scandir", Some(p), None))?;
+    let rd = match std::fs::read_dir(&os) {
+        Ok(rd) => rd,
+        Err(e) => {
+            #[cfg(windows)]
+            {
+                // `uv_fs_scandir` returns UV_ENOTDIR when the path exists and is not a
+                // directory, before the generic map of ERROR_DIRECTORY (267) to ENOENT.
+                if std::fs::metadata(&os).is_ok_and(|m| !m.is_dir()) {
+                    return Err(uv_error("ENOTDIR", "scandir", Some(p), None));
+                }
+            }
+            return Err(io_error(e, "scandir", Some(p), None));
+        }
+    };
     let mut out = Vec::new();
     for entry in rd {
         let entry = entry.map_err(|e| io_error(e, "scandir", Some(p), None))?;
@@ -1582,7 +1613,14 @@ pub fn readlink(p: &str) -> Result<String> {
     validate_path(p, "path")?;
     std::fs::read_link(os_path(p))
         .map(|t| strip_verbatim(lossy(t.into_os_string())))
-        .map_err(|e| io_error(e, "readlink", Some(p), None))
+        .map_err(|e| {
+            #[cfg(windows)]
+            if e.raw_os_error() == Some(4390) {
+                // libuv `fs__readlink`: ERROR_NOT_A_REPARSE_POINT → UV_EINVAL.
+                return uv_error("EINVAL", "readlink", Some(p), None);
+            }
+            io_error(e, "readlink", Some(p), None)
+        })
 }
 
 fn file_time(seconds: f64) -> filetime::FileTime {
@@ -2216,5 +2254,64 @@ pub mod promises {
             drop(file);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    fn node(err: Error) -> NodeError {
+        match err {
+            Error::Node(n) => n,
+            other => panic!("expected NodeError, got {other}"),
+        }
+    }
+
+    fn scratch_file() -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"hello").unwrap();
+        (dir, file.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn readdir_of_a_file_is_enotdir() {
+        let (_d, file) = scratch_file();
+        let n = node(readdir(&file).unwrap_err());
+        assert_eq!(n.code, "ENOTDIR");
+        assert_eq!(n.syscall, "scandir");
+        assert_eq!(n.path.as_deref(), Some(file.as_str()));
+        assert_eq!(n.message, format!("ENOTDIR: not a directory, scandir '{file}'"));
+    }
+
+    #[test]
+    fn mkdir_recursive_under_a_file_is_enotdir() {
+        let (_d, file) = scratch_file();
+        let sep = std::path::MAIN_SEPARATOR;
+        let target = format!("{file}{sep}a{sep}b");
+        let n = node(mkdir(&target, true, None).unwrap_err());
+        assert_eq!(n.code, "ENOTDIR");
+        assert_eq!(n.syscall, "mkdir");
+        assert_eq!(n.message, format!("ENOTDIR: not a directory, mkdir '{target}'"));
+    }
+
+    #[test]
+    fn readlink_of_a_file_is_einval() {
+        let (_d, file) = scratch_file();
+        let n = node(readlink(&file).unwrap_err());
+        assert_eq!(n.code, "EINVAL", "{n:?}");
+        assert_eq!(n.syscall, "readlink");
+    }
+
+    #[test]
+    fn read_file_of_a_directory_is_eisdir_without_a_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().to_string_lossy().into_owned();
+        let n = node(read_file(&p).unwrap_err());
+        assert_eq!(n.code, "EISDIR", "{n:?}");
+        assert_eq!(n.syscall, "read", "{n:?}");
+        assert!(n.path.is_none(), "{n:?}");
+        assert_eq!(n.message, "EISDIR: illegal operation on a directory, read");
     }
 }
