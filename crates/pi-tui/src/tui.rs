@@ -1,957 +1,1176 @@
-use std::boxed::Box as StdBox;
-use std::collections::BTreeSet;
+//! Port of packages/tui/src/tui.ts
+//!
+//! Minimal TUI implementation with differential rendering.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+
+use async_trait::async_trait;
+use indexmap::IndexSet;
+use serde::{Deserialize, Serialize};
+
+use crate::layout_node::LayoutComponent;
 use crate::terminal::Terminal;
-use crate::terminal_image::delete_kitty_image;
-use crate::utils::{slice_by_column, truncate_to_width, truncate_to_width_with, visible_width};
+use crate::terminal_colors::{RgbColor, TerminalColorScheme, TerminalColors};
 
-pub const CURSOR_MARKER: &str = "\u{1b}_pi:c\u{7}";
+pub use crate::utils::visible_width;
 
-pub trait Component {
+const TERMINAL_PALETTE_SIZE: i64 = 16;
+/// OSC 10 and 11 plus OSC 4 for every palette color.
+const TERMINAL_COLOR_REPLY_COUNT: i64 = 2 + TERMINAL_PALETTE_SIZE;
+/// Default colors, palette colors 0-15, and a trailing primary device attributes (DA1) request.
+/// Every terminal answers DA1 and terminals answer in order, so the DA1 reply marks the end of
+/// the color replies, including for terminals that ignore the color queries.
+const TERMINAL_COLOR_QUERY: &str = "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?\x07\x1b]4;1;?\x07\x1b]4;2;?\x07\x1b]4;3;?\x07\x1b]4;4;?\x07\x1b]4;5;?\x07\x1b]4;6;?\x07\x1b]4;7;?\x07\x1b]4;8;?\x07\x1b]4;9;?\x07\x1b]4;10;?\x07\x1b]4;11;?\x07\x1b]4;12;?\x07\x1b]4;13;?\x07\x1b]4;14;?\x07\x1b]4;15;?\x07\x1b[c";
+/// PORT: JS `\d` is `[0-9]`.
+static DEVICE_ATTRIBUTES_RESPONSE_PATTERN: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new("^\x1b\\[\\?[0-9;]*c$").expect("DEVICE_ATTRIBUTES_RESPONSE_PATTERN"));
+const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TuiMouseEventType {
+    #[serde(rename = "press")]
+    Press,
+    #[serde(rename = "release")]
+    Release,
+    #[serde(rename = "move")]
+    Move,
+    #[serde(rename = "drag")]
+    Drag,
+    #[serde(rename = "click")]
+    Click,
+    #[serde(rename = "wheel")]
+    Wheel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TuiMouseButton {
+    #[serde(rename = "left")]
+    Left,
+    #[serde(rename = "middle")]
+    Middle,
+    #[serde(rename = "right")]
+    Right,
+    #[serde(rename = "none")]
+    None,
+}
+
+/// Normalized cell-based mouse event. Coordinates are zero-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TuiMouseEvent {
+    pub r#type: TuiMouseEventType,
+    pub button: TuiMouseButton,
+    /// Coordinates local to the receiving component.
+    pub x: i64,
+    pub y: i64,
+    /// Absolute terminal coordinates.
+    pub screen_x: i64,
+    pub screen_y: i64,
+    /// Current component bounds.
+    pub width: i64,
+    pub height: i64,
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    /// Logical lines. Negative values scroll up.
+    pub wheel_delta: Option<i64>,
+    /// Consecutive click count when type is click.
+    pub click_count: Option<i64>,
+}
+
+/// PORT: `target` / `focus_target` are set only for a forwarded `TuiMouseDispatchResult`
+/// (`"target" in result`). [`Component::handle_mouse`] stays `Option<TuiMouseEventResult>`.
+#[derive(Clone, Default)]
+pub struct TuiMouseEventResult {
+    /// Stop propagation and suppress renderer-level fallback behavior.
+    pub handled: Option<bool>,
+    /// Route subsequent drag/release events to this component. Implies handled.
+    pub capture: Option<bool>,
+    /// Give keyboard focus to this component. Implies handled.
+    pub focus: Option<bool>,
+    /// Explicitly request or suppress a render. Move and release default to false;
+    /// press, click, drag, and wheel default to true.
+    pub render: Option<bool>,
+    pub target: Option<TuiMouseDispatchTarget>,
+    pub focus_target: Option<Arc<dyn Component>>,
+}
+
+/// Internal target metadata used by containers and alternate-screen dispatch.
+#[derive(Clone)]
+pub struct TuiMouseDispatchTarget {
+    pub component: Arc<dyn Component>,
+    pub origin_x: i64,
+    pub origin_y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+/// Result of dispatching to a concrete component.
+#[derive(Clone)]
+pub struct TuiMouseDispatchResult {
+    pub handled: bool,
+    pub capture: Option<bool>,
+    pub focus: Option<bool>,
+    pub render: Option<bool>,
+    pub target: TuiMouseDispatchTarget,
+    /// Keyboard focus target, which may be a delegating parent container.
+    pub focus_target: Option<Arc<dyn Component>>,
+}
+
+/// Dispatch an event to a component and retain the exact target and coordinate
+/// transform. Containers use this when forwarding events to nested children.
+pub fn dispatch_mouse_event(component: &dyn Component, event: &TuiMouseEvent) -> Option<TuiMouseDispatchResult> {
+    todo!("port: dispatch_mouse_event")
+}
+
+/// Recreate local coordinates for a previously dispatched mouse target.
+pub fn retarget_mouse_event(event: &TuiMouseEvent, target: &TuiMouseDispatchTarget) -> TuiMouseEvent {
+    todo!("port: retarget_mouse_event")
+}
+
+/// Interface for components that can receive focus and display a hardware cursor.
+/// When focused, the component should emit CURSOR_MARKER at the cursor position
+/// in its render output. TUI will find this marker and position the hardware
+/// cursor there for proper IME candidate window positioning.
+pub trait Focusable: Send + Sync {
+    /// Set by TUI when focus changes. Component should emit CURSOR_MARKER when true.
+    fn focused(&self) -> bool;
+    fn set_focused(&self, focused: bool);
+}
+
+/// Component interface - all components must implement this.
+///
+/// PORT: `handle_input` / `handle_mouse` / `wants_key_release` are optional in TS.
+/// `has_handle_input` is false unless the component defines `handleInput`.
+/// `is_container_handle_mouse` is TS `handleMouse === Container.prototype.handleMouse`.
+/// `container_children` is TS `instanceof Container` (subclasses included, `Box` excluded).
+/// `as_focusable` / `as_layout_component` stand in for `"focused" in component` and `LAYOUT_NODE`.
+pub trait Component: Send + Sync {
+    /// Render the component to lines for the given viewport width.
     fn render(&self, width: usize) -> Vec<String>;
 
-    fn handle_input(&mut self, _data: &str) {}
+    /// Optional handler for keyboard input when component has focus.
+    fn handle_input(&self, data: &str) {}
 
+    /// Optional normalized mouse handler.
+    fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        None
+    }
+
+    /// If true, component receives key release events (Kitty protocol).
+    /// Default is false - release events are filtered out.
     fn wants_key_release(&self) -> bool {
         false
     }
 
-    fn invalidate(&mut self) {}
+    /// Invalidate any cached rendering state.
+    /// Called when theme changes or when component needs to re-render from scratch.
+    fn invalidate(&self);
+
+    /// PORT: TS `handleInput` method presence. Default false.
+    fn has_handle_input(&self) -> bool {
+        false
+    }
+
+    /// PORT: TS `component.handleMouse === Container.prototype.handleMouse`.
+    fn is_container_handle_mouse(&self) -> bool {
+        false
+    }
+
+    fn as_focusable(&self) -> Option<&dyn Focusable> {
+        None
+    }
+
+    /// PORT: `Some` iff TS `instanceof Container`. The vec is that container's children.
+    fn container_children(&self) -> Option<Vec<Arc<dyn Component>>> {
+        None
+    }
+
+    fn as_layout_component(&self) -> Option<&dyn LayoutComponent> {
+        None
+    }
 }
 
-pub trait Focusable {
-    fn set_focused(&mut self, focused: bool);
-    fn focused(&self) -> bool;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TuiInputListenerResult {
+    pub consume: Option<bool>,
+    pub data: Option<String>,
 }
 
-#[derive(Default)]
+/// PORT: TS `TuiInputListenerResult` includes `| undefined`, so the callback returns `Option`.
+pub type TuiInputListener = Arc<dyn Fn(&str) -> Option<TuiInputListenerResult> + Send + Sync>;
+
+/// Type guard to check if a component implements Focusable.
+pub fn is_focusable(component: Option<&dyn Component>) -> bool {
+    component.is_some_and(|component| component.as_focusable().is_some())
+}
+
+/// Cursor position marker - APC (Application Program Command) sequence.
+/// This is a zero-width escape sequence that terminals ignore.
+/// Components emit this at the cursor position when focused.
+/// TUI finds and strips this marker, then positions the hardware cursor there.
+pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
+
+/// Anchor position for overlays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OverlayAnchor {
+    #[serde(rename = "center")]
+    Center,
+    #[serde(rename = "top-left")]
+    TopLeft,
+    #[serde(rename = "top-right")]
+    TopRight,
+    #[serde(rename = "bottom-left")]
+    BottomLeft,
+    #[serde(rename = "bottom-right")]
+    BottomRight,
+    #[serde(rename = "top-center")]
+    TopCenter,
+    #[serde(rename = "bottom-center")]
+    BottomCenter,
+    #[serde(rename = "left-center")]
+    LeftCenter,
+    #[serde(rename = "right-center")]
+    RightCenter,
+}
+
+/// Margin configuration for overlays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OverlayMargin {
+    pub top: Option<i64>,
+    pub right: Option<i64>,
+    pub bottom: Option<i64>,
+    pub left: Option<i64>,
+}
+
+/// `OverlayMargin | number`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayMarginValue {
+    All(i64),
+    Sides(OverlayMargin),
+}
+
+/// Value that can be absolute (number) or percentage (string like "50%").
+#[derive(Clone, Debug, PartialEq)]
+pub enum SizeValue {
+    Absolute(f64),
+    /// Raw percentage text, including `%`, so an invalid value still round-trips into the parser.
+    Percent(String),
+}
+
+/// Parse a SizeValue into absolute value given a reference size.
+fn parse_size_value(value: Option<&SizeValue>, reference_size: i64) -> Option<f64> {
+    todo!("port: parse_size_value")
+}
+
+/// Options for overlay positioning and sizing.
+/// Values can be absolute numbers or percentage strings (e.g., "50%").
+#[derive(Clone, Default)]
+pub struct OverlayOptions {
+    /// Width in columns, or percentage of terminal width (e.g., "50%").
+    pub width: Option<SizeValue>,
+    /// Minimum width in columns.
+    pub min_width: Option<i64>,
+    /// Maximum height in rows, or percentage of terminal height (e.g., "50%").
+    pub max_height: Option<SizeValue>,
+    /// Anchor point for positioning (default: 'center').
+    pub anchor: Option<OverlayAnchor>,
+    /// Horizontal offset from anchor position (positive = right).
+    pub offset_x: Option<i64>,
+    /// Vertical offset from anchor position (positive = down).
+    pub offset_y: Option<i64>,
+    /// Row position: absolute number, or percentage (e.g., "25%" = 25% from top).
+    pub row: Option<SizeValue>,
+    /// Column position: absolute number, or percentage (e.g., "50%" = centered horizontally).
+    pub col: Option<SizeValue>,
+    /// Margin from terminal edges. Number applies to all sides.
+    pub margin: Option<OverlayMarginValue>,
+    /// Control overlay visibility based on terminal dimensions.
+    /// If provided, overlay is only rendered when this returns true.
+    /// Called each render cycle with current terminal dimensions.
+    pub visible: Option<Arc<dyn Fn(i64, i64) -> bool + Send + Sync>>,
+    /// If true, don't capture keyboard focus when shown.
+    pub non_capturing: Option<bool>,
+}
+
+/// Options for [`OverlayHandle::unfocus`].
+#[derive(Clone)]
+pub struct OverlayUnfocusOptions {
+    /// Explicit target to focus after releasing this overlay.
+    pub target: Option<Arc<dyn Component>>,
+}
+
+/// Last rendered terminal-relative overlay rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverlayBounds {
+    pub row: i64,
+    pub col: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+/// Handle returned by showOverlay for controlling the overlay.
+///
+/// PORT: TS returns a closure object. This handle shares the stack entry by `Arc` identity.
+#[derive(Clone)]
+pub struct OverlayHandle {
+    inner: Arc<OverlayHandleInner>,
+}
+
+struct OverlayHandleInner {
+    base: TuiBase,
+    entry: OverlayStackEntry,
+}
+
+impl OverlayHandle {
+    /// Permanently remove the overlay (cannot be shown again).
+    pub fn hide(&self) {
+        todo!("port: OverlayHandle::hide")
+    }
+
+    /// Temporarily hide or show the overlay.
+    pub fn set_hidden(&self, hidden: bool) {
+        todo!("port: OverlayHandle::set_hidden")
+    }
+
+    /// Check if overlay is temporarily hidden.
+    pub fn is_hidden(&self) -> bool {
+        todo!("port: OverlayHandle::is_hidden")
+    }
+
+    /// Focus this overlay and bring it to the visual front.
+    pub fn focus(&self) {
+        todo!("port: OverlayHandle::focus")
+    }
+
+    /// Release focus to the next visible capturing overlay or previous target, or to an explicit target when provided.
+    pub fn unfocus(&self, options: Option<OverlayUnfocusOptions>) {
+        todo!("port: OverlayHandle::unfocus")
+    }
+
+    /// Check if this overlay currently has focus.
+    pub fn is_focused(&self) -> bool {
+        todo!("port: OverlayHandle::is_focused")
+    }
+
+    /// Get the most recent rendered bounds for a visible overlay.
+    pub fn get_bounds(&self) -> Option<OverlayBounds> {
+        todo!("port: OverlayHandle::get_bounds")
+    }
+}
+
+struct ContainerMouseChild {
+    component: Arc<dyn Component>,
+    height: i64,
+}
+
+struct ContainerMouseLayout {
+    width: i64,
+    children: Vec<ContainerMouseChild>,
+}
+
+struct ContainerState {
+    children: Vec<Arc<dyn Component>>,
+    mouse_layout: Option<ContainerMouseLayout>,
+}
+
+struct ContainerInner {
+    state: Mutex<ContainerState>,
+}
+
+/// Container - a component that contains other components.
+///
+/// PORT: TS class with identity. Subclasses compose this and delegate (§9.4).
+#[derive(Clone)]
 pub struct Container {
-    children: Vec<StdBox<dyn Component>>,
+    inner: Arc<ContainerInner>,
 }
 
 impl Container {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add_child<C>(&mut self, component: C)
-    where
-        C: Component + 'static,
-    {
-        self.children.push(StdBox::new(component));
-    }
-
-    pub fn remove_child(&mut self, index: usize) -> Option<StdBox<dyn Component>> {
-        if index < self.children.len() {
-            Some(self.children.remove(index))
-        } else {
-            None
+        Container {
+            inner: Arc::new(ContainerInner {
+                state: Mutex::new(ContainerState {
+                    children: Vec::new(),
+                    mouse_layout: None,
+                }),
+            }),
         }
     }
 
-    pub fn clear(&mut self) {
-        self.children.clear();
+    fn lock(&self) -> MutexGuard<'_, ContainerState> {
+        self.inner.state.lock().unwrap()
     }
 
-    pub fn len(&self) -> usize {
-        self.children.len()
+    /// Public `children` array (Arc clones).
+    pub fn children(&self) -> Vec<Arc<dyn Component>> {
+        self.lock().children.clone()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.children.is_empty()
+    /// `this.children = children`.
+    pub fn set_children(&self, children: Vec<Arc<dyn Component>>) {
+        self.lock().children = children;
     }
 
-    pub fn children(&self) -> &[StdBox<dyn Component>] {
-        &self.children
+    pub fn add_child(&self, component: Arc<dyn Component>) {
+        todo!("port: Container::add_child")
     }
 
-    pub fn children_mut(&mut self) -> &mut [StdBox<dyn Component>] {
-        &mut self.children
+    pub fn remove_child(&self, component: &Arc<dyn Component>) {
+        todo!("port: Container::remove_child")
+    }
+
+    pub fn clear(&self) {
+        todo!("port: Container::clear")
+    }
+
+    pub fn invalidate(&self) {
+        todo!("port: Container::invalidate")
+    }
+
+    pub fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        todo!("port: Container::handle_mouse")
+    }
+
+    pub fn render(&self, width: usize) -> Vec<String> {
+        todo!("port: Container::render")
     }
 }
 
 impl Component for Container {
     fn render(&self, width: usize) -> Vec<String> {
-        self.children
-            .iter()
-            .flat_map(|child| child.render(width))
-            .map(|line| truncate_to_width(&line, width))
-            .collect()
+        Container::render(self, width)
     }
 
-    fn handle_input(&mut self, data: &str) {
-        if let Some(child) = self.children.last_mut() {
-            child.handle_input(data);
-        }
+    fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        Container::handle_mouse(self, event)
     }
 
-    fn invalidate(&mut self) {
-        for child in &mut self.children {
-            child.invalidate();
-        }
+    fn invalidate(&self) {
+        Container::invalidate(self)
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayAnchor {
-    Center,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-    TopCenter,
-    BottomCenter,
-    LeftCenter,
-    RightCenter,
-}
+    fn is_container_handle_mouse(&self) -> bool {
+        true
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct OverlayMargin {
-    pub top: usize,
-    pub right: usize,
-    pub bottom: usize,
-    pub left: usize,
-}
-
-impl OverlayMargin {
-    pub fn all(value: usize) -> Self {
-        Self {
-            top: value,
-            right: value,
-            bottom: value,
-            left: value,
-        }
+    fn container_children(&self) -> Option<Vec<Arc<dyn Component>>> {
+        Some(self.children())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeValue {
-    Columns(usize),
-    Percent(u8),
+/// Composite overlay content into a terminal line at a fixed column.
+pub fn composite_tui_line(
+    base_line: &str,
+    overlay_line: &str,
+    start_col: i64,
+    overlay_width: i64,
+    total_width: i64,
+) -> String {
+    todo!("port: composite_tui_line")
 }
 
-impl SizeValue {
-    pub fn resolve(self, reference: usize) -> usize {
-        match self {
-            SizeValue::Columns(value) => value,
-            SizeValue::Percent(percent) => reference.saturating_mul(percent as usize) / 100,
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TuiMode {
+    #[serde(rename = "regular")]
+    Regular,
+    #[serde(rename = "fullscreen")]
+    Fullscreen,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayOptions {
-    pub width: Option<SizeValue>,
-    pub min_width: Option<usize>,
-    pub max_height: Option<SizeValue>,
-    pub anchor: OverlayAnchor,
-    pub offset_x: isize,
-    pub offset_y: isize,
-    pub row: Option<SizeValue>,
-    pub col: Option<SizeValue>,
-    pub margin: OverlayMargin,
-    pub non_capturing: bool,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TuiStopOptions {
+    /// Leave renderer output in place for another TUI taking over the same terminal.
+    pub preserve_screen: Option<bool>,
 }
 
-impl Default for OverlayOptions {
-    fn default() -> Self {
-        Self {
-            width: None,
-            min_width: None,
-            max_height: None,
-            anchor: OverlayAnchor::Center,
-            offset_x: 0,
-            offset_y: 0,
-            row: None,
-            col: None,
-            margin: OverlayMargin::default(),
-            non_capturing: false,
-        }
-    }
+pub struct QueryTerminalColorsOptions {
+    /// Query timeout in milliseconds, for terminals that do not answer DA1 either.
+    pub timeout_ms: i64,
+    /// Receives the replies if the query completes after the timeout, e.g. over slow links.
+    pub on_late_reply: Option<Arc<dyn Fn(TerminalColors) + Send + Sync>>,
 }
 
-struct Overlay {
-    id: usize,
-    component: StdBox<dyn Component>,
-    options: OverlayOptions,
-    hidden: bool,
+/// PORT: JS `Symbol.for("@earendil-works/pi-tui/viewport")`. Capability is [`ViewportTUI`].
+pub const VIEWPORT_TUI: &str = "@earendil-works/pi-tui/viewport";
+
+#[async_trait]
+pub trait ViewportTUI: TUI {
+    fn set_layout_root(&self, component: Option<Arc<dyn Component>>);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayHandle {
-    id: usize,
-}
+#[async_trait]
+pub trait TUI: Component {
+    fn mode(&self) -> TuiMode;
+    fn children(&self) -> Vec<Arc<dyn Component>>;
+    fn set_children(&self, children: Vec<Arc<dyn Component>>);
+    fn terminal(&self) -> Arc<dyn Terminal>;
+    fn on_debug(&self) -> Option<Arc<dyn Fn() + Send + Sync>>;
+    fn set_on_debug(&self, on_debug: Option<Arc<dyn Fn() + Send + Sync>>);
+    fn full_redraws(&self) -> i64;
+    fn add_child(&self, component: Arc<dyn Component>);
+    fn remove_child(&self, component: &Arc<dyn Component>);
+    fn clear(&self);
+    fn get_show_hardware_cursor(&self) -> bool;
+    fn set_show_hardware_cursor(&self, enabled: bool);
+    fn get_clear_on_shrink(&self) -> bool;
+    fn set_clear_on_shrink(&self, enabled: bool);
+    fn set_focus(&self, component: Option<Arc<dyn Component>>);
+    fn show_overlay(&self, component: Arc<dyn Component>, options: Option<OverlayOptions>) -> OverlayHandle;
+    fn hide_overlay(&self);
+    fn has_overlay(&self) -> bool;
+    fn start(&self);
+    fn stop(&self, options: Option<TuiStopOptions>);
+    fn render_now(&self, force: Option<bool>);
+    fn request_render(&self, force: Option<bool>);
+    fn add_input_listener(&self, listener: TuiInputListener) -> pi_js::Unsubscribe;
+    fn remove_input_listener(&self, listener: &TuiInputListener);
+    fn on_terminal_color_scheme_change(
+        &self,
+        listener: Arc<dyn Fn(TerminalColorScheme) + Send + Sync>,
+    ) -> pi_js::Unsubscribe;
+    fn set_terminal_color_scheme_notifications(&self, enabled: bool);
 
-impl OverlayHandle {
-    pub fn id(&self) -> usize {
-        self.id
-    }
-}
+    /// Query the terminal's theme colors: the default foreground (OSC 10), the default background
+    /// (OSC 11), and ANSI colors 0-15 (OSC 4), followed by a DA1 request that marks the end of the
+    /// replies. Resolves when the DA1 reply or all color replies arrive, or when the timeout expires.
+    /// Colors the terminal did not report are undefined; the palette is only set when all 16 arrived.
+    async fn query_terminal_colors(&self, options: QueryTerminalColorsOptions) -> TerminalColors;
 
-pub struct TUI<T: Terminal> {
-    pub terminal: T,
-    container: Container,
-    overlays: Vec<Overlay>,
-    focused_overlay: Option<usize>,
-    next_overlay_id: usize,
-    running: bool,
-    previous_kitty_image_ids: BTreeSet<u32>,
-    previous_width: usize,
-    previous_height: usize,
-    max_lines_rendered: usize,
-    clear_on_shrink: bool,
-    full_redraws: usize,
-    previous_lines: Vec<String>,
-    cursor_row: usize,
-    hardware_cursor_row: usize,
-    show_hardware_cursor: bool,
-    previous_viewport_top: usize,
-}
-
-impl<T: Terminal> TUI<T> {
-    pub fn new(terminal: T) -> Self {
-        Self {
-            terminal,
-            container: Container::new(),
-            overlays: Vec::new(),
-            focused_overlay: None,
-            next_overlay_id: 1,
-            running: false,
-            previous_kitty_image_ids: BTreeSet::new(),
-            previous_width: 0,
-            previous_height: 0,
-            max_lines_rendered: 0,
-            clear_on_shrink: std::env::var("PI_CLEAR_ON_SHRINK").is_ok_and(|value| value == "1"),
-            full_redraws: 0,
-            previous_lines: Vec::new(),
-            cursor_row: 0,
-            hardware_cursor_row: 0,
-            show_hardware_cursor: false,
-            previous_viewport_top: 0,
-        }
-    }
-
-    pub fn add_child<C>(&mut self, component: C)
-    where
-        C: Component + 'static,
-    {
-        self.container.add_child(component);
-    }
-
-    pub fn remove_child(&mut self, index: usize) -> Option<StdBox<dyn Component>> {
-        self.container.remove_child(index)
-    }
-
-    pub fn clear(&mut self) {
-        self.container.clear();
-    }
-
-    pub fn start(&mut self) -> anyhow::Result<()> {
-        self.running = true;
-        self.terminal.start()
-    }
-
-    pub fn stop(&mut self) -> anyhow::Result<()> {
-        self.running = false;
-        self.terminal.stop()
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.running
-    }
-
-    pub fn request_render(&mut self) -> anyhow::Result<()> {
-        self.render_now_with_full_redraw(false)
-    }
-
-    pub fn request_render_full(&mut self) -> anyhow::Result<()> {
-        self.render_now_with_full_redraw(true)
-    }
-
-    pub fn full_redraws(&self) -> usize {
-        self.full_redraws
-    }
-
-    pub fn set_clear_on_shrink(&mut self, clear: bool) {
-        self.clear_on_shrink = clear;
-    }
-
-    pub fn render_lines(&self) -> Vec<String> {
-        let width = self.terminal.columns();
-        let height = self.terminal.rows();
-        let mut lines = self.container.render(width);
-        for overlay in &self.overlays {
-            if overlay.hidden {
-                continue;
-            }
-            let overlay_width = overlay
-                .options
-                .width
-                .map(|value| value.resolve(width))
-                .unwrap_or(width.min(80))
-                .max(overlay.options.min_width.unwrap_or(0))
-                .min(width);
-            let mut overlay_lines = overlay.component.render(overlay_width);
-            if let Some(max_height) = overlay
-                .options
-                .max_height
-                .map(|value| value.resolve(height))
-            {
-                overlay_lines.truncate(max_height);
-            }
-            let overlay_lines = overlay_lines
-                .into_iter()
-                .map(|line| truncate_to_width_with(&line, overlay_width, "", true))
-                .collect::<Vec<_>>();
-            let (row, col) = resolve_overlay_position(
-                &overlay.options,
-                width,
-                height,
-                overlay_width,
-                overlay_lines.len(),
-            );
-            composite_overlay(&mut lines, &overlay_lines, row, col, width);
-        }
-        lines
-            .into_iter()
-            .map(|line| truncate_to_width(&line.replace(CURSOR_MARKER, ""), width))
-            .collect()
-    }
-
-    fn extract_cursor_position(&self, lines: &[String], _height: usize) -> Option<(usize, usize)> {
-        for (row, line) in lines.iter().enumerate() {
-            if let Some(col) = line.find(CURSOR_MARKER) {
-                return Some((row, col));
-            }
-        }
+    /// PORT: TS `[VIEWPORT_TUI] === true`.
+    fn as_viewport(&self) -> Option<&dyn ViewportTUI> {
         None
     }
+}
 
-    #[allow(dead_code)]
-    fn expand_last_changed_for_kitty_images(&self, _first: usize, last: usize) -> usize {
-        last
+pub fn is_viewport_tui(tui: &dyn TUI) -> bool {
+    tui.as_viewport().is_some()
+}
+
+#[derive(Clone)]
+struct OverlayStackEntry {
+    inner: Arc<OverlayStackEntryInner>,
+}
+
+struct OverlayStackEntryInner {
+    state: Mutex<OverlayStackEntryState>,
+}
+
+struct OverlayStackEntryState {
+    component: Arc<dyn Component>,
+    options: Option<OverlayOptions>,
+    pre_focus: Option<Arc<dyn Component>>,
+    hidden: bool,
+    focus_order: i64,
+    bounds: Option<OverlayBounds>,
+}
+
+struct RenderedOverlayLayout {
+    entry: OverlayStackEntry,
+    row: i64,
+    col: i64,
+    width: i64,
+    height: i64,
+}
+
+#[derive(Clone)]
+enum OverlayBlockedFocusResume {
+    RestoreOverlay,
+    FocusTarget { target: Option<Arc<dyn Component>> },
+}
+
+#[derive(Clone)]
+enum OverlayFocusRestoreState {
+    Inactive,
+    Eligible {
+        overlay: OverlayStackEntry,
+    },
+    Blocked {
+        overlay: OverlayStackEntry,
+        blocked_by: Arc<dyn Component>,
+        resume: OverlayBlockedFocusResume,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum OverlayFocusRestorePolicy {
+    Clear,
+    Preserve,
+}
+
+struct PendingTerminalColorQuery {
+    foreground: Option<RgbColor>,
+    background: Option<RgbColor>,
+    palette: Vec<Option<RgbColor>>,
+    /// Targets that already replied, so duplicates do not count twice.
+    replied: IndexSet<String>,
+    /// Receives the result: the promise's resolve until the timeout, then `onLateReply`. Unset once the
+    /// query completed (on the DA1 reply or once every color replied); later replies are ignored.
+    deliver: Option<Arc<dyn Fn(TerminalColors) + Send + Sync>>,
+    timer: Option<pi_js::time::Timeout>,
+}
+
+pub(crate) struct CursorPosition {
+    pub row: i64,
+    pub col: i64,
+}
+
+pub(crate) struct OverlayMouseDispatch {
+    pub hit: bool,
+    pub result: Option<TuiMouseDispatchResult>,
+}
+
+struct ResolvedOverlayLayout {
+    width: i64,
+    row: i64,
+    col: i64,
+    max_height: Option<i64>,
+}
+
+/// Overridable `protected` / `abstract` hooks of [`TuiBase`].
+///
+/// PORT: TS subclassing is composition. `TuiMainScreen` / `TuiAltScreen` implement this and
+/// [`TuiBase::bind_overrides`]. Defaults match the empty base methods. `do_render` and `mode` are abstract.
+pub(crate) trait TuiBaseOverrides: Send + Sync {
+    fn mode(&self) -> TuiMode;
+    fn do_render(&self);
+    fn reset_render_state(&self) {}
+    fn before_terminal_start(&self) {}
+    fn after_terminal_start(&self) {}
+    fn before_terminal_stop(&self, options: &TuiStopOptions) {}
+    fn after_terminal_stop(&self, options: &TuiStopOptions) {}
+    fn get_mounted_roots(&self, base: &TuiBase) -> Vec<Arc<dyn Component>> {
+        base.children()
+    }
+}
+
+struct TuiBaseState {
+    focused_component: Option<Arc<dyn Component>>,
+    /// PORT: JS `Set` of callbacks. Insertion order; removal uses `Arc::ptr_eq`.
+    input_listeners: Vec<TuiInputListener>,
+    on_debug: Option<Arc<dyn Fn() + Send + Sync>>,
+    render_requested: bool,
+    immediate_render_scheduled: bool,
+    render_timer: Option<pi_js::time::Timeout>,
+    last_render_at: f64,
+    show_hardware_cursor: bool,
+    clear_on_shrink: bool,
+    full_redraw_count: i64,
+    stopped: bool,
+    pending_terminal_color_queries: Vec<PendingTerminalColorQuery>,
+    terminal_color_scheme_listeners: Vec<Arc<dyn Fn(TerminalColorScheme) + Send + Sync>>,
+    terminal_color_scheme_notifications_enabled: bool,
+    focus_order_counter: i64,
+    overlay_stack: Vec<OverlayStackEntry>,
+    rendered_overlay_layouts: Vec<RenderedOverlayLayout>,
+    overlay_focus_restore: OverlayFocusRestoreState,
+}
+
+struct TuiBaseInner {
+    terminal: Arc<dyn Terminal>,
+    /// Directory for debug/crash logs. When absent, debug logging is disabled and crash dumps fall back to the OS temp directory.
+    log_directory: Option<String>,
+    container: Container,
+    /// PORT: `Weak` breaks the screen → base → overrides → screen cycle.
+    overrides: Mutex<Option<Weak<dyn TuiBaseOverrides>>>,
+    state: Mutex<TuiBaseState>,
+}
+
+/// Abstract TUI base. Concrete screens are [`crate::tui_main_screen::TuiMainScreen`] and `TuiAltScreen`.
+///
+/// PORT: TS class with identity. `extends Container` is a composed [`Container`].
+#[derive(Clone)]
+pub struct TuiBase {
+    inner: Arc<TuiBaseInner>,
+}
+
+impl TuiBase {
+    const MIN_RENDER_INTERVAL_MS: i64 = 16;
+
+    pub fn new(terminal: Arc<dyn Terminal>, show_hardware_cursor: Option<bool>, log_directory: Option<&str>) -> Self {
+        todo!("port: TuiBase::new")
     }
 
-    #[allow(dead_code)]
-    fn delete_changed_kitty_images(&self, _first: usize, _last: usize) -> String {
-        String::new()
+    pub(crate) fn bind_overrides(&self, overrides: Arc<dyn TuiBaseOverrides>) {
+        todo!("port: TuiBase::bind_overrides")
     }
 
-    fn position_hardware_cursor(&mut self, cursor_pos: Option<(usize, usize)>, total_lines: usize) {
-        // Move hardware cursor if cursor_pos given
-        if let Some((target_row, target_col)) = cursor_pos {
-            if total_lines > 0 {
-                let target_row = target_row.clamp(0, total_lines.saturating_sub(1));
-                let mut buffer = String::new();
-
-                #[allow(clippy::comparison_chain)]
-                if target_row > self.hardware_cursor_row {
-                    buffer.push_str(&format!(
-                        "\u{1b}[{}B",
-                        target_row - self.hardware_cursor_row
-                    ));
-                } else if target_row < self.hardware_cursor_row {
-                    buffer.push_str(&format!(
-                        "\u{1b}[{}A",
-                        self.hardware_cursor_row - target_row
-                    ));
-                }
-                buffer.push_str(&format!("\u{1b}[{}G", target_col + 1));
-
-                if !buffer.is_empty() {
-                    let _ = self.terminal.write(&buffer);
-                }
-                self.hardware_cursor_row = target_row;
-                if self.show_hardware_cursor {
-                    let _ = self.terminal.show_cursor();
-                }
-                return;
-            }
-        }
-        let _ = self.terminal.hide_cursor();
+    fn lock(&self) -> MutexGuard<'_, TuiBaseState> {
+        self.inner.state.lock().unwrap()
     }
 
-    pub fn render_now_with_full_redraw(&mut self, force_full_redraw: bool) -> anyhow::Result<()> {
-        let width = self.terminal.columns();
-        let height = self.terminal.rows();
-        let mut new_lines = self.container.render(width);
-
-        for overlay in &self.overlays {
-            if overlay.hidden {
-                continue;
-            }
-            let overlay_width = overlay
-                .options
-                .width
-                .map(|v| v.resolve(width))
-                .unwrap_or_else(|| width.min(80))
-                .max(overlay.options.min_width.unwrap_or(0))
-                .min(width);
-            let mut overlay_lines = overlay.component.render(overlay_width);
-            if let Some(max_height) = overlay.options.max_height.map(|v| v.resolve(height)) {
-                overlay_lines.truncate(max_height);
-            }
-            let overlay_lines: Vec<_> = overlay_lines
-                .into_iter()
-                .map(|l| truncate_to_width_with(&l, overlay_width, "", true))
-                .collect();
-            let (row, col) = resolve_overlay_position(
-                &overlay.options,
-                width,
-                height,
-                overlay_width,
-                overlay_lines.len(),
-            );
-            composite_overlay(&mut new_lines, &overlay_lines, row, col, width);
-        }
-
-        let cursor_pos = self.extract_cursor_position(&new_lines, height);
-        let new_lines: Vec<_> = new_lines
-            .into_iter()
-            .map(|l| truncate_to_width(&l.replace(CURSOR_MARKER, ""), width))
-            .collect();
-        let current_image_ids = extract_kitty_image_ids_from_lines(&new_lines);
-
-        let width_changed = self.previous_width != 0 && self.previous_width != width;
-        let height_changed = self.previous_height != 0
-            && self.previous_height != height
-            && std::env::var_os("TERMUX_VERSION").is_none();
-
-        let shrunk = self.clear_on_shrink
-            && self.max_lines_rendered > 0
-            && new_lines.len() < self.max_lines_rendered
-            && self.overlays.is_empty();
-
-        let mut first_changed = None;
-        let mut last_changed = 0;
-        let max_lines = new_lines.len().max(self.previous_lines.len());
-        for i in 0..max_lines {
-            let old = self.previous_lines.get(i).map_or("", String::as_str);
-            let new = new_lines.get(i).map_or("", String::as_str);
-            if old != new {
-                if first_changed.is_none() {
-                    first_changed = Some(i);
-                }
-                last_changed = i;
-            }
-        }
-
-        let appended_lines = new_lines.len() > self.previous_lines.len();
-        if appended_lines {
-            if first_changed.is_none() {
-                first_changed = Some(self.previous_lines.len());
-            }
-            last_changed = new_lines.len().saturating_sub(1);
-        }
-
-        let append_start = appended_lines
-            && first_changed == Some(self.previous_lines.len())
-            && first_changed.unwrap_or(0) > 0;
-
-        let mut clear_screen = force_full_redraw || width_changed || height_changed || shrunk;
-        if let Some(first) = first_changed {
-            if first < self.previous_viewport_top {
-                clear_screen = true;
-            }
-        }
-        let total_full =
-            clear_screen || (self.previous_lines.is_empty() && !width_changed && !height_changed);
-
-        if clear_screen {
-            self.full_redraws += 1;
-        }
-
-        if total_full {
-            let mut buffer = String::from("\u{1b}[?2026h");
-            if clear_screen {
-                for image_id in &self.previous_kitty_image_ids {
-                    buffer.push_str(&delete_kitty_image(*image_id));
-                }
-                buffer.push_str("\u{1b}[2J\u{1b}[H\u{1b}[3J");
-            }
-
-            for (i, line) in new_lines.iter().enumerate() {
-                if i > 0 {
-                    buffer.push_str("\r\n");
-                }
-                buffer.push_str(line);
-            }
-            buffer.push_str("\u{1b}[?2026l");
-            self.terminal.write(&buffer)?;
-
-            self.cursor_row = new_lines.len().saturating_sub(1);
-            self.hardware_cursor_row = self.cursor_row;
-            self.max_lines_rendered = new_lines.len();
-            let buffer_length = height.max(new_lines.len());
-            self.previous_viewport_top = buffer_length.saturating_sub(height);
-        } else if let Some(first_changed) = first_changed {
-            if first_changed >= new_lines.len() {
-                if self.previous_lines.len() > new_lines.len() {
-                    let mut buffer = String::from("\u{1b}[?2026h");
-                    let target_row = new_lines.len().saturating_sub(1);
-                    if target_row < self.previous_viewport_top {
-                        return self.render_now_with_full_redraw(true);
-                    }
-
-                    let line_diff = target_row as isize - self.hardware_cursor_row as isize;
-                    if line_diff > 0 {
-                        buffer.push_str(&format!("\u{1b}[{}B", line_diff));
-                    } else if line_diff < 0 {
-                        buffer.push_str(&format!("\u{1b}[{}A", -line_diff));
-                    }
-                    buffer.push('\r');
-                    let extra_lines = self.previous_lines.len() - new_lines.len();
-                    if extra_lines > height {
-                        return self.render_now_with_full_redraw(true);
-                    }
-                    if extra_lines > 0 {
-                        buffer.push_str("\u{1b}[1B");
-                    }
-                    for i in 0..extra_lines {
-                        buffer.push_str("\r\u{1b}[2K");
-                        if i < extra_lines - 1 {
-                            buffer.push_str("\u{1b}[1B");
-                        }
-                    }
-                    if extra_lines > 0 {
-                        buffer.push_str(&format!("\u{1b}[{}A", extra_lines));
-                    }
-                    buffer.push_str("\u{1b}[?2026l");
-                    self.terminal.write(&buffer)?;
-                    self.cursor_row = target_row;
-                    self.hardware_cursor_row = target_row;
-                }
-            } else {
-                let mut buffer = String::from("\u{1b}[?2026h");
-                let prev_viewport_bottom = self.previous_viewport_top + height.saturating_sub(1);
-                let move_target_row = if append_start {
-                    first_changed.saturating_sub(1)
-                } else {
-                    first_changed
-                };
-
-                if move_target_row > prev_viewport_bottom {
-                    let current_screen_row = (height.saturating_sub(1)).min(
-                        self.hardware_cursor_row
-                            .saturating_sub(self.previous_viewport_top),
-                    );
-                    let move_to_bottom =
-                        (height.saturating_sub(1)).saturating_sub(current_screen_row);
-                    if move_to_bottom > 0 {
-                        buffer.push_str(&format!("\u{1b}[{}B", move_to_bottom));
-                    }
-                    let scroll = move_target_row - prev_viewport_bottom;
-                    buffer.push_str(&"\r\n".repeat(scroll));
-                    self.previous_viewport_top += scroll;
-                    self.hardware_cursor_row = move_target_row;
-                }
-
-                let line_diff = move_target_row as isize - self.hardware_cursor_row as isize;
-                if line_diff > 0 {
-                    buffer.push_str(&format!("\u{1b}[{}B", line_diff));
-                } else if line_diff < 0 {
-                    buffer.push_str(&format!("\u{1b}[{}A", -line_diff));
-                }
-                buffer.push_str(if append_start { "\r\n" } else { "\r" });
-
-                let render_end = last_changed.min(new_lines.len().saturating_sub(1));
-                for i in first_changed..=render_end {
-                    if i > first_changed {
-                        buffer.push_str("\r\n");
-                    }
-                    buffer.push_str("\u{1b}[2K");
-                    buffer.push_str(&new_lines[i]);
-                }
-
-                buffer.push_str("\u{1b}[?2026l");
-                self.terminal.write(&buffer)?;
-                self.cursor_row = render_end;
-                self.hardware_cursor_row = render_end;
-            }
-        }
-
-        self.position_hardware_cursor(cursor_pos, new_lines.len());
-        self.previous_width = width;
-        self.previous_height = height;
-        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
-        self.previous_kitty_image_ids = current_image_ids;
-        self.previous_lines = new_lines;
-
-        Ok(())
+    pub fn mode(&self) -> TuiMode {
+        todo!("port: TuiBase::mode")
     }
 
-    pub fn handle_input(&mut self, data: &str) {
-        if let Some(id) = self.focused_overlay {
-            if let Some(overlay) = self
-                .overlays
-                .iter_mut()
-                .find(|overlay| overlay.id == id && !overlay.hidden)
-            {
-                overlay.component.handle_input(data);
-                return;
-            }
-        }
-        self.container.handle_input(data);
+    pub fn children(&self) -> Vec<Arc<dyn Component>> {
+        self.inner.container.children()
     }
 
-    pub fn show_overlay<C>(&mut self, component: C, options: OverlayOptions) -> OverlayHandle
-    where
-        C: Component + 'static,
-    {
-        let id = self.next_overlay_id;
-        self.next_overlay_id += 1;
-        if !options.non_capturing {
-            self.focused_overlay = Some(id);
-        }
-        self.overlays.push(Overlay {
-            id,
-            component: StdBox::new(component),
-            options,
-            hidden: false,
-        });
-        OverlayHandle { id }
+    pub fn set_children(&self, children: Vec<Arc<dyn Component>>) {
+        self.inner.container.set_children(children);
     }
 
-    pub fn hide_overlay(&mut self) -> Option<OverlayHandle> {
-        let overlay = self.overlays.pop()?;
-        if self.focused_overlay == Some(overlay.id) {
-            self.focused_overlay = self.overlays.last().map(|overlay| overlay.id);
-        }
-        Some(OverlayHandle { id: overlay.id })
+    pub fn terminal(&self) -> Arc<dyn Terminal> {
+        Arc::clone(&self.inner.terminal)
     }
 
-    pub fn hide_overlay_handle(&mut self, handle: OverlayHandle) -> bool {
-        if let Some(index) = self
-            .overlays
-            .iter()
-            .position(|overlay| overlay.id == handle.id)
-        {
-            self.overlays.remove(index);
-            if self.focused_overlay == Some(handle.id) {
-                self.focused_overlay = self.overlays.last().map(|overlay| overlay.id);
-            }
-            true
-        } else {
-            false
-        }
+    pub fn on_debug(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.lock().on_debug.clone()
     }
 
-    pub fn set_overlay_hidden(&mut self, handle: OverlayHandle, hidden: bool) -> bool {
-        if let Some(overlay) = self
-            .overlays
-            .iter_mut()
-            .find(|overlay| overlay.id == handle.id)
-        {
-            overlay.hidden = hidden;
-            true
-        } else {
-            false
-        }
+    pub fn set_on_debug(&self, on_debug: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.lock().on_debug = on_debug;
     }
 
-    pub fn is_overlay_hidden(&self, handle: OverlayHandle) -> bool {
-        self.overlays
-            .iter()
-            .find(|overlay| overlay.id == handle.id)
-            .is_none_or(|overlay| overlay.hidden)
+    pub fn full_redraws(&self) -> i64 {
+        self.lock().full_redraw_count
     }
 
-    pub fn focus_overlay(&mut self, handle: OverlayHandle) -> bool {
-        if self.overlays.iter().any(|overlay| overlay.id == handle.id) {
-            self.focused_overlay = Some(handle.id);
-            true
-        } else {
-            false
-        }
+    pub(crate) fn full_redraw_count(&self) -> i64 {
+        self.lock().full_redraw_count
     }
 
-    pub fn unfocus_overlay(&mut self, handle: OverlayHandle) -> bool {
-        if self.focused_overlay == Some(handle.id) {
-            self.focused_overlay = None;
-            true
-        } else {
-            false
-        }
+    pub(crate) fn set_full_redraw_count(&self, count: i64) {
+        self.lock().full_redraw_count = count;
     }
 
-    pub fn is_overlay_focused(&self, handle: OverlayHandle) -> bool {
-        self.focused_overlay == Some(handle.id)
+    pub(crate) fn stopped(&self) -> bool {
+        self.lock().stopped
     }
 
+    pub(crate) fn log_directory(&self) -> Option<&str> {
+        self.inner.log_directory.as_deref()
+    }
+
+    pub fn add_child(&self, component: Arc<dyn Component>) {
+        self.inner.container.add_child(component);
+    }
+
+    pub fn remove_child(&self, component: &Arc<dyn Component>) {
+        self.inner.container.remove_child(component);
+    }
+
+    pub fn clear(&self) {
+        self.inner.container.clear();
+    }
+
+    pub fn render(&self, width: usize) -> Vec<String> {
+        self.inner.container.render(width)
+    }
+
+    pub fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        self.inner.container.handle_mouse(event)
+    }
+
+    pub fn get_show_hardware_cursor(&self) -> bool {
+        self.lock().show_hardware_cursor
+    }
+
+    pub fn set_show_hardware_cursor(&self, enabled: bool) {
+        todo!("port: TuiBase::set_show_hardware_cursor")
+    }
+
+    pub fn get_clear_on_shrink(&self) -> bool {
+        self.lock().clear_on_shrink
+    }
+
+    /// Set whether to trigger full re-render when content shrinks.
+    /// When true, empty rows are cleared when content shrinks.
+    /// When false (default), empty rows remain (reduces redraws on slower terminals).
+    pub fn set_clear_on_shrink(&self, enabled: bool) {
+        self.lock().clear_on_shrink = enabled;
+    }
+
+    pub fn get_focused_component(&self) -> Option<Arc<dyn Component>> {
+        self.lock().focused_component.clone()
+    }
+
+    pub fn set_focus(&self, component: Option<Arc<dyn Component>>) {
+        todo!("port: TuiBase::set_focus")
+    }
+
+    fn set_focus_internal(
+        &self,
+        component: Option<Arc<dyn Component>>,
+        overlay_focus_restore: OverlayFocusRestorePolicy,
+    ) {
+        todo!("port: TuiBase::set_focus_internal")
+    }
+
+    fn clear_overlay_focus_restore(&self) {
+        todo!("port: TuiBase::clear_overlay_focus_restore")
+    }
+
+    fn clear_overlay_focus_restore_for(&self, overlay: &OverlayStackEntry) {
+        todo!("port: TuiBase::clear_overlay_focus_restore_for")
+    }
+
+    fn resolve_blocked_overlay_focus_resume(
+        &self,
+        restore_state: &OverlayFocusRestoreState,
+    ) -> Option<Arc<dyn Component>> {
+        todo!("port: TuiBase::resolve_blocked_overlay_focus_resume")
+    }
+
+    fn get_visible_overlay_focus_restore(&self) -> OverlayFocusRestoreState {
+        todo!("port: TuiBase::get_visible_overlay_focus_restore")
+    }
+
+    fn is_overlay_focus_ancestor(&self, entry: &OverlayStackEntry, component: &Arc<dyn Component>) -> bool {
+        todo!("port: TuiBase::is_overlay_focus_ancestor")
+    }
+
+    fn retarget_overlay_pre_focus(&self, removed: &OverlayStackEntry) {
+        todo!("port: TuiBase::retarget_overlay_pre_focus")
+    }
+
+    pub(crate) fn get_mounted_roots(&self) -> Vec<Arc<dyn Component>> {
+        todo!("port: TuiBase::get_mounted_roots")
+    }
+
+    fn is_component_mounted(&self, component: &Arc<dyn Component>) -> bool {
+        todo!("port: TuiBase::is_component_mounted")
+    }
+
+    fn contains_component(&self, root: &Arc<dyn Component>, target: &Arc<dyn Component>) -> bool {
+        todo!("port: TuiBase::contains_component")
+    }
+
+    /// Show an overlay component with configurable positioning and sizing.
+    /// Returns a handle to control the overlay's visibility.
+    pub fn show_overlay(&self, component: Arc<dyn Component>, options: Option<OverlayOptions>) -> OverlayHandle {
+        todo!("port: TuiBase::show_overlay")
+    }
+
+    /// Hide the topmost overlay and restore previous focus.
+    pub fn hide_overlay(&self) {
+        todo!("port: TuiBase::hide_overlay")
+    }
+
+    /// Hide the cursor while running. After stop(), the shell owns the cursor and it must stay visible.
+    fn hide_terminal_cursor(&self) {
+        todo!("port: TuiBase::hide_terminal_cursor")
+    }
+
+    /// Check if there are any visible overlays.
     pub fn has_overlay(&self) -> bool {
-        self.overlays.iter().any(|overlay| !overlay.hidden)
+        todo!("port: TuiBase::has_overlay")
+    }
+
+    pub fn has_overlay_entries(&self) -> bool {
+        !self.lock().overlay_stack.is_empty()
+    }
+
+    /// Check if the focused component is a visible overlay.
+    pub(crate) fn is_overlay_focused(&self) -> bool {
+        todo!("port: TuiBase::is_overlay_focused")
+    }
+
+    /// Keep overlay containers as keyboard focus owners when a nested control is clicked.
+    pub(crate) fn resolve_mouse_focus_target(&self, component: Arc<dyn Component>) -> Arc<dyn Component> {
+        todo!("port: TuiBase::resolve_mouse_focus_target")
+    }
+
+    /// Dispatch to the visually topmost overlay under the pointer.
+    pub(crate) fn dispatch_mouse_to_overlay(&self, event: &TuiMouseEvent) -> OverlayMouseDispatch {
+        todo!("port: TuiBase::dispatch_mouse_to_overlay")
+    }
+
+    fn is_overlay_visible(&self, entry: &OverlayStackEntry) -> bool {
+        todo!("port: TuiBase::is_overlay_visible")
+    }
+
+    fn get_topmost_visible_overlay(&self) -> Option<OverlayStackEntry> {
+        todo!("port: TuiBase::get_topmost_visible_overlay")
+    }
+
+    pub fn invalidate(&self) {
+        todo!("port: TuiBase::invalidate")
+    }
+
+    pub fn start(&self) {
+        todo!("port: TuiBase::start")
+    }
+
+    pub fn add_input_listener(&self, listener: TuiInputListener) -> pi_js::Unsubscribe {
+        todo!("port: TuiBase::add_input_listener")
+    }
+
+    pub fn remove_input_listener(&self, listener: &TuiInputListener) {
+        todo!("port: TuiBase::remove_input_listener")
+    }
+
+    pub fn on_terminal_color_scheme_change(
+        &self,
+        listener: Arc<dyn Fn(TerminalColorScheme) + Send + Sync>,
+    ) -> pi_js::Unsubscribe {
+        todo!("port: TuiBase::on_terminal_color_scheme_change")
+    }
+
+    pub fn set_terminal_color_scheme_notifications(&self, enabled: bool) {
+        todo!("port: TuiBase::set_terminal_color_scheme_notifications")
+    }
+
+    fn query_cell_size(&self) {
+        todo!("port: TuiBase::query_cell_size")
+    }
+
+    pub fn stop(&self, options: Option<TuiStopOptions>) {
+        todo!("port: TuiBase::stop")
+    }
+
+    pub fn render_now(&self, force: Option<bool>) {
+        todo!("port: TuiBase::render_now")
+    }
+
+    pub fn request_render(&self, force: Option<bool>) {
+        todo!("port: TuiBase::request_render")
+    }
+
+    fn request_immediate_render(&self) {
+        todo!("port: TuiBase::request_immediate_render")
+    }
+
+    fn cancel_render_timer(&self) {
+        todo!("port: TuiBase::cancel_render_timer")
+    }
+
+    fn schedule_render(&self) {
+        todo!("port: TuiBase::schedule_render")
+    }
+
+    pub(crate) fn do_render(&self) {
+        todo!("port: TuiBase::do_render")
+    }
+
+    pub(crate) fn reset_render_state(&self) {
+        todo!("port: TuiBase::reset_render_state")
+    }
+
+    pub(crate) fn before_terminal_start(&self) {
+        todo!("port: TuiBase::before_terminal_start")
+    }
+
+    pub(crate) fn after_terminal_start(&self) {
+        todo!("port: TuiBase::after_terminal_start")
+    }
+
+    pub(crate) fn before_terminal_stop(&self, options: &TuiStopOptions) {
+        todo!("port: TuiBase::before_terminal_stop")
+    }
+
+    pub(crate) fn after_terminal_stop(&self, options: &TuiStopOptions) {
+        todo!("port: TuiBase::after_terminal_stop")
+    }
+
+    fn handle_terminal_input(&self, data: &str) {
+        todo!("port: TuiBase::handle_terminal_input")
+    }
+
+    fn consume_terminal_color_response(&self, data: &str) -> bool {
+        todo!("port: TuiBase::consume_terminal_color_response")
+    }
+
+    fn terminal_color_query_result(&self, query: &PendingTerminalColorQuery) -> TerminalColors {
+        todo!("port: TuiBase::terminal_color_query_result")
+    }
+
+    fn complete_terminal_color_query(&self, query: &mut PendingTerminalColorQuery) {
+        todo!("port: TuiBase::complete_terminal_color_query")
+    }
+
+    fn consume_terminal_color_scheme_report(&self, data: &str) -> bool {
+        todo!("port: TuiBase::consume_terminal_color_scheme_report")
+    }
+
+    fn consume_cell_size_response(&self, data: &str) -> bool {
+        todo!("port: TuiBase::consume_cell_size_response")
+    }
+
+    fn resolve_overlay_layout(
+        &self,
+        options: Option<&OverlayOptions>,
+        overlay_height: i64,
+        term_width: i64,
+        term_height: i64,
+    ) -> ResolvedOverlayLayout {
+        todo!("port: TuiBase::resolve_overlay_layout")
+    }
+
+    fn resolve_anchor_row(&self, anchor: OverlayAnchor, height: i64, avail_height: i64, margin_top: i64) -> i64 {
+        todo!("port: TuiBase::resolve_anchor_row")
+    }
+
+    fn resolve_anchor_col(&self, anchor: OverlayAnchor, width: i64, avail_width: i64, margin_left: i64) -> i64 {
+        todo!("port: TuiBase::resolve_anchor_col")
+    }
+
+    /// Composite all overlays into content lines (sorted by focusOrder, higher = on top).
+    pub(crate) fn composite_overlays(&self, lines: Vec<String>, term_width: i64, term_height: i64) -> Vec<String> {
+        todo!("port: TuiBase::composite_overlays")
+    }
+
+    pub(crate) fn apply_line_resets(&self, lines: Vec<String>) -> Vec<String> {
+        todo!("port: TuiBase::apply_line_resets")
+    }
+
+    fn composite_line_at(
+        &self,
+        base_line: &str,
+        overlay_line: &str,
+        start_col: i64,
+        overlay_width: i64,
+        total_width: i64,
+    ) -> String {
+        todo!("port: TuiBase::composite_line_at")
+    }
+
+    /// Find and extract cursor position from rendered lines.
+    /// Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
+    /// Only scans the bottom terminal height lines (visible viewport).
+    pub(crate) fn extract_cursor_position(&self, lines: &mut [String], height: i64) -> Option<CursorPosition> {
+        todo!("port: TuiBase::extract_cursor_position")
+    }
+
+    pub async fn query_terminal_colors(&self, options: QueryTerminalColorsOptions) -> TerminalColors {
+        todo!("port: TuiBase::query_terminal_colors")
     }
 }
 
-fn extract_kitty_image_ids_from_lines(lines: &[String]) -> BTreeSet<u32> {
-    let mut ids = BTreeSet::new();
-    for line in lines {
-        let mut search_from = 0;
-        while let Some(start) = line[search_from..].find("\u{1b}_G") {
-            let sequence_start = search_from + start;
-            let params_start = sequence_start + "\u{1b}_G".len();
-            let Some(params_end_rel) = line[params_start..].find(';') else {
-                break;
-            };
-            let params_end = params_start + params_end_rel;
-            for param in line[params_start..params_end].split(',') {
-                if let Some(value) = param.strip_prefix("i=") {
-                    if let Ok(id) = value.parse::<u32>() {
-                        if id > 0 {
-                            ids.insert(id);
-                        }
-                    }
-                }
-            }
-            search_from = params_end + 1;
-        }
+impl Component for TuiBase {
+    fn render(&self, width: usize) -> Vec<String> {
+        TuiBase::render(self, width)
     }
-    ids
-}
 
-fn resolve_overlay_position(
-    options: &OverlayOptions,
-    term_width: usize,
-    term_height: usize,
-    overlay_width: usize,
-    overlay_height: usize,
-) -> (usize, usize) {
-    let margin = options.margin;
-    let available_bottom = term_height.saturating_sub(margin.bottom);
-    let max_row = available_bottom.saturating_sub(overlay_height);
-    let available_right = term_width.saturating_sub(margin.right);
-    let max_col = available_right.saturating_sub(overlay_width);
+    fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        TuiBase::handle_mouse(self, event)
+    }
 
-    let mut row = if let Some(row) = options.row {
-        row.resolve(term_height)
-    } else {
-        match options.anchor {
-            OverlayAnchor::TopLeft | OverlayAnchor::TopRight | OverlayAnchor::TopCenter => {
-                margin.top
-            }
-            OverlayAnchor::BottomLeft
-            | OverlayAnchor::BottomRight
-            | OverlayAnchor::BottomCenter => max_row,
-            _ => term_height.saturating_sub(overlay_height) / 2,
-        }
-    };
+    fn invalidate(&self) {
+        TuiBase::invalidate(self)
+    }
 
-    let mut col = if let Some(col) = options.col {
-        col.resolve(term_width)
-    } else {
-        match options.anchor {
-            OverlayAnchor::TopLeft | OverlayAnchor::BottomLeft | OverlayAnchor::LeftCenter => {
-                margin.left
-            }
-            OverlayAnchor::TopRight | OverlayAnchor::BottomRight | OverlayAnchor::RightCenter => {
-                max_col
-            }
-            _ => term_width.saturating_sub(overlay_width) / 2,
-        }
-    };
+    fn is_container_handle_mouse(&self) -> bool {
+        true
+    }
 
-    row = apply_offset(row, options.offset_y).clamp(margin.top, max_row.max(margin.top));
-    col = apply_offset(col, options.offset_x).clamp(margin.left, max_col.max(margin.left));
-    (row, col)
-}
-
-fn apply_offset(value: usize, offset: isize) -> usize {
-    if offset.is_negative() {
-        value.saturating_sub(offset.unsigned_abs())
-    } else {
-        value.saturating_add(offset as usize)
+    fn container_children(&self) -> Option<Vec<Arc<dyn Component>>> {
+        Some(self.children())
     }
 }
 
-fn composite_overlay(
-    lines: &mut Vec<String>,
-    overlay_lines: &[String],
-    row: usize,
-    col: usize,
-    width: usize,
-) {
-    if overlay_lines.is_empty() || width == 0 {
-        return;
-    }
-    if lines.len() < row + overlay_lines.len() {
-        lines.resize(row + overlay_lines.len(), String::new());
-    }
-    for (offset, overlay_line) in overlay_lines.iter().enumerate() {
-        let target_index = row + offset;
-        let base = lines.get(target_index).cloned().unwrap_or_default();
-        let overlay_width = visible_width(overlay_line).min(width.saturating_sub(col));
-        let before = slice_by_column(&base, 0, col.min(width), false);
-        let mut composed = before;
-        composed.push_str(&" ".repeat(col.saturating_sub(visible_width(&composed))));
-        composed.push_str(&truncate_to_width_with(
-            overlay_line,
-            overlay_width,
-            "",
-            true,
-        ));
-        let after_start = col.saturating_add(overlay_width).min(width);
-        let after = slice_by_column(&base, after_start, width.saturating_sub(after_start), false);
-        composed.push_str(&after);
-        let composed_width = visible_width(&composed);
-        if composed_width < width {
-            composed.push_str(&" ".repeat(width - composed_width));
-        }
-        lines[target_index] = truncate_to_width_with(&composed, width, "", false);
-    }
-}
-
-impl<T: Terminal> Component for TUI<T> {
-    fn render(&self, _width: usize) -> Vec<String> {
-        self.render_lines()
+#[async_trait]
+impl TUI for TuiBase {
+    fn mode(&self) -> TuiMode {
+        TuiBase::mode(self)
     }
 
-    fn handle_input(&mut self, data: &str) {
-        TUI::handle_input(self, data);
+    fn children(&self) -> Vec<Arc<dyn Component>> {
+        TuiBase::children(self)
     }
 
-    fn invalidate(&mut self) {
-        self.container.invalidate();
-        for overlay in &mut self.overlays {
-            overlay.component.invalidate();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result;
-
-    #[derive(Default)]
-    struct TestTerminal {
-        columns: usize,
-        rows: usize,
-        writes: String,
+    fn set_children(&self, children: Vec<Arc<dyn Component>>) {
+        TuiBase::set_children(self, children);
     }
 
-    impl TestTerminal {
-        fn new(columns: usize, rows: usize) -> Self {
-            Self {
-                columns,
-                rows,
-                writes: String::new(),
-            }
-        }
+    fn terminal(&self) -> Arc<dyn Terminal> {
+        TuiBase::terminal(self)
     }
 
-    impl Terminal for TestTerminal {
-        fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
-        fn write(&mut self, data: &str) -> Result<()> {
-            self.writes.push_str(data);
-            Ok(())
-        }
-        fn columns(&self) -> usize {
-            self.columns
-        }
-        fn rows(&self) -> usize {
-            self.rows
-        }
+    fn on_debug(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        TuiBase::on_debug(self)
     }
 
-    struct StaticLines(Vec<String>);
-    impl Component for StaticLines {
-        fn render(&self, _width: usize) -> Vec<String> {
-            self.0.clone()
-        }
+    fn set_on_debug(&self, on_debug: Option<Arc<dyn Fn() + Send + Sync>>) {
+        TuiBase::set_on_debug(self, on_debug);
     }
 
-    #[test]
-    fn overlays_composite_at_explicit_position() {
-        let terminal = TestTerminal::new(12, 6);
-        let mut tui = TUI::new(terminal);
-        tui.add_child(StaticLines(vec![
-            "abcdefghijkl".into(),
-            "mnopqrstuvwx".into(),
-        ]));
-        tui.show_overlay(
-            StaticLines(vec!["OVR".into()]),
-            OverlayOptions {
-                row: Some(SizeValue::Columns(1)),
-                col: Some(SizeValue::Columns(4)),
-                width: Some(SizeValue::Columns(3)),
-                ..OverlayOptions::default()
-            },
-        );
-        let lines = tui.render_lines();
-        assert_eq!(lines[0], "abcdefghijkl");
-        assert_eq!(lines[1], "mnopOVRtuvwx");
+    fn full_redraws(&self) -> i64 {
+        TuiBase::full_redraws(self)
     }
 
-    #[test]
-    fn overlays_respect_anchor_and_margin() {
-        let terminal = TestTerminal::new(10, 5);
-        let mut tui = TUI::new(terminal);
-        tui.add_child(StaticLines(vec!["..........".into(); 5]));
-        tui.show_overlay(
-            StaticLines(vec!["XX".into()]),
-            OverlayOptions {
-                anchor: OverlayAnchor::BottomRight,
-                margin: OverlayMargin::all(1),
-                width: Some(SizeValue::Columns(2)),
-                ..OverlayOptions::default()
-            },
-        );
-        let lines = tui.render_lines();
-        assert_eq!(lines[3], ".......XX.");
+    fn add_child(&self, component: Arc<dyn Component>) {
+        TuiBase::add_child(self, component);
     }
 
-    #[test]
-    fn render_strips_cursor_marker_from_output() {
-        let terminal = TestTerminal::new(10, 4);
-        let mut tui = TUI::new(terminal);
-        tui.add_child(StaticLines(vec![format!("ab{CURSOR_MARKER}cd")]));
-        let lines = tui.render_lines();
-        assert_eq!(lines[0], "abcd");
+    fn remove_child(&self, component: &Arc<dyn Component>) {
+        TuiBase::remove_child(self, component);
     }
 
-    #[test]
-    fn render_deletes_previous_kitty_images_before_redraw() {
-        let terminal = TestTerminal::new(40, 6);
-        let mut tui = TUI::new(terminal);
-        tui.add_child(StaticLines(vec![
-            "\u{1b}_Ga=T,f=100,q=2,i=42;AAAA\u{1b}\\".into(),
-        ]));
-        tui.request_render().unwrap();
-        tui.request_render_full().unwrap();
-        let writes = &tui.terminal.writes;
-        let delete_index = writes
-            .find("\u{1b}_Ga=d,d=I,i=42,q=2\u{1b}\\")
-            .expect("delete image");
-        let clear_index = writes.find("\u{1b}[2J\u{1b}[H").expect("clear screen");
-        assert!(delete_index < clear_index);
-        assert_eq!(tui.full_redraws(), 1);
+    fn clear(&self) {
+        TuiBase::clear(self);
     }
 
-    #[test]
-    fn render_full_redraws_on_resize_and_shrink() {
-        let terminal = TestTerminal::new(20, 6);
-        let mut tui = TUI::new(terminal);
-        tui.set_clear_on_shrink(true);
-        tui.add_child(StaticLines(vec![
-            "line 1".into(),
-            "line 2".into(),
-            "line 3".into(),
-        ]));
-        tui.request_render().unwrap();
-        assert_eq!(tui.full_redraws(), 0);
+    fn get_show_hardware_cursor(&self) -> bool {
+        TuiBase::get_show_hardware_cursor(self)
+    }
 
-        tui.terminal.columns = 30;
-        tui.request_render().unwrap();
-        assert_eq!(tui.full_redraws(), 1);
+    fn set_show_hardware_cursor(&self, enabled: bool) {
+        TuiBase::set_show_hardware_cursor(self, enabled);
+    }
 
-        tui.clear();
-        tui.add_child(StaticLines(vec!["line 1".into()]));
-        tui.request_render().unwrap();
-        assert_eq!(tui.full_redraws(), 2);
+    fn get_clear_on_shrink(&self) -> bool {
+        TuiBase::get_clear_on_shrink(self)
+    }
+
+    fn set_clear_on_shrink(&self, enabled: bool) {
+        TuiBase::set_clear_on_shrink(self, enabled);
+    }
+
+    fn set_focus(&self, component: Option<Arc<dyn Component>>) {
+        TuiBase::set_focus(self, component);
+    }
+
+    fn show_overlay(&self, component: Arc<dyn Component>, options: Option<OverlayOptions>) -> OverlayHandle {
+        TuiBase::show_overlay(self, component, options)
+    }
+
+    fn hide_overlay(&self) {
+        TuiBase::hide_overlay(self);
+    }
+
+    fn has_overlay(&self) -> bool {
+        TuiBase::has_overlay(self)
+    }
+
+    fn start(&self) {
+        TuiBase::start(self);
+    }
+
+    fn stop(&self, options: Option<TuiStopOptions>) {
+        TuiBase::stop(self, options);
+    }
+
+    fn render_now(&self, force: Option<bool>) {
+        TuiBase::render_now(self, force);
+    }
+
+    fn request_render(&self, force: Option<bool>) {
+        TuiBase::request_render(self, force);
+    }
+
+    fn add_input_listener(&self, listener: TuiInputListener) -> pi_js::Unsubscribe {
+        TuiBase::add_input_listener(self, listener)
+    }
+
+    fn remove_input_listener(&self, listener: &TuiInputListener) {
+        TuiBase::remove_input_listener(self, listener);
+    }
+
+    fn on_terminal_color_scheme_change(
+        &self,
+        listener: Arc<dyn Fn(TerminalColorScheme) + Send + Sync>,
+    ) -> pi_js::Unsubscribe {
+        TuiBase::on_terminal_color_scheme_change(self, listener)
+    }
+
+    fn set_terminal_color_scheme_notifications(&self, enabled: bool) {
+        TuiBase::set_terminal_color_scheme_notifications(self, enabled);
+    }
+
+    async fn query_terminal_colors(&self, options: QueryTerminalColorsOptions) -> TerminalColors {
+        TuiBase::query_terminal_colors(self, options).await
     }
 }

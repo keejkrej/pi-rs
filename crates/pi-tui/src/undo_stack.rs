@@ -1,36 +1,46 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+//! Port of packages/tui/src/undo-stack.ts
+
+#![allow(dead_code, unused_variables)]
+
+use std::sync::{Arc, Mutex};
+
+struct UndoStackInner<S> {
+    stack: Mutex<Vec<S>>,
+}
+
+/// Generic undo stack with clone-on-push semantics.
+///
+/// Stores deep clones of state snapshots. Popped snapshots are returned
+/// directly (no re-cloning) since they are already detached.
+///
+/// PORT: TS class with identity. `S: Clone` stands in for `structuredClone` of plain data.
+#[derive(Clone)]
 pub struct UndoStack<S> {
-    stack: Vec<S>,
+    inner: Arc<UndoStackInner<S>>,
 }
 
-impl<S> Default for UndoStack<S> {
-    fn default() -> Self {
-        Self { stack: Vec::new() }
-    }
-}
-
-impl<S: Clone> UndoStack<S> {
+impl<S: Clone + Send> UndoStack<S> {
     pub fn new() -> Self {
-        Self { stack: Vec::new() }
+        todo!("port: UndoStack::new")
     }
 
-    pub fn push(&mut self, state: &S) {
-        self.stack.push(state.clone());
+    /// Push a deep clone of the given state onto the stack.
+    pub fn push(&self, state: &S) {
+        todo!("port: UndoStack::push")
     }
 
-    pub fn pop(&mut self) -> Option<S> {
-        self.stack.pop()
+    /// Pop and return the most recent snapshot, or undefined if empty.
+    pub fn pop(&self) -> Option<S> {
+        todo!("port: UndoStack::pop")
     }
 
-    pub fn clear(&mut self) {
-        self.stack.clear();
+    /// Remove all snapshots.
+    pub fn clear(&self) {
+        todo!("port: UndoStack::clear")
     }
 
-    pub fn len(&self) -> usize {
-        self.stack.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.stack.is_empty()
+    /// `get length()`.
+    pub fn length(&self) -> i64 {
+        self.inner.stack.lock().unwrap().len() as i64
     }
 }

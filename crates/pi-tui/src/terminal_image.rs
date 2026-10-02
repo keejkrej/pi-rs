@@ -1,466 +1,374 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+//! Port of packages/tui/src/terminal-image.ts
 
-use base64::Engine;
+#![allow(dead_code, unused_variables)]
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use std::sync::{LazyLock, Mutex};
+
+use indexmap::{IndexMap, IndexSet};
+use serde::{Deserialize, Serialize};
+
+use crate::colors::TerminalColorMode;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageProtocol {
+    #[serde(rename = "kitty")]
     Kitty,
-    ITerm2,
+    #[serde(rename = "iterm2")]
+    Iterm2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalCapabilities {
+    /// PORT: TS `"kitty" | "iterm2" | null`. `None` is `null` (the key is always present in TS literals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<ImageProtocol>,
     pub true_color: bool,
     pub hyperlinks: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// PORT: TS `Partial<TerminalCapabilities>`. `images: None` is absent, `Some(None)` is `null`,
+/// `Some(Some(_))` is `"kitty"` | `"iterm2"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCapabilityOverrides {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "pi_js::json::double_option"
+    )]
+    pub images: Option<Option<ImageProtocol>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_color: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hyperlinks: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CellDimensions {
-    pub width_px: u32,
-    pub height_px: u32,
+    pub width_px: i64,
+    pub height_px: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageDimensions {
-    pub width_px: u32,
-    pub height_px: u32,
+    pub width_px: i64,
+    pub height_px: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageRenderOptions {
-    pub max_width_cells: Option<u32>,
-    pub max_height_cells: Option<u32>,
-    pub preserve_aspect_ratio: bool,
-    pub image_id: Option<u32>,
-    pub move_cursor: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width_cells: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height_cells: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_aspect_ratio: Option<bool>,
+    /// Kitty image ID. If provided, reuses/replaces existing image with this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<i64>,
+    /// Whether Kitty should apply its default cursor movement after placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_cursor: Option<bool>,
 }
 
-impl Default for ImageRenderOptions {
-    fn default() -> Self {
-        Self {
-            max_width_cells: None,
-            max_height_cells: None,
-            preserve_aspect_ratio: true,
-            image_id: None,
-            move_cursor: true,
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageCellSize {
+    pub columns: i64,
+    pub rows: i64,
 }
 
-static CELL_DIMENSIONS: OnceLock<Mutex<CellDimensions>> = OnceLock::new();
-static CAPABILITIES: OnceLock<Mutex<Option<TerminalCapabilities>>> = OnceLock::new();
-static IMAGE_ID: AtomicU32 = AtomicU32::new(1);
+/// Field order is the object literal (`imageId`, `columns`, `rows`, `widthPx`, `heightPx`), not the interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KittyImageMetadata {
+    pub image_id: i64,
+    pub columns: i64,
+    pub rows: i64,
+    pub width_px: i64,
+    pub height_px: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegisteredKittyImageMetadata {
+    image_id: i64,
+    columns: i64,
+    rows: i64,
+    width_px: i64,
+    height_px: i64,
+    transmission_generation: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KittyImagePlacement {
+    pub image_id: i64,
+    pub transmission_generation: i64,
+    pub transmission_bytes: i64,
+    pub estimated_decoded_bytes: i64,
+    pub sequence: String,
+    pub replacement_line: String,
+}
+
+/// TS inline options of `encodeKitty`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodeKittyOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<i64>,
+    /// Whether Kitty should apply its default cursor movement after placement. Default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_cursor: Option<bool>,
+}
+
+/// TS `number | string` (`width` / `height` of [`EncodeITerm2Options`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NumberOrString {
+    Number(f64),
+    Text(String),
+}
+
+/// TS inline options of `encodeITerm2`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodeITerm2Options {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<NumberOrString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<NumberOrString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_aspect_ratio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<bool>,
+}
+
+/// `{ sequence, columns, rows, imageId? }` from [`render_image`], or `None` when images are unsupported.
+///
+/// PORT: TS returns this anonymous object, or `null`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderImageResult {
+    pub sequence: String,
+    pub columns: i64,
+    pub rows: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<i64>,
+}
+
+const DEFAULT_CELL_DIMENSIONS: CellDimensions = CellDimensions {
+    width_px: 9,
+    height_px: 18,
+};
+
+static CACHED_CAPABILITIES: LazyLock<Mutex<Option<TerminalCapabilities>>> = LazyLock::new(|| Mutex::new(None));
+static CAPABILITY_OVERRIDES: LazyLock<Mutex<TerminalCapabilityOverrides>> =
+    LazyLock::new(|| Mutex::new(TerminalCapabilityOverrides::default()));
+// Default cell dimensions - updated by TUI when terminal responds to query
+static CELL_DIMENSIONS: LazyLock<Mutex<CellDimensions>> = LazyLock::new(|| Mutex::new(DEFAULT_CELL_DIMENSIONS));
+
+const KITTY_PREFIX: &str = "\u{1b}_G";
+const ITERM2_PREFIX: &str = "\u{1b}]1337;File=";
+const KITTY_CHUNK_SIZE: usize = 4096;
+
+static KITTY_PLACEMENT_CONTROL_KEYS: LazyLock<IndexSet<&'static str>> = LazyLock::new(|| {
+    IndexSet::from([
+        "i", "p", "x", "y", "w", "h", "X", "Y", "c", "r", "C", "U", "z", "P", "Q", "H", "V",
+    ])
+});
+
+static KITTY_IMAGE_METADATA: LazyLock<Mutex<IndexMap<i64, RegisteredKittyImageMetadata>>> =
+    LazyLock::new(|| Mutex::new(IndexMap::new()));
+static KITTY_TRANSMISSION_GENERATION: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
 
 pub fn get_cell_dimensions() -> CellDimensions {
-    *CELL_DIMENSIONS
-        .get_or_init(|| {
-            Mutex::new(CellDimensions {
-                width_px: 9,
-                height_px: 18,
-            })
-        })
-        .lock()
-        .expect("cell dimensions mutex poisoned")
+    *CELL_DIMENSIONS.lock().unwrap()
 }
 
 pub fn set_cell_dimensions(dims: CellDimensions) {
-    *CELL_DIMENSIONS
-        .get_or_init(|| {
-            Mutex::new(CellDimensions {
-                width_px: 9,
-                height_px: 18,
-            })
-        })
-        .lock()
-        .expect("cell dimensions mutex poisoned") = dims;
+    *CELL_DIMENSIONS.lock().unwrap() = dims;
 }
 
-pub fn detect_capabilities() -> TerminalCapabilities {
-    let term_program = std::env::var("TERM_PROGRAM")
-        .unwrap_or_default()
-        .to_lowercase();
-    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
-    let color_term = std::env::var("COLORTERM")
-        .unwrap_or_default()
-        .to_lowercase();
-    let true_color = color_term == "truecolor" || color_term == "24bit";
+/// Checks whether the attached tmux client forwards OSC 8 hyperlinks to the
+/// outer terminal. tmux only re-emits them when its `client_termfeatures` lists
+/// `hyperlinks`, and strips them otherwise. On any error fallbacks `false`.
+fn probe_tmux_hyperlinks() -> bool {
+    todo!("port: probe_tmux_hyperlinks")
+}
 
-    if std::env::var("TMUX").is_ok() || term.starts_with("tmux") || term.starts_with("screen") {
-        return TerminalCapabilities {
-            images: None,
-            true_color,
-            hyperlinks: false,
-        };
-    }
-    if std::env::var("KITTY_WINDOW_ID").is_ok()
-        || term_program == "kitty"
-        || term_program == "ghostty"
-        || term.contains("ghostty")
-        || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
-        || std::env::var("WEZTERM_PANE").is_ok()
-        || term_program == "wezterm"
-    {
-        return TerminalCapabilities {
-            images: Some(ImageProtocol::Kitty),
-            true_color: true,
-            hyperlinks: true,
-        };
-    }
-    if std::env::var("ITERM_SESSION_ID").is_ok() || term_program == "iterm.app" {
-        return TerminalCapabilities {
-            images: Some(ImageProtocol::ITerm2),
-            true_color: true,
-            hyperlinks: true,
-        };
-    }
-    if matches!(term_program.as_str(), "vscode" | "alacritty") {
-        return TerminalCapabilities {
-            images: None,
-            true_color: true,
-            hyperlinks: true,
-        };
-    }
-    TerminalCapabilities {
-        images: None,
-        true_color,
-        hyperlinks: false,
-    }
+fn detect_capabilities_from_environment(tmux_forwards_hyperlink: &dyn Fn() -> bool) -> TerminalCapabilities {
+    todo!("port: detect_capabilities_from_environment")
+}
+
+fn parse_boolean_capability_override(value: Option<&str>) -> Option<bool> {
+    todo!("port: parse_boolean_capability_override")
+}
+
+/// PORT: `None` selects `probe_tmux_hyperlinks`, the TS default.
+pub fn detect_capabilities(tmux_forwards_hyperlink: Option<&dyn Fn() -> bool>) -> TerminalCapabilities {
+    todo!("port: detect_capabilities")
 }
 
 pub fn get_capabilities() -> TerminalCapabilities {
-    let mut guard = CAPABILITIES
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("capabilities mutex poisoned");
-    if let Some(caps) = *guard {
-        caps
-    } else {
-        let caps = detect_capabilities();
-        *guard = Some(caps);
-        caps
-    }
+    todo!("port: get_capabilities")
 }
 
-pub fn set_capabilities(caps: TerminalCapabilities) {
-    *CAPABILITIES
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("capabilities mutex poisoned") = Some(caps);
+/// PORT: `None` selects [`get_capabilities`], the TS default.
+pub fn get_terminal_color_mode(capabilities: Option<TerminalCapabilities>) -> TerminalColorMode {
+    todo!("port: get_terminal_color_mode")
 }
 
 pub fn reset_capabilities_cache() {
-    *CAPABILITIES
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("capabilities mutex poisoned") = None;
+    *CACHED_CAPABILITIES.lock().unwrap() = None;
+}
+
+/// Override selected auto-detected capabilities.
+pub fn set_capability_overrides(overrides: TerminalCapabilityOverrides) {
+    todo!("port: set_capability_overrides")
+}
+
+/// Override the cached capabilities. Useful in tests to exercise both code paths.
+pub fn set_capabilities(caps: TerminalCapabilities) {
+    *CACHED_CAPABILITIES.lock().unwrap() = Some(caps);
 }
 
 pub fn is_image_line(line: &str) -> bool {
-    line.contains("\u{1b}_G") || line.contains("\u{1b}]1337;File=")
+    todo!("port: is_image_line")
 }
 
-pub fn allocate_image_id() -> u32 {
-    let id = IMAGE_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 { 1 } else { id }
+/// Generate a random image ID for Kitty graphics protocol.
+/// Uses random IDs to avoid collisions between different module instances
+/// (e.g., main app vs extensions).
+pub fn allocate_image_id() -> i64 {
+    todo!("port: allocate_image_id")
 }
 
-pub fn encode_kitty(
-    base64_data: &str,
-    columns: Option<u32>,
-    rows: Option<u32>,
-    image_id: Option<u32>,
-    move_cursor: bool,
-) -> String {
-    const CHUNK_SIZE: usize = 4096;
-    let mut params = vec!["a=T".to_string(), "f=100".to_string(), "q=2".to_string()];
-    if !move_cursor {
-        params.push("C=1".to_string());
-    }
-    if let Some(columns) = columns {
-        params.push(format!("c={columns}"));
-    }
-    if let Some(rows) = rows {
-        params.push(format!("r={rows}"));
-    }
-    if let Some(image_id) = image_id {
-        params.push(format!("i={image_id}"));
-    }
-
-    if base64_data.len() <= CHUNK_SIZE {
-        return format!("\u{1b}_G{};{}\u{1b}\\", params.join(","), base64_data);
-    }
-
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-    let mut first = true;
-    while offset < base64_data.len() {
-        let end = (offset + CHUNK_SIZE).min(base64_data.len());
-        let chunk = &base64_data[offset..end];
-        let last = end >= base64_data.len();
-        if first {
-            chunks.push(format!(
-                "\u{1b}_G{},m=1;{}\u{1b}\\",
-                params.join(","),
-                chunk
-            ));
-            first = false;
-        } else if last {
-            chunks.push(format!("\u{1b}_Gm=0;{chunk}\u{1b}\\"));
-        } else {
-            chunks.push(format!("\u{1b}_Gm=1;{chunk}\u{1b}\\"));
-        }
-        offset = end;
-    }
-    chunks.join("")
+pub fn encode_kitty(base64_data: &str, options: Option<EncodeKittyOptions>) -> String {
+    todo!("port: encode_kitty")
 }
 
-pub fn delete_kitty_image(image_id: u32) -> String {
-    format!("\u{1b}_Ga=d,d=I,i={image_id},q=2\u{1b}\\")
+/// Delete a Kitty graphics image by ID.
+/// Uses uppercase 'I' to also free the image data.
+pub fn delete_kitty_image(image_id: i64) -> String {
+    todo!("port: delete_kitty_image")
 }
 
+/// Delete all visible Kitty graphics images.
+/// Uses uppercase 'A' to also free the image data.
 pub fn delete_all_kitty_images() -> String {
     "\u{1b}_Ga=d,d=A,q=2\u{1b}\\".to_string()
 }
 
-pub fn encode_iterm2(
-    base64_data: &str,
-    width: Option<&str>,
-    height: Option<&str>,
-    name_base64: Option<&str>,
-    preserve_aspect_ratio: bool,
-    inline: bool,
-) -> String {
-    let mut params = vec![format!("inline={}", if inline { 1 } else { 0 })];
-    if let Some(width) = width {
-        params.push(format!("width={width}"));
-    }
-    if let Some(height) = height {
-        params.push(format!("height={height}"));
-    }
-    if let Some(name) = name_base64 {
-        params.push(format!("name={name}"));
-    }
-    if !preserve_aspect_ratio {
-        params.push("preserveAspectRatio=0".to_string());
-    }
-    format!("\u{1b}]1337;File={}:{}\u{7}", params.join(";"), base64_data)
+/// Delete all visible Kitty placements while retaining their uploaded image data.
+pub fn delete_all_kitty_placements() -> String {
+    "\u{1b}_Ga=d,d=a,q=2\u{1b}\\".to_string()
 }
 
+pub fn encode_iterm2(base64_data: &str, options: Option<EncodeITerm2Options>) -> String {
+    todo!("port: encode_iterm2")
+}
+
+pub fn register_kitty_image_metadata(metadata: KittyImageMetadata) {
+    todo!("port: register_kitty_image_metadata")
+}
+
+fn get_registered_kitty_image_metadata(line: &str) -> Option<RegisteredKittyImageMetadata> {
+    todo!("port: get_registered_kitty_image_metadata")
+}
+
+pub fn get_kitty_image_metadata(line: &str) -> Option<KittyImageMetadata> {
+    todo!("port: get_kitty_image_metadata")
+}
+
+/// Build a placement-only command for an image line emitted by [`render_image`].
+pub fn get_kitty_image_placement(line: &str) -> Option<KittyImagePlacement> {
+    todo!("port: get_kitty_image_placement")
+}
+
+pub fn crop_kitty_image_line(line: &str, hidden_rows: i64, visible_rows: i64) -> String {
+    todo!("port: crop_kitty_image_line")
+}
+
+fn choose_less_distorted_cell_count(upper_count: i64, ideal_count: f64) -> i64 {
+    todo!("port: choose_less_distorted_cell_count")
+}
+
+/// PORT: `None` cell dimensions are `{ widthPx: 9, heightPx: 18 }`. `None` `optimize_aspect_ratio` is false.
 pub fn calculate_image_cell_size(
-    dimensions: ImageDimensions,
-    max_width_cells: u32,
-    max_height_cells: Option<u32>,
-    cell: CellDimensions,
-) -> (u32, u32) {
-    let max_width = max_width_cells.max(1);
-    let max_height = max_height_cells.map(|height| height.max(1));
-    let image_width = dimensions.width_px.max(1);
-    let image_height = dimensions.height_px.max(1);
-    let width_scale = (max_width * cell.width_px.max(1)) as f64 / image_width as f64;
-    let height_scale = max_height.map_or(width_scale, |height| {
-        (height * cell.height_px.max(1)) as f64 / image_height as f64
-    });
-    let scale = width_scale.min(height_scale);
-    let scaled_width_px = image_width as f64 * scale;
-    let scaled_height_px = image_height as f64 * scale;
-    let columns = (scaled_width_px / cell.width_px.max(1) as f64).ceil() as u32;
-    let rows = (scaled_height_px / cell.height_px.max(1) as f64).ceil() as u32;
-    (
-        columns.clamp(1, max_width),
-        max_height.map_or(rows.max(1), |height| rows.clamp(1, height)),
-    )
+    image_dimensions: ImageDimensions,
+    max_width_cells: i64,
+    max_height_cells: Option<i64>,
+    cell_dimensions: Option<CellDimensions>,
+    optimize_aspect_ratio: Option<bool>,
+) -> ImageCellSize {
+    todo!("port: calculate_image_cell_size")
 }
 
-pub fn calculate_image_rows(dimensions: ImageDimensions, target_width_cells: u32) -> u32 {
-    calculate_image_cell_size(dimensions, target_width_cells, None, get_cell_dimensions()).1
+pub fn calculate_image_rows(
+    image_dimensions: ImageDimensions,
+    target_width_cells: i64,
+    cell_dimensions: Option<CellDimensions>,
+) -> i64 {
+    calculate_image_cell_size(image_dimensions, target_width_cells, None, cell_dimensions, None).rows
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedImage {
-    pub sequence: String,
-    pub rows: u32,
-    pub image_id: Option<u32>,
+pub fn get_png_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    todo!("port: get_png_dimensions")
+}
+
+pub fn get_jpeg_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    todo!("port: get_jpeg_dimensions")
+}
+
+pub fn get_gif_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    todo!("port: get_gif_dimensions")
+}
+
+pub fn get_webp_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    todo!("port: get_webp_dimensions")
+}
+
+pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageDimensions> {
+    todo!("port: get_image_dimensions")
 }
 
 pub fn render_image(
     base64_data: &str,
     image_dimensions: ImageDimensions,
-    options: ImageRenderOptions,
-) -> Option<RenderedImage> {
-    let caps = get_capabilities();
-    let protocol = caps.images?;
-    let max_width = options.max_width_cells.unwrap_or(80);
-    let (columns, rows) = calculate_image_cell_size(
-        image_dimensions,
-        max_width,
-        options.max_height_cells,
-        get_cell_dimensions(),
-    );
-    match protocol {
-        ImageProtocol::Kitty => Some(RenderedImage {
-            sequence: encode_kitty(
-                base64_data,
-                Some(columns),
-                Some(rows),
-                options.image_id,
-                options.move_cursor,
-            ),
-            rows,
-            image_id: options.image_id,
-        }),
-        ImageProtocol::ITerm2 => Some(RenderedImage {
-            sequence: encode_iterm2(
-                base64_data,
-                Some(&columns.to_string()),
-                Some("auto"),
-                None,
-                options.preserve_aspect_ratio,
-                true,
-            ),
-            rows,
-            image_id: None,
-        }),
-    }
+    options: Option<ImageRenderOptions>,
+) -> Option<RenderImageResult> {
+    todo!("port: render_image")
 }
 
+/// Wrap text in an OSC 8 hyperlink sequence.
+/// The text is rendered as a clickable hyperlink in terminals that support OSC 8
+/// (Ghostty, Kitty, WezTerm, iTerm2, VSCode, and others).
+/// In terminals that do not support OSC 8, the escape sequences are ignored
+/// and only the plain text is displayed.
+///
+/// @param text - The visible text to display
+/// @param url - The URL to link to
 pub fn hyperlink(text: &str, url: &str) -> String {
-    format!("\u{1b}]8;;{url}\u{1b}\\{text}\u{1b}]8;;\u{1b}\\")
+    todo!("port: hyperlink")
 }
 
-pub fn image_fallback(
-    mime_type: &str,
-    dimensions: Option<ImageDimensions>,
-    filename: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-    if let Some(filename) = filename {
-        parts.push(filename.to_string());
-    }
-    parts.push(format!("[{mime_type}]"));
-    if let Some(dim) = dimensions {
-        parts.push(format!("{}x{}", dim.width_px, dim.height_px));
-    }
-    format!("[Image: {}]", parts.join(" "))
+/// Shorten home-prefixed absolute paths to ~/... for compact display.
+fn shorten_image_path(filename: &str) -> String {
+    todo!("port: shorten_image_path")
 }
 
-fn decode_base64(base64_data: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD
-        .decode(base64_data)
-        .ok()
-}
-
-pub fn get_png_dimensions(base64_data: &str) -> Option<ImageDimensions> {
-    let buffer = decode_base64(base64_data)?;
-    if buffer.len() < 24 || &buffer[0..4] != b"\x89PNG" {
-        return None;
-    }
-    Some(ImageDimensions {
-        width_px: u32::from_be_bytes(buffer[16..20].try_into().ok()?),
-        height_px: u32::from_be_bytes(buffer[20..24].try_into().ok()?),
-    })
-}
-
-pub fn get_jpeg_dimensions(base64_data: &str) -> Option<ImageDimensions> {
-    let buffer = decode_base64(base64_data)?;
-    if buffer.len() < 2 || buffer[0] != 0xff || buffer[1] != 0xd8 {
-        return None;
-    }
-    let mut offset = 2;
-    while offset + 9 < buffer.len() {
-        if buffer[offset] != 0xff {
-            offset += 1;
-            continue;
-        }
-        let marker = buffer[offset + 1];
-        if (0xc0..=0xc2).contains(&marker) {
-            return Some(ImageDimensions {
-                width_px: u16::from_be_bytes([buffer[offset + 7], buffer[offset + 8]]) as u32,
-                height_px: u16::from_be_bytes([buffer[offset + 5], buffer[offset + 6]]) as u32,
-            });
-        }
-        if offset + 3 >= buffer.len() {
-            return None;
-        }
-        let length = u16::from_be_bytes([buffer[offset + 2], buffer[offset + 3]]) as usize;
-        if length < 2 {
-            return None;
-        }
-        offset += 2 + length;
-    }
-    None
-}
-
-pub fn get_gif_dimensions(base64_data: &str) -> Option<ImageDimensions> {
-    let buffer = decode_base64(base64_data)?;
-    if buffer.len() < 10 || (&buffer[0..6] != b"GIF87a" && &buffer[0..6] != b"GIF89a") {
-        return None;
-    }
-    Some(ImageDimensions {
-        width_px: u16::from_le_bytes([buffer[6], buffer[7]]) as u32,
-        height_px: u16::from_le_bytes([buffer[8], buffer[9]]) as u32,
-    })
-}
-
-pub fn get_webp_dimensions(base64_data: &str) -> Option<ImageDimensions> {
-    let buffer = decode_base64(base64_data)?;
-    if buffer.len() < 30 || &buffer[0..4] != b"RIFF" || &buffer[8..12] != b"WEBP" {
-        return None;
-    }
-    match &buffer[12..16] {
-        b"VP8 " => Some(ImageDimensions {
-            width_px: (u16::from_le_bytes([buffer[26], buffer[27]]) & 0x3fff) as u32,
-            height_px: (u16::from_le_bytes([buffer[28], buffer[29]]) & 0x3fff) as u32,
-        }),
-        b"VP8L" => {
-            if buffer.len() < 25 {
-                return None;
-            }
-            let bits = u32::from_le_bytes([buffer[21], buffer[22], buffer[23], buffer[24]]);
-            Some(ImageDimensions {
-                width_px: (bits & 0x3fff) + 1,
-                height_px: ((bits >> 14) & 0x3fff) + 1,
-            })
-        }
-        b"VP8X" => Some(ImageDimensions {
-            width_px: (buffer[24] as u32
-                | ((buffer[25] as u32) << 8)
-                | ((buffer[26] as u32) << 16))
-                + 1,
-            height_px: (buffer[27] as u32
-                | ((buffer[28] as u32) << 8)
-                | ((buffer[29] as u32) << 16))
-                + 1,
-        }),
-        _ => None,
-    }
-}
-
-pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageDimensions> {
-    match mime_type {
-        "image/png" => get_png_dimensions(base64_data),
-        "image/jpeg" => get_jpeg_dimensions(base64_data),
-        "image/gif" => get_gif_dimensions(base64_data),
-        "image/webp" => get_webp_dimensions(base64_data),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encodes_kitty_delete() {
-        assert_eq!(delete_kitty_image(7), "\u{1b}_Ga=d,d=I,i=7,q=2\u{1b}\\");
-    }
-
-    #[test]
-    fn hyperlink_uses_osc8_st_sequence() {
-        assert_eq!(
-            hyperlink("text", "https://example.com"),
-            "\u{1b}]8;;https://example.com\u{1b}\\text\u{1b}]8;;\u{1b}\\"
-        );
-    }
+/// Text fallback when the terminal cannot render inline images.
+/// Absolute paths are shown shortened (~/...) and, when OSC 8 hyperlinks are
+/// available, linked to file:// so the full path remains openable.
+pub fn image_fallback(mime_type: &str, dimensions: Option<ImageDimensions>, filename: Option<&str>) -> String {
+    todo!("port: image_fallback")
 }

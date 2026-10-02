@@ -1,0 +1,4920 @@
+{
+  "built": {
+    "object_basic": "{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file\"},\"limit\":{\"type\":\"number\",\"minimum\":1}}}",
+    "object_all_optional": "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"number\"},\"enabled\":{\"type\":\"boolean\"}}}",
+    "object_nested": "{\"type\":\"object\",\"required\":[\"path\",\"metadata\"],\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"number\"},\"nullable\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]},\"metadata\":{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"}}}}}",
+    "literal_string": "{\"type\":\"string\",\"const\":\"a\"}",
+    "literal_number": "{\"type\":\"number\",\"const\":1}",
+    "literal_bool": "{\"type\":\"boolean\",\"const\":true}",
+    "record_string": "{\"type\":\"object\",\"patternProperties\":{\"^.*$\":{\"type\":\"number\"}}}",
+    "record_integer": "{\"type\":\"object\",\"patternProperties\":{\"^-?(?:0|[1-9][0-9]*)$\":{\"type\":\"string\"}}}",
+    "record_number": "{\"type\":\"object\",\"patternProperties\":{\"^-?(?:0|[1-9][0-9]*)(?:\\\\.[0-9]+)?$\":{\"type\":\"boolean\"}}}",
+    "record_literal": "{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}}}",
+    "record_bool_key": "{\"type\":\"object\",\"required\":[\"true\",\"false\"],\"properties\":{\"true\":{\"type\":\"number\"},\"false\":{\"type\":\"number\"}}}",
+    "union": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"description\":\"nullable\"}",
+    "intersect": "{\"allOf\":[{\"type\":\"object\",\"required\":[\"a\"],\"properties\":{\"a\":{\"type\":\"string\"}}},{\"type\":\"object\",\"required\":[\"b\"],\"properties\":{\"b\":{\"type\":\"number\"}}}]}",
+    "array": "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1}",
+    "tuple": "{\"type\":\"array\",\"additionalItems\":false,\"items\":[{\"type\":\"string\"},{\"type\":\"number\"}],\"minItems\":2}",
+    "enum_str": "{\"enum\":[\"add\",\"subtract\"]}",
+    "enum_num": "{\"enum\":[1,2,3]}",
+    "any": "{}",
+    "unknown": "{}",
+    "string": "{\"type\":\"string\"}",
+    "number": "{\"type\":\"number\"}",
+    "integer": "{\"type\":\"integer\",\"minimum\":0}",
+    "boolean": "{\"type\":\"boolean\"}",
+    "null": "{\"type\":\"null\"}",
+    "string_constraints": "{\"type\":\"string\",\"minLength\":1,\"maxLength\":4,\"pattern\":\"^[a-z]+$\"}",
+    "unsafe_enum": "{\"type\":\"string\",\"enum\":[\"add\",\"subtract\"],\"description\":\"The operation to perform\"}",
+    "ref_defs": "{\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/value\"}},\"$defs\":{\"value\":{\"anyOf\":[{\"type\":\"number\"},{\"type\":\"null\"}]}}}",
+    "defs_keyword": "{\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/definitions/value\"}},\"definitions\":{\"value\":{\"type\":\"string\"}}}",
+    "number_bounds": "{\"type\":\"number\",\"minimum\":1,\"maximum\":10,\"exclusiveMinimum\":0,\"exclusiveMaximum\":11,\"multipleOf\":1}",
+    "array_keywords": "{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":1,\"maxItems\":3,\"uniqueItems\":true}",
+    "prefix": "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"},{\"type\":\"number\"}],\"items\":{\"type\":\"boolean\"}}",
+    "additional": "{\"type\":\"object\",\"required\":[\"a\"],\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+    "additional_schema": "{\"type\":\"object\",\"required\":[\"a\"],\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":{\"type\":\"number\"}}",
+    "pattern_props": "{\"type\":\"object\",\"patternProperties\":{\"^x-\":{\"type\":\"number\"}},\"additionalProperties\":false}",
+    "not_schema": "{\"not\":{\"type\":\"string\"}}",
+    "one_of": "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"number\"}]}",
+    "all_of": "{\"allOf\":[{\"type\":\"object\"},{\"required\":[\"a\"],\"properties\":{\"a\":{\"type\":\"string\"}}}]}",
+    "format_email": "{\"type\":\"string\",\"format\":\"email\"}",
+    "format_uuid": "{\"type\":\"string\",\"format\":\"uuid\"}",
+    "format_date": "{\"type\":\"string\",\"format\":\"date\"}",
+    "format_date_time": "{\"type\":\"string\",\"format\":\"date-time\"}",
+    "format_uri": "{\"type\":\"string\",\"format\":\"uri\"}",
+    "format_ipv4": "{\"type\":\"string\",\"format\":\"ipv4\"}",
+    "type_array": "{\"type\":[\"number\",\"string\"]}",
+    "with_default": "{\"type\":\"object\",\"required\":[\"a\"],\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"hi\"},\"b\":{\"type\":\"number\",\"default\":1}}}",
+    "union_obj": "{\"anyOf\":[{\"type\":\"object\",\"required\":[\"nested\"],\"properties\":{\"nested\":{\"type\":\"string\"}}},{\"type\":\"null\"}]}",
+    "enum_as_union_input": "{\"enum\":[\"a\",\"b\"]}"
+  },
+  "cases": [
+    {
+      "id": "object_basic",
+      "value": {
+        "path": "a.txt",
+        "limit": 2
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "path": "a.txt",
+        "limit": 2
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": "a.txt",
+        "limit": 2
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": "a.txt",
+        "limit": 2
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_basic",
+      "value": {
+        "path": "a.txt"
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "path": "a.txt"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": "a.txt"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": "a.txt"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_basic",
+      "value": {
+        "limit": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "path"
+            ]
+          },
+          "message": "must have required properties path"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "path"
+            ]
+          },
+          "message": "must have required properties path"
+        }
+      ],
+      "converted": {
+        "limit": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "limit": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "limit": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_basic",
+      "value": {
+        "path": "a.txt",
+        "limit": "4"
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/limit",
+          "instancePath": "/limit",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/limit",
+          "instancePath": "/limit",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "path": "a.txt",
+        "limit": 4
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": "a.txt",
+        "limit": "4"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": "a.txt",
+        "limit": "4"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_basic",
+      "value": {
+        "path": 1,
+        "limit": true
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/path",
+          "instancePath": "/path",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/limit",
+          "instancePath": "/limit",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/path",
+          "instancePath": "/path",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/limit",
+          "instancePath": "/limit",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "path": "1",
+        "limit": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": 1,
+        "limit": true
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": 1,
+        "limit": true
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_basic",
+      "value": {
+        "path": null,
+        "extra": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/path",
+          "instancePath": "/path",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/path",
+          "instancePath": "/path",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": {
+        "path": "null",
+        "extra": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": null
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": null,
+        "extra": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_all_optional",
+      "value": {},
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {},
+      "convertThrew": null,
+      "cleaned": {},
+      "cleanThrew": null,
+      "defaulted": {},
+      "defaultThrew": null
+    },
+    {
+      "id": "object_all_optional",
+      "value": {
+        "offset": "3",
+        "enabled": "true",
+        "extra": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/offset",
+          "instancePath": "/offset",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/enabled",
+          "instancePath": "/enabled",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/offset",
+          "instancePath": "/offset",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/enabled",
+          "instancePath": "/enabled",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": {
+        "offset": 3,
+        "enabled": true,
+        "extra": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "offset": "3",
+        "enabled": "true"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "offset": "3",
+        "enabled": "true",
+        "extra": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_nested",
+      "value": {
+        "path": "file.txt",
+        "offset": null,
+        "nullable": null,
+        "metadata": {
+          "enabled": null
+        }
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/offset",
+          "instancePath": "/offset",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/metadata/properties/enabled",
+          "instancePath": "/metadata/enabled",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/offset",
+          "instancePath": "/offset",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/properties/metadata/properties/enabled",
+          "instancePath": "/metadata/enabled",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": {
+        "path": "file.txt",
+        "offset": 0,
+        "nullable": null,
+        "metadata": {
+          "enabled": false
+        }
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": "file.txt",
+        "offset": null,
+        "nullable": null,
+        "metadata": {
+          "enabled": null
+        }
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": "file.txt",
+        "offset": null,
+        "nullable": null,
+        "metadata": {
+          "enabled": null
+        }
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "object_nested",
+      "value": {
+        "path": "file.txt",
+        "nullable": null,
+        "metadata": {}
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "path": "file.txt",
+        "nullable": null,
+        "metadata": {}
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "path": "file.txt",
+        "nullable": null,
+        "metadata": {}
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "path": "file.txt",
+        "nullable": null,
+        "metadata": {}
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_string",
+      "value": "a",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "a",
+      "convertThrew": null,
+      "cleaned": "a",
+      "cleanThrew": null,
+      "defaulted": "a",
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_string",
+      "value": "b",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": "a"
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": "a"
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "converted": "b",
+      "convertThrew": null,
+      "cleaned": "b",
+      "cleanThrew": null,
+      "defaulted": "b",
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_string",
+      "value": 1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": "a"
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": "a"
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_number",
+      "value": 1,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_number",
+      "value": "1",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": 1
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": 1
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": "1",
+      "cleanThrew": null,
+      "defaulted": "1",
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_bool",
+      "value": true,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_bool",
+      "value": "true",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": true
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": true
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": "true",
+      "cleanThrew": null,
+      "defaulted": "true",
+      "defaultThrew": null
+    },
+    {
+      "id": "literal_bool",
+      "value": "TRUE",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": true
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        },
+        {
+          "keyword": "const",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValue": true
+          },
+          "message": "must be equal to constant"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": "TRUE",
+      "cleanThrew": null,
+      "defaulted": "TRUE",
+      "defaultThrew": null
+    },
+    {
+      "id": "record_string",
+      "value": {
+        "a": "1",
+        "b": 2
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^.*$",
+          "instancePath": "/a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^.*$",
+          "instancePath": "/a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "a": 1,
+        "b": 2
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "1",
+        "b": 2
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "1",
+        "b": 2
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "record_string",
+      "value": {
+        "a": "nope"
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^.*$",
+          "instancePath": "/a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^.*$",
+          "instancePath": "/a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "a": "nope"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "nope"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "nope"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "record_integer",
+      "value": {
+        "1": "a",
+        "-2": "b",
+        "x": "c"
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "1": "a",
+        "-2": "b",
+        "x": "c"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "1": "a",
+        "-2": "b"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "1": "a",
+        "-2": "b",
+        "x": "c"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "record_number",
+      "value": {
+        "1.5": "true",
+        "a": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "instancePath": "/1.5",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "instancePath": "/1.5",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": {
+        "1.5": true,
+        "a": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "1.5": "true"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "1.5": "true",
+        "a": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "record_literal",
+      "value": {
+        "id": "abc",
+        "other": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "id": "abc",
+        "other": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "id": "abc"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "id": "abc",
+        "other": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "union",
+      "value": "x",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "x",
+      "convertThrew": null,
+      "cleaned": "x",
+      "cleanThrew": null,
+      "defaulted": "x",
+      "defaultThrew": null
+    },
+    {
+      "id": "union",
+      "value": null,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "union",
+      "value": "42",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "42",
+      "convertThrew": null,
+      "cleaned": "42",
+      "cleanThrew": null,
+      "defaulted": "42",
+      "defaultThrew": null
+    },
+    {
+      "id": "union",
+      "value": 1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "converted": "1",
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "intersect",
+      "value": {
+        "a": "s",
+        "b": "2",
+        "c": true
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/allOf/1/properties/b",
+          "instancePath": "/b",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/allOf/1/properties/b",
+          "instancePath": "/b",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "a": "s",
+        "b": 2,
+        "c": true
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "s",
+        "b": "2"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "s",
+        "b": "2",
+        "c": true
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "intersect",
+      "value": {
+        "a": "s"
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#/allOf/1",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "b"
+            ]
+          },
+          "message": "must have required properties b"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#/allOf/1",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "b"
+            ]
+          },
+          "message": "must have required properties b"
+        }
+      ],
+      "converted": {
+        "a": "s"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "s"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "s"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "array",
+      "value": [
+        "a",
+        "b"
+      ],
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": [
+        "a",
+        "b"
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a",
+        "b"
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a",
+        "b"
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "array",
+      "value": "a",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "array"
+          },
+          "message": "must be array"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "array"
+          },
+          "message": "must be array"
+        }
+      ],
+      "converted": [
+        "a"
+      ],
+      "convertThrew": null,
+      "cleaned": "a",
+      "cleanThrew": null,
+      "defaulted": "a",
+      "defaultThrew": null
+    },
+    {
+      "id": "array",
+      "value": [
+        1,
+        "true"
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/items",
+          "instancePath": "/0",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/items",
+          "instancePath": "/0",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": [
+        "1",
+        "true"
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        1,
+        "true"
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        1,
+        "true"
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "array",
+      "value": [],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 items"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 items"
+        }
+      ],
+      "converted": [],
+      "convertThrew": null,
+      "cleaned": [],
+      "cleanThrew": null,
+      "defaulted": [],
+      "defaultThrew": null
+    },
+    {
+      "id": "tuple",
+      "value": [
+        "a",
+        "1",
+        true
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalItems",
+          "instancePath": "/2",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/items/1",
+          "instancePath": "/1",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalItems",
+          "instancePath": "/2",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/items/1",
+          "instancePath": "/1",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": [
+        "a",
+        1,
+        true
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a",
+        "1"
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a",
+        "1",
+        true
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "tuple",
+      "value": [
+        "a"
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 items"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 items"
+        }
+      ],
+      "converted": [
+        "a"
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a"
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a",
+        null
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "tuple",
+      "value": [
+        "a",
+        1
+      ],
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": [
+        "a",
+        1
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a",
+        1
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a",
+        1
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_str",
+      "value": "add",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "add",
+      "convertThrew": null,
+      "cleaned": "add",
+      "cleanThrew": null,
+      "defaulted": "add",
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_str",
+      "value": "nope",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "converted": "nope",
+      "convertThrew": null,
+      "cleaned": "nope",
+      "cleanThrew": null,
+      "defaulted": "nope",
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_str",
+      "value": "ADD",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "converted": "ADD",
+      "convertThrew": null,
+      "cleaned": "ADD",
+      "cleanThrew": null,
+      "defaulted": "ADD",
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_num",
+      "value": 2,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 2,
+      "convertThrew": null,
+      "cleaned": 2,
+      "cleanThrew": null,
+      "defaulted": 2,
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_num",
+      "value": "2",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              1,
+              2,
+              3
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              1,
+              2,
+              3
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "converted": 2,
+      "convertThrew": null,
+      "cleaned": "2",
+      "cleanThrew": null,
+      "defaulted": "2",
+      "defaultThrew": null
+    },
+    {
+      "id": "enum_num",
+      "value": 4,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              1,
+              2,
+              3
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              1,
+              2,
+              3
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "converted": 4,
+      "convertThrew": null,
+      "cleaned": 4,
+      "cleanThrew": null,
+      "defaulted": 4,
+      "defaultThrew": null
+    },
+    {
+      "id": "any",
+      "value": {
+        "x": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "x": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "x": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "x": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "unknown",
+      "value": null,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "string",
+      "value": null,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": "null",
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "string",
+      "value": true,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": "true",
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "string",
+      "value": 1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": "1",
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "string",
+      "value": "hi",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "hi",
+      "convertThrew": null,
+      "cleaned": "hi",
+      "cleanThrew": null,
+      "defaulted": "hi",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "42",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 42,
+      "convertThrew": null,
+      "cleaned": "42",
+      "cleanThrew": null,
+      "defaulted": "42",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "42.5",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 42.5,
+      "convertThrew": null,
+      "cleaned": "42.5",
+      "cleanThrew": null,
+      "defaulted": "42.5",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": true,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": false,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 0,
+      "convertThrew": null,
+      "cleaned": false,
+      "cleanThrew": null,
+      "defaulted": false,
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": null,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 0,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "true",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": "true",
+      "cleanThrew": null,
+      "defaulted": "true",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "TRUE",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": "TRUE",
+      "cleanThrew": null,
+      "defaulted": "TRUE",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 0,
+      "convertThrew": null,
+      "cleaned": "",
+      "cleanThrew": null,
+      "defaulted": "",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "  7 ",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": 7,
+      "convertThrew": null,
+      "cleaned": "  7 ",
+      "cleanThrew": null,
+      "defaulted": "  7 ",
+      "defaultThrew": null
+    },
+    {
+      "id": "number",
+      "value": "nope",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": "nope",
+      "convertThrew": null,
+      "cleaned": "nope",
+      "cleanThrew": null,
+      "defaulted": "nope",
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": "42.9",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "converted": 42,
+      "convertThrew": null,
+      "cleaned": "42.9",
+      "cleanThrew": null,
+      "defaulted": "42.9",
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": "42",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "converted": 42,
+      "convertThrew": null,
+      "cleaned": "42",
+      "cleanThrew": null,
+      "defaulted": "42",
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": true,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": null,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "converted": 0,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": "-3.2",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "integer"
+          },
+          "message": "must be integer"
+        }
+      ],
+      "converted": -3,
+      "convertThrew": null,
+      "cleaned": "-3.2",
+      "cleanThrew": null,
+      "defaulted": "-3.2",
+      "defaultThrew": null
+    },
+    {
+      "id": "integer",
+      "value": -1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">=",
+            "limit": 0
+          },
+          "message": "must be >= 0"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">=",
+            "limit": 0
+          },
+          "message": "must be >= 0"
+        }
+      ],
+      "converted": -1,
+      "convertThrew": null,
+      "cleaned": -1,
+      "cleanThrew": null,
+      "defaulted": -1,
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": "true",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": "true",
+      "cleanThrew": null,
+      "defaulted": "true",
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": "FALSE",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": false,
+      "convertThrew": null,
+      "cleaned": "FALSE",
+      "cleanThrew": null,
+      "defaulted": "FALSE",
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": 1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": 0,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": false,
+      "convertThrew": null,
+      "cleaned": 0,
+      "cleanThrew": null,
+      "defaulted": 0,
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": null,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": false,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": "1",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": "1",
+      "cleanThrew": null,
+      "defaulted": "1",
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": "0",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": false,
+      "convertThrew": null,
+      "cleaned": "0",
+      "cleanThrew": null,
+      "defaulted": "0",
+      "defaultThrew": null
+    },
+    {
+      "id": "boolean",
+      "value": 2,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "boolean"
+          },
+          "message": "must be boolean"
+        }
+      ],
+      "converted": 2,
+      "convertThrew": null,
+      "cleaned": 2,
+      "cleanThrew": null,
+      "defaulted": 2,
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": "",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": "",
+      "cleanThrew": null,
+      "defaulted": "",
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": 0,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": 0,
+      "cleanThrew": null,
+      "defaulted": 0,
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": false,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": false,
+      "cleanThrew": null,
+      "defaulted": false,
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": "null",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": "null",
+      "cleanThrew": null,
+      "defaulted": "null",
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": "NULL",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": "NULL",
+      "cleanThrew": null,
+      "defaulted": "NULL",
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": "undefined",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": "undefined",
+      "cleanThrew": null,
+      "defaulted": "undefined",
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": "nope",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": "nope",
+      "convertThrew": null,
+      "cleaned": "nope",
+      "cleanThrew": null,
+      "defaulted": "nope",
+      "defaultThrew": null
+    },
+    {
+      "id": "null",
+      "value": 1,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        }
+      ],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "ab",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "ab",
+      "convertThrew": null,
+      "cleaned": "ab",
+      "cleanThrew": null,
+      "defaulted": "ab",
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 characters"
+        },
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 characters"
+        },
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "converted": "",
+      "convertThrew": null,
+      "cleaned": "",
+      "cleanThrew": null,
+      "defaulted": "",
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "abcde",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "maxLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 4
+          },
+          "message": "must not have more than 4 characters"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "maxLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 4
+          },
+          "message": "must not have more than 4 characters"
+        }
+      ],
+      "converted": "abcde",
+      "convertThrew": null,
+      "cleaned": "abcde",
+      "cleanThrew": null,
+      "defaulted": "abcde",
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "A",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "converted": "A",
+      "convertThrew": null,
+      "cleaned": "A",
+      "cleanThrew": null,
+      "defaulted": "A",
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "a\nb",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "converted": "a\nb",
+      "convertThrew": null,
+      "cleaned": "a\nb",
+      "cleanThrew": null,
+      "defaulted": "a\nb",
+      "defaultThrew": null
+    },
+    {
+      "id": "unsafe_enum",
+      "value": "add",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "add",
+      "convertThrew": null,
+      "cleaned": "add",
+      "cleanThrew": null,
+      "defaulted": "add",
+      "defaultThrew": null
+    },
+    {
+      "id": "unsafe_enum",
+      "value": "multiply",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "enum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "allowedValues": [
+              "add",
+              "subtract"
+            ]
+          },
+          "message": "must be equal to one of the allowed values"
+        }
+      ],
+      "converted": "multiply",
+      "convertThrew": null,
+      "cleaned": "multiply",
+      "cleanThrew": null,
+      "defaulted": "multiply",
+      "defaultThrew": null
+    },
+    {
+      "id": "ref_defs",
+      "value": {
+        "value": null
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "value": null
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "value": null
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "value": null
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "ref_defs",
+      "value": {
+        "value": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "value": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "value": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "value": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "ref_defs",
+      "value": {
+        "value": "1"
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0",
+          "instancePath": "/value",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "/value",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "/value",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0",
+          "instancePath": "/value",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "/value",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "/value",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "converted": {
+        "value": "1"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "value": "1"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "value": "1"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "defs_keyword",
+      "value": {
+        "value": "ok"
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "value": "ok"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "value": "ok"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "value": "ok"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "defs_keyword",
+      "value": {
+        "value": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "/value",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "/value",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": {
+        "value": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "value": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "value": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 5,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 5,
+      "convertThrew": null,
+      "cleaned": 5,
+      "cleanThrew": null,
+      "defaulted": 5,
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 0,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "exclusiveMinimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">",
+            "limit": 0
+          },
+          "message": "must be > 0"
+        },
+        {
+          "keyword": "minimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">=",
+            "limit": 1
+          },
+          "message": "must be >= 1"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "exclusiveMinimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">",
+            "limit": 0
+          },
+          "message": "must be > 0"
+        },
+        {
+          "keyword": "minimum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": ">=",
+            "limit": 1
+          },
+          "message": "must be >= 1"
+        }
+      ],
+      "converted": 0,
+      "convertThrew": null,
+      "cleaned": 0,
+      "cleanThrew": null,
+      "defaulted": 0,
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 1,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 11,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "exclusiveMaximum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": "<",
+            "limit": 11
+          },
+          "message": "must be < 11"
+        },
+        {
+          "keyword": "maximum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": "<=",
+            "limit": 10
+          },
+          "message": "must be <= 10"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "exclusiveMaximum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": "<",
+            "limit": 11
+          },
+          "message": "must be < 11"
+        },
+        {
+          "keyword": "maximum",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "comparison": "<=",
+            "limit": 10
+          },
+          "message": "must be <= 10"
+        }
+      ],
+      "converted": 11,
+      "convertThrew": null,
+      "cleaned": 11,
+      "cleanThrew": null,
+      "defaulted": 11,
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 10,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 10,
+      "convertThrew": null,
+      "cleaned": 10,
+      "cleanThrew": null,
+      "defaulted": 10,
+      "defaultThrew": null
+    },
+    {
+      "id": "number_bounds",
+      "value": 2.5,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "multipleOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "multipleOf": 1
+          },
+          "message": "must be multiple of 1"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "multipleOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "multipleOf": 1
+          },
+          "message": "must be multiple of 1"
+        }
+      ],
+      "converted": 2.5,
+      "convertThrew": null,
+      "cleaned": 2.5,
+      "cleanThrew": null,
+      "defaulted": 2.5,
+      "defaultThrew": null
+    },
+    {
+      "id": "array_keywords",
+      "value": [
+        1,
+        2,
+        2
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "uniqueItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "duplicateItems": [
+              2
+            ]
+          },
+          "message": "must not have duplicate items"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "uniqueItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "duplicateItems": [
+              2
+            ]
+          },
+          "message": "must not have duplicate items"
+        }
+      ],
+      "converted": [
+        1,
+        2,
+        2
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        1,
+        2,
+        2
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        1,
+        2,
+        2
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "array_keywords",
+      "value": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "maxItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 3
+          },
+          "message": "must not have more than 3 items"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "maxItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 3
+          },
+          "message": "must not have more than 3 items"
+        }
+      ],
+      "converted": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "array_keywords",
+      "value": [],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 items"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minItems",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 1
+          },
+          "message": "must not have fewer than 1 items"
+        }
+      ],
+      "converted": [],
+      "convertThrew": null,
+      "cleaned": [],
+      "cleanThrew": null,
+      "defaulted": [],
+      "defaultThrew": null
+    },
+    {
+      "id": "array_keywords",
+      "value": [
+        1,
+        "2",
+        3
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/items",
+          "instancePath": "/1",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/items",
+          "instancePath": "/1",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": [
+        1,
+        2,
+        3
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        1,
+        "2",
+        3
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        1,
+        "2",
+        3
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "prefix",
+      "value": [
+        "a",
+        1,
+        true,
+        false
+      ],
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": [
+        "a",
+        1,
+        true,
+        false
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a",
+        1,
+        true,
+        false
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a",
+        1,
+        true,
+        false
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "prefix",
+      "value": [
+        "a"
+      ],
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": [
+        "a"
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        "a"
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        "a"
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "prefix",
+      "value": [
+        1,
+        2
+      ],
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/prefixItems/0",
+          "instancePath": "/0",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/prefixItems/0",
+          "instancePath": "/0",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        }
+      ],
+      "converted": [
+        1,
+        2
+      ],
+      "convertThrew": null,
+      "cleaned": [
+        1,
+        2
+      ],
+      "cleanThrew": null,
+      "defaulted": [
+        1,
+        2
+      ],
+      "defaultThrew": null
+    },
+    {
+      "id": "additional",
+      "value": {
+        "a": "x",
+        "b": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b"
+            ]
+          },
+          "message": "must not have additional properties"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b"
+            ]
+          },
+          "message": "must not have additional properties"
+        }
+      ],
+      "converted": {
+        "a": "x",
+        "b": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "x"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "x",
+        "b": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "additional",
+      "value": {
+        "a": "x"
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "a": "x"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "x"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "x"
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "additional_schema",
+      "value": {
+        "a": "x",
+        "b": "3",
+        "c": true
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/c",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b",
+              "c"
+            ]
+          },
+          "message": "must not have additional properties"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/c",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b",
+              "c"
+            ]
+          },
+          "message": "must not have additional properties"
+        }
+      ],
+      "converted": {
+        "a": "x",
+        "b": 3,
+        "c": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "x"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "x",
+        "b": "3",
+        "c": true
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "pattern_props",
+      "value": {
+        "x-a": "1",
+        "b": 2
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b"
+            ]
+          },
+          "message": "must not have additional properties"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^x-",
+          "instancePath": "/x-a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "boolean",
+          "schemaPath": "#/additionalProperties",
+          "instancePath": "/b",
+          "params": {},
+          "message": "schema is false"
+        },
+        {
+          "keyword": "additionalProperties",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "additionalProperties": [
+              "b"
+            ]
+          },
+          "message": "must not have additional properties"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/patternProperties/^x-",
+          "instancePath": "/x-a",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        }
+      ],
+      "converted": {
+        "x-a": "1",
+        "b": 2
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "x-a": "1",
+        "b": 2
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "x-a": "1",
+        "b": 2
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "pattern_props",
+      "value": {
+        "x-a": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "x-a": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "x-a": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "x-a": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "not_schema",
+      "value": 1,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "not_schema",
+      "value": "a",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "not",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must not be valid"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "not",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must not be valid"
+        }
+      ],
+      "converted": "a",
+      "convertThrew": null,
+      "cleaned": "a",
+      "cleanThrew": null,
+      "defaulted": "a",
+      "defaultThrew": null
+    },
+    {
+      "id": "one_of",
+      "value": "a",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "a",
+      "convertThrew": null,
+      "cleaned": "a",
+      "cleanThrew": null,
+      "defaulted": "a",
+      "defaultThrew": null
+    },
+    {
+      "id": "one_of",
+      "value": 1,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "one_of",
+      "value": true,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/oneOf/0",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/oneOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "oneOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "passingSchemas": []
+          },
+          "message": "must match exactly one schema in oneOf"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/oneOf/0",
+          "instancePath": "",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/oneOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "number"
+          },
+          "message": "must be number"
+        },
+        {
+          "keyword": "oneOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "passingSchemas": []
+          },
+          "message": "must match exactly one schema in oneOf"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "all_of",
+      "value": {
+        "a": "x",
+        "b": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "a": "x",
+        "b": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "x",
+        "b": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "x",
+        "b": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "all_of",
+      "value": {
+        "b": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#/allOf/1",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "a"
+            ]
+          },
+          "message": "must have required properties a"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#/allOf/1",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "a"
+            ]
+          },
+          "message": "must have required properties a"
+        }
+      ],
+      "converted": {
+        "b": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "b": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "b": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "format_email",
+      "value": "a@b.co",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "a@b.co",
+      "convertThrew": null,
+      "cleaned": "a@b.co",
+      "cleanThrew": null,
+      "defaulted": "a@b.co",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_email",
+      "value": "not-an-email",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "email"
+          },
+          "message": "must match format \"email\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "email"
+          },
+          "message": "must match format \"email\""
+        }
+      ],
+      "converted": "not-an-email",
+      "convertThrew": null,
+      "cleaned": "not-an-email",
+      "cleanThrew": null,
+      "defaulted": "not-an-email",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_uuid",
+      "value": "550e8400-e29b-41d4-a716-446655440000",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "550e8400-e29b-41d4-a716-446655440000",
+      "convertThrew": null,
+      "cleaned": "550e8400-e29b-41d4-a716-446655440000",
+      "cleanThrew": null,
+      "defaulted": "550e8400-e29b-41d4-a716-446655440000",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_uuid",
+      "value": "nope",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "uuid"
+          },
+          "message": "must match format \"uuid\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "uuid"
+          },
+          "message": "must match format \"uuid\""
+        }
+      ],
+      "converted": "nope",
+      "convertThrew": null,
+      "cleaned": "nope",
+      "cleanThrew": null,
+      "defaulted": "nope",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_date",
+      "value": "2020-12-12",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "2020-12-12",
+      "convertThrew": null,
+      "cleaned": "2020-12-12",
+      "cleanThrew": null,
+      "defaulted": "2020-12-12",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_date",
+      "value": "2020-13-12",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "date"
+          },
+          "message": "must match format \"date\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "date"
+          },
+          "message": "must match format \"date\""
+        }
+      ],
+      "converted": "2020-13-12",
+      "convertThrew": null,
+      "cleaned": "2020-13-12",
+      "cleanThrew": null,
+      "defaulted": "2020-13-12",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_date_time",
+      "value": "2020-12-12T20:20:40Z",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "2020-12-12T20:20:40Z",
+      "convertThrew": null,
+      "cleaned": "2020-12-12T20:20:40Z",
+      "cleanThrew": null,
+      "defaulted": "2020-12-12T20:20:40Z",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_date_time",
+      "value": "2020-12-12",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "date-time"
+          },
+          "message": "must match format \"date-time\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "date-time"
+          },
+          "message": "must match format \"date-time\""
+        }
+      ],
+      "converted": "2020-12-12",
+      "convertThrew": null,
+      "cleaned": "2020-12-12",
+      "cleanThrew": null,
+      "defaulted": "2020-12-12",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_uri",
+      "value": "https://example.com/a",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "https://example.com/a",
+      "convertThrew": null,
+      "cleaned": "https://example.com/a",
+      "cleanThrew": null,
+      "defaulted": "https://example.com/a",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_uri",
+      "value": "not a uri",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "uri"
+          },
+          "message": "must match format \"uri\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "uri"
+          },
+          "message": "must match format \"uri\""
+        }
+      ],
+      "converted": "not a uri",
+      "convertThrew": null,
+      "cleaned": "not a uri",
+      "cleanThrew": null,
+      "defaulted": "not a uri",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_ipv4",
+      "value": "127.0.0.1",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "127.0.0.1",
+      "convertThrew": null,
+      "cleaned": "127.0.0.1",
+      "cleanThrew": null,
+      "defaulted": "127.0.0.1",
+      "defaultThrew": null
+    },
+    {
+      "id": "format_ipv4",
+      "value": "127.0.0",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "ipv4"
+          },
+          "message": "must match format \"ipv4\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "format",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "format": "ipv4"
+          },
+          "message": "must match format \"ipv4\""
+        }
+      ],
+      "converted": "127.0.0",
+      "convertThrew": null,
+      "cleaned": "127.0.0",
+      "cleanThrew": null,
+      "defaulted": "127.0.0",
+      "defaultThrew": null
+    },
+    {
+      "id": "type_array",
+      "value": "1",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "1",
+      "convertThrew": null,
+      "cleaned": "1",
+      "cleanThrew": null,
+      "defaulted": "1",
+      "defaultThrew": null
+    },
+    {
+      "id": "type_array",
+      "value": 1,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": 1,
+      "convertThrew": null,
+      "cleaned": 1,
+      "cleanThrew": null,
+      "defaulted": 1,
+      "defaultThrew": null
+    },
+    {
+      "id": "type_array",
+      "value": true,
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": [
+              "number",
+              "string"
+            ]
+          },
+          "message": "must be either number or string"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "type": [
+              "number",
+              "string"
+            ]
+          },
+          "message": "must be either number or string"
+        }
+      ],
+      "converted": true,
+      "convertThrew": null,
+      "cleaned": true,
+      "cleanThrew": null,
+      "defaulted": true,
+      "defaultThrew": null
+    },
+    {
+      "id": "with_default",
+      "value": {},
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "a"
+            ]
+          },
+          "message": "must have required properties a"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "required",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "requiredProperties": [
+              "a"
+            ]
+          },
+          "message": "must have required properties a"
+        }
+      ],
+      "converted": {},
+      "convertThrew": null,
+      "cleaned": {},
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "hi",
+        "b": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "with_default",
+      "value": {
+        "a": "z"
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "a": "z"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "a": "z"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "a": "z",
+        "b": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "union_obj",
+      "value": {
+        "nested": "x",
+        "extra": 1
+      },
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": {
+        "nested": "x",
+        "extra": 1
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "nested": "x"
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "nested": "x",
+        "extra": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "union_obj",
+      "value": null,
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": null,
+      "convertThrew": null,
+      "cleaned": null,
+      "cleanThrew": null,
+      "defaulted": null,
+      "defaultThrew": null
+    },
+    {
+      "id": "union_obj",
+      "value": {
+        "nested": 1
+      },
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0/properties/nested",
+          "instancePath": "/nested",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/0/properties/nested",
+          "instancePath": "/nested",
+          "params": {
+            "type": "string"
+          },
+          "message": "must be string"
+        },
+        {
+          "keyword": "type",
+          "schemaPath": "#/anyOf/1",
+          "instancePath": "",
+          "params": {
+            "type": "null"
+          },
+          "message": "must be null"
+        },
+        {
+          "keyword": "anyOf",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {},
+          "message": "must match a schema in anyOf"
+        }
+      ],
+      "converted": {
+        "nested": "1"
+      },
+      "convertThrew": null,
+      "cleaned": {
+        "nested": 1
+      },
+      "cleanThrew": null,
+      "defaulted": {
+        "nested": 1
+      },
+      "defaultThrew": null
+    },
+    {
+      "id": "string",
+      "value": "😀",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "😀",
+      "convertThrew": null,
+      "cleaned": "😀",
+      "cleanThrew": null,
+      "defaulted": "😀",
+      "defaultThrew": null
+    },
+    {
+      "id": "string_constraints",
+      "value": "😀",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "pattern",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "pattern": "^[a-z]+$"
+          },
+          "message": "must match pattern \"^[a-z]+$\""
+        }
+      ],
+      "converted": "😀",
+      "convertThrew": null,
+      "cleaned": "😀",
+      "cleanThrew": null,
+      "defaulted": "😀",
+      "defaultThrew": null
+    },
+    {
+      "id": "length_emoji",
+      "value": "😀",
+      "schemaJson": "{\"type\":\"string\",\"minLength\":2,\"maxLength\":2}",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 characters"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 characters"
+        }
+      ],
+      "converted": "😀",
+      "convertThrew": null,
+      "cleaned": "😀",
+      "cleanThrew": null,
+      "defaulted": "😀",
+      "defaultThrew": null
+    },
+    {
+      "id": "length_ascii",
+      "value": "ab",
+      "schemaJson": "{\"type\":\"string\",\"minLength\":2,\"maxLength\":2}",
+      "check": true,
+      "compileCheck": true,
+      "errors": [],
+      "compileErrors": [],
+      "converted": "ab",
+      "convertThrew": null,
+      "cleaned": "ab",
+      "cleanThrew": null,
+      "defaulted": "ab",
+      "defaultThrew": null
+    },
+    {
+      "id": "length_combining",
+      "value": "é",
+      "schemaJson": "{\"type\":\"string\",\"minLength\":2,\"maxLength\":2}",
+      "check": false,
+      "compileCheck": false,
+      "errors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 characters"
+        }
+      ],
+      "compileErrors": [
+        {
+          "keyword": "minLength",
+          "schemaPath": "#",
+          "instancePath": "",
+          "params": {
+            "limit": 2
+          },
+          "message": "must not have fewer than 2 characters"
+        }
+      ],
+      "converted": "é",
+      "convertThrew": null,
+      "cleaned": "é",
+      "cleanThrew": null,
+      "defaulted": "é",
+      "defaultThrew": null
+    }
+  ]
+}

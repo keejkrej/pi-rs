@@ -1,307 +1,179 @@
-const ESC: char = '\u{1b}';
-const BRACKETED_PASTE_START: &str = "\u{1b}[200~";
-const BRACKETED_PASTE_END: &str = "\u{1b}[201~";
+//! Port of packages/tui/src/stdin-buffer.ts
+//!
+//! StdinBuffer buffers input and emits complete sequences.
+//!
+//! This is necessary because stdin data events can arrive in partial chunks,
+//! especially for escape sequences like mouse events. Without buffering,
+//! partial sequences can be misinterpreted as regular keypresses.
+//!
+//! For example, the mouse SGR sequence `\x1b[<35;20;5m` might arrive as:
+//! - Event 1: `\x1b`
+//! - Event 2: `[<35`
+//! - Event 3: `;20;5m`
+//!
+//! The buffer accumulates these until a complete sequence is detected.
+//! Call the `process()` method to feed input data.
+//!
+//! Based on code from OpenTUI (<https://github.com/anomalyco/opentui>)
+//! MIT License - Copyright (c) 2025 opentui
 
-pub type StdinBufferEventMap = Vec<StdinBufferEvent>;
+#![allow(dead_code, unused_variables)]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StdinBufferEvent {
-    Data(String),
-    Paste(String),
-}
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StdinBufferOptions {
-    pub timeout_ms: u64,
-}
+use pi_js::Unsubscribe;
+use pi_js::time::Timeout;
 
-impl Default for StdinBufferOptions {
-    fn default() -> Self {
-        Self { timeout_ms: 10 }
-    }
-}
+const ESC: &str = "\x1b";
+const DEFAULT_SEQUENCE_TIMEOUT_MS: i64 = 50;
+const DEFAULT_ESCAPE_TIMEOUT_MS: i64 = 10;
+const BRACKETED_PASTE_START: &str = "\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
 
-#[derive(Debug, Clone)]
-pub struct StdinBuffer {
-    buffer: String,
-    paste_mode: bool,
-    paste_buffer: String,
-    pending_kitty_printable_codepoint: Option<u32>,
-    pub options: StdinBufferOptions,
-}
-
-impl Default for StdinBuffer {
-    fn default() -> Self {
-        Self::new(StdinBufferOptions::default())
-    }
-}
-
-impl StdinBuffer {
-    pub fn new(options: StdinBufferOptions) -> Self {
-        Self {
-            buffer: String::new(),
-            paste_mode: false,
-            paste_buffer: String::new(),
-            pending_kitty_printable_codepoint: None,
-            options,
-        }
-    }
-
-    pub fn process(&mut self, data: &str) -> Vec<StdinBufferEvent> {
-        if data.is_empty() && self.buffer.is_empty() {
-            return vec![StdinBufferEvent::Data(String::new())];
-        }
-
-        self.buffer.push_str(data);
-        let (sequences, remainder) = extract_complete_sequences(&self.buffer);
-        self.buffer = remainder;
-
-        let mut events = Vec::new();
-        for sequence in sequences {
-            if self.paste_mode {
-                if let Some(end) = sequence.find(BRACKETED_PASTE_END) {
-                    self.paste_buffer.push_str(&sequence[..end]);
-                    events.push(StdinBufferEvent::Paste(std::mem::take(
-                        &mut self.paste_buffer,
-                    )));
-                    self.paste_mode = false;
-                    self.pending_kitty_printable_codepoint = None;
-                    let after = &sequence[end + BRACKETED_PASTE_END.len()..];
-                    if !after.is_empty() {
-                        events.extend(self.process(after));
-                    }
-                } else {
-                    self.paste_buffer.push_str(&sequence);
-                }
-                continue;
-            }
-
-            if let Some(start) = sequence.find(BRACKETED_PASTE_START) {
-                let before = &sequence[..start];
-                if !before.is_empty() {
-                    events.push(StdinBufferEvent::Data(before.to_string()));
-                }
-                self.paste_mode = true;
-                self.pending_kitty_printable_codepoint = None;
-                let after = &sequence[start + BRACKETED_PASTE_START.len()..];
-                if let Some(end) = after.find(BRACKETED_PASTE_END) {
-                    events.push(StdinBufferEvent::Paste(after[..end].to_string()));
-                    self.paste_mode = false;
-                    self.pending_kitty_printable_codepoint = None;
-                    let rest = &after[end + BRACKETED_PASTE_END.len()..];
-                    if !rest.is_empty() {
-                        events.extend(self.process(rest));
-                    }
-                } else {
-                    self.paste_buffer.push_str(after);
-                }
-            } else if let Some(event) = self.emit_data_sequence(sequence) {
-                events.push(event);
-            }
-        }
-        events
-    }
-
-    fn emit_data_sequence(&mut self, sequence: String) -> Option<StdinBufferEvent> {
-        let raw_codepoint = if sequence.chars().count() == 1 {
-            sequence.chars().next().map(|ch| ch as u32)
-        } else {
-            None
-        };
-        if raw_codepoint.is_some() && raw_codepoint == self.pending_kitty_printable_codepoint {
-            self.pending_kitty_printable_codepoint = None;
-            return None;
-        }
-
-        self.pending_kitty_printable_codepoint =
-            parse_unmodified_kitty_printable_codepoint(&sequence);
-        Some(StdinBufferEvent::Data(sequence))
-    }
-
-    pub fn flush(&mut self) -> Vec<StdinBufferEvent> {
-        if self.buffer.is_empty() {
-            Vec::new()
-        } else {
-            self.pending_kitty_printable_codepoint = None;
-            vec![StdinBufferEvent::Data(std::mem::take(&mut self.buffer))]
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.buffer.clear();
-        self.paste_mode = false;
-        self.paste_buffer.clear();
-        self.pending_kitty_printable_codepoint = None;
-    }
-
-    pub fn get_buffer(&self) -> &str {
-        &self.buffer
-    }
-
-    pub fn destroy(&mut self) {
-        self.clear();
-    }
-}
-
-fn is_complete_sequence(data: &str) -> SequenceStatus {
-    if !data.starts_with(ESC) {
-        return SequenceStatus::NotEscape;
-    }
-    if data.len() == 1 {
-        return SequenceStatus::Incomplete;
-    }
-    let after_esc = &data[1..];
-    if after_esc.starts_with('[') {
-        return is_complete_csi_sequence(data);
-    }
-    if after_esc.starts_with(']') {
-        return if data.ends_with("\u{1b}\\") || data.ends_with('\u{7}') {
-            SequenceStatus::Complete
-        } else {
-            SequenceStatus::Incomplete
-        };
-    }
-    if after_esc.starts_with('P') || after_esc.starts_with('_') {
-        return if data.ends_with("\u{1b}\\") {
-            SequenceStatus::Complete
-        } else {
-            SequenceStatus::Incomplete
-        };
-    }
-    if after_esc.starts_with('O') {
-        return if after_esc.len() >= 2 {
-            SequenceStatus::Complete
-        } else {
-            SequenceStatus::Incomplete
-        };
-    }
-    if after_esc.chars().count() == 1 {
-        SequenceStatus::Complete
-    } else {
-        SequenceStatus::Complete
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SequenceStatus {
     Complete,
     Incomplete,
     NotEscape,
 }
 
+struct ExtractedSequences {
+    sequences: Vec<String>,
+    remainder: String,
+}
+
+/// Check if a string is a complete escape sequence or needs more data.
+fn is_complete_sequence(data: &str) -> SequenceStatus {
+    todo!("port: is_complete_sequence")
+}
+
+/// Check if CSI sequence is complete.
+/// CSI sequences: ESC [ ... followed by a final byte (0x40-0x7E).
 fn is_complete_csi_sequence(data: &str) -> SequenceStatus {
-    if !data.starts_with("\u{1b}[") {
-        return SequenceStatus::Complete;
-    }
-    if data.len() < 3 {
-        return SequenceStatus::Incomplete;
-    }
-    let payload = &data[2..];
-    let Some(last) = payload.chars().last() else {
-        return SequenceStatus::Incomplete;
-    };
-    let code = last as u32;
-    if (0x40..=0x7e).contains(&code) {
-        if payload.starts_with('<') {
-            let body = &payload[1..payload.len().saturating_sub(1)];
-            let valid_mouse = matches!(last, 'M' | 'm')
-                && body.split(';').count() == 3
-                && body
-                    .split(';')
-                    .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
-            return if valid_mouse {
-                SequenceStatus::Complete
-            } else {
-                SequenceStatus::Incomplete
-            };
-        }
-        SequenceStatus::Complete
-    } else {
-        SequenceStatus::Incomplete
-    }
+    todo!("port: is_complete_csi_sequence")
 }
 
-fn parse_unmodified_kitty_printable_codepoint(sequence: &str) -> Option<u32> {
-    let body = sequence.strip_prefix("\u{1b}[")?.strip_suffix('u')?;
-    if body.contains(';') {
-        return None;
-    }
-    let codepoint = body.split(':').next()?.parse::<u32>().ok()?;
-    (codepoint >= 32).then_some(codepoint)
+/// Check if OSC sequence is complete.
+/// OSC sequences: ESC ] ... ST (where ST is ESC \ or BEL).
+fn is_complete_osc_sequence(data: &str) -> SequenceStatus {
+    todo!("port: is_complete_osc_sequence")
 }
 
-fn extract_complete_sequences(buffer: &str) -> (Vec<String>, String) {
-    let mut sequences = Vec::new();
-    let mut pos = 0;
-    while pos < buffer.len() {
-        let remaining = &buffer[pos..];
-        if remaining.starts_with(ESC) {
-            let mut seq_end = 1;
-            let mut completed = false;
-            while seq_end <= remaining.len() {
-                let candidate = &remaining[..seq_end];
-                match is_complete_sequence(candidate) {
-                    SequenceStatus::Complete => {
-                        sequences.push(candidate.to_string());
-                        pos += seq_end;
-                        completed = true;
-                        break;
-                    }
-                    SequenceStatus::Incomplete => seq_end += 1,
-                    SequenceStatus::NotEscape => {
-                        sequences.push(candidate.to_string());
-                        pos += seq_end;
-                        completed = true;
-                        break;
-                    }
-                }
-            }
-            if !completed {
-                return (sequences, remaining.to_string());
-            }
-        } else {
-            let ch = remaining.chars().next().expect("non-empty");
-            sequences.push(ch.to_string());
-            pos += ch.len_utf8();
-        }
-    }
-    (sequences, String::new())
+/// Check if DCS (Device Control String) sequence is complete.
+/// DCS sequences: ESC P ... ST (where ST is ESC \).
+/// Used for XTVersion responses like ESC P >| ... ESC \.
+fn is_complete_dcs_sequence(data: &str) -> SequenceStatus {
+    todo!("port: is_complete_dcs_sequence")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Check if APC (Application Program Command) sequence is complete.
+/// APC sequences: ESC _ ... ST (where ST is ESC \).
+/// Used for Kitty graphics responses like ESC _ G ... ESC \.
+fn is_complete_apc_sequence(data: &str) -> SequenceStatus {
+    todo!("port: is_complete_apc_sequence")
+}
 
-    #[test]
-    fn buffers_split_escape_sequence() {
-        let mut buffer = StdinBuffer::default();
-        assert!(buffer.process("\u{1b}").is_empty());
-        assert_eq!(buffer.get_buffer(), "\u{1b}");
-        assert_eq!(
-            buffer.process("[A"),
-            vec![StdinBufferEvent::Data("\u{1b}[A".into())]
-        );
-        assert_eq!(buffer.get_buffer(), "");
+fn parse_unmodified_kitty_printable_codepoint(sequence: &str) -> Option<i64> {
+    todo!("port: parse_unmodified_kitty_printable_codepoint")
+}
+
+/// Split accumulated buffer into complete sequences.
+fn extract_complete_sequences(buffer: &str) -> ExtractedSequences {
+    todo!("port: extract_complete_sequences")
+}
+
+/// Maximum time to wait for an incomplete sequence such as CSI or mouse (default: 50ms),
+/// and maximum time to wait after a lone ESC before treating it as Escape (default: 10ms).
+/// Increase `escape_timeout` for high-latency Alt+key input (SSH).
+///
+/// `None` on either field means the default. Omitted options are [`StdinBufferOptions::default`].
+#[derive(Clone, Debug, Default)]
+pub struct StdinBufferOptions {
+    pub timeout: Option<i64>,
+    pub escape_timeout: Option<i64>,
+}
+
+/// `string | Buffer` passed to [`StdinBuffer::process`].
+///
+/// PORT: a Node `Buffer` argument is borrowed bytes. The single-byte `> 127` conversion
+/// stays inside `process`.
+pub enum StdinBufferData<'a> {
+    Text(&'a str),
+    Buffer(&'a [u8]),
+}
+
+/// Listener argument lists: `data: [string]`, `paste: [string]`.
+///
+/// PORT: Node `EventEmitter` `on("data" | "paste", cb)` is [`StdinBuffer::on_data`] and
+/// [`StdinBuffer::on_paste`]. Each returns [`Unsubscribe`] (drop does not remove the listener).
+/// The rest of the EventEmitter surface (`once`, `off`, `emit`) is not declared; `destroy`
+/// drops listeners with the buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StdinBufferEventMap {
+    Data(String),
+    Paste(String),
+}
+
+pub type StdinBufferListener = Arc<dyn Fn(&str) + Send + Sync>;
+
+struct StdinBufferState {
+    buffer: String,
+    timeout: Option<Timeout>,
+    paste_mode: bool,
+    paste_buffer: String,
+    pending_kitty_printable_codepoint: Option<i64>,
+    data_listeners: Vec<StdinBufferListener>,
+    paste_listeners: Vec<StdinBufferListener>,
+}
+
+struct StdinBufferInner {
+    timeout_ms: i64,
+    escape_timeout_ms: i64,
+    state: Mutex<StdinBufferState>,
+}
+
+/// Buffers stdin input and emits complete sequences via the 'data' event.
+/// Handles partial escape sequences that arrive across multiple chunks.
+#[derive(Clone)]
+pub struct StdinBuffer {
+    inner: Arc<StdinBufferInner>,
+}
+
+impl StdinBuffer {
+    /// `options` `None` is the TS default `{}`. Numeric defaults are applied inside.
+    pub fn new(options: Option<StdinBufferOptions>) -> Self {
+        todo!("port: StdinBuffer::new")
     }
 
-    #[test]
-    fn drops_duplicate_raw_char_after_kitty_printable() {
-        let mut buffer = StdinBuffer::default();
-        assert_eq!(
-            buffer.process("\u{1b}[64u@"),
-            vec![StdinBufferEvent::Data("\u{1b}[64u".into())]
-        );
+    pub fn on_data(&self, listener: StdinBufferListener) -> Unsubscribe {
+        todo!("port: StdinBuffer::on_data")
     }
 
-    #[test]
-    fn keeps_raw_char_after_modified_kitty_printable() {
-        let mut buffer = StdinBuffer::default();
-        assert_eq!(
-            buffer.process("\u{1b}[64;3u@"),
-            vec![
-                StdinBufferEvent::Data("\u{1b}[64;3u".into()),
-                StdinBufferEvent::Data("@".into())
-            ]
-        );
+    pub fn on_paste(&self, listener: StdinBufferListener) -> Unsubscribe {
+        todo!("port: StdinBuffer::on_paste")
+    }
+
+    pub fn process(&self, data: StdinBufferData<'_>) {
+        todo!("port: StdinBuffer::process")
+    }
+
+    fn emit_data_sequence(&self, sequence: &str) {
+        todo!("port: StdinBuffer::emit_data_sequence")
+    }
+
+    pub fn flush(&self) -> Vec<String> {
+        todo!("port: StdinBuffer::flush")
+    }
+
+    pub fn clear(&self) {
+        todo!("port: StdinBuffer::clear")
+    }
+
+    pub fn get_buffer(&self) -> String {
+        self.inner.state.lock().unwrap().buffer.clone()
+    }
+
+    pub fn destroy(&self) {
+        self.clear();
     }
 }

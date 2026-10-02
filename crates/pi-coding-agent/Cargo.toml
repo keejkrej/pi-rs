@@ -2,31 +2,84 @@
 name = "pi-coding-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Coding agent CLI with read, bash, edit, write tools and session management"
+publish.workspace = true
 
-[[bin]]
-name = "pi"
-path = "src/main.rs"
+[lib]
+doctest = false
+
+[lints]
+workspace = true
 
 [dependencies]
-crossterm.workspace = true
-agent-client-protocol.workspace = true
+pi-js.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
-base64.workspace = true
-clap.workspace = true
 futures.workspace = true
-glob.workspace = true
-regex.workspace = true
+pin-project-lite.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"] }
-tokio-util.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 uuid.workspace = true
-walkdir.workspace = true
-pi-agent = { path = "../pi-agent" }
-pi-ai = { path = "../pi-ai" }
-pi-tui = { path = "../pi-tui" }
-pi-web-ui = { path = "../pi-web-ui" }
+chrono.workspace = true
+url.workspace = true
+pi-telemetry.workspace = true
+pi-chord.workspace = true
+pi-tui.workspace = true
+pi-mcp.workspace = true
+pi-codemode.workspace = true
+pi-ai.workspace = true
+pi-protocol.workspace = true
+pi-agent-core.workspace = true
+pi-client.workspace = true
+pi-server.workspace = true
+pi-durable.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+crossterm.workspace = true
+image.workspace = true
+syntect.workspace = true
+two-face.workspace = true
+ignore.workspace = true
+node-semver.workspace = true
+serde_yaml_ng.workspace = true
+notify.workspace = true
+filetime.workspace = true
+tempfile.workspace = true
+which.workspace = true
+zstd.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+arboard.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+httpdate.workspace = true
+getrandom.workspace = true
+percent-encoding.workspace = true
+form_urlencoded.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+pretty_assertions.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true
