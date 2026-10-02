@@ -1,38 +1,115 @@
 [workspace]
-members = [
-  "crates/pi-agent",
-  "crates/pi-ai",
-  "crates/pi-coding-agent",
-  "crates/pi-tui",
-  "crates/pi-web-ui",
-]
-resolver = "2"
+resolver = "3"
+members = ["crates/*"]
+exclude = ["legacy"]
 
 [workspace.package]
-version = "0.74.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.98"
 license = "MIT"
 authors = ["Mario Zechner"]
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.package."*"]
+opt-level = 1
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
 
 [workspace.dependencies]
-agent-client-protocol = { version = "0.10.4", features = ["unstable", "unstable_auth_methods", "unstable_logout", "unstable_message_id"] }
-anyhow = "1.0.100"
-async-trait = "0.1.89"
-base64 = "0.22.1"
-chrono = { version = "0.4.42", features = ["serde"] }
-clap = { version = "4.5.48", features = ["derive"] }
-crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
-dirs = "6.0.0"
-futures = "0.3.31"
-glob = "0.3.3"
-regex = "1.11.3"
-reqwest = { version = "0.12.23", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-sha2 = "0.10.9"
-tokio = { version = "1.47.1", features = ["full"] }
-tokio-util = { version = "0.7.16", features = ["compat"] }
-uuid = { version = "1.18.1", features = ["serde", "v4"] }
-walkdir = "2.5.0"
-webbrowser = "1.0.6"
-unicode-width = "0.2.0"
+pi-js = { path = "crates/pi-js" }
+pi-telemetry = { path = "crates/pi-telemetry" }
+pi-chord = { path = "crates/pi-chord" }
+pi-tui = { path = "crates/pi-tui" }
+pi-mcp = { path = "crates/pi-mcp" }
+pi-codemode = { path = "crates/pi-codemode" }
+pi-ai = { path = "crates/pi-ai" }
+pi-protocol = { path = "crates/pi-protocol" }
+pi-agent-core = { path = "crates/pi-agent-core" }
+pi-client = { path = "crates/pi-client" }
+pi-server = { path = "crates/pi-server" }
+pi-durable = { path = "crates/pi-durable" }
+pi-coding-agent = { path = "crates/pi-coding-agent" }
+# async
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["codec", "io", "rt"] }
+futures = "0.3.34"
+async-trait = "0.1.92"
+pin-project-lite = "0.2.17"
+bytes = "1.12.1"
+# serialization
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
+indexmap = { version = "2.14.2", features = ["serde"] }
+ryu-js = "1.0.3"
+serde_yaml_ng = "0.10.0"
+# errors
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+# text
+regex = "1.13.1"
+fancy-regex = "0.19.2"
+regress = "0.12.0"
+icu_segmenter = "2.3.0"
+icu_collator = "2.3.1"
+unicode-normalization = "0.1.25"
+# http / net
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset", "stream", "gzip", "brotli", "deflate", "zstd"] }
+rustls = "0.23.45"
+url = "2.5.8"
+form_urlencoded = "1.2.2"
+percent-encoding = "2.3.2"
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1"] }
+http-body-util = "0.1.5"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+httpdate = "1.0.3"
+# cloud
+aws-config = { version = "1.12.0", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1.148.0"
+aws-smithy-types = "1.8.1"
+gcp_auth = "0.12.7"
+# crypto / ids / encoding
+sha2 = "0.11.0"
+base64 = "0.23.1"
+hex = "0.4.3"
+rand = "0.10.3"
+getrandom = "0.4.3"
+uuid = { version = "1.26.1", features = ["v4"] }
+# time
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# compression
+zstd = "0.14.0"
+flate2 = "1.1.10"
+crc32fast = "1.5.2"
+# fs / process / packages
+tempfile = "3.27.0"
+filetime = "0.2.29"
+notify = "8.2.0"
+which = "8.0.6"
+ignore = "0.4.33"
+node-semver = "2.2.0"
+# terminal / media
+crossterm = "0.29.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+# storage / wasm
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+wasmtime = { version = "49.0.1", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+# platform
+nix = { version = "0.31.3", features = ["signal", "process", "term", "fs", "user", "hostname", "feature"] }
+libc = "0.2.189"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSEvent"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
+x11rb = "0.14.0"
+# dev
+pretty_assertions = "1.4.1"
+serial_test = "4.0.1"

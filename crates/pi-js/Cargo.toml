@@ -1,0 +1,62 @@
+[package]
+name = "pi-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+pin-project-lite.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+url.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+form_urlencoded.workspace = true
+percent-encoding.workspace = true
+ryu-js.workspace = true
+regress.workspace = true
+icu_segmenter.workspace = true
+icu_collator.workspace = true
+unicode-normalization.workspace = true
+httpdate.workspace = true
+getrandom.workspace = true
+filetime.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+pretty_assertions.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true

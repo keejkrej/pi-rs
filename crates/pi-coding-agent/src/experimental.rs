@@ -1,0 +1,22 @@
+// @generated-mods begin (scaffold-owned, do not edit)
+pub mod cli;
+pub mod client;
+pub mod client_runtime;
+pub mod client_tui;
+pub mod client_tui_chat;
+pub mod commands;
+pub mod coordinator;
+pub mod coordinator_entry;
+pub mod durable;
+pub mod plugin;
+pub mod plugins;
+pub mod process;
+pub mod radius_auth;
+pub mod radius_relay;
+pub mod server;
+pub mod services;
+pub mod session_catalog;
+pub mod session_worker;
+pub mod session_worker_manager;
+pub mod vacation;
+// @generated-mods end

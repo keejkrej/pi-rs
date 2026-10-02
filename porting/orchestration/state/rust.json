@@ -1,0 +1,5 @@
+{
+  "note": "Foundation progress when the macOS run was stopped (2026-10-02 13:5x). foundDone: port = ported, parity review still needed; all = ported and reviewed.",
+  "foundDone": { "pijs-data": "port", "pijs-jsdiff": "all", "pijs-system": "port", "pijs-net-intl": "port" },
+  "partial": {}
+}
