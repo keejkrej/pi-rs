@@ -1894,7 +1894,7 @@ impl TuiAltScreen {
         let Some(ref on_paste) = self.inner.on_right_click_paste else {
             return false;
         };
-        if !cfg!(windows)
+        if pi_js::env::platform() != "win32"
             || pi_js::env::var("TERM_PROGRAM")
                 .map(|v| v.to_ascii_lowercase())
                 .as_deref()

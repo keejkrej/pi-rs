@@ -525,36 +525,34 @@ impl VirtualTerminalInner {
     fn process_char(&mut self, ch: char) {
         let state = std::mem::replace(&mut self.parse_state, ParseState::Ground);
         match state {
-            ParseState::Ground => {
-                match ch {
-                    '\x1b' => self.parse_state = ParseState::Escape,
-                    '\r' => {
-                        let buf = self.active_mut();
-                        buf.cursor_x = 0;
-                        buf.pending_wrap = false;
-                    }
-                    '\n' | '\x0b' | '\x0c' => {
-                        let record = !self.using_alternate;
-                        self.active_mut().line_feed(record);
-                    }
-                    '\x08' => {
-                        let buf = self.active_mut();
-                        buf.cursor_x = buf.cursor_x.saturating_sub(1);
-                        buf.pending_wrap = false;
-                    }
-                    '\t' => {
-                        let buf = self.active_mut();
-                        let next_tab = ((buf.cursor_x / 8) + 1) * 8;
-                        buf.cursor_x = next_tab.min(buf.cols - 1);
-                        buf.pending_wrap = false;
-                    }
-                    c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
-                    c => {
-                        let record = !self.using_alternate;
-                        self.active_mut().put_char(c, record);
-                    }
+            ParseState::Ground => match ch {
+                '\x1b' => self.parse_state = ParseState::Escape,
+                '\r' => {
+                    let buf = self.active_mut();
+                    buf.cursor_x = 0;
+                    buf.pending_wrap = false;
                 }
-            }
+                '\n' | '\x0b' | '\x0c' => {
+                    let record = !self.using_alternate;
+                    self.active_mut().line_feed(record);
+                }
+                '\x08' => {
+                    let buf = self.active_mut();
+                    buf.cursor_x = buf.cursor_x.saturating_sub(1);
+                    buf.pending_wrap = false;
+                }
+                '\t' => {
+                    let buf = self.active_mut();
+                    let next_tab = ((buf.cursor_x / 8) + 1) * 8;
+                    buf.cursor_x = next_tab.min(buf.cols - 1);
+                    buf.pending_wrap = false;
+                }
+                c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
+                c => {
+                    let record = !self.using_alternate;
+                    self.active_mut().put_char(c, record);
+                }
+            },
             ParseState::Escape => match ch {
                 '[' => self.parse_state = ParseState::Csi(String::new()),
                 ']' => self.parse_state = ParseState::Osc(String::new(), false),
@@ -719,7 +717,11 @@ impl VirtualTerminalInner {
             'A' => {
                 let n = num(0, 1).max(1);
                 let buf = self.active_mut();
-                let limit = if buf.cursor_y >= buf.scroll_top { buf.scroll_top } else { 0 };
+                let limit = if buf.cursor_y >= buf.scroll_top {
+                    buf.scroll_top
+                } else {
+                    0
+                };
                 buf.cursor_y = buf.cursor_y.saturating_sub(n).max(limit);
                 buf.pending_wrap = false;
             }
@@ -874,10 +876,7 @@ impl VirtualTerminalInner {
         while i < tokens.len() {
             let tok = tokens[i];
             if tok.contains(':') {
-                let sub: Vec<u16> = tok
-                    .split(':')
-                    .map(|s| s.parse::<u16>().unwrap_or(0))
-                    .collect();
+                let sub: Vec<u16> = tok.split(':').map(|s| s.parse::<u16>().unwrap_or(0)).collect();
                 match sub.as_slice() {
                     [4, 0, ..] => style.underline = false,
                     [4, _, ..] => style.underline = true,
@@ -895,7 +894,11 @@ impl VirtualTerminalInner {
                 continue;
             }
 
-            let code = if tok.is_empty() { 0 } else { tok.parse::<i64>().unwrap_or(0) };
+            let code = if tok.is_empty() {
+                0
+            } else {
+                tok.parse::<i64>().unwrap_or(0)
+            };
             match code {
                 0 => *style = CellStyle::default(),
                 1 => style.bold = true,
@@ -1027,11 +1030,7 @@ impl VirtualTerminal {
             return Vec::new();
         };
         let buf = g.active();
-        let mut lines: Vec<String> = buf
-            .scrollback
-            .iter()
-            .map(|l| ScreenBuffer::line_to_string(l))
-            .collect();
+        let mut lines: Vec<String> = buf.scrollback.iter().map(|l| ScreenBuffer::line_to_string(l)).collect();
         for l in &buf.lines {
             lines.push(ScreenBuffer::line_to_string(l));
         }
