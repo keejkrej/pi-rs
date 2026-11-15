@@ -89,8 +89,18 @@ fn uses_the_configured_minimum_primary_column_width() {
     );
     let rendered = list.render(80);
 
-    assert_eq!(rendered[0].find("first"), Some(14));
-    assert_eq!(rendered[1].find("second"), Some(14));
+    assert_eq!(
+        rendered[0]
+            .find("first")
+            .map(|b| rendered[0][..b].encode_utf16().count()),
+        Some(14)
+    );
+    assert_eq!(
+        rendered[1]
+            .find("second")
+            .map(|b| rendered[1][..b].encode_utf16().count()),
+        Some(14)
+    );
 }
 
 #[test]

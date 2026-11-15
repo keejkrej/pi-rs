@@ -55,7 +55,7 @@ static unquoted_autocomplete_suffix_regex: LazyLock<fancy_regex::Regex> = LazyLo
 static autocomplete_token_start_source: LazyLock<String> = LazyLock::new(|| {
     let mut pattern = String::new();
     pattern.push_str(autocomplete_boundary_regex.as_str());
-    pattern.push_str("[([{<`]*");
+    pattern.push_str(r"[(\[{<`]*");
     pattern
 });
 

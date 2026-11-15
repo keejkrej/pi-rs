@@ -307,6 +307,7 @@ mod tui_render_scheduling {
         terminal.send_input("first");
         terminal.send_input("second");
         terminal.send_input("typed");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         tokio::task::yield_now().await;
 
         assert_eq!(component.render_count(), render_count_before_input + 1);

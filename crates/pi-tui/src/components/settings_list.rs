@@ -202,12 +202,29 @@ impl SettingsList {
     }
 
     fn render_main_list(&self, width: usize) -> Vec<String> {
-        let (search_enabled, search_input, items_empty, display_items, selected_index, max_visible, theme) = {
+        let (
+            search_enabled,
+            search_input,
+            items_empty,
+            all_items_max_label,
+            display_items,
+            selected_index,
+            max_visible,
+            theme,
+        ) = {
             let fields = self.fields();
+            let max_lbl = fields
+                .items
+                .iter()
+                .map(|item| crate::utils::visible_width(&item.label))
+                .max()
+                .unwrap_or(0)
+                .min(36);
             (
                 fields.search_enabled,
                 fields.search_input.clone(),
                 fields.items.is_empty(),
+                max_lbl,
                 Self::get_display_items_locked(&fields),
                 fields.selected_index,
                 fields.max_visible,
@@ -232,19 +249,10 @@ impl SettingsList {
             return lines;
         }
 
-        let max_label_width = display_items
-            .iter()
-            .map(|item| crate::utils::visible_width(&item.label))
-            .max()
-            .unwrap_or(0)
-            .min(30);
+        let max_label_width = all_items_max_label;
 
         let VisibleRange { start_index, end_index } =
             Self::get_visible_range_for(selected_index, max_visible, display_items.len() as i64);
-
-        if start_index > 0 {
-            lines.push((theme.hint)(&format!("  ↑ {start_index} more")));
-        }
 
         for i in start_index..end_index {
             let item = &display_items[i as usize];
@@ -259,19 +267,29 @@ impl SettingsList {
             let label_text = (theme.label)(&label_padded, is_selected);
 
             let separator = "  ";
-            let used_width = prefix_width + max_label_width + separator.len() as i64;
-            let max_value_width = ((width as i64) - used_width - 2).max(1);
+            let used_width = prefix_width + max_label_width + crate::utils::visible_width(separator);
+            let max_value_width = (width as i64) - used_width - 2;
             let truncated_value =
                 crate::utils::truncate_to_width(&item.current_value, max_value_width, Some(""), Some(false));
             let value_text = (theme.value)(&truncated_value, is_selected);
 
-            lines.push(format!("{prefix}{label_text}{separator}{value_text}"));
+            lines.push(crate::utils::truncate_to_width(
+                &format!("{prefix}{label_text}{separator}{value_text}"),
+                width as i64,
+                None,
+                None,
+            ));
         }
 
         let total_display = display_items.len() as i64;
-        if end_index < total_display {
-            let remaining = total_display - end_index;
-            lines.push((theme.hint)(&format!("  ↓ {remaining} more")));
+        if start_index > 0 || end_index < total_display {
+            let scroll_text = format!("  ({}/{})", selected_index + 1, total_display);
+            lines.push((theme.hint)(&crate::utils::truncate_to_width(
+                &scroll_text,
+                (width as i64) - 2,
+                Some(""),
+                Some(false),
+            )));
         }
 
         if let Some(selected_item) = usize::try_from(selected_index)

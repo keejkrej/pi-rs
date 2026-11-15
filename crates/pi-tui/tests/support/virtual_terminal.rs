@@ -193,8 +193,18 @@ impl ScreenBuffer {
     }
 
     fn line_to_string(line: &[VirtualCell]) -> String {
-        let mut out = String::with_capacity(line.len());
-        for cell in line {
+        // Match xterm.js `translateToString(true)`: trim trailing unwritten/erased cells (`chars.is_empty()`),
+        // while preserving explicitly written trailing space characters.
+        let mut end = line.len();
+        while end > 0 {
+            let cell = &line[end - 1];
+            if cell.width > 0 && !cell.chars.is_empty() {
+                break;
+            }
+            end -= 1;
+        }
+        let mut out = String::with_capacity(end);
+        for cell in &line[..end] {
             if cell.width == 0 {
                 continue;
             }
@@ -203,9 +213,6 @@ impl ScreenBuffer {
             } else {
                 out.push_str(&cell.chars);
             }
-        }
-        while out.ends_with(' ') {
-            out.pop();
         }
         out
     }

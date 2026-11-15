@@ -247,9 +247,7 @@ impl ImplicitDocument {
     }
 
     fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
-        self.screen
-            .upgrade()
-            .and_then(|inner| inner.base.handle_mouse(event))
+        self.screen.upgrade().and_then(|inner| inner.base.handle_mouse(event))
     }
 
     fn invalidate(&self) {
@@ -321,6 +319,7 @@ struct TuiAltScreenState {
 struct TuiAltScreenInner {
     /// PORT: `extends TuiBase` is composition. Overridden hooks are [`TuiBaseOverrides`].
     /// After [`TuiAltScreen::new`], call [`TuiBase::bind_overrides`] (`Weak` inside the base breaks the cycle).
+    self_weak: std::sync::Weak<TuiAltScreenInner>,
     base: TuiBase,
     implicit_document: ComponentHandle,
     implicit_scroll_view: ScrollView,
@@ -429,6 +428,7 @@ impl TuiAltScreen {
                 }
             }));
             TuiAltScreenInner {
+                self_weak: std::sync::Weak::clone(weak),
                 base,
                 implicit_document,
                 implicit_scroll_view,
@@ -479,7 +479,8 @@ impl TuiAltScreen {
         });
 
         let screen = Self { inner };
-        screen.base().bind_overrides(Arc::new(screen.clone()));
+        let overrides: Arc<dyn TuiBaseOverrides> = screen.inner.clone();
+        screen.base().bind_overrides(overrides);
         let input_weak = Arc::downgrade(&screen.inner);
         screen.base().add_input_listener(Arc::new(move |data| {
             input_weak
@@ -641,13 +642,7 @@ impl TuiAltScreen {
 
     /// Copy the active fullscreen text selection, if any, using the configured selection clipboard path.
     pub async fn copy_active_selection_to_clipboard(&self) -> bool {
-        let Some(text) = self.get_active_selection_text() else {
-            return false;
-        };
-        if text.is_empty() {
-            return false;
-        }
-        self.copy_text_to_clipboard(&text).await
+        self.copy_selection_to_clipboard().await
     }
 
     /// The lines of the last rendered frame, one per terminal row, as written to the terminal.
@@ -754,8 +749,9 @@ impl TuiAltScreen {
             ENABLE_ALL_MOTION_MOUSE
         };
         let mouse = if self.inner.mouse_enabled { mouse_sequence } else { "" };
-        self.terminal()
-            .write(&format!("{ENTER_ALT_SCREEN}{DISABLE_AUTOWRAP}{mouse}\x1b[2J\x1b[H\x1b[?25l"));
+        self.terminal().write(&format!(
+            "{ENTER_ALT_SCREEN}{DISABLE_AUTOWRAP}{mouse}\x1b[2J\x1b[H\x1b[?25l"
+        ));
     }
 
     /// PORT: `protected`.
@@ -830,7 +826,9 @@ impl TuiAltScreen {
                 buffer.push_str("\r\x1b[2K");
                 buffer.push_str(line);
             }
-            buffer.push_str(&format!("\x1b[0m{ENABLE_AUTOWRAP}\r\n\x1b[?25h{END_SYNCHRONIZED_OUTPUT}"));
+            buffer.push_str(&format!(
+                "\x1b[0m{ENABLE_AUTOWRAP}\r\n\x1b[?25h{END_SYNCHRONIZED_OUTPUT}"
+            ));
             terminal.write(&buffer);
             self.state().last_document = last_document;
         }
@@ -868,7 +866,9 @@ impl TuiAltScreen {
             if cached_image.is_some() {
                 state.uploaded_kitty_images.shift_remove(&placement.image_id);
             }
-            state.uploaded_kitty_images.insert(placement.image_id, next_cached_image);
+            state
+                .uploaded_kitty_images
+                .insert(placement.image_id, next_cached_image);
             if cached_image.is_some_and(|c| c.transmission_generation == placement.transmission_generation) {
                 lines.push(placement.replacement_line);
             } else {
@@ -1373,9 +1373,13 @@ impl TuiAltScreen {
                 }),
             );
             let overlay = self.base().dispatch_mouse_to_overlay(&event);
-            let result = overlay
-                .result
-                .or_else(|| if overlay.hit { None } else { self.dispatch_mouse_to_layout(&event) });
+            let result = overlay.result.or_else(|| {
+                if overlay.hit {
+                    None
+                } else {
+                    self.dispatch_mouse_to_layout(&event)
+                }
+            });
             if let Some(res) = result {
                 if self.apply_mouse_dispatch_result(&event, &res) {
                     self.request_render(None);
@@ -1718,10 +1722,7 @@ impl TuiAltScreen {
 
         let active_target = {
             let state = self.state();
-            state
-                .mouse_capture
-                .clone()
-                .or_else(|| state.mouse_press_target.clone())
+            state.mouse_capture.clone().or_else(|| state.mouse_press_target.clone())
         };
         if let Some(target) = active_target {
             let (moved_now, match_press_point) = {
@@ -1786,9 +1787,13 @@ impl TuiAltScreen {
             self.stop_scrollbar_hover();
         }
 
-        let result = overlay
-            .result
-            .or_else(|| if overlay.hit { None } else { self.dispatch_mouse_to_layout(&event) });
+        let result = overlay.result.or_else(|| {
+            if overlay.hit {
+                None
+            } else {
+                self.dispatch_mouse_to_layout(&event)
+            }
+        });
         if let Some(res) = result {
             let render = self.apply_mouse_dispatch_result(&event, &res);
             if event_type == crate::tui::TuiMouseEventType::Press {
@@ -2024,8 +2029,8 @@ impl TuiAltScreen {
             state.selection_dragged = false;
         }
         self.set_scrollbar_hover(Some(&target.scroll_view));
-        let on_thumb = event.y >= target.geometry.thumb_top
-            && event.y < target.geometry.thumb_top + target.geometry.thumb_height;
+        let on_thumb =
+            event.y >= target.geometry.thumb_top && event.y < target.geometry.thumb_top + target.geometry.thumb_height;
         let grab_offset = if on_thumb {
             event.y - target.geometry.thumb_top
         } else {
@@ -2055,9 +2060,7 @@ impl TuiAltScreen {
         }
         let rows = self.terminal().rows();
         let visible_top = 0.max(rect.y).max(clip.y);
-        let visible_bottom = (rows - 1)
-            .min(rect.y + rect.height - 1)
-            .min(clip.y + clip.height - 1);
+        let visible_bottom = (rows - 1).min(rect.y + rect.height - 1).min(clip.y + clip.height - 1);
         if visible_bottom < visible_top {
             return None;
         }
@@ -2090,8 +2093,7 @@ impl TuiAltScreen {
     fn get_selection_source_line(&self, point: &SelectionPoint) -> String {
         let state = self.state();
         if let (Some(sv), Some(layout)) = (&point.scroll_view, &state.current_layout) {
-            if let Some(lines) = crate::layout::get_scroll_view_box(layout, sv).and_then(|b| b.scroll_content_lines())
-            {
+            if let Some(lines) = crate::layout::get_scroll_view_box(layout, sv).and_then(|b| b.scroll_content_lines()) {
                 return usize::try_from(point.row)
                     .ok()
                     .and_then(|r| lines.get(r).cloned())
@@ -2257,9 +2259,7 @@ impl TuiAltScreen {
         }
         let rows = self.terminal().rows();
         let visible_top = 0.max(rect.y).max(clip.y);
-        let visible_bottom = (rows - 1)
-            .min(rect.y + rect.height - 1)
-            .min(clip.y + clip.height - 1);
+        let visible_bottom = (rows - 1).min(rect.y + rect.height - 1).min(clip.y + clip.height - 1);
         let direction = if event.y <= visible_top {
             -1
         } else if event.y >= visible_bottom {
@@ -2365,8 +2365,10 @@ impl TuiAltScreen {
                 return;
             };
             self.update_selection_focus(&point);
-            let is_click =
-                !dragged && anchor.scroll_view == point.scroll_view && anchor.row == point.row && anchor.col == point.col;
+            let is_click = !dragged
+                && anchor.scroll_view == point.scroll_view
+                && anchor.row == point.row
+                && anchor.col == point.col;
             let clicked_url = if is_click { pressed_url } else { None };
             if let (Some(url), Some(open_url)) = (clicked_url, self.inner.open_url.as_ref()) {
                 {
@@ -2408,15 +2410,19 @@ impl TuiAltScreen {
                 }
             }
             if self.state().copy_on_select {
-                if self.inner.copy_selection.is_some() {
-                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                        let this = self.clone();
-                        rt.spawn(async move {
-                            let _ = this.copy_selection_to_clipboard().await;
-                        });
+                // Capture selection text synchronously on release before yielding to a spawned task
+                // so rapid subsequent clicks cannot overwrite selection_anchor/focus first.
+                if let Some(text) = self.get_active_selection_text() {
+                    if self.inner.copy_selection.is_some() {
+                        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                            let this = self.clone();
+                            rt.spawn(async move {
+                                let _ = this.copy_text_to_clipboard(&text).await;
+                            });
+                        }
+                    } else {
+                        self.copy_text_osc52(&text);
                     }
-                } else if let Some(text) = self.get_active_selection_text() {
-                    self.copy_text_osc52(&text);
                 }
             }
             self.request_render(None);
@@ -2440,10 +2446,11 @@ impl TuiAltScreen {
 
         self.stop_selection_auto_scroll();
         let scroll_view = if !self.has_overlay() {
-            self.state()
-                .current_layout
-                .as_ref()
-                .and_then(|l| crate::layout::get_scroll_views_at(l, event.x, event.y).into_iter().next())
+            self.state().current_layout.as_ref().and_then(|l| {
+                crate::layout::get_scroll_views_at(l, event.x, event.y)
+                    .into_iter()
+                    .next()
+            })
         } else {
             None
         };
@@ -2463,12 +2470,7 @@ impl TuiAltScreen {
             let terminal = self.terminal();
             let row_idx = 0.max((terminal.rows() - 1).min(event.y)) as usize;
             let col_idx = 0.max((terminal.columns() - 1).min(event.x));
-            let line = self
-                .state()
-                .previous_screen
-                .get(row_idx)
-                .cloned()
-                .unwrap_or_default();
+            let line = self.state().previous_screen.get(row_idx).cloned().unwrap_or_default();
             crate::utils::get_osc8_link_at_column(&line, col_idx)
         };
         {
@@ -2484,7 +2486,12 @@ impl TuiAltScreen {
                 SelectionGranularity::Character
             };
             state.selection_initial_range = range.clone();
-            state.selection_anchor = Some(range.as_ref().map(|r| r.start.clone()).unwrap_or_else(|| anchor.clone()));
+            state.selection_anchor = Some(
+                range
+                    .as_ref()
+                    .map(|r| r.start.clone())
+                    .unwrap_or_else(|| anchor.clone()),
+            );
             state.selection_focus = Some(range.map(|r| r.end).unwrap_or(anchor));
             state.selection_dragged = false;
             state.pressed_url = pressed_url;
@@ -2502,8 +2509,7 @@ impl TuiAltScreen {
         if anchor.row == focus.row && anchor.col == focus.col {
             return None;
         }
-        let anchor_before_focus =
-            anchor.row < focus.row || (anchor.row == focus.row && anchor.col < focus.col);
+        let anchor_before_focus = anchor.row < focus.row || (anchor.row == focus.row && anchor.col < focus.col);
         if anchor_before_focus {
             Some(SelectionRange {
                 start: anchor.clone(),
@@ -2813,9 +2819,7 @@ impl TuiAltScreen {
                 .min(rect.y + rect.height - 1)
                 .min(clip.y + clip.height - 1);
             min_column = 0.max(rect.x).max(clip.x);
-            max_column = max_column
-                .min(rect.x + rect.width)
-                .min(clip.x + clip.width);
+            max_column = max_column.min(rect.x + rect.width).min(clip.x + clip.width);
             let scroll_top = sv.scroll_top();
             screen_selection = SelectionRange {
                 start: SelectionPoint {
@@ -2853,7 +2857,8 @@ impl TuiAltScreen {
                 let before = crate::utils::slice_by_column(line, 0, columns.start, Some(true));
                 let selected =
                     crate::utils::slice_by_column(line, columns.start, columns.end - columns.start, Some(true));
-                let after = crate::utils::slice_by_column(line, columns.end, 0.max(line_width - columns.end), Some(true));
+                let after =
+                    crate::utils::slice_by_column(line, columns.end, 0.max(line_width - columns.end), Some(true));
                 format!("{before}{}{after}", self.apply_selection_highlight(&selected))
             })
             .collect()
@@ -2883,10 +2888,7 @@ impl TuiAltScreen {
             return screen.to_vec();
         }
         let row = clip.y + clip.height - 1;
-        if row < 0
-            || (row as usize) >= screen.len()
-            || crate::terminal_image::is_image_line(&screen[row as usize])
-        {
+        if row < 0 || (row as usize) >= screen.len() || crate::terminal_image::is_image_line(&screen[row as usize]) {
             return screen.to_vec();
         }
         let scrollbar_column = crate::layout::get_scrollbar_geometry(&r#box, None).map(|g| g.column);
@@ -2912,10 +2914,7 @@ impl TuiAltScreen {
     }
 
     fn composite_flashes(&self, screen: &[String], width: i64, height: i64) -> Vec<String> {
-        let all_flash_lines = self
-            .inner
-            .flashes
-            .render(usize::try_from(width.max(0)).unwrap_or(0));
+        let all_flash_lines = self.inner.flashes.render(usize::try_from(width.max(0)).unwrap_or(0));
         let h_usize = usize::try_from(height.max(0)).unwrap_or(0);
         let start = all_flash_lines.len().saturating_sub(h_usize);
         let flash_lines = &all_flash_lines[start..];
@@ -2943,7 +2942,11 @@ impl TuiAltScreen {
     pub(crate) fn do_render(&self) {
         let (stopped, alt_screen_active, layout_root) = {
             let state = self.state();
-            (self.base().stopped(), state.alt_screen_active, state.layout_root.clone())
+            (
+                self.base().stopped(),
+                state.alt_screen_active,
+                state.layout_root.clone(),
+            )
         };
         if stopped || !alt_screen_active {
             return;
@@ -3062,11 +3065,7 @@ impl TuiAltScreen {
             if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
                 continue;
             }
-            let line = prepared_kitty_screen
-                .lines
-                .get(row)
-                .map(String::as_str)
-                .unwrap_or("");
+            let line = prepared_kitty_screen.lines.get(row).map(String::as_str).unwrap_or("");
             if clear_rows_before_kitty_images {
                 buffer.push_str(&format!("\x1b[{};1H{line}", row + 1));
             } else {
@@ -3137,6 +3136,49 @@ impl Component for TuiAltScreen {
 
     fn container_children(&self) -> Option<Vec<ComponentHandle>> {
         Some(self.children())
+    }
+}
+
+impl TuiBaseOverrides for TuiAltScreenInner {
+    fn mode(&self) -> TuiMode {
+        TuiMode::Fullscreen
+    }
+
+    fn do_render(&self) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiAltScreen { inner }.do_render();
+        }
+    }
+
+    fn reset_render_state(&self) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiAltScreen { inner }.reset_render_state();
+        }
+    }
+
+    fn before_terminal_start(&self) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiAltScreen { inner }.before_terminal_start();
+        }
+    }
+
+    fn before_terminal_stop(&self, options: &TuiStopOptions) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiAltScreen { inner }.before_terminal_stop(options);
+        }
+    }
+
+    fn after_terminal_stop(&self, options: &TuiStopOptions) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiAltScreen { inner }.after_terminal_stop(options);
+        }
+    }
+
+    fn get_mounted_roots(&self, _base: &TuiBase) -> Vec<ComponentHandle> {
+        self.self_weak
+            .upgrade()
+            .map(|inner| TuiAltScreen { inner }.get_mounted_roots())
+            .unwrap_or_default()
     }
 }
 

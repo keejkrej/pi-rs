@@ -1135,12 +1135,7 @@ impl TuiBase {
     }
 
     fn overrides(&self) -> Option<Arc<dyn TuiBaseOverrides>> {
-        self.inner
-            .overrides
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(Weak::upgrade)
+        self.inner.overrides.lock().unwrap().as_ref().and_then(Weak::upgrade)
     }
 
     fn lock(&self) -> MutexGuard<'_, TuiBaseState> {
@@ -1148,9 +1143,7 @@ impl TuiBase {
     }
 
     pub fn mode(&self) -> TuiMode {
-        self.overrides()
-            .map(|o| o.mode())
-            .unwrap_or(TuiMode::Regular)
+        self.overrides().map(|o| o.mode()).unwrap_or(TuiMode::Regular)
     }
 
     pub fn children(&self) -> Vec<Arc<dyn Component>> {
@@ -1259,12 +1252,15 @@ impl TuiBase {
         let mut next_focus = component;
 
         let stack = self.lock().overlay_stack.clone();
-        let previous_focused_overlay = previous_focus.as_ref().and_then(|prev| {
-            stack.iter().find(|entry| {
-                let entry_comp = entry.inner.state.lock().unwrap().component.clone();
-                Arc::ptr_eq(&entry_comp, prev) && self.is_overlay_visible(entry)
+        let previous_focused_overlay = previous_focus
+            .as_ref()
+            .and_then(|prev| {
+                stack.iter().find(|entry| {
+                    let entry_comp = entry.inner.state.lock().unwrap().component.clone();
+                    Arc::ptr_eq(&entry_comp, prev) && self.is_overlay_visible(entry)
+                })
             })
-        }).cloned();
+            .cloned();
 
         let next_focus_is_overlay = next_focus.as_ref().is_some_and(|nf| {
             stack.iter().any(|entry| {
@@ -1999,9 +1995,8 @@ impl TuiBase {
                     blocked_by,
                     resume,
                 } => {
-                    let still_blocked_by_focused = current_focused
-                        .as_ref()
-                        .is_some_and(|fc| Arc::ptr_eq(fc, &blocked_by));
+                    let still_blocked_by_focused =
+                        current_focused.as_ref().is_some_and(|fc| Arc::ptr_eq(fc, &blocked_by));
                     if !still_blocked_by_focused {
                         match resume {
                             OverlayBlockedFocusResume::RestoreOverlay => {
@@ -2134,8 +2129,8 @@ impl TuiBase {
     }
 
     fn terminal_color_query_result(&self, query: &PendingTerminalColorQuery) -> TerminalColors {
-        let all_palette = query.palette.len() as i64 == TERMINAL_PALETTE_SIZE
-            && query.palette.iter().all(Option::is_some);
+        let all_palette =
+            query.palette.len() as i64 == TERMINAL_PALETTE_SIZE && query.palette.iter().all(Option::is_some);
         let palette = if all_palette {
             Some(query.palette.iter().filter_map(|c| *c).collect())
         } else {
@@ -2184,10 +2179,7 @@ impl TuiBase {
         if height_px <= 0 || width_px <= 0 {
             return true;
         }
-        crate::terminal_image::set_cell_dimensions(crate::terminal_image::CellDimensions {
-            width_px,
-            height_px,
-        });
+        crate::terminal_image::set_cell_dimensions(crate::terminal_image::CellDimensions { width_px, height_px });
         self.invalidate();
         self.request_render(None);
         true
@@ -2363,12 +2355,8 @@ impl TuiBase {
                     overlay_lines.truncate(mh_usize);
                 }
             }
-            let pos = self.resolve_overlay_layout(
-                options.as_ref(),
-                overlay_lines.len() as i64,
-                term_width,
-                term_height,
-            );
+            let pos =
+                self.resolve_overlay_layout(options.as_ref(), overlay_lines.len() as i64, term_width, term_height);
             entry.inner.state.lock().unwrap().bounds = Some(OverlayBounds {
                 row: pos.row,
                 col: pos.col,
@@ -2451,10 +2439,7 @@ impl TuiBase {
             if let Some(marker_idx) = lines[row].find(CURSOR_MARKER) {
                 let col = crate::utils::visible_width(&lines[row][..marker_idx]);
                 lines[row] = lines[row].replace(CURSOR_MARKER, "");
-                return Some(CursorPosition {
-                    row: row as i64,
-                    col,
-                });
+                return Some(CursorPosition { row: row as i64, col });
             }
         }
         None
@@ -2477,11 +2462,11 @@ impl TuiBase {
         let timer = pi_js::time::set_timeout(delay_ms, move || {
             let result = {
                 let mut state = this_timeout.lock();
-                if let Some(query) = state.pending_terminal_color_queries.iter_mut().find(|q| {
-                    q.deliver
-                        .as_ref()
-                        .is_some_and(|d| Arc::ptr_eq(d, &deliver_id))
-                }) {
+                if let Some(query) = state
+                    .pending_terminal_color_queries
+                    .iter_mut()
+                    .find(|q| q.deliver.as_ref().is_some_and(|d| Arc::ptr_eq(d, &deliver_id)))
+                {
                     query.deliver = on_late_reply.clone();
                     query.timer = None;
                     let all_palette = query.palette.len() as i64 == TERMINAL_PALETTE_SIZE

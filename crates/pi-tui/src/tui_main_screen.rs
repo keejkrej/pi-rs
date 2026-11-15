@@ -207,6 +207,7 @@ struct ChangedRange {
 }
 
 struct TuiMainScreenInner {
+    self_weak: std::sync::Weak<TuiMainScreenInner>,
     base: TuiBase,
     state: Mutex<TuiMainScreenState>,
 }
@@ -225,7 +226,8 @@ impl TuiMainScreen {
     pub fn new(terminal: Arc<dyn Terminal>, show_hardware_cursor: Option<bool>, log_directory: Option<&str>) -> Self {
         let base = TuiBase::new(terminal, show_hardware_cursor, log_directory);
         let screen = Self {
-            inner: Arc::new(TuiMainScreenInner {
+            inner: Arc::new_cyclic(|weak| TuiMainScreenInner {
+                self_weak: std::sync::Weak::clone(weak),
                 base,
                 state: Mutex::new(TuiMainScreenState {
                     previous_lines: Vec::new(),
@@ -239,7 +241,8 @@ impl TuiMainScreen {
                 }),
             }),
         };
-        screen.base().bind_overrides(Arc::new(screen.clone()));
+        let overrides: Arc<dyn TuiBaseOverrides> = screen.inner.clone();
+        screen.base().bind_overrides(overrides);
         screen
     }
 
@@ -544,6 +547,30 @@ impl TuiMainScreen {
     }
 }
 
+impl TuiBaseOverrides for TuiMainScreenInner {
+    fn mode(&self) -> TuiMode {
+        TuiMode::Regular
+    }
+
+    fn do_render(&self) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiMainScreen { inner }.do_render();
+        }
+    }
+
+    fn reset_render_state(&self) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiMainScreen { inner }.reset_render_state();
+        }
+    }
+
+    fn before_terminal_stop(&self, options: &TuiStopOptions) {
+        if let Some(inner) = self.self_weak.upgrade() {
+            TuiMainScreen { inner }.before_terminal_stop(options);
+        }
+    }
+}
+
 impl TuiBaseOverrides for TuiMainScreen {
     fn mode(&self) -> TuiMode {
         TuiMainScreen::mode(self)
@@ -734,7 +761,9 @@ impl TuiBaseOverrides for TuiMainScreen {
         }
 
         // Content shrunk below the working area and no overlays - re-render to clear empty rows
-        if self.get_clear_on_shrink() && (new_lines.len() as i64) < prev_max_lines_rendered && !self.has_overlay_entries()
+        if self.get_clear_on_shrink()
+            && (new_lines.len() as i64) < prev_max_lines_rendered
+            && !self.has_overlay_entries()
         {
             log_redraw(
                 &format!("clearOnShrink (maxLinesRendered={prev_max_lines_rendered})"),
@@ -902,7 +931,9 @@ impl TuiBaseOverrides for TuiMainScreen {
                 let image_start_screen_row = i - viewport_top;
                 if image_start_screen_row < 0 || image_start_screen_row + image_reserved_rows > height {
                     log_redraw(
-                        &format!("kitty image pre-clear would scroll ({image_start_screen_row} + {image_reserved_rows} > {height})"),
+                        &format!(
+                            "kitty image pre-clear would scroll ({image_start_screen_row} + {image_reserved_rows} > {height})"
+                        ),
                         new_lines.len(),
                     );
                     full_render(true, new_lines);
