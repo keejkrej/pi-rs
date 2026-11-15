@@ -215,7 +215,10 @@ impl Execution {
                         Some(CodemodeError {
                             kind: CodemodeErrorKind::Timeout,
                             name: None,
-                            message: format!("Execution timed out after {timeout_ms}ms"),
+                            message: format!(
+                                "Execution timed out after {} ms",
+                                pi_js::json::number_to_string(timeout_ms)
+                            ),
                             stack: None,
                         }),
                         None,
@@ -245,7 +248,7 @@ impl Execution {
                         Some(CodemodeError {
                             kind: CodemodeErrorKind::Sandbox,
                             name: None,
-                            message: error_message(&err),
+                            message: format!("Failed to load QuickJS: {}", error_message(&err)),
                             stack: None,
                         }),
                         None,
@@ -412,8 +415,8 @@ impl Execution {
             .signal
             .as_ref()
             .and_then(|s| s.reason())
+            .filter(|r| r.value.is_none())
             .map(|r| r.message)
-            .filter(|m| !m.is_empty())
             .unwrap_or_else(|| "Execution aborted".to_string());
         self.finish(
             Some(CodemodeError {
@@ -554,7 +557,7 @@ impl Execution {
         };
 
         let Some(tool) = tool else {
-            let err_msg = format!("Unknown {}: {name}", if is_global { "global" } else { "tool" });
+            let err_msg = format!("Unknown {}: \"{name}\"", if is_global { "global" } else { "tool" });
             if let Some(ref rec) = record {
                 lock_unpoisoned(rec).status = CodemodeCallStatus::Error;
             }
@@ -754,50 +757,37 @@ impl CodemodeSandbox {
     pub fn new(options: Option<CodemodeSandboxOptions>) -> pi_js::Result<Self> {
         let options = options.unwrap_or_default();
         let mut globals_by_name = IndexMap::<String, CodemodeTool>::new();
-        let mut namespace_roots = IndexSet::<String>::new();
-        let mut flat_globals = IndexSet::<String>::new();
-
         if let Some(globals) = options.globals {
+            let mut namespaces = IndexSet::<String>::new();
             for global in globals {
-                if globals_by_name.contains_key(&global.name) {
-                    return Err(pi_js::Error::msg(format!("Duplicate global \"{}\"", global.name)));
+                let mut parts = global.name.split('.');
+                let first = parts.next();
+                let second = parts.next();
+                let too_many_parts = parts.next().is_some();
+                let valid_parts = first.is_some_and(is_identifier) && second.is_none_or(is_identifier);
+                let reserved = first.is_some_and(|p| RESERVED_GLOBALS.contains(&p));
+                if too_many_parts || !valid_parts || reserved {
+                    return Err(pi_js::Error::msg(format!("Invalid global name \"{}\"", global.name)));
                 }
-                if let Some((ns, member)) = global.name.split_once('.') {
-                    if !is_identifier(ns) || !is_identifier(member) || member.contains('.') {
-                        return Err(pi_js::Error::msg(format!("Invalid global name \"{}\"", global.name)));
-                    }
-                    if RESERVED_GLOBALS.contains(&ns) {
-                        return Err(pi_js::Error::msg(format!(
-                            "Global name \"{}\" conflicts with reserved built-in \"{}\"",
-                            global.name, ns
-                        )));
-                    }
-                    if flat_globals.contains(ns) {
-                        return Err(pi_js::Error::msg(format!(
-                            "Global \"{}\" conflicts with namespace \"{}\"",
-                            global.name, ns
-                        )));
-                    }
-                    namespace_roots.insert(ns.to_string());
-                } else {
-                    if !is_identifier(&global.name) {
-                        return Err(pi_js::Error::msg(format!("Invalid global name \"{}\"", global.name)));
-                    }
-                    if RESERVED_GLOBALS.contains(&global.name.as_str()) {
-                        return Err(pi_js::Error::msg(format!(
-                            "Global name \"{}\" is reserved",
-                            global.name
-                        )));
-                    }
-                    if namespace_roots.contains(&global.name) {
-                        return Err(pi_js::Error::msg(format!(
-                            "Global \"{}\" conflicts with namespace",
-                            global.name
-                        )));
-                    }
-                    flat_globals.insert(global.name.clone());
+                if globals_by_name.contains_key(&global.name) {
+                    return Err(pi_js::Error::msg(format!(
+                        "Global \"{}\" is already registered",
+                        global.name
+                    )));
+                }
+                if second.is_some()
+                    && let Some(ns) = first
+                {
+                    namespaces.insert(ns.to_string());
                 }
                 globals_by_name.insert(global.name.clone(), global);
+            }
+            for name in namespaces {
+                if globals_by_name.contains_key(&name) {
+                    return Err(pi_js::Error::msg(format!(
+                        "Global \"{name}\" conflicts with the namespace \"{name}\""
+                    )));
+                }
             }
         }
 

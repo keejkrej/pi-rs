@@ -180,31 +180,50 @@ async fn manages_tools_and_validates_globals() {
         .is_err()
     );
 
-    let bad_global = make_tool("123bad", None, |_, _| async move { Ok(None) });
-    assert!(
-        CodemodeSandbox::new(Some(CodemodeSandboxOptions {
+    for bad in [
+        "123bad",
+        "not-valid",
+        "a.b.c",
+        "a.",
+        ".a",
+        "a.not-valid",
+        "tools",
+        "tools.x",
+        "store",
+        "store.x",
+        "load",
+        "console",
+    ] {
+        let bad_global = make_tool(bad, None, |_, _| async move { Ok(None) });
+        let err = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
             globals: Some(vec![bad_global]),
             ..Default::default()
         }))
-        .is_err()
-    );
+        .err()
+        .expect("expected invalid global error");
+        assert_eq!(err.message(), format!("Invalid global name \"{bad}\""), "name={bad}");
+    }
 
-    let reserved_global = make_tool("console", None, |_, _| async move { Ok(None) });
-    assert!(
-        CodemodeSandbox::new(Some(CodemodeSandboxOptions {
-            globals: Some(vec![reserved_global]),
-            ..Default::default()
-        }))
-        .is_err()
-    );
+    let dup_g = make_tool("helper", None, |_, _| async move { Ok(None) });
+    let dup_err = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
+        globals: Some(vec![dup_g.clone(), dup_g]),
+        ..Default::default()
+    }))
+    .err()
+    .expect("expected duplicate global error");
+    assert_eq!(dup_err.message(), "Global \"helper\" is already registered");
 
-    let reserved_ns = make_tool("tools.extra", None, |_, _| async move { Ok(None) });
-    assert!(
-        CodemodeSandbox::new(Some(CodemodeSandboxOptions {
-            globals: Some(vec![reserved_ns]),
-            ..Default::default()
-        }))
-        .is_err()
+    let ns_flat = make_tool("models", None, |_, _| async move { Ok(None) });
+    let ns_member = make_tool("models.list", None, |_, _| async move { Ok(None) });
+    let conflict_err = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
+        globals: Some(vec![ns_flat, ns_member]),
+        ..Default::default()
+    }))
+    .err()
+    .expect("expected namespace conflict");
+    assert_eq!(
+        conflict_err.message(),
+        "Global \"models\" conflicts with the namespace \"models\""
     );
 
     let mut g_spread = make_tool("sumAll", None, |args, _| async move {
@@ -637,5 +656,319 @@ async fn handles_timeouts_aborts_memory_limit_and_close() {
     match pending_sandbox.execute("return 7;", None).await.expect("ok") {
         CodemodeResult::Success { value, .. } => assert_eq!(value, Some(json!(7))),
         other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stack_traces_recursion_non_error_and_bigint_regressions() {
+    let sandbox = CodemodeSandbox::new(None).expect("sandbox");
+
+    let syntax = sandbox
+        .execute("const a = 1;\nconst b = ;\nreturn a", None)
+        .await
+        .expect("execute");
+    match syntax {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            assert_eq!(error.name.as_deref(), Some("SyntaxError"));
+            let stack = error.stack.as_deref().unwrap_or("");
+            assert!(stack.contains("codemode.js:2"), "syntax stack was: {stack}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let runtime = sandbox
+        .execute("const a = 1;\nthrow new TypeError('boom ' + a)", None)
+        .await
+        .expect("execute");
+    match runtime {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            assert_eq!(error.name.as_deref(), Some("TypeError"));
+            assert_eq!(error.message, "boom 1");
+            let stack = error.stack.as_deref().unwrap_or("");
+            assert!(stack.contains("codemode.js:2"), "runtime stack was: {stack}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let v8_stack = sandbox
+        .execute("console.log(new Error('inner'));\nthrow new RangeError('outer')", None)
+        .await
+        .expect("execute");
+    match v8_stack {
+        CodemodeResult::Failure { error, output, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            let stack = error.stack.as_deref().unwrap_or("");
+            let lines: Vec<&str> = stack.lines().collect();
+            assert_eq!(lines.first().copied(), Some("RangeError: outer"), "stack={stack}");
+            assert!(
+                lines
+                    .get(1)
+                    .is_some_and(|l| l.starts_with("    at ") && l.contains("codemode.js:2")),
+                "expected V8 frame at codemode.js:2 in: {stack}"
+            );
+            assert!(!stack.contains("codemode-prelude.js"), "stack leaked prelude: {stack}");
+            let Some(CodemodeOutputItem::Text { text }) = output.first() else {
+                panic!("expected console output item, got: {output:?}");
+            };
+            let out_lines: Vec<&str> = text.lines().collect();
+            assert_eq!(out_lines.first().copied(), Some("Error: inner"), "text={text}");
+            assert!(
+                out_lines
+                    .get(1)
+                    .is_some_and(|l| l.starts_with("    at ") && l.contains("codemode.js:1")),
+                "expected V8 frame at codemode.js:1 in: {text}"
+            );
+            assert!(!text.contains("codemode-prelude.js"), "output leaked prelude: {text}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let non_error = sandbox.execute("throw { code: 7 }", None).await.expect("execute");
+    match non_error {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            assert_eq!(error.message, r#"{"code":7}"#);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let bigint_ret = sandbox.execute("return 10n", None).await.expect("execute");
+    match bigint_ret {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            assert_eq!(error.name.as_deref(), Some("TypeError"));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let recursion = sandbox
+        .execute(
+            r#"
+            let depth = 0;
+            function dive() { depth++; dive(); }
+            try { dive(); } catch (error) { return [error.name, depth > 1000]; }
+            "#,
+            None,
+        )
+        .await
+        .expect("execute");
+    match recursion {
+        CodemodeResult::Success { value, .. } => {
+            assert_eq!(value, Some(json!(["RangeError", true])));
+        }
+        other => panic!("unexpected recursion result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn namespace_suggestions_microtask_timeout_pending_wasm_err_and_escape_hatches() {
+    let echo = make_tool("echo", None, |args, _| async move { Ok(args) });
+    let ns_sandbox = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
+        tools: Some(vec![echo]),
+        globals: Some(vec![
+            make_tool("models.classify", None, |_, _| async move { Ok(None) }),
+            make_tool("models.generateImages", None, |_, _| async move { Ok(None) }),
+        ]),
+        ..Default::default()
+    }))
+    .expect("ns sandbox");
+
+    let missing_member = ns_sandbox
+        .execute("await models.generateImage();", None)
+        .await
+        .expect("execute");
+    match missing_member {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(
+                error.message,
+                "models.generateImage does not exist. Did you mean models.generateImages? Check for a member with \"generateImage\" in models."
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let timeout_res = ns_sandbox
+        .execute(
+            "while (true) await null;",
+            Some(CodemodeExecuteOptions {
+                timeout_ms: Some(120.0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("execute");
+    match timeout_res {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Timeout);
+            assert_eq!(error.message, "Execution timed out after 120 ms");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let abort_ctrl = AbortController::new();
+    abort_ctrl.abort(Some(AbortReason::value(json!("non-error reason"))));
+    let aborted_non_err = ns_sandbox
+        .execute(
+            "return 1;",
+            Some(CodemodeExecuteOptions {
+                signal: Some(abort_ctrl.signal()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("execute");
+    match aborted_non_err {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Aborted);
+            assert_eq!(error.message, "Execution aborted");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let failing_wasm = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
+        wasm: Some(CodemodeWasmInput::Pending(Arc::new(std::sync::Mutex::new(Some(
+            Box::pin(async { Err(pi_js::Error::msg("no wasm")) }),
+        ))))),
+        ..Default::default()
+    }))
+    .expect("sandbox");
+    match failing_wasm.execute("return 1;", None).await.expect("execute") {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Sandbox);
+            assert_eq!(error.message, "Failed to load QuickJS: no wasm");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    // Snapshot isolation: unregistering a tool mid-flight leaves the active execution intact,
+    // while subsequent executions no longer see it.
+    let gate_sandbox = ns_sandbox.clone();
+    let trigger = make_tool("trigger", None, move |_, _| {
+        let gate_sandbox = gate_sandbox.clone();
+        async move {
+            gate_sandbox.unregister_tool("echo");
+            Ok(None)
+        }
+    });
+    ns_sandbox.register_tool(trigger).expect("register trigger");
+    let snapshot_ok = ns_sandbox
+        .execute("await tools.trigger(); return await tools.echo(42);", None)
+        .await
+        .expect("execute");
+    match snapshot_ok {
+        CodemodeResult::Success { value, .. } => assert_eq!(value, Some(json!(42))),
+        other => panic!("unexpected result: {other:?}"),
+    }
+    let missing_after_unreg = ns_sandbox
+        .execute("return typeof tools.echo;", None)
+        .await
+        .expect("execute");
+    match missing_after_unreg {
+        CodemodeResult::Failure { error, .. } => {
+            assert_eq!(error.kind, CodemodeErrorKind::Script);
+            assert!(
+                error.message.contains("tools.echo does not exist"),
+                "msg={}",
+                error.message
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+    // Re-register `echo` for escape hatch check below.
+    ns_sandbox
+        .register_tool(make_tool("echo", None, |args, _| async move { Ok(args) }))
+        .expect("re-register echo");
+
+    let globals_check = ns_sandbox
+        .execute(
+            r#"
+            return [
+                typeof process, typeof require, typeof module, typeof setTimeout, typeof fetch,
+                typeof WebAssembly, typeof std, typeof os, typeof globalThis.constructor,
+            ];
+            "#,
+            None,
+        )
+        .await
+        .expect("execute");
+    match globals_check {
+        CodemodeResult::Success { value, .. } => {
+            assert_eq!(
+                value,
+                Some(json!([
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "undefined",
+                    "function"
+                ]))
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let codegen_check = ns_sandbox
+        .execute(
+            r#"
+            return [
+                eval("typeof process"),
+                new Function("return typeof process")(),
+                tools.echo.constructor("return typeof require")(),
+                (async () => {}).constructor("return typeof setTimeout")() instanceof Promise,
+            ];
+            "#,
+            None,
+        )
+        .await
+        .expect("execute");
+    match codegen_check {
+        CodemodeResult::Success { value, .. } => {
+            assert_eq!(value, Some(json!(["undefined", "undefined", "undefined", true])));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let dyn_import = ns_sandbox
+        .execute(
+            r#"
+            try { await import("node:fs"); return "imported"; }
+            catch (error) { return error.constructor.name; }
+            "#,
+            None,
+        )
+        .await
+        .expect("execute");
+    match dyn_import {
+        CodemodeResult::Success { value, .. } => {
+            assert_ne!(value, Some(json!("imported")));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let frozen_check = ns_sandbox
+        .execute(
+            r#"
+            try { tools.echo = () => 'nope'; } catch {}
+            try { tools.extra = () => 'nope'; } catch {}
+            try { globalThis.tools = null; } catch {}
+            try { console.log = () => 'nope'; } catch {}
+            try { console.extra = () => 'nope'; } catch {}
+            return ["extra" in tools, "extra" in console, Object.isFrozen(tools), Object.isFrozen(console), await tools.echo('still')];
+            "#,
+            None,
+        )
+        .await
+        .expect("execute");
+    match frozen_check {
+        CodemodeResult::Success { value, .. } => {
+            assert_eq!(value, Some(json!([false, false, true, true, "still"])));
+        }
+        other => panic!("unexpected result: {other:?}"),
     }
 }

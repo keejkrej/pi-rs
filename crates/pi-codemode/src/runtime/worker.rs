@@ -8,7 +8,9 @@ use serde_json::{Map, Value};
 
 use crate::runtime::prelude_source::PRELUDE_SOURCE;
 use crate::runtime::protocol::{HostToWorkerMessage, WorkerCallTarget, WorkerData, WorkerToHostMessage};
-use crate::vendor::quickjs_wasi::{JSException, QuickJS, QuickJSOptions, WasiMemory, WasiOptions, WasiOverrides};
+use crate::vendor::quickjs_wasi::{
+    JSException, MAX_STACK_SIZE, QuickJS, QuickJSOptions, WasiMemory, WasiOptions, WasiOverrides,
+};
 
 // PORT: body of a dedicated `std::thread` (PORTING.md §2.6). The TS module is a Node worker
 // entry (`parentPort` / `workerData`) that starts on import. The host spawns the thread;
@@ -40,7 +42,7 @@ fn run_inner(
     let vm = QuickJS::create(QuickJSOptions {
         wasm: data.wasm,
         memory_limit: data.memory_limit_bytes.filter(|v| v.is_finite() && *v > 0.0),
-        max_stack_size: None,
+        max_stack_size: Some(MAX_STACK_SIZE),
         interrupt_handler: Some(Arc::new(move || interrupt_cb_flag.load(Ordering::Acquire) != 0)),
         wasi: Some(discard_output()),
     })?;
@@ -175,8 +177,10 @@ fn run_inner(
     let stalled_fn = api.get_prop("stalled")?;
     api.dispose();
 
-    let wrapped = format!("(async function() {{\n{}\n}})", data.code);
-    let script_fn = match vm.eval_code(&wrapped, Some("script.js"), None) {
+    // The prefix shares the first line with the script so reported line numbers
+    // match the script as written.
+    let wrapped = format!("(async (tools, console) => {{{}\n}})", data.code);
+    let script_fn = match vm.eval_code(&wrapped, Some("codemode.js"), None) {
         Ok(h) => h,
         Err(err) => {
             run_fn.dispose();
@@ -193,7 +197,7 @@ fn run_inner(
                         ok: false,
                         value: None,
                         writes: None,
-                        error: Some(format_script_error_json(jse)),
+                        error: Some(describe_exception(jse)),
                     },
                 );
                 return Ok(());
@@ -310,14 +314,14 @@ fn drain_and_check_stalled(
     Ok(())
 }
 
-fn format_script_error_json(error: &JSException) -> String {
+fn describe_exception(error: &JSException) -> String {
     let head = if error.message().is_empty() {
         error.name().to_string()
     } else {
         format!("{}: {}", error.name(), error.message())
     };
     let stack = match error.stack() {
-        Some(frames) if !frames.trim().is_empty() => format!("{head}\n{}", frames.trim_end()),
+        Some(frames) if !frames.trim_end().is_empty() => format!("{head}\n{}", frames.trim_end()),
         _ => head,
     };
     let mut obj = Map::new();
@@ -329,7 +333,11 @@ fn format_script_error_json(error: &JSException) -> String {
 
 fn map_js_exception(err: pi_js::Error) -> pi_js::Error {
     if let Some(jse) = err.downcast_ref::<JSException>() {
-        pi_js::Error::msg(describe_exception(jse))
+        let msg = match jse.stack() {
+            Some(stack) if !stack.trim_end().is_empty() => format!("{}\n{}", jse.message(), stack.trim_end()),
+            _ => jse.message().to_string(),
+        };
+        pi_js::Error::js(jse.name(), msg)
     } else {
         err
     }
@@ -343,7 +351,7 @@ fn crash(outgoing: &Sender<WorkerToHostMessage>, error: &pi_js::Error) {
     post(
         outgoing,
         WorkerToHostMessage::Crash {
-            message: error.message().to_string(),
+            message: format!("{}: {}", error.name(), error.message()),
         },
     );
 }
@@ -368,11 +376,4 @@ fn discard_output() -> WasiOptions {
             },
         )),
     })
-}
-
-fn describe_exception(error: &JSException) -> String {
-    match error.stack() {
-        Some(stack) if !stack.is_empty() => format!("{}: {}\n{stack}", error.name(), error.message()),
-        _ => format!("{}: {}", error.name(), error.message()),
-    }
 }

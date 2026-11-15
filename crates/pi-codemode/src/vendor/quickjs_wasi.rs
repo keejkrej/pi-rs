@@ -411,7 +411,8 @@ struct QuickJSInner {
     id: usize,
     disposed: AtomicBool,
     store: Mutex<Option<Store<HostState>>>,
-    exports: WasmExports,
+    exports: Option<WasmExports>,
+    pending_frees: Mutex<Vec<i32>>,
     host_callbacks: Mutex<IndexMap<String, HostFunction>>,
     next_internal_id: AtomicUsize,
     interrupt_handler: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
@@ -440,6 +441,28 @@ impl Drop for QuickJSInner {
     fn drop(&mut self) {
         self.disposed.store(true, Ordering::Release);
         *self.store.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+enum ActiveDispatch<F, R> {
+    Ran(pi_js::Result<R>),
+    NotActive(F),
+}
+
+fn flush_pending_frees(
+    pending_frees: &Mutex<Vec<i32>>,
+    exports: &WasmExports,
+    ctx: &mut StoreContextMut<'_, HostState>,
+) {
+    let pending = {
+        let mut guard = pending_frees.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *guard)
+    };
+    for ptr in pending {
+        let _ = exports.qjs_free_value.call(&mut *ctx, ptr);
     }
 }
 
@@ -1065,14 +1088,12 @@ impl QuickJS {
                 }
             });
 
-            // Only reachable when instantiation + export binding failed (we check `init_err` below).
-            let exports = exports.unwrap_or_else(|| panic!("QuickJS WASM export binding checked via init_err"));
-
             QuickJSInner {
                 id: vm_id,
                 disposed: AtomicBool::new(false),
                 store: Mutex::new(Some(store)),
                 exports,
+                pending_frees: Mutex::new(Vec::new()),
                 host_callbacks: Mutex::new(IndexMap::new()),
                 next_internal_id: AtomicUsize::new(1),
                 interrupt_handler: Mutex::new(options.interrupt_handler),
@@ -1177,8 +1198,17 @@ impl QuickJS {
         if let Ok(mut guard) = self.inner.store.lock()
             && let Some(mut store) = guard.take()
         {
-            let _ = self.inner.exports.qjs_destroy.call(&mut store, ());
+            if let Some(exports) = self.inner.exports.as_ref() {
+                let mut ctx = store.as_ctx_mut();
+                flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+                let _ = exports.qjs_destroy.call(&mut store, ());
+            }
         }
+        self.inner
+            .pending_frees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     fn assert_not_disposed(&self) -> pi_js::Result<()> {
@@ -1189,11 +1219,10 @@ impl QuickJS {
         }
     }
 
-    fn with_site<R>(
-        &self,
-        f: impl FnOnce(&WasmExports, StoreContextMut<'_, HostState>) -> pi_js::Result<R>,
-    ) -> pi_js::Result<R> {
-        self.assert_not_disposed()?;
+    fn with_active_site<F, R>(&self, exports: &WasmExports, f: F) -> ActiveDispatch<F, R>
+    where
+        F: FnOnce(&WasmExports, StoreContextMut<'_, HostState>) -> pi_js::Result<R>,
+    {
         let active = ACTIVE_SITE.with(|cell| match cell.get() {
             Some((id, ptr)) if id == self.inner.id => {
                 cell.set(None);
@@ -1201,19 +1230,82 @@ impl QuickJS {
             }
             _ => None,
         });
-        if let Some((id, mut ptr)) = active {
-            let _restore = SiteResetGuard(Some((id, ptr)));
-            // SAFETY: `ptr` was installed for a live `Caller` stack frame on this thread above us.
-            // Taking it out of `ACTIVE_SITE` guarantees unique `&mut` access during `f`.
-            let site = unsafe { ptr.as_mut() };
-            return f(&self.inner.exports, site.as_ctx_mut());
-        }
+        let Some((id, mut ptr)) = active else {
+            return ActiveDispatch::NotActive(f);
+        };
+        let _restore = SiteResetGuard(Some((id, ptr)));
+        // SAFETY: `ptr` was installed for a live `Caller` stack frame on this thread above us.
+        // Taking it out of `ACTIVE_SITE` guarantees unique `&mut` access during `f`.
+        let site = unsafe { ptr.as_mut() };
+        let mut ctx = site.as_ctx_mut();
+        flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+        ActiveDispatch::Ran(f(exports, ctx))
+    }
+
+    fn with_site<R>(
+        &self,
+        f: impl FnOnce(&WasmExports, StoreContextMut<'_, HostState>) -> pi_js::Result<R>,
+    ) -> pi_js::Result<R> {
+        self.assert_not_disposed()?;
+        let exports = self
+            .inner
+            .exports
+            .as_ref()
+            .ok_or_else(|| pi_js::Error::msg("QuickJS VM failed to initialize exports"))?;
+        let f = match self.with_active_site(exports, f) {
+            ActiveDispatch::Ran(res) => return res,
+            ActiveDispatch::NotActive(f) => f,
+        };
 
         let mut guard = self.inner.store.lock().unwrap_or_else(|e| e.into_inner());
         let Some(store) = guard.as_mut() else {
             return Err(pi_js::Error::msg("QuickJS VM has been disposed"));
         };
-        f(&self.inner.exports, store.as_ctx_mut())
+        let mut ctx = store.as_ctx_mut();
+        flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+        f(exports, ctx)
+    }
+
+    /// Free a QuickJS value pointer without ever blocking on `store.lock()`.
+    ///
+    /// `JSValueHandleInner::drop` can fire reentrantly inside `with_site` or concurrently
+    /// while another thread holds `store`. If we cannot lock `store` immediately (and are
+    /// not inside an active host-callback site), defer `ptr` until the next VM access.
+    fn free_value_ptr(&self, ptr: i32) {
+        if self.is_disposed() {
+            return;
+        }
+        let Some(exports) = self.inner.exports.as_ref() else {
+            return;
+        };
+        let free_fn = |exp: &WasmExports, mut ctx: StoreContextMut<'_, HostState>| {
+            let _ = exp.qjs_free_value.call(&mut ctx, ptr);
+            Ok(())
+        };
+        match self.with_active_site(exports, free_fn) {
+            ActiveDispatch::Ran(_) => return,
+            ActiveDispatch::NotActive(_) => {}
+        }
+
+        let mut guard = match self.inner.store.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if !self.is_disposed() {
+                    self.inner
+                        .pending_frees
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(ptr);
+                }
+                return;
+            }
+        };
+        if let Some(store) = guard.as_mut() {
+            let mut ctx = store.as_ctx_mut();
+            flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+            let _ = exports.qjs_free_value.call(&mut ctx, ptr);
+        }
     }
 
     fn with_memory_read<R>(&self, ptr: u32, len: usize, f: impl FnOnce(&[u8]) -> R) -> pi_js::Result<R> {
@@ -2579,11 +2671,7 @@ impl JSValueHandleInner {
             cb();
         }
         if !self.vm.is_disposed() {
-            let ptr = self.ptr;
-            let _ = self.vm.with_site(|exports, mut ctx| {
-                let _ = exports.qjs_free_value.call(&mut ctx, ptr);
-                Ok(())
-            });
+            self.vm.free_value_ptr(self.ptr);
         }
     }
 }
@@ -3339,5 +3427,19 @@ mod tests {
         assert_eq!(j.to_json_value().unwrap(), json!({"a": [1, true, "x", null]}));
         j.dispose();
         vm.dispose();
+    }
+
+    #[test]
+    fn invalid_or_empty_wasm_returns_err_without_panic() {
+        let empty_module = crate::wasm::CodemodeWasmModule::from_bytes(b"\0asm\x01\0\0\0").unwrap();
+        let err = QuickJS::create(QuickJSOptions {
+            wasm: empty_module,
+            memory_limit: None,
+            max_stack_size: None,
+            interrupt_handler: None,
+            wasi: None,
+        })
+        .unwrap_err();
+        assert!(!err.message().is_empty());
     }
 }
