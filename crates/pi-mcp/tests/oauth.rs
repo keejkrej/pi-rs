@@ -962,3 +962,17 @@ async fn renders_pages_through_render_page() {
     assert_eq!(pending_res.unwrap().code, "abc");
     callback.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn rejects_invalid_and_non_hierarchical_discovery_urls_with_type_error() {
+    let invalid = pi_mcp::oauth::build_authorization_server_discovery_urls("not a url").unwrap_err();
+    assert_eq!(invalid.name(), "TypeError");
+
+    let opaque = pi_mcp::oauth::build_authorization_server_discovery_urls("urn:example:issuer").unwrap_err();
+    assert_eq!(opaque.name(), "TypeError");
+
+    let info_err = pi_mcp::oauth::discover_oauth_server_info("urn:example:server", None)
+        .await
+        .unwrap_err();
+    assert_eq!(info_err.name(), "TypeError");
+}

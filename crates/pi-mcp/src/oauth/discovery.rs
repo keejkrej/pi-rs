@@ -152,20 +152,21 @@ pub async fn discover_protected_resource_metadata(
 
 pub fn build_authorization_server_discovery_urls(
     authorization_server_url: &str,
-) -> Vec<AuthorizationServerDiscoveryUrl> {
-    let issuer = url::Url::parse(authorization_server_url).expect("invalid authorization server URL");
+) -> Result<Vec<AuthorizationServerDiscoveryUrl>> {
+    let issuer =
+        url::Url::parse(authorization_server_url).map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
     let path = path_suffix(issuer.path());
     let mut urls = vec![
         AuthorizationServerDiscoveryUrl {
             url: issuer
                 .join(&format!("/.well-known/oauth-authorization-server{path}"))
-                .expect("valid discovery url"),
+                .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?,
             r#type: AuthorizationServerDiscoveryType::Oauth,
         },
         AuthorizationServerDiscoveryUrl {
             url: issuer
                 .join(&format!("/.well-known/openid-configuration{path}"))
-                .expect("valid discovery url"),
+                .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?,
             r#type: AuthorizationServerDiscoveryType::Oidc,
         },
     ];
@@ -173,11 +174,11 @@ pub fn build_authorization_server_discovery_urls(
         urls.push(AuthorizationServerDiscoveryUrl {
             url: issuer
                 .join(&format!("{path}/.well-known/openid-configuration"))
-                .expect("valid discovery url"),
+                .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?,
             r#type: AuthorizationServerDiscoveryType::Oidc,
         });
     }
-    urls
+    Ok(urls)
 }
 
 pub async fn discover_authorization_server_metadata(
@@ -188,7 +189,7 @@ pub async fn discover_authorization_server_metadata(
     let fetch = options.fetch.unwrap_or_else(default_fetch);
     let version = options.protocol_version.as_deref().unwrap_or(LATEST_PROTOCOL_VERSION);
 
-    for entry in build_authorization_server_discovery_urls(authorization_server_url) {
+    for entry in build_authorization_server_discovery_urls(authorization_server_url)? {
         let response = fetch_metadata(&entry.url, &fetch, version).await?;
         if !response.ok() {
             let status = response.status();
@@ -261,17 +262,18 @@ pub async fn discover_oauth_server_info(
         });
     }
 
-    let authorization_server_url = resource_metadata
+    let authorization_server_url = match resource_metadata
         .as_ref()
         .and_then(|m| m.authorization_servers.as_ref())
         .and_then(|servers| servers.first())
         .cloned()
-        .unwrap_or_else(|| {
-            url::Url::parse(server_url)
-                .and_then(|u| u.join("/"))
-                .map(|u| u.to_string())
-                .unwrap_or_default()
-        });
+    {
+        Some(url) => url,
+        None => url::Url::parse(server_url)
+            .and_then(|u| u.join("/"))
+            .map(|u| u.to_string())
+            .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?,
+    };
 
     let authorization_server_metadata = discover_authorization_server_metadata(
         &authorization_server_url,

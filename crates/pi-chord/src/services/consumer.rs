@@ -104,20 +104,20 @@ impl SharedPromise {
         if let std::task::Poll::Ready(res) = future.as_mut().poll(&mut cx) {
             return Self::resolved(res);
         }
-        let (tx, rx) = tokio::sync::watch::channel(None);
-        let task = async move {
-            let res = future.await.map_err(Arc::new);
-            let _ = tx.send(Some(res));
-        };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(task);
-        } else {
-            std::thread::spawn(move || {
-                futures::executor::block_on(task);
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            handle.spawn(async move {
+                let res = future.await.map_err(Arc::new);
+                let _ = tx.send(Some(res));
             });
-        }
-        Self {
-            inner: Arc::new(SharedPromiseInner { rx }),
+            Self {
+                inner: Arc::new(SharedPromiseInner { rx }),
+            }
+        } else {
+            Self::resolved(Err(pi_js::Error::js(
+                "Error",
+                "Async consumer operation returned a pending future outside a Tokio runtime",
+            )))
         }
     }
 
@@ -1238,15 +1238,26 @@ impl RemoteServiceBindingImpl {
                     };
                     if let Some(binding) = removed {
                         let report_error = Arc::clone(&inner.report_error);
-                        let task = async move {
-                            if let Err(err) = binding.close(BACKGROUND_CONTEXT.clone()).await {
-                                report_error(err);
+                        let mut fut: pi_js::BoxFuture<pi_js::Result<()>> =
+                            Box::pin(async move { binding.close(BACKGROUND_CONTEXT.clone()).await });
+                        let waker = futures::task::noop_waker_ref();
+                        let mut cx = std::task::Context::from_waker(waker);
+                        match fut.as_mut().poll(&mut cx) {
+                            std::task::Poll::Ready(Ok(())) => {}
+                            std::task::Poll::Ready(Err(err)) => report_error(err),
+                            std::task::Poll::Pending => {
+                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                    handle.spawn(async move {
+                                        if let Err(err) = fut.await {
+                                            report_error(err);
+                                        }
+                                    });
+                                } else {
+                                    report_error(pi_js::Error::msg(
+                                        "KeyedBinding close returned a pending future outside a Tokio runtime",
+                                    ));
+                                }
                             }
-                        };
-                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                            handle.spawn(task);
-                        } else {
-                            std::thread::spawn(move || futures::executor::block_on(task));
                         }
                     }
                 });

@@ -127,9 +127,9 @@ impl RemoteServiceEndpoint {
                                             let _ = fut.await;
                                         });
                                     } else {
-                                        std::thread::spawn(move || {
-                                            let _ = futures::executor::block_on(fut);
-                                        });
+                                        pi_js::console::error(
+                                            "RemoteServiceEndpoint publisher returned a pending future outside a Tokio runtime",
+                                        );
                                     }
                                 }
                             })?;

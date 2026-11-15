@@ -228,24 +228,30 @@ fn is_resource_template(template: &Map<String, Value>) -> bool {
     template.get("uriTemplate").is_some_and(Value::is_string) && template.get("name").is_none_or(Value::is_string)
 }
 
-fn to_resource(item: &Map<String, Value>) -> Resource {
+fn to_resource(item: &Map<String, Value>) -> Result<Resource> {
     let mut map = item.clone();
     if matches!(map.get("name"), None | Some(Value::Null))
         && let Some(uri) = map.get("uri").cloned()
     {
         map.insert("name".to_string(), uri);
     }
-    serde_json::from_value(Value::Object(map)).expect("validated resource shape")
+    serde_json::from_value(Value::Object(map))
+        .map_err(|_| Error::typed("McpError", invalid("Invalid entry in MCP resources/list result")))
 }
 
-fn to_resource_template(item: &Map<String, Value>) -> ResourceTemplate {
+fn to_resource_template(item: &Map<String, Value>) -> Result<ResourceTemplate> {
     let mut map = item.clone();
     if matches!(map.get("name"), None | Some(Value::Null))
         && let Some(uri_template) = map.get("uriTemplate").cloned()
     {
         map.insert("name".to_string(), uri_template);
     }
-    serde_json::from_value(Value::Object(map)).expect("validated resource template shape")
+    serde_json::from_value(Value::Object(map)).map_err(|_| {
+        Error::typed(
+            "McpError",
+            invalid("Invalid entry in MCP resources/templates/list result"),
+        )
+    })
 }
 
 fn page_cursor(page: &ListPage) -> Option<String> {
@@ -610,7 +616,7 @@ impl McpClient {
         let items = self
             .list_all("resources/list", "resources", &is_resource, options.unwrap_or_default())
             .await?;
-        Ok(items.iter().map(to_resource).collect())
+        items.iter().map(to_resource).collect()
     }
 
     /// One page of resources, starting at `cursor`.
@@ -629,7 +635,7 @@ impl McpClient {
             )
             .await?;
         Ok(ListResourcesResult {
-            resources: page.items.iter().map(to_resource).collect(),
+            resources: page.items.iter().map(to_resource).collect::<Result<Vec<_>>>()?,
             next_cursor: page_cursor(&page),
             meta: None,
         })
@@ -645,7 +651,7 @@ impl McpClient {
                 options.unwrap_or_default(),
             )
             .await?;
-        Ok(items.iter().map(to_resource_template).collect())
+        items.iter().map(to_resource_template).collect()
     }
 
     /// One page of resource templates, starting at `cursor`.
@@ -664,7 +670,11 @@ impl McpClient {
             )
             .await?;
         Ok(ListResourceTemplatesResult {
-            resource_templates: page.items.iter().map(to_resource_template).collect(),
+            resource_templates: page
+                .items
+                .iter()
+                .map(to_resource_template)
+                .collect::<Result<Vec<_>>>()?,
             next_cursor: page_cursor(&page),
             meta: None,
         })

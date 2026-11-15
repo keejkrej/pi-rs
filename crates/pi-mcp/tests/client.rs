@@ -701,3 +701,26 @@ async fn answers_roots_list_and_dispatches_notifications() {
     assert_eq!(changed.calls(), vec![None]);
     client.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn rejects_malformed_optional_fields_in_resources_without_panicking() {
+    let (client, server) = connect().await;
+    server.set_handler("resources/list", |_| {
+        Box::pin(async {
+            Ok(json!({
+                "resources": [{ "uri": "file:///bad", "title": 123 }]
+            }))
+        })
+    });
+    server.set_handler("resources/templates/list", |_| {
+        Box::pin(async {
+            Ok(json!({
+                "resourceTemplates": [{ "uriTemplate": "repo://{owner}", "mimeType": false }]
+            }))
+        })
+    });
+
+    assert!(client.list_resources(None).await.is_err());
+    assert!(client.list_resource_templates(None).await.is_err());
+    client.close().await.unwrap();
+}

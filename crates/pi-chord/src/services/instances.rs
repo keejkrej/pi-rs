@@ -409,17 +409,18 @@ impl<TEntry: InstanceEntry> InstanceDirectory<TEntry> {
                 }
             }
             None => {
-                let task = async move {
-                    if let Err(error) = future.await {
-                        if !context.abort_signal().is_some_and(|signal| signal.aborted()) {
-                            report_error(error);
-                        }
-                    }
-                };
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(task);
+                    handle.spawn(async move {
+                        if let Err(error) = future.await {
+                            if !context.abort_signal().is_some_and(|signal| signal.aborted()) {
+                                report_error(error);
+                            }
+                        }
+                    });
                 } else {
-                    std::thread::spawn(move || futures::executor::block_on(task));
+                    report_error(pi_js::Error::msg(
+                        "Keyed service observer returned a pending future outside a Tokio runtime",
+                    ));
                 }
             }
         }

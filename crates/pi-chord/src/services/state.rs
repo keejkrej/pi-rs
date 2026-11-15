@@ -143,23 +143,22 @@ impl<T: Send + Sync + 'static> StateSubscriber<T> {
                 std::task::Poll::Ready(Ok(())) => {}
                 std::task::Poll::Ready(Err(error)) => self.report(error),
                 std::task::Poll::Pending => {
-                    // Leave `running = true` until the spawned future completes and calls `resume()`.
-                    running_guard.armed = false;
-                    let subscriber = self.clone();
-                    let task = async move {
-                        if let Err(error) = fut.await {
-                            subscriber.report(error);
-                        }
-                        subscriber.resume();
-                    };
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        // Leave `running = true` until the spawned future completes and calls `resume()`.
+                        running_guard.armed = false;
+                        let subscriber = self.clone();
+                        let task = async move {
+                            if let Err(error) = fut.await {
+                                subscriber.report(error);
+                            }
+                            subscriber.resume();
+                        };
                         handle.spawn(task);
-                    } else {
-                        std::thread::spawn(move || {
-                            futures::executor::block_on(task);
-                        });
+                        return;
                     }
-                    return;
+                    self.report(pi_js::Error::msg(
+                        "ReplicatedState subscriber returned a pending future outside a Tokio runtime",
+                    ));
                 }
             }
         }
