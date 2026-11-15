@@ -120,7 +120,7 @@ fn renders_hint_line_when_empty_and_search_is_enabled() {
     );
     let rendered = searchable.render(80);
     assert!(rendered.iter().any(|line| line.contains("No settings available")));
-    assert!(rendered.iter().any(|line| line.contains("Type to filter")));
+    assert!(rendered.iter().any(|line| line.contains("Type to search")));
 
     let non_searchable = SettingsList::new(Vec::new(), 10, test_theme(), Arc::new(|_, _| {}), Arc::new(|| {}), None);
     let plain = non_searchable.render(80);

@@ -757,7 +757,7 @@ fn stops_kitty_reverse_scan_at_non_empty_content_line_above_scroll_top() {
         width_px: 100,
         height_px: 100,
     });
-    let scroll_view = ScrollView::new(
+    let scroll_view = Arc::new(ScrollView::new(
         CustomComponent::new(move |_| {
             vec![
                 image_line.clone(),
@@ -768,9 +768,10 @@ fn stops_kitty_reverse_scan_at_non_empty_content_line_above_scroll_top() {
             ]
         }),
         None,
-    );
+    ));
+    render_layout_frame(Arc::clone(&scroll_view) as Arc<dyn Component>, 24, 2, noop_render());
     scroll_view.scroll_to(3.0, None);
-    let frame = render_layout_frame(Arc::new(scroll_view), 24, 2, noop_render());
+    let frame = render_layout_frame(scroll_view, 24, 2, noop_render());
 
     assert_eq!(visible_lines(&frame.lines), vec!["visible top", "visible bottom"]);
     assert!(
