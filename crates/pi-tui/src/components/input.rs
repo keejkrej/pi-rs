@@ -15,7 +15,7 @@ use crate::utils::{get_grapheme_segmenter, is_whitespace_char, slice_by_column, 
 use crate::word_navigation::{find_word_backward, find_word_forward};
 
 fn render_fake_cursor(text: &str) -> String {
-    format!("\x1b_pi:fc\x07{text}\x1b_pi:/fc\x07")
+    format!("\x1b[7m{text}\x1b[27m")
 }
 
 pub type InputSubmitCallback = Arc<dyn Fn(&str) + Send + Sync>;

@@ -737,3 +737,44 @@ fn rebuilds_geometry_after_content_changes() {
     assert_eq!(first.root.children()[0].lines().map(|l| l.len()), Some(1));
     assert_eq!(second.root.children()[0].lines().map(|l| l.len()), Some(3));
 }
+
+#[test]
+fn stops_kitty_reverse_scan_at_non_empty_content_line_above_scroll_top() {
+    let image_id = 4321;
+    let image_line = encode_kitty(
+        "AAAA",
+        Some(EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(4),
+            image_id: Some(image_id),
+            move_cursor: Some(false),
+        }),
+    );
+    register_kitty_image_metadata(KittyImageMetadata {
+        image_id,
+        columns: 2,
+        rows: 4,
+        width_px: 100,
+        height_px: 100,
+    });
+    let scroll_view = ScrollView::new(
+        CustomComponent::new(move |_| {
+            vec![
+                image_line.clone(),
+                "non-empty separator".to_string(),
+                String::new(),
+                "visible top".to_string(),
+                "visible bottom".to_string(),
+            ]
+        }),
+        None,
+    );
+    scroll_view.scroll_to(3.0, None);
+    let frame = render_layout_frame(Arc::new(scroll_view), 24, 2, noop_render());
+
+    assert_eq!(visible_lines(&frame.lines), vec!["visible top", "visible bottom"]);
+    assert!(
+        !frame.lines[0].contains("\x1b_G"),
+        "reverse scan should stop at non-empty line above scroll_top instead of cropping earlier image"
+    );
+}

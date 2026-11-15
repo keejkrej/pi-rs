@@ -660,25 +660,26 @@ fn paint_box(r#box: &LayoutBox, screen: &mut [String], total_width: i64) {
         && scroll_view.scroll_top() > 0
         && rect.height > 0
     {
-        // PORT: `terminal_image::get_max_kitty_image_rows` is not yet exposed on `main`; scan back to 0.
         let scroll_top = scroll_view.scroll_top().min(scroll_content_lines.len() as i64);
         for image_row in (0..scroll_top).rev() {
             let image_line = &scroll_content_lines[image_row as usize];
-            if !is_image_line(image_line) {
-                continue;
-            }
-            let Some(metadata) = get_kitty_image_metadata(image_line) else {
-                continue;
-            };
-            let hidden_rows = scroll_top - image_row;
-            if hidden_rows < metadata.rows {
-                let visible_rows = rect.height.min(metadata.rows - hidden_rows);
-                let cropped = crop_kitty_image_line(image_line, hidden_rows, visible_rows);
-                if rect.x == 0 && rect.width >= total_width && rect.y >= 0 && (rect.y as usize) < screen.len() {
-                    screen[rect.y as usize] = cropped;
+            if let Some(metadata) = is_image_line(image_line)
+                .then(|| get_kitty_image_metadata(image_line))
+                .flatten()
+            {
+                let hidden_rows = scroll_top - image_row;
+                if hidden_rows < metadata.rows {
+                    let visible_rows = rect.height.min(metadata.rows - hidden_rows);
+                    let cropped = crop_kitty_image_line(image_line, hidden_rows, visible_rows);
+                    if rect.x == 0 && rect.width >= total_width && rect.y >= 0 && (rect.y as usize) < screen.len() {
+                        screen[rect.y as usize] = cropped;
+                    }
                 }
+                break;
             }
-            break;
+            if !image_line.is_empty() {
+                break;
+            }
         }
     }
 

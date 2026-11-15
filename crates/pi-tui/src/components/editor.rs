@@ -2882,27 +2882,14 @@ impl Editor {
             )
         };
         let editor = self.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    prev_task.await;
-                    editor.start_autocomplete_request(start_token, options).await;
-                    let _ = tx.send(());
-                });
-            }
-            Err(_) => {
-                std::thread::spawn(move || {
-                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                        rt.block_on(async move {
-                            prev_task.await;
-                            editor.start_autocomplete_request(start_token, options).await;
-                            let _ = tx.send(());
-                        });
-                    } else {
-                        let _ = tx.send(());
-                    }
-                });
-            }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                prev_task.await;
+                editor.start_autocomplete_request(start_token, options).await;
+                let _ = tx.send(());
+            });
+        } else {
+            let _ = tx.send(());
         }
     }
 

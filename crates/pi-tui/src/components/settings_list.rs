@@ -240,11 +240,19 @@ impl SettingsList {
 
         if items_empty {
             lines.push((theme.hint)("  No settings available"));
+            if search_enabled {
+                Self::add_hint_line_with(&theme, search_enabled, &mut lines, width);
+            }
             return lines;
         }
 
         if search_enabled && display_items.is_empty() {
-            lines.push((theme.hint)("  No matching settings"));
+            lines.push(crate::utils::truncate_to_width(
+                &(theme.hint)("  No matching settings"),
+                width as i64,
+                None,
+                None,
+            ));
             Self::add_hint_line_with(&theme, search_enabled, &mut lines, width);
             return lines;
         }

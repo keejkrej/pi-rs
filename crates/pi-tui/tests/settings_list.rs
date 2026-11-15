@@ -105,3 +105,24 @@ fn moves_by_one_visible_page_with_selection_page_keys() {
     list.handle_input("\x1b[5~");
     assert!(list.render(80).join("\n").contains("> Setting 6"));
 }
+
+#[test]
+fn renders_hint_line_when_empty_and_search_is_enabled() {
+    let searchable = SettingsList::new(
+        Vec::new(),
+        10,
+        test_theme(),
+        Arc::new(|_, _| {}),
+        Arc::new(|| {}),
+        Some(SettingsListOptions {
+            enable_search: Some(true),
+        }),
+    );
+    let rendered = searchable.render(80);
+    assert!(rendered.iter().any(|line| line.contains("No settings available")));
+    assert!(rendered.iter().any(|line| line.contains("Type to filter")));
+
+    let non_searchable = SettingsList::new(Vec::new(), 10, test_theme(), Arc::new(|_, _| {}), Arc::new(|| {}), None);
+    let plain = non_searchable.render(80);
+    assert_eq!(plain, vec!["  No settings available".to_string()]);
+}

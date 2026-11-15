@@ -50,11 +50,13 @@ fn render_supports_a_custom_prompt_and_styled_placeholder() {
     let empty_lines = input.render(20);
     let empty = empty_lines.first().map(String::as_str).unwrap_or("");
     assert!(empty.contains("\x1b[2m"));
+    assert!(empty.contains("\x1b[7m\x1b[2mF\x1b[22m\x1b[27m"));
     assert_eq!(strip_terminal_sequences(empty).trim_end(), "Find transcript");
 
     input.handle_input("n");
     let populated_lines = input.render(20);
     let populated = populated_lines.first().map(String::as_str).unwrap_or("");
+    assert!(populated.contains("n\x1b_pi:c\x07\x1b[7m \x1b[27m"));
     assert_eq!(strip_terminal_sequences(populated).trim_end(), "n");
 }
 
