@@ -442,11 +442,8 @@ impl Execution {
             return;
         }
         match message {
-            WorkerToHostMessage::Call { .. } => {
-                let exec = self.clone();
-                tokio::spawn(async move {
-                    exec.handle_call(message).await;
-                });
+            WorkerToHostMessage::Call { id, target, name, args } => {
+                self.handle_call(id, target, name, args);
             }
             WorkerToHostMessage::Output { item } => {
                 lock_unpoisoned(&self.inner.output).push(item);
@@ -536,11 +533,7 @@ impl Execution {
         self.finish(None, parsed_value, writes.as_deref());
     }
 
-    async fn handle_call(&self, message: WorkerToHostMessage) {
-        let WorkerToHostMessage::Call { id, target, name, args } = message else {
-            return;
-        };
-
+    fn handle_call(&self, id: i64, target: WorkerCallTarget, name: String, args: Option<String>) {
         let is_global = target == WorkerCallTarget::Global;
         let record = if is_global {
             None
@@ -613,40 +606,44 @@ impl Execution {
             );
         }
 
-        let result = (tool.execute)(parsed_args, CodemodeToolContext { signal }).await;
-        let pending_entry = lock_unpoisoned(&self.inner.pending).shift_remove(&id);
-        let Some(_pending_entry) = pending_entry else {
-            return;
-        };
+        let exec = self.clone();
+        let fut = (tool.execute)(parsed_args, CodemodeToolContext { signal });
+        tokio::spawn(async move {
+            let result = fut.await;
+            let pending_entry = lock_unpoisoned(&exec.inner.pending).shift_remove(&id);
+            let Some(_pending_entry) = pending_entry else {
+                return;
+            };
 
-        let duration_ms = (pi_js::time::performance_now() - started_at).max(0.0);
-        match result {
-            Ok(opt_val) => {
-                let serialized = opt_val.as_ref().map(pi_js::json::stringify);
-                if let Some(ref rec) = record {
-                    let mut r = lock_unpoisoned(rec);
-                    r.status = CodemodeCallStatus::Ok;
-                    r.duration_ms = duration_ms;
+            let duration_ms = (pi_js::time::performance_now() - started_at).max(0.0);
+            match result {
+                Ok(opt_val) => {
+                    let serialized = opt_val.as_ref().map(pi_js::json::stringify);
+                    if let Some(ref rec) = record {
+                        let mut r = lock_unpoisoned(rec);
+                        r.status = CodemodeCallStatus::Ok;
+                        r.duration_ms = duration_ms;
+                    }
+                    exec.post(HostToWorkerMessage::Result {
+                        id,
+                        ok: true,
+                        payload: serialized,
+                    });
                 }
-                self.post(HostToWorkerMessage::Result {
-                    id,
-                    ok: true,
-                    payload: serialized,
-                });
-            }
-            Err(err) => {
-                if let Some(ref rec) = record {
-                    let mut r = lock_unpoisoned(rec);
-                    r.status = CodemodeCallStatus::Error;
-                    r.duration_ms = duration_ms;
+                Err(err) => {
+                    if let Some(ref rec) = record {
+                        let mut r = lock_unpoisoned(rec);
+                        r.status = CodemodeCallStatus::Error;
+                        r.duration_ms = duration_ms;
+                    }
+                    exec.post(HostToWorkerMessage::Result {
+                        id,
+                        ok: false,
+                        payload: Some(error_message(&err)),
+                    });
                 }
-                self.post(HostToWorkerMessage::Result {
-                    id,
-                    ok: false,
-                    payload: Some(error_message(&err)),
-                });
             }
-        }
+        });
     }
 
     fn finish(&self, error: Option<CodemodeError>, value: Option<Value>, writes: Option<&str>) {
