@@ -33,7 +33,11 @@ pub struct KillRing {
 
 impl KillRing {
     pub fn new() -> Self {
-        todo!("port: KillRing::new")
+        Self {
+            inner: Arc::new(KillRingInner {
+                ring: Mutex::new(Vec::new()),
+            }),
+        }
     }
 
     /// Add text to the kill ring.
@@ -41,21 +45,46 @@ impl KillRing {
     /// @param text - The killed text to add
     /// @param opts - Push options
     pub fn push(&self, text: &str, opts: KillRingPushOptions) {
-        todo!("port: KillRing::push")
+        if text.is_empty() {
+            return;
+        }
+        let mut ring = self.inner.ring.lock().unwrap();
+        if opts.accumulate.unwrap_or(false)
+            && let Some(last) = ring.pop()
+        {
+            if opts.prepend {
+                ring.push(format!("{text}{last}"));
+            } else {
+                ring.push(format!("{last}{text}"));
+            }
+        } else {
+            ring.push(text.to_owned());
+        }
     }
 
     /// Get most recent entry without modifying the ring.
     pub fn peek(&self) -> Option<String> {
-        todo!("port: KillRing::peek")
+        self.inner.ring.lock().unwrap().last().cloned()
     }
 
     /// Move last entry to front (for yank-pop cycling).
     pub fn rotate(&self) {
-        todo!("port: KillRing::rotate")
+        let mut ring = self.inner.ring.lock().unwrap();
+        if ring.len() > 1
+            && let Some(last) = ring.pop()
+        {
+            ring.insert(0, last);
+        }
     }
 
     /// `get length()`.
     pub fn length(&self) -> i64 {
         self.inner.ring.lock().unwrap().len() as i64
+    }
+}
+
+impl Default for KillRing {
+    fn default() -> Self {
+        Self::new()
     }
 }
