@@ -1913,6 +1913,16 @@ async fn clears_stale_iterm2_image_placements_when_they_leave_the_viewport() {
     terminal.wait_for_render().await;
     tui.scroll_to_top();
     terminal.wait_for_render().await;
+    for _ in 0..3 {
+        if tui
+            .get_screen_lines()
+            .iter()
+            .any(|line| line.contains("\x1b]1337;File="))
+        {
+            break;
+        }
+        terminal.wait_for_render().await;
+    }
     let event_count = terminal.event_count();
 
     tui.scroll_by(1);

@@ -1074,7 +1074,7 @@ impl VirtualTerminal {
 
     pub async fn wait_for_render(&self) {
         tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(28)).await;
         self.flush().await;
     }
 

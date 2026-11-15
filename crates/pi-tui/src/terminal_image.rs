@@ -419,8 +419,8 @@ pub fn get_capabilities() -> TerminalCapabilities {
         true_color: overrides.true_color.unwrap_or(detected.true_color),
         hyperlinks: overrides.hyperlinks.unwrap_or(detected.hyperlinks),
     };
-    *CACHED_CAPABILITIES.lock().unwrap() = Some(caps);
-    caps
+    let mut cached = CACHED_CAPABILITIES.lock().unwrap();
+    *cached.get_or_insert(caps)
 }
 
 /// PORT: `None` selects [`get_capabilities`], the TS default.
