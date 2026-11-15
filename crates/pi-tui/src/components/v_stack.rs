@@ -35,7 +35,11 @@ impl Eq for VStack {}
 impl VStack {
     /// `children` `None` is `[]`. `options` `None` is `{}`. Layout type is [`StackLayoutType::VStack`].
     pub fn new(children: Option<Vec<StackChild>>, options: Option<StackOptions>) -> Self {
-        todo!("port: VStack::new")
+        Self {
+            inner: Arc::new(VStackInner {
+                stack: Stack::new(StackLayoutType::VStack, children, options),
+            }),
+        }
     }
 
     pub fn children(&self) -> Vec<DynComponent> {
@@ -55,7 +59,38 @@ impl VStack {
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
-        todo!("port: VStack::render")
+        use crate::components::stack::{allocate_stack_sizes, visible_stack_entries};
+        use crate::layout_node::LayoutViewport;
+
+        const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+        let viewport = LayoutViewport {
+            width: (width as i64).max(1),
+            height: MAX_SAFE_INTEGER,
+        };
+        let entries = visible_stack_entries(&self.inner.stack.entries(), &viewport);
+        let rendered: Vec<Vec<String>> = entries
+            .iter()
+            .map(|entry| entry.component.render(viewport.width as usize))
+            .collect();
+        let intrinsic_heights: Vec<i64> = rendered.iter().map(|lines| lines.len() as i64).collect();
+        let gap = self.inner.stack.gap();
+        let sizes = allocate_stack_sizes(&entries, &intrinsic_heights, None, gap);
+
+        let mut lines = Vec::new();
+        for (index, rendered_child) in rendered.into_iter().enumerate() {
+            if index > 0 {
+                for _ in 0..gap {
+                    lines.push(String::new());
+                }
+            }
+            let target_len = sizes[index].max(0) as usize;
+            let take_len = rendered_child.len().min(target_len);
+            lines.extend(rendered_child.into_iter().take(target_len));
+            for _ in take_len..target_len {
+                lines.push(String::new());
+            }
+        }
+        lines
     }
 
     pub fn layout_node(&self) -> LayoutNode {
