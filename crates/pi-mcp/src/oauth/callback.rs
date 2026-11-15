@@ -4,9 +4,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::Response;
 use indexmap::IndexMap;
 
-use pi_js::Result;
+use pi_js::{Error, Result};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OAuthCallback {
@@ -59,7 +62,13 @@ struct PendingOAuthCallback {
 }
 
 fn plain_text(page: &OAuthCallbackPage) -> String {
-    todo!("port: plain_text")
+    match page {
+        OAuthCallbackPage::Ok => "Authorization complete. You may close this window.".to_string(),
+        OAuthCallbackPage::Err { message, details } => match details.as_deref().filter(|d| !d.is_empty()) {
+            Some(d) => format!("{message}\n\n{d}"),
+            None => message.clone(),
+        },
+    }
 }
 
 impl OAuthCallbackServer {
@@ -68,14 +77,212 @@ impl OAuthCallbackServer {
     }
 
     pub async fn listen(options: Option<OAuthCallbackServerOptions>) -> Result<Self> {
-        todo!("port: OAuthCallbackServer::listen")
+        let options = options.unwrap_or_default();
+        let host = options.host.unwrap_or_else(|| "127.0.0.1".to_string());
+        let redirect_host = options.redirect_host.unwrap_or_else(|| host.clone());
+        let port = u16::try_from(options.port.unwrap_or(0).max(0)).map_err(|_| Error::msg("Invalid port"))?;
+        let path = options.path.unwrap_or_else(|| "/callback".to_string());
+        let timeout_ms = options.timeout_ms.unwrap_or(5 * 60_000).max(0);
+
+        let listener = tokio::net::TcpListener::bind((host.as_str(), port))
+            .await
+            .map_err(|e| Error::from_io(e, "listen", None, None))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| Error::from_io(e, "getsockname", None, None))?;
+        let formatted_host = if redirect_host.contains(':') {
+            format!("[{redirect_host}]")
+        } else {
+            redirect_host
+        };
+        let redirect_url = format!("http://{formatted_host}:{}{path}", addr.port());
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = Self {
+            inner: Arc::new(OAuthCallbackServerInner {
+                redirect_url,
+                path,
+                timeout_ms,
+                render_page: options.render_page,
+                pending: Mutex::new(IndexMap::new()),
+                shutdown: shutdown_tx,
+                serve_task: Mutex::new(None),
+            }),
+        };
+
+        let srv_for_loop = server.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else {
+                            break;
+                        };
+                        let srv = srv_for_loop.clone();
+                        let mut conn_shutdown = shutdown_rx.clone();
+                        tokio::spawn(async move {
+                            let io = hyper_util::rt::TokioIo::new(stream);
+                            let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                let srv = srv.clone();
+                                async move {
+                                    Ok::<_, std::convert::Infallible>(srv.handle_request(req.uri().to_string()))
+                                }
+                            });
+                            let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
+                            tokio::pin!(conn);
+                            tokio::select! {
+                                _ = &mut conn => {}
+                                _ = conn_shutdown.changed() => {
+                                    conn.as_mut().graceful_shutdown();
+                                    let _ = conn.await;
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        *server.inner.serve_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        Ok(server)
     }
 
     pub async fn wait_for_callback(&self, state: &str) -> Result<OAuthCallback> {
-        todo!("port: OAuthCallbackServer::wait_for_callback")
+        let rx = {
+            let mut pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if pending.contains_key(state) {
+                return Err(Error::msg("OAuth state is already pending"));
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let inner = Arc::clone(&self.inner);
+            let key = state.to_string();
+            let timer = pi_js::time::set_timeout(self.inner.timeout_ms as u64, move || {
+                let removed = inner
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .shift_remove(&key);
+                if let Some(entry) = removed {
+                    let _ = entry.tx.send(Err(Error::msg("OAuth callback timed out")));
+                }
+            });
+            pending.insert(state.to_string(), PendingOAuthCallback { tx, timer });
+            rx
+        };
+        rx.await
+            .unwrap_or_else(|_| Err(Error::msg("OAuth callback server closed")))
     }
 
     pub async fn close(&self) -> Result<()> {
-        todo!("port: OAuthCallbackServer::close")
+        let entries: Vec<PendingOAuthCallback> = {
+            let mut pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.drain(..).map(|(_, v)| v).collect()
+        };
+        for entry in entries {
+            entry.timer.clear();
+            let _ = entry.tx.send(Err(Error::msg("OAuth callback server closed")));
+        }
+        let _ = self.inner.shutdown.send(true);
+        let handle = self.inner.serve_task.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
+        Ok(())
+    }
+
+    fn reply(&self, status: u16, page: &OAuthCallbackPage) -> Response<Full<Bytes>> {
+        if let Some(render) = &self.inner.render_page {
+            let html = render(page);
+            Response::builder()
+                .status(status)
+                .header("content-type", "text/html; charset=utf-8")
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(html)))
+                .expect("valid response")
+        } else {
+            Response::builder()
+                .status(status)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body(Full::new(Bytes::from(plain_text(page))))
+                .expect("valid response")
+        }
+    }
+
+    fn handle_request(&self, raw_uri: String) -> Response<Full<Bytes>> {
+        let base = url::Url::parse(&self.inner.redirect_url)
+            .unwrap_or_else(|_| url::Url::parse("http://127.0.0.1/").expect("valid fallback url"));
+        let Ok(url) = base.join(&raw_uri) else {
+            return self.reply(
+                400,
+                &OAuthCallbackPage::Err {
+                    message: "Invalid request URL".to_string(),
+                    details: None,
+                },
+            );
+        };
+        if url.path() != self.inner.path {
+            return self.reply(
+                404,
+                &OAuthCallbackPage::Err {
+                    message: "Not found".to_string(),
+                    details: None,
+                },
+            );
+        }
+
+        let query_param =
+            |name: &str| -> Option<String> { url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned()) };
+        let state = query_param("state").filter(|s| !s.is_empty());
+        let entry = state.as_ref().and_then(|s| {
+            self.inner
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .shift_remove(s)
+        });
+        let (Some(state), Some(entry)) = (state, entry) else {
+            return self.reply(
+                400,
+                &OAuthCallbackPage::Err {
+                    message: "Invalid or expired OAuth state".to_string(),
+                    details: None,
+                },
+            );
+        };
+        entry.timer.clear();
+
+        if let Some(error) = query_param("error").filter(|s| !s.is_empty()) {
+            let description = query_param("error_description").unwrap_or(error);
+            let _ = entry.tx.send(Err(Error::msg(description.clone())));
+            return self.reply(
+                200,
+                &OAuthCallbackPage::Err {
+                    message: "Authorization failed. You may close this window.".to_string(),
+                    details: Some(description),
+                },
+            );
+        }
+
+        let Some(code) = query_param("code").filter(|s| !s.is_empty()) else {
+            let _ = entry
+                .tx
+                .send(Err(Error::msg("OAuth callback did not include an authorization code")));
+            return self.reply(
+                400,
+                &OAuthCallbackPage::Err {
+                    message: "Missing authorization code".to_string(),
+                    details: None,
+                },
+            );
+        };
+
+        let iss = query_param("iss").filter(|s| !s.is_empty());
+        let _ = entry.tx.send(Ok(OAuthCallback { code, state, iss }));
+        self.reply(200, &OAuthCallbackPage::Ok)
     }
 }

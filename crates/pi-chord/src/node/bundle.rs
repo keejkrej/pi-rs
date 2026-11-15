@@ -92,34 +92,133 @@ async fn bundle_entry(input: BundleEntryInput<'_>) -> pi_js::Result<FacetBundleE
 }
 
 fn validate_options(options: &BundleFacetsOptions) -> pi_js::Result<()> {
-    todo!("port: validate_options")
+    if options.plugin.id.is_empty() {
+        return Err(pi_js::Error::js(
+            "TypeError",
+            "Facet bundle plugin ID must not be empty",
+        ));
+    }
+    if options
+        .plugin
+        .version
+        .as_ref()
+        .is_some_and(|version| version.is_empty())
+    {
+        return Err(pi_js::Error::js(
+            "TypeError",
+            "Facet bundle plugin version must not be empty",
+        ));
+    }
+    if options.entries.is_empty() {
+        return Err(pi_js::Error::js(
+            "TypeError",
+            "Facet bundle must contain at least one entry",
+        ));
+    }
+    for (name, source) in &options.entries {
+        if name.is_empty() {
+            return Err(pi_js::Error::js(
+                "TypeError",
+                "Facet bundle entry name must not be empty",
+            ));
+        }
+        if source.is_empty() {
+            return Err(pi_js::Error::js(
+                "TypeError",
+                format!("Facet bundle entry {name} must have a source path"),
+            ));
+        }
+    }
+    if let Some(externals) = &options.external {
+        for external in externals {
+            if external.is_empty() {
+                return Err(pi_js::Error::js(
+                    "TypeError",
+                    "Facet bundle external import must not be empty",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn replace_directory(temporary_directory: &str, output_directory: &str) -> pi_js::Result<()> {
-    todo!("port: replace_directory")
+    let backup_directory = format!("{output_directory}.old-{}", pi_js::crypto::random_uuid());
+    let mut moved_existing = false;
+    match pi_js::fs::promises::rename(output_directory, &backup_directory).await {
+        Ok(()) => moved_existing = true,
+        Err(error) if is_missing_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = pi_js::fs::promises::rename(temporary_directory, output_directory).await {
+        if moved_existing {
+            pi_js::fs::promises::rename(&backup_directory, output_directory).await?;
+        }
+        return Err(error);
+    }
+    if moved_existing {
+        pi_js::fs::promises::rm(&backup_directory, true, true).await?;
+    }
+    Ok(())
 }
 
 fn short_hash(value: &str) -> String {
-    todo!("port: short_hash")
+    let digest = pi_js::crypto::sha256_hex(value.as_bytes());
+    digest.chars().take(12).collect()
 }
 
 fn esbuild_messages(error: &serde_json::Value) -> Vec<String> {
-    todo!("port: esbuild_messages")
+    let Some(obj) = error.as_object() else {
+        return Vec::new();
+    };
+    let Some(errors) = obj.get("errors").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    errors
+        .iter()
+        .filter(|candidate| is_esbuild_message(candidate))
+        .filter_map(|candidate| {
+            let text = candidate.get("text")?.as_str()?.to_string();
+            let location = match candidate.get("location") {
+                Some(serde_json::Value::Null) | None => None,
+                Some(loc) => Some(EsbuildLocation {
+                    file: loc.get("file").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    line: loc.get("line").and_then(|v| v.as_i64()).unwrap_or_default(),
+                    column: loc.get("column").and_then(|v| v.as_i64()).unwrap_or_default(),
+                }),
+            };
+            Some(format_esbuild_message(&EsbuildMessage { text, location }))
+        })
+        .collect()
 }
 
 fn format_esbuild_message(message: &EsbuildMessage) -> String {
-    todo!("port: format_esbuild_message")
+    match &message.location {
+        None => message.text.clone(),
+        Some(location) => format!(
+            "{}:{}:{}: {}",
+            location.file,
+            location.line,
+            location.column + 1,
+            message.text
+        ),
+    }
 }
 
 fn is_esbuild_message(value: &serde_json::Value) -> bool {
-    todo!("port: is_esbuild_message")
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let has_text = obj.get("text").is_some_and(|v| v.is_string());
+    let has_location = obj.get("location").is_some_and(|loc| loc.is_null() || is_record(loc));
+    has_text && has_location
 }
 
 // PORT: caught values are `pi_js::Error`; `error.code === "ENOENT"` is `error.code() == Some("ENOENT")`.
 fn is_missing_path(error: &pi_js::Error) -> bool {
-    todo!("port: is_missing_path")
+    error.code() == Some("ENOENT")
 }
 
 fn is_record(value: &serde_json::Value) -> bool {
-    todo!("port: is_record")
+    value.is_object()
 }

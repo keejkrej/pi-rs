@@ -13,7 +13,14 @@ pub struct OAuthError {
 
 impl OAuthError {
     pub fn new(code: impl Into<String>, message: impl Into<String>, error_uri: Option<String>) -> Self {
-        todo!("port: OAuthError::new")
+        let code = code.into();
+        let raw_msg = message.into();
+        let message = if raw_msg.is_empty() { code.clone() } else { raw_msg };
+        Self {
+            message,
+            code,
+            error_uri,
+        }
     }
 }
 
@@ -29,7 +36,17 @@ pub struct OAuthIssuerMismatchError {
 
 impl OAuthIssuerMismatchError {
     pub fn new(expected: impl Into<String>, received: Option<String>) -> Self {
-        todo!("port: OAuthIssuerMismatchError::new")
+        let expected = expected.into();
+        let expected_json = pi_js::json::stringify(&expected);
+        let received_json = match &received {
+            None => "none".to_string(),
+            Some(r) => pi_js::json::stringify(r),
+        };
+        Self {
+            message: format!("OAuth issuer mismatch: expected {expected_json}, received {received_json}"),
+            expected,
+            received,
+        }
     }
 }
 
@@ -43,7 +60,11 @@ pub struct OAuthInsecureEndpointError {
 
 impl OAuthInsecureEndpointError {
     pub fn new(endpoint: impl Into<String>) -> Self {
-        todo!("port: OAuthInsecureEndpointError::new")
+        let endpoint = endpoint.into();
+        Self {
+            message: format!("Refusing to send OAuth credentials to non-HTTPS endpoint {endpoint}"),
+            endpoint,
+        }
     }
 }
 
@@ -58,7 +79,12 @@ pub struct OAuthRegistrationError {
 
 impl OAuthRegistrationError {
     pub fn new(status: i64, body: impl Into<String>) -> Self {
-        todo!("port: OAuthRegistrationError::new")
+        let body = body.into();
+        Self {
+            message: format!("OAuth dynamic client registration failed with status {status}: {body}"),
+            status,
+            body,
+        }
     }
 }
 
