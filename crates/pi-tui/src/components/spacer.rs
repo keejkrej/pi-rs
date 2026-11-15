@@ -27,7 +27,11 @@ impl Eq for Spacer {}
 impl Spacer {
     /// `lines` `None` is `1`.
     pub fn new(lines: Option<i64>) -> Self {
-        todo!("port: Spacer::new")
+        Self {
+            inner: Arc::new(SpacerInner {
+                lines: Mutex::new(lines.unwrap_or(1)),
+            }),
+        }
     }
 
     pub fn set_lines(&self, lines: i64) {
@@ -37,8 +41,9 @@ impl Spacer {
     /// No cached state to invalidate currently.
     pub fn invalidate(&self) {}
 
-    pub fn render(&self, width: usize) -> Vec<String> {
-        todo!("port: Spacer::render")
+    pub fn render(&self, _width: usize) -> Vec<String> {
+        let lines = (*self.inner.lines.lock().unwrap()).max(0) as usize;
+        vec![String::new(); lines]
     }
 }
 

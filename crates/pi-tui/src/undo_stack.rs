@@ -21,26 +21,36 @@ pub struct UndoStack<S> {
 
 impl<S: Clone + Send> UndoStack<S> {
     pub fn new() -> Self {
-        todo!("port: UndoStack::new")
+        Self {
+            inner: Arc::new(UndoStackInner {
+                stack: Mutex::new(Vec::new()),
+            }),
+        }
     }
 
     /// Push a deep clone of the given state onto the stack.
     pub fn push(&self, state: &S) {
-        todo!("port: UndoStack::push")
+        self.inner.stack.lock().unwrap().push(state.clone());
     }
 
     /// Pop and return the most recent snapshot, or undefined if empty.
     pub fn pop(&self) -> Option<S> {
-        todo!("port: UndoStack::pop")
+        self.inner.stack.lock().unwrap().pop()
     }
 
     /// Remove all snapshots.
     pub fn clear(&self) {
-        todo!("port: UndoStack::clear")
+        self.inner.stack.lock().unwrap().clear();
     }
 
     /// `get length()`.
     pub fn length(&self) -> i64 {
         self.inner.stack.lock().unwrap().len() as i64
+    }
+}
+
+impl<S: Clone + Send> Default for UndoStack<S> {
+    fn default() -> Self {
+        Self::new()
     }
 }
