@@ -52,11 +52,8 @@ pub struct CodemodeTool {
     /// `args` is whatever the script passed, after a JSON round trip. The return
     /// value must be JSON-serializable; a thrown error surfaces in the script as
     /// an `Error` with the same message.
-    pub execute: Arc<
-        dyn Fn(Option<Value>, CodemodeToolContext) -> pi_js::BoxFuture< pi_js::Result<Option<Value>>>
-            + Send
-            + Sync,
-    >,
+    pub execute:
+        Arc<dyn Fn(Option<Value>, CodemodeToolContext) -> pi_js::BoxFuture<pi_js::Result<Option<Value>>> + Send + Sync>,
 }
 
 impl std::fmt::Debug for CodemodeTool {
@@ -172,7 +169,7 @@ pub enum CodemodeResult {
 #[derive(Clone)]
 pub enum CodemodeWasmInput {
     Module(CodemodeWasmModule),
-    Pending(Arc<std::sync::Mutex<Option<pi_js::BoxFuture< pi_js::Result<CodemodeWasmModule>>>>>),
+    Pending(Arc<std::sync::Mutex<Option<pi_js::BoxFuture<pi_js::Result<CodemodeWasmModule>>>>>),
 }
 
 impl std::fmt::Debug for CodemodeWasmInput {
