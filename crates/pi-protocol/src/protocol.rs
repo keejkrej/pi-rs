@@ -1,12 +1,10 @@
 //! Port of packages/protocol/src/protocol.ts
 
-#![allow(dead_code, unused_variables)]
-
 use std::sync::LazyLock;
 
 use pi_chord::JsonValue;
-use pi_js::vendor::typebox::{Schema, t};
-use serde::{Deserialize, Serialize};
+use pi_js::vendor::typebox::{Schema, Validator, compile, t};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: i64 = 8;
@@ -108,6 +106,13 @@ pub struct ServerHelloError {
     pub error: ProtocolError,
 }
 
+fn deserialize_some_json_value<'de, D>(deserializer: D) -> std::result::Result<Option<JsonValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    JsonValue::deserialize(deserializer).map(Some)
+}
+
 /// Successful (`ok: true`, optional `result`) or failed (`ok: false`, `error`) response.
 ///
 /// Key order is `type`, `id`, `ok`, then `result` or `error`.
@@ -120,7 +125,12 @@ pub struct ServerHelloError {
 pub struct ResponseEnvelope {
     pub id: String,
     pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // PORT: preserve explicit `"result": null` as `Some(Value::Null)` distinct from absent key `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_json_value"
+    )]
     pub result: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ProtocolError>,
@@ -160,8 +170,12 @@ pub enum ServerMessage {
     Attachment(AttachmentEnvelope),
 }
 
+static SERVER_ID_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&server_id_schema()));
+pub(crate) static CLIENT_MESSAGE_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&client_message_schema));
+pub(crate) static SERVER_MESSAGE_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&server_message_schema));
+
 pub fn is_server_id(value: &Value) -> bool {
-    todo!("port: is_server_id")
+    SERVER_ID_VALIDATOR.check(value)
 }
 
 fn strict_object<I, K>(properties: I) -> Schema
@@ -276,6 +290,7 @@ fn attachment_envelope_schema() -> Schema {
 }
 
 /// `ClientMessageSchema`.
+#[allow(non_upper_case_globals)]
 pub static client_message_schema: LazyLock<Schema> = LazyLock::new(|| {
     t::union([
         client_hello_schema(),
@@ -285,6 +300,7 @@ pub static client_message_schema: LazyLock<Schema> = LazyLock::new(|| {
 });
 
 /// `ServerMessageSchema`.
+#[allow(non_upper_case_globals)]
 pub static server_message_schema: LazyLock<Schema> = LazyLock::new(|| {
     t::union([
         server_hello_schema(),

@@ -1,11 +1,9 @@
 //! Port of packages/protocol/src/cbor/options.ts
 
-#![allow(dead_code, unused_variables)]
+use std::sync::{LazyLock, Mutex, PoisonError};
 
-use std::sync::{LazyLock, Mutex};
-
-use pi_js::Result;
 use pi_js::text::{TextDecoderOptions, Utf8StreamDecoder};
+use pi_js::{Error, Result};
 
 pub const UINT32_BASE: i64 = 0x1_0000_0000;
 pub const MAX_UINT32: i64 = 0xffff_ffff;
@@ -59,6 +57,7 @@ impl TextEncoder {
     }
 }
 
+#[allow(non_upper_case_globals)]
 pub static text_encoder: TextEncoder = TextEncoder;
 
 /// `new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`.
@@ -78,16 +77,51 @@ impl TextDecoder {
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<String> {
-        todo!("port: TextDecoder::decode")
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .try_decode(bytes, false)
     }
 }
 
+impl Default for TextDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(non_upper_case_globals)]
 pub static text_decoder: LazyLock<TextDecoder> = LazyLock::new(TextDecoder::new);
 
 fn resolve_limit(name: &str, value: i64, maximum: i64) -> Result<i64> {
-    todo!("port: resolve_limit")
+    if value < 0 || value > maximum {
+        return Err(Error::js(
+            "RangeError",
+            format!("{name} must be an integer between 0 and {maximum}"),
+        ));
+    }
+    Ok(value)
 }
 
 pub fn resolve_options(options: Option<CborOptions>) -> Result<ResolvedCborOptions> {
-    todo!("port: resolve_options")
+    let options = options.unwrap_or_default();
+    Ok(ResolvedCborOptions {
+        max_byte_length: resolve_limit(
+            "maxByteLength",
+            options.max_byte_length.unwrap_or(DEFAULT_MAX_CBOR_BYTE_LENGTH),
+            MAX_UINT32,
+        )?,
+        max_container_length: resolve_limit(
+            "maxContainerLength",
+            options
+                .max_container_length
+                .unwrap_or(DEFAULT_MAX_CBOR_CONTAINER_LENGTH),
+            MAX_UINT32,
+        )?,
+        max_depth: resolve_limit(
+            "maxDepth",
+            options.max_depth.unwrap_or(DEFAULT_MAX_CBOR_DEPTH),
+            MAX_CONFIGURED_DEPTH,
+        )?,
+    })
 }
