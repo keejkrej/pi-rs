@@ -1,7 +1,5 @@
 //! Port of packages/chord/src/delta/revision-validator.ts
 
-#![allow(dead_code, unused_variables)]
-
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexSet;
@@ -15,21 +13,36 @@ pub struct JsonRevisionValidator {
 }
 
 struct JsonRevisionValidatorInner {
-    // PORT: JS `WeakSet<object>` has no Rust equivalent. `validate` records container identity here.
-    validated: Mutex<IndexSet<u64>>,
+    // PORT: JS `WeakSet<object>` tracks live object identity across revisions. In Rust, `JsonValue`
+    // is moved by value and heap/stack addresses can be reused across calls after values are dropped,
+    // so cross-call address caching would risk false hits; within-call DAG/cycle checks use `ancestors`
+    // and `finished` while each revision value is borrowed live.
+    _validated: Mutex<IndexSet<u64>>,
 }
 
 impl JsonRevisionValidator {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(JsonRevisionValidatorInner {
-                validated: Mutex::new(IndexSet::new()),
+                _validated: Mutex::new(IndexSet::new()),
             }),
         }
     }
 
-    pub fn validate<T>(&self, value: T) -> pi_js::Result<T> {
-        todo!("port: JsonRevisionValidator::validate")
+    pub fn validate<T: 'static>(&self, value: T) -> pi_js::Result<T> {
+        let _lock = &self.inner._validated;
+        if let Some(json) = crate::json::downcast_json_ref(&value) {
+            let mut ancestors = IndexSet::new();
+            let mut finished = IndexSet::new();
+            validate_node(json, &mut ancestors, &mut finished)?;
+            return Ok(value);
+        }
+        let cloned = crate::json::clone_as_json(&value)
+            .map_err(|_| pi_js::Error::js("TypeError", "Replicated state values must be strict JSON"))?;
+        let mut ancestors = IndexSet::new();
+        let mut finished = IndexSet::new();
+        validate_node(&cloned, &mut ancestors, &mut finished)?;
+        Ok(value)
     }
 }
 
@@ -39,18 +52,74 @@ impl Default for JsonRevisionValidator {
     }
 }
 
+fn validate_node(value: &JsonValue, ancestors: &mut IndexSet<u64>, finished: &mut IndexSet<u64>) -> pi_js::Result<()> {
+    if !is_container(value) {
+        return assert_primitive(value);
+    }
+    let ptr = (value as *const JsonValue) as usize as u64;
+    if finished.contains(&ptr) {
+        return Ok(());
+    }
+    if !ancestors.insert(ptr) {
+        return Err(pi_js::Error::js("TypeError", "Replicated state cannot contain cycles"));
+    }
+    let res = match value {
+        JsonValue::Array(arr) => {
+            assert_dense_array(value)?;
+            for item in arr {
+                validate_node(item, ancestors, finished)?;
+            }
+            Ok(())
+        }
+        JsonValue::Object(map) => {
+            assert_plain_object(value)?;
+            for entry in map.values() {
+                validate_node(entry, ancestors, finished)?;
+            }
+            Ok(())
+        }
+        _ => unreachable!(),
+    };
+    ancestors.shift_remove(&ptr);
+    if res.is_ok() {
+        finished.insert(ptr);
+    }
+    res
+}
+
 fn is_container(value: &JsonValue) -> bool {
-    todo!("port: is_container")
+    matches!(value, JsonValue::Array(_) | JsonValue::Object(_))
 }
 
 fn assert_primitive(value: &JsonValue) -> pi_js::Result<()> {
-    todo!("port: assert_primitive")
+    match value {
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::String(_) => Ok(()),
+        JsonValue::Number(n) if n.as_f64().is_some_and(f64::is_finite) => Ok(()),
+        _ => Err(pi_js::Error::js(
+            "TypeError",
+            "Replicated state values must be strict JSON",
+        )),
+    }
 }
 
 fn assert_plain_object(value: &JsonValue) -> pi_js::Result<()> {
-    todo!("port: assert_plain_object")
+    if matches!(value, JsonValue::Object(_)) {
+        Ok(())
+    } else {
+        Err(pi_js::Error::js(
+            "TypeError",
+            "Replicated state containers must be plain objects or arrays",
+        ))
+    }
 }
 
 fn assert_dense_array(value: &JsonValue) -> pi_js::Result<()> {
-    todo!("port: assert_dense_array")
+    if matches!(value, JsonValue::Array(_)) {
+        Ok(())
+    } else {
+        Err(pi_js::Error::js(
+            "TypeError",
+            "Replicated state arrays must be dense and contain only indexed entries",
+        ))
+    }
 }
