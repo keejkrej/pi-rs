@@ -1927,6 +1927,17 @@ async fn clears_stale_iterm2_image_placements_when_they_leave_the_viewport() {
 
     tui.scroll_by(1);
     terminal.wait_for_render().await;
+    for _ in 0..5 {
+        if terminal.event_count() > event_count
+            && tui
+                .get_screen_lines()
+                .iter()
+                .all(|line| !line.contains("\x1b]1337;File="))
+        {
+            break;
+        }
+        terminal.wait_for_render().await;
+    }
     assert!(terminal.writes_since(event_count).contains("\x1b[2J"));
     tui.stop(None);
 }
