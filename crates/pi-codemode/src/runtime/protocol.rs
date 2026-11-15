@@ -1,7 +1,5 @@
 //! Port of packages/codemode/src/runtime/protocol.ts
 
-#![allow(dead_code, unused_variables)]
-
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 
@@ -102,9 +100,21 @@ pub enum HostToWorkerMessage {
 }
 
 pub fn is_worker_to_host_message(value: &Value) -> bool {
-    todo!("port: is_worker_to_host_message")
+    matches!(
+        value
+            .as_object()
+            .and_then(|obj| obj.get("type"))
+            .and_then(Value::as_str),
+        Some("call" | "output" | "done" | "crash")
+    )
 }
 
 pub fn is_host_to_worker_message(value: &Value) -> bool {
-    todo!("port: is_host_to_worker_message")
+    matches!(
+        value
+            .as_object()
+            .and_then(|obj| obj.get("type"))
+            .and_then(Value::as_str),
+        Some("result")
+    )
 }
