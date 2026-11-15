@@ -48,7 +48,10 @@ const MAX_AUTO_LINES: f64 = 6.0;
 /// and they emit one event per line. Other platforms, and SSH sessions where the client platform
 /// is unknown, usually send one event per wheel notch.
 fn terminal_accelerates_wheel() -> bool {
-    todo!("port: terminal_accelerates_wheel")
+    pi_js::env::platform() == "darwin"
+        && pi_js::env::var("SSH_CONNECTION").is_none()
+        && pi_js::env::var("SSH_CLIENT").is_none()
+        && pi_js::env::var("SSH_TTY").is_none()
 }
 
 struct WheelScrollState {
@@ -80,21 +83,75 @@ pub struct WheelScrollAccelerator {
 impl WheelScrollAccelerator {
     /// `lines` `None` is `"auto"`. `accelerate` `None` is `!terminal_accelerates_wheel()`.
     pub fn new(lines: Option<WheelScrollLines>, accelerate: Option<bool>) -> Self {
-        todo!("port: WheelScrollAccelerator::new")
+        Self {
+            inner: Arc::new(WheelScrollInner {
+                accelerate: accelerate.unwrap_or_else(|| !terminal_accelerates_wheel()),
+                state: Mutex::new(WheelScrollState {
+                    lines: lines.unwrap_or_default(),
+                    last_time: f64::NEG_INFINITY,
+                    last_direction: 0,
+                    average_gap: None,
+                    carry: 0.0,
+                }),
+            }),
+        }
     }
 
     pub fn set_lines(&self, lines: WheelScrollLines) {
-        todo!("port: WheelScrollAccelerator::set_lines")
+        {
+            self.inner.state.lock().unwrap().lines = lines;
+        }
+        self.reset();
     }
 
     /// Return the positive line count for a wheel event in `direction` at time `now` (milliseconds).
     ///
     /// `direction` is `-1` or `1`. `now` is `performance.now()` (`f64` milliseconds).
     pub fn next(&self, direction: i64, now: f64) -> i64 {
-        todo!("port: WheelScrollAccelerator::next")
+        let mut state = self.inner.state.lock().unwrap();
+        match state.lines {
+            WheelScrollLines::Lines(lines) => {
+                return if lines.is_finite() {
+                    lines.floor().clamp(1.0, i64::MAX as f64) as i64
+                } else {
+                    1
+                };
+            }
+            WheelScrollLines::Auto(_) => {}
+        }
+        if !self.inner.accelerate {
+            return 1;
+        }
+
+        let gap = now - state.last_time;
+        let same_gesture = direction == state.last_direction && gap <= GESTURE_GAP_MS;
+        state.last_time = now;
+        state.last_direction = direction;
+        if !same_gesture {
+            state.average_gap = None;
+            state.carry = 0.0;
+            return 1;
+        }
+        if gap < BURST_GAP_MS {
+            return 1;
+        }
+
+        let avg = match state.average_gap {
+            None => gap,
+            Some(prev) => (prev + gap) / 2.0,
+        };
+        state.average_gap = Some(avg);
+        let lines = (REFERENCE_GAP_MS / avg).clamp(1.0, MAX_AUTO_LINES) + state.carry;
+        let whole = lines.floor();
+        state.carry = lines - whole;
+        whole as i64
     }
 
     fn reset(&self) {
-        todo!("port: WheelScrollAccelerator::reset")
+        let mut state = self.inner.state.lock().unwrap();
+        state.last_time = f64::NEG_INFINITY;
+        state.last_direction = 0;
+        state.average_gap = None;
+        state.carry = 0.0;
     }
 }

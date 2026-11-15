@@ -69,7 +69,17 @@ fn is_stack_entry(child: &StackChild) -> bool {
 }
 
 fn normalize_size(value: Option<f64>, fallback: i64) -> i64 {
-    todo!("port: normalize_size")
+    match value {
+        Some(v) if v.is_finite() => {
+            let floored = v.floor().max(0.0);
+            if floored >= i64::MAX as f64 {
+                i64::MAX
+            } else {
+                floored as i64
+            }
+        }
+        _ => fallback,
+    }
 }
 
 struct StackInner {
@@ -106,7 +116,39 @@ impl Stack {
         children: Option<Vec<StackChild>>,
         options: Option<StackOptions>,
     ) -> Self {
-        todo!("port: Stack::new")
+        let opts = options.unwrap_or_default();
+        let stack = Self {
+            inner: Arc::new(StackInner {
+                container: Container::new(),
+                entries: Mutex::new(Vec::new()),
+                gap: normalize_size(opts.gap.map(|v| v as f64), 0),
+                align: opts.align.unwrap_or(StackAlign::Stretch),
+                layout_type,
+            }),
+        };
+        if let Some(children) = children {
+            for child in children {
+                match child {
+                    StackChild::Entry(entry) => {
+                        stack.add_child(
+                            entry.component,
+                            Some(StackEntryOptions {
+                                basis: entry.basis,
+                                grow: entry.grow,
+                                shrink: entry.shrink,
+                                min_size: entry.min_size,
+                                max_size: entry.max_size,
+                                visible: entry.visible,
+                            }),
+                        );
+                    }
+                    StackChild::Component(component) => {
+                        stack.add_child(component, None);
+                    }
+                }
+            }
+        }
+        stack
     }
 
     pub(crate) fn gap(&self) -> i64 {
@@ -130,15 +172,31 @@ impl Stack {
     }
 
     pub fn add_child(&self, component: DynComponent, options: Option<StackEntryOptions>) {
-        todo!("port: Stack::add_child")
+        const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+        let opts = options.unwrap_or_default();
+        self.inner.container.add_child(component.clone());
+        self.state_entries().push(StackLayoutEntry {
+            component,
+            basis: opts.basis,
+            grow: opts.grow.map(|v| normalize_size(Some(v as f64), 0)),
+            shrink: opts.shrink.map(|v| normalize_size(Some(v as f64), 1)),
+            min_size: opts.min_size.map(|v| normalize_size(Some(v as f64), 0)),
+            max_size: opts.max_size.map(|v| normalize_size(Some(v as f64), MAX_SAFE_INTEGER)),
+            visible: opts.visible,
+        });
     }
 
     pub fn remove_child(&self, component: &DynComponent) {
-        todo!("port: Stack::remove_child")
+        self.inner.container.remove_child(component);
+        let mut entries = self.state_entries();
+        if let Some(index) = entries.iter().position(|e| Arc::ptr_eq(&e.component, component)) {
+            entries.remove(index);
+        }
     }
 
     pub fn clear(&self) {
-        todo!("port: Stack::clear")
+        self.inner.container.clear();
+        self.state_entries().clear();
     }
 
     pub fn invalidate(&self) {
@@ -154,7 +212,13 @@ impl Stack {
     }
 
     pub fn layout_node(&self) -> LayoutNode {
-        todo!("port: Stack::layout_node")
+        use crate::layout_node::StackLayoutNode;
+        LayoutNode::Stack(StackLayoutNode {
+            r#type: self.inner.layout_type,
+            entries: self.entries(),
+            gap: self.inner.gap,
+            align: self.inner.align,
+        })
     }
 }
 
@@ -197,16 +261,81 @@ impl LayoutComponent for Stack {
     }
 }
 
+const STACK_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
 fn clamp_size(size: i64, entry: &StackLayoutEntry) -> i64 {
-    todo!("port: clamp_size")
+    let min = entry.min_size.unwrap_or(0).max(0);
+    let max = entry.max_size.unwrap_or(STACK_MAX_SAFE_INTEGER).max(min);
+    size.max(0).min(max).max(min)
 }
 
 fn distribute(sizes: &mut [i64], entries: &[StackLayoutEntry], amount: i64, mode: DistributeMode) {
-    todo!("port: distribute")
+    let mut remaining = amount;
+    while remaining > 0 {
+        let mut candidates: Vec<(usize, &StackLayoutEntry)> = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let eligible = match mode {
+                DistributeMode::Grow => {
+                    entry.grow.unwrap_or(0) > 0 && sizes[index] < entry.max_size.unwrap_or(STACK_MAX_SAFE_INTEGER)
+                }
+                DistributeMode::Shrink => entry.shrink.unwrap_or(1) > 0 && sizes[index] > entry.min_size.unwrap_or(0),
+            };
+            if eligible {
+                candidates.push((index, entry));
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+
+        let total_weight: i128 = candidates
+            .iter()
+            .map(|(index, entry)| match mode {
+                DistributeMode::Grow => i128::from(entry.grow.unwrap_or(0)),
+                DistributeMode::Shrink => i128::from(entry.shrink.unwrap_or(1)) * i128::from(sizes[*index].max(1)),
+            })
+            .sum();
+        if total_weight <= 0 {
+            return;
+        }
+
+        let mut distributed = 0i64;
+        for (index, entry) in candidates {
+            if remaining <= 0 {
+                break;
+            }
+            let weight: i128 = match mode {
+                DistributeMode::Grow => i128::from(entry.grow.unwrap_or(0)),
+                DistributeMode::Shrink => i128::from(entry.shrink.unwrap_or(1)) * i128::from(sizes[index].max(1)),
+            };
+            let proposed = ((i128::from(remaining) * weight) / total_weight).max(1) as i64;
+            let capacity = match mode {
+                DistributeMode::Grow => entry.max_size.unwrap_or(STACK_MAX_SAFE_INTEGER) - sizes[index],
+                DistributeMode::Shrink => sizes[index] - entry.min_size.unwrap_or(0),
+            };
+            let delta = remaining.min(proposed).min(capacity);
+            if delta <= 0 {
+                continue;
+            }
+            match mode {
+                DistributeMode::Grow => sizes[index] += delta,
+                DistributeMode::Shrink => sizes[index] -= delta,
+            }
+            remaining -= delta;
+            distributed += delta;
+        }
+        if distributed == 0 {
+            return;
+        }
+    }
 }
 
 pub fn visible_stack_entries(entries: &[StackLayoutEntry], viewport: &LayoutViewport) -> Vec<StackLayoutEntry> {
-    todo!("port: visible_stack_entries")
+    entries
+        .iter()
+        .filter(|entry| entry.visible.as_ref().is_none_or(|f| f(viewport)))
+        .cloned()
+        .collect()
 }
 
 pub fn allocate_stack_sizes(
@@ -215,5 +344,45 @@ pub fn allocate_stack_sizes(
     available_size: Option<i64>,
     gap: i64,
 ) -> Vec<i64> {
-    todo!("port: allocate_stack_sizes")
+    let mut sizes: Vec<i64> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let base = match &entry.basis {
+                None | Some(StackBasis::Auto) => intrinsic_sizes.get(index).copied().unwrap_or(0),
+                Some(StackBasis::Fixed(n)) => {
+                    if n.is_nan() {
+                        0
+                    } else if *n == f64::INFINITY {
+                        STACK_MAX_SAFE_INTEGER
+                    } else if *n == f64::NEG_INFINITY {
+                        0
+                    } else {
+                        let f = n.floor();
+                        if f >= STACK_MAX_SAFE_INTEGER as f64 {
+                            STACK_MAX_SAFE_INTEGER
+                        } else if f <= 0.0 {
+                            0
+                        } else {
+                            f as i64
+                        }
+                    }
+                }
+            };
+            clamp_size(base, entry)
+        })
+        .collect();
+
+    let Some(available_size) = available_size else {
+        return sizes;
+    };
+
+    let content_size = (available_size - (entries.len() as i64 - 1).max(0) * gap).max(0);
+    let total: i64 = sizes.iter().sum();
+    if total < content_size {
+        distribute(&mut sizes, entries, content_size - total, DistributeMode::Grow);
+    } else if total > content_size {
+        distribute(&mut sizes, entries, total - content_size, DistributeMode::Shrink);
+    }
+    sizes
 }
