@@ -313,28 +313,30 @@ fn does_not_compact_the_running_delivery_when_activation_overflows_reentrantly()
         .unwrap();
     subscription.activate().unwrap();
 
-    let captured = updates.lock().unwrap();
-    assert_eq!(captured.len(), 3);
-    match &captured[0] {
-        ServiceProviderUpdate::State { sequence, .. } => assert_eq!(*sequence, 1),
-        other => panic!("unexpected first: {other:?}"),
-    }
-    match &captured[1] {
-        ServiceProviderUpdate::Reset { snapshot } => match &snapshot.instances[0].members[0] {
-            ServiceMemberSnapshot::State(s) => {
-                assert_eq!(s.sequence, 102);
-                assert_eq!(
-                    s.ops,
-                    vec![Op::Replace(OpReplace(ReplaceVerb::R, json!({ "value": 102 })))]
-                );
-            }
-            _ => panic!(),
-        },
-        other => panic!("unexpected second: {other:?}"),
-    }
-    match &captured[2] {
-        ServiceProviderUpdate::State { sequence, .. } => assert_eq!(*sequence, 103),
-        other => panic!("unexpected third: {other:?}"),
+    {
+        let captured = updates.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        match &captured[0] {
+            ServiceProviderUpdate::State { sequence, .. } => assert_eq!(*sequence, 1),
+            other => panic!("unexpected first: {other:?}"),
+        }
+        match &captured[1] {
+            ServiceProviderUpdate::Reset { snapshot } => match &snapshot.instances[0].members[0] {
+                ServiceMemberSnapshot::State(s) => {
+                    assert_eq!(s.sequence, 102);
+                    assert_eq!(
+                        s.ops,
+                        vec![Op::Replace(OpReplace(ReplaceVerb::R, json!({ "value": 102 })))]
+                    );
+                }
+                _ => panic!(),
+            },
+            other => panic!("unexpected second: {other:?}"),
+        }
+        match &captured[2] {
+            ServiceProviderUpdate::State { sequence, .. } => assert_eq!(*sequence, 103),
+            other => panic!("unexpected third: {other:?}"),
+        }
     }
     provider.dispose().unwrap();
 }
@@ -441,21 +443,23 @@ fn preserves_lifecycle_ordering_across_subscribers_during_reentrant_publication(
     let s1 = replicated_state_initial(json!({ "value": 1 })).unwrap();
     provider.replace(&counter, counter_impl(&s1)).unwrap();
 
-    let f_vec = first.lock().unwrap();
-    let s_vec = second.lock().unwrap();
-    assert_eq!(*f_vec, *s_vec);
-    assert_eq!(s_vec.len(), 2);
-    match &s_vec[0] {
-        ServiceProviderUpdate::Replaced { snapshot } => match &snapshot.members[0] {
-            ServiceMemberSnapshot::State(s) => {
-                assert_eq!(
-                    s.ops,
-                    vec![Op::Replace(OpReplace(ReplaceVerb::R, json!({ "value": 1 })))]
-                );
-            }
-            _ => panic!(),
-        },
-        other => panic!("unexpected update: {other:?}"),
+    {
+        let f_vec = first.lock().unwrap();
+        let s_vec = second.lock().unwrap();
+        assert_eq!(*f_vec, *s_vec);
+        assert_eq!(s_vec.len(), 2);
+        match &s_vec[0] {
+            ServiceProviderUpdate::Replaced { snapshot } => match &snapshot.members[0] {
+                ServiceMemberSnapshot::State(s) => {
+                    assert_eq!(
+                        s.ops,
+                        vec![Op::Replace(OpReplace(ReplaceVerb::R, json!({ "value": 1 })))]
+                    );
+                }
+                _ => panic!(),
+            },
+            other => panic!("unexpected update: {other:?}"),
+        }
     }
     provider.dispose().unwrap();
 }

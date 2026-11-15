@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::delta::{
-    DefineVerb, Op, OpReplace, OpSet, ReplaceVerb, Seg, SetVerb, WireOp, WireOpDefine, WireOpSet, WireOpSetShort,
+    DefineVerb, Op, OpReplace, OpSet, PathRef, ReplaceVerb, Seg, SetVerb, WireOp, WireOpDefine, WireOpSet,
 };
 use pi_chord::services::handle::{PropertyKey, ServiceObject, ServiceTarget, ServiceValue};
 use pi_chord::services::provider::RemoteServiceProviderEntry;
@@ -209,7 +209,7 @@ fn keeps_one_operation_codec_pair_for_one_subscription_state() {
                     0,
                     vec![Seg::String("revision".into())]
                 )),
-                WireOp::SetShort(WireOpSetShort(SetVerb::S, json!(2))),
+                WireOp::Set(WireOpSet(SetVerb::S, PathRef::Id(0), json!(2))),
             ],
         }
     );

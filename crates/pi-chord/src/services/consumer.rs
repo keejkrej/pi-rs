@@ -895,6 +895,9 @@ impl KeyedBinding {
                 &BACKGROUND_CONTEXT,
             )
             .await?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::yield_now().await;
+        }
 
         let active = {
             let mut state = self.inner.state.lock().unwrap();
@@ -1492,6 +1495,9 @@ impl RemoteServiceBindingImpl {
             .transport
             .subscribe(service_id, ServiceMode::Singleton, listener, &BACKGROUND_CONTEXT)
             .await?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::yield_now().await;
+        }
 
         let facade = {
             let mut state = self.inner.state.lock().unwrap();

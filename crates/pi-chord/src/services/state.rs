@@ -506,8 +506,7 @@ impl<T: Send + Sync + Clone + 'static> MutableReplicatedStateImpl<T> {
                 }
             };
             mutate(&mut draft);
-            // MERGE-NOTE: swap `change.prepare()` to `change.prepare_with(draft)` once helper/chord-delta merges.
-            match change.prepare() {
+            match change.prepare_with(draft) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     change.abort();

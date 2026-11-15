@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use pi_chord::api::DefineServiceOptions;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::delta::{Op, OpReplace, OpSplice, ReplaceVerb, Seg, SpliceVerb};
-use pi_chord::services::errors::RemoteServiceErrorCode;
+use pi_chord::services::errors::{RemoteServiceError, RemoteServiceErrorCode};
 use pi_chord::services::handle::{PropertyKey, ServiceObject, ServiceTarget, ServiceValue};
 use pi_chord::services::provider::{RemoteServiceProviderEntry, RemoteServiceSubscription};
 use pi_chord::services::state_internals::get_replicated_state_internals;
@@ -765,8 +765,8 @@ async fn keeps_singleton_facades_stable_when_their_provider_is_replaced() {
     };
     let err_not_found = unavailable_promise.into_json_future().unwrap().await.unwrap_err();
     assert_eq!(
-        err_not_found.code(),
-        Some(RemoteServiceErrorCode::ServiceNotFound.as_str())
+        err_not_found.downcast_ref::<RemoteServiceError>().map(|e| e.code),
+        Some(RemoteServiceErrorCode::ServiceNotFound)
     );
 
     let calls = Arc::new(AtomicUsize::new(0));
