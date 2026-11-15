@@ -500,6 +500,7 @@ impl Terminal for RecordingTerminal {
 }
 
 #[tokio::test]
+#[serial]
 async fn renders_a_terminal_height_viewport_and_preserves_manual_scroll_position() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -536,6 +537,7 @@ async fn renders_a_terminal_height_viewport_and_preserves_manual_scroll_position
 }
 
 #[tokio::test]
+#[serial]
 async fn shows_a_clickable_jump_to_end_indicator_on_the_transcripts_last_row_while_scrolled_up() {
     let terminal = VirtualTerminal::new(30, 6);
     let tui = TuiAltScreen::new(
@@ -608,6 +610,7 @@ async fn shows_a_clickable_jump_to_end_indicator_on_the_transcripts_last_row_whi
 }
 
 #[tokio::test]
+#[serial]
 async fn keeps_the_jump_to_end_indicator_centered_as_the_auto_scrollbar_hides_and_reappears() {
     // Regression test for #9136: auto scrollbar visibility must not move the indicator.
     let terminal = VirtualTerminal::new(80, 6);
@@ -665,6 +668,7 @@ async fn keeps_the_jump_to_end_indicator_centered_as_the_auto_scrollbar_hides_an
 }
 
 #[tokio::test]
+#[serial]
 async fn leaves_the_scrollbar_visible_and_clickable_when_the_jump_to_end_indicator_spans_the_transcript() {
     // Regression coverage for #9136: centering must not paint or capture clicks over the scrollbar.
     let terminal = VirtualTerminal::new(30, 6);
@@ -727,6 +731,7 @@ async fn leaves_the_scrollbar_visible_and_clickable_when_the_jump_to_end_indicat
 }
 
 #[tokio::test]
+#[serial]
 async fn never_shows_the_jump_to_end_indicator_for_a_primary_scroll_view_without_follow_end() {
     let terminal = VirtualTerminal::new(30, 3);
     let tui = TuiAltScreen::new(
@@ -756,6 +761,7 @@ async fn never_shows_the_jump_to_end_indicator_for_a_primary_scroll_view_without
 }
 
 #[tokio::test]
+#[serial]
 async fn keeps_an_explicit_dock_fixed_while_the_transcript_scrolls() {
     let terminal = VirtualTerminal::new(20, 6);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -834,6 +840,7 @@ async fn keeps_an_explicit_dock_fixed_while_the_transcript_scrolls() {
 }
 
 #[test]
+#[serial]
 fn invalidates_overlays_with_an_explicit_layout_root() {
     let tui = TuiAltScreen::new(Arc::new(VirtualTerminal::default()), None, None, None);
     let _guard = StopGuard::new(tui.clone());
@@ -853,6 +860,7 @@ fn invalidates_overlays_with_an_explicit_layout_root() {
 }
 
 #[tokio::test]
+#[serial]
 async fn routes_wheel_input_to_the_scroll_view_under_the_pointer() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -910,6 +918,7 @@ async fn routes_wheel_input_to_the_scroll_view_under_the_pointer() {
 }
 
 #[tokio::test]
+#[serial]
 async fn scrolls_faster_while_alt_is_held_during_wheel_input() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -928,6 +937,7 @@ async fn scrolls_faster_while_alt_is_held_during_wheel_input() {
 }
 
 #[tokio::test]
+#[serial]
 async fn does_not_vertically_redispatch_misses_through_horizontal_layout_containers() {
     let terminal = VirtualTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -1078,6 +1088,7 @@ fn invokes_the_right_click_paste_handler_only_on_windows_outside_vs_code() {
 }
 
 #[tokio::test]
+#[serial]
 async fn reveals_an_auto_scrollbar_when_the_pointer_enters_its_hidden_track() {
     let terminal = RecordingTerminal::new(10, 5);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -1111,6 +1122,7 @@ async fn reveals_an_auto_scrollbar_when_the_pointer_enters_its_hidden_track() {
 }
 
 #[tokio::test]
+#[serial]
 async fn jumps_to_a_scrollbar_track_position_and_continues_dragging_from_there() {
     let terminal = RecordingTerminal::new(10, 10);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -1144,6 +1156,7 @@ async fn jumps_to_a_scrollbar_track_position_and_continues_dragging_from_there()
 
 // #9758: wheel line counts can change at runtime; Alt keeps its multiplier.
 #[tokio::test]
+#[serial]
 async fn applies_runtime_wheel_line_count_updates() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(
@@ -1182,6 +1195,7 @@ async fn applies_runtime_wheel_line_count_updates() {
 }
 
 #[tokio::test]
+#[serial]
 async fn chains_unused_wheel_delta_to_an_outer_scroll_view() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(
@@ -1292,6 +1306,7 @@ async fn supports_configurable_keyboard_viewport_navigation_with_four_rows_of_pa
 }
 
 #[test]
+#[serial]
 fn searches_normalized_rendered_transcript_text_across_rows() {
     assert_eq!(
         find_alt_screen_search_matches(&["alpha QUICK".to_string(), "brown fox".to_string()], "quick brown"),
@@ -1313,6 +1328,7 @@ fn searches_normalized_rendered_transcript_text_across_rows() {
 }
 
 #[test]
+#[serial]
 fn maps_normalized_ascii_and_unicode_search_matches_back_to_rendered_columns() {
     assert_eq!(
         find_alt_screen_search_matches(
@@ -1342,6 +1358,7 @@ fn maps_normalized_ascii_and_unicode_search_matches_back_to_rendered_columns() {
 }
 
 #[test]
+#[serial]
 fn reuses_indexed_transcript_matches_until_the_query_or_rendered_lines_change() {
     let index = AltScreenSearchIndex::new();
     let initial = index.search(&["alpha needle".to_string(), "omega".to_string()], "needle");
@@ -2237,6 +2254,7 @@ async fn evicts_offscreen_kitty_images_when_decoded_raster_memory_exceeds_the_ca
 }
 
 #[tokio::test]
+#[serial]
 async fn opens_an_osc_8_hyperlink_with_specific_or_generic_release_codes_but_not_on_drag() {
     let terminal = RecordingTerminal::new(20, 3);
     let opened_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2299,6 +2317,7 @@ async fn opens_an_osc_8_hyperlink_with_specific_or_generic_release_codes_but_not
 }
 
 #[tokio::test]
+#[serial]
 async fn selects_visible_text_with_the_mouse_and_copies_it_with_osc_52_after_a_generic_release() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2335,6 +2354,7 @@ async fn selects_visible_text_with_the_mouse_and_copies_it_with_osc_52_after_a_g
 }
 
 #[tokio::test]
+#[serial]
 async fn uses_an_injected_copy_selection_handler_instead_of_osc_52_and_reports_success() {
     let terminal = RecordingTerminal::new(20, 4);
     let copied: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2380,6 +2400,7 @@ async fn uses_an_injected_copy_selection_handler_instead_of_osc_52_and_reports_s
 }
 
 #[tokio::test]
+#[serial]
 async fn leaves_selections_visible_without_copying_when_copy_on_select_is_disabled() {
     let terminal = RecordingTerminal::new(20, 4);
     let copied: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2424,6 +2445,7 @@ async fn leaves_selections_visible_without_copying_when_copy_on_select_is_disabl
 }
 
 #[tokio::test]
+#[serial]
 async fn copies_an_active_selection_programmatically() {
     let terminal = RecordingTerminal::new(20, 4);
     let copied: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2475,6 +2497,7 @@ async fn copies_an_active_selection_programmatically() {
 }
 
 #[tokio::test]
+#[serial]
 async fn flashes_an_error_when_the_injected_copy_selection_handler_fails() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(
@@ -2511,6 +2534,7 @@ async fn flashes_an_error_when_the_injected_copy_selection_handler_fails() {
 }
 
 #[tokio::test]
+#[serial]
 async fn flashes_a_specific_error_returned_by_the_injected_copy_selection_handler() {
     // Regression test for #9618.
     let terminal = RecordingTerminal::new(80, 4);
@@ -2566,6 +2590,7 @@ async fn flashes_a_specific_error_returned_by_the_injected_copy_selection_handle
 }
 
 #[tokio::test]
+#[serial]
 async fn does_not_append_whitespace_to_double_click_word_highlighting() {
     let terminal = RecordingTerminal::new(20, 1);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2584,6 +2609,7 @@ async fn does_not_append_whitespace_to_double_click_word_highlighting() {
 }
 
 #[tokio::test]
+#[serial]
 async fn coalesces_slash_and_hyphen_separated_segments_for_double_click_word_selection() {
     for (line, needle) in [
         ("extensions/starline/fixed-editor/compositor.ts", "starline"),
@@ -2625,6 +2651,7 @@ async fn coalesces_slash_and_hyphen_separated_segments_for_double_click_word_sel
 }
 
 #[tokio::test]
+#[serial]
 async fn highlights_a_complete_whitespace_segment_during_a_word_drag() {
     let terminal = RecordingTerminal::new(20, 1);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2644,6 +2671,7 @@ async fn highlights_a_complete_whitespace_segment_during_a_word_drag() {
 }
 
 #[tokio::test]
+#[serial]
 async fn selects_whole_words_on_double_click_extends_word_drags_and_selects_lines_on_triple_click() {
     let terminal = RecordingTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2690,6 +2718,7 @@ async fn selects_whole_words_on_double_click_extends_word_drags_and_selects_line
 }
 
 #[tokio::test]
+#[serial]
 async fn does_not_repaint_idle_or_zero_width_selections_on_focus_loss() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2738,6 +2767,7 @@ async fn does_not_repaint_idle_or_zero_width_selections_on_focus_loss() {
 }
 
 #[tokio::test]
+#[serial]
 async fn clears_an_active_visible_selection_on_focus_loss_and_ignores_orphan_events() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2771,6 +2801,7 @@ async fn clears_an_active_visible_selection_on_focus_loss_and_ignores_orphan_eve
 }
 
 #[tokio::test]
+#[serial]
 async fn retains_a_completed_visible_selection_across_focus_changes() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2804,6 +2835,7 @@ async fn retains_a_completed_visible_selection_across_focus_changes() {
 }
 
 #[tokio::test]
+#[serial]
 async fn stacks_flash_messages_and_collapses_them_as_they_expire() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2834,6 +2866,7 @@ async fn stacks_flash_messages_and_collapses_them_as_they_expire() {
 }
 
 #[tokio::test]
+#[serial]
 async fn auto_scrolls_and_extends_a_drag_selection_held_at_the_viewport_edge() {
     let terminal = RecordingTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2872,6 +2905,7 @@ async fn auto_scrolls_and_extends_a_drag_selection_held_at_the_viewport_edge() {
 }
 
 #[tokio::test]
+#[serial]
 async fn snaps_mouse_selection_to_cjk_emoji_and_combining_grapheme_boundaries() {
     let terminal = RecordingTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2910,6 +2944,7 @@ async fn snaps_mouse_selection_to_cjk_emoji_and_combining_grapheme_boundaries() 
 }
 
 #[tokio::test]
+#[serial]
 async fn ignores_horizontal_trackpad_wheel_events() {
     let terminal = VirtualTerminal::new(20, 4);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2931,6 +2966,7 @@ async fn ignores_horizontal_trackpad_wheel_events() {
 }
 
 #[tokio::test]
+#[serial]
 async fn dispatches_clicks_to_nested_mouse_regions_without_breaking_drag_selection() {
     let terminal = RecordingTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -2968,6 +3004,7 @@ async fn dispatches_clicks_to_nested_mouse_regions_without_breaking_drag_selecti
 }
 
 #[tokio::test]
+#[serial]
 async fn focuses_and_captures_drag_gestures_for_mouse_aware_components() {
     let terminal = VirtualTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -3020,6 +3057,7 @@ async fn focuses_and_captures_drag_gestures_for_mouse_aware_components() {
 }
 
 #[tokio::test]
+#[serial]
 async fn reports_consecutive_click_counts_to_component_owned_controls() {
     let terminal = VirtualTerminal::new(20, 1);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -3061,6 +3099,7 @@ async fn reports_consecutive_click_counts_to_component_owned_controls() {
 }
 
 #[tokio::test]
+#[serial]
 async fn does_not_rerender_for_handled_no_op_pointer_motion() {
     let terminal = RecordingTerminal::new(20, 2);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -3096,6 +3135,7 @@ async fn does_not_rerender_for_handled_no_op_pointer_motion() {
 }
 
 #[tokio::test]
+#[serial]
 async fn lets_mouse_aware_components_consume_wheel_events_before_viewport_scrolling() {
     let terminal = VirtualTerminal::new(20, 3);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
@@ -3127,6 +3167,7 @@ async fn lets_mouse_aware_components_consume_wheel_events_before_viewport_scroll
 }
 
 #[tokio::test]
+#[serial]
 async fn restores_keyboard_state_before_leaving_alt_mode_and_prints_the_full_document() {
     let terminal = RecordingTerminal::new(20, 3);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
