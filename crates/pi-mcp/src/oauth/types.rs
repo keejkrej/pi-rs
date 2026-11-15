@@ -354,46 +354,308 @@ pub struct OAuthChallenge {
 }
 
 pub fn parse_protected_resource_metadata(value: Value) -> Result<OAuthProtectedResourceMetadata> {
-    todo!("port: parse_protected_resource_metadata")
+    let input = object(&value, "OAuth protected resource metadata")?;
+    let resource = match input.get("resource") {
+        Some(v) => safe_url(v, "OAuth protected resource metadata resource")?,
+        None => return Err(pi_js::Error::msg("Invalid OAuth protected resource metadata resource")),
+    };
+    let authorization_servers = match input.get("authorization_servers") {
+        None => None,
+        Some(v) => optional_strings(v, "authorization_servers")?
+            .map(|urls| {
+                urls.iter()
+                    .map(|u| safe_url(&Value::String(u.clone()), "authorization server URL"))
+                    .collect::<Result<Vec<String>>>()
+            })
+            .transpose()?,
+    };
+    let scopes_supported = match input.get("scopes_supported") {
+        None => None,
+        Some(v) => optional_strings(v, "scopes_supported")?,
+    };
+    let mut extra = IndexMap::new();
+    for (k, v) in input {
+        if !matches!(k.as_str(), "resource" | "authorization_servers" | "scopes_supported") {
+            extra.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(OAuthProtectedResourceMetadata {
+        resource,
+        authorization_servers,
+        scopes_supported,
+        extra,
+    })
 }
 
 pub fn parse_authorization_server_metadata(value: Value) -> Result<AuthorizationServerMetadata> {
-    todo!("port: parse_authorization_server_metadata")
+    let input = object(&value, "authorization server metadata")?;
+    let response_types = match input.get("response_types_supported") {
+        Some(v) => optional_strings(v, "response_types_supported")?,
+        None => None,
+    }
+    .ok_or_else(|| pi_js::Error::msg("Invalid response_types_supported"))?;
+
+    let issuer = safe_url(
+        input.get("issuer").unwrap_or(&Value::Null),
+        "authorization server issuer",
+    )?;
+    let authorization_endpoint = safe_url(
+        input.get("authorization_endpoint").unwrap_or(&Value::Null),
+        "authorization endpoint",
+    )?;
+    let token_endpoint = safe_url(input.get("token_endpoint").unwrap_or(&Value::Null), "token endpoint")?;
+    let registration_endpoint = optional_url(
+        input.get("registration_endpoint").unwrap_or(&Value::Null),
+        "registration endpoint",
+    )?;
+    let scopes_supported = match input.get("scopes_supported") {
+        None => None,
+        Some(v) => optional_strings(v, "scopes_supported")?,
+    };
+    let grant_types_supported = match input.get("grant_types_supported") {
+        None => None,
+        Some(v) => optional_strings(v, "grant_types_supported")?,
+    };
+    let token_endpoint_auth_methods_supported = match input.get("token_endpoint_auth_methods_supported") {
+        None => None,
+        Some(v) => optional_strings(v, "token_endpoint_auth_methods_supported")?,
+    };
+    let code_challenge_methods_supported = match input.get("code_challenge_methods_supported") {
+        None => None,
+        Some(v) => optional_strings(v, "code_challenge_methods_supported")?,
+    };
+    let client_id_metadata_document_supported = input
+        .get("client_id_metadata_document_supported")
+        .and_then(Value::as_bool);
+    let authorization_response_iss_parameter_supported = input
+        .get("authorization_response_iss_parameter_supported")
+        .and_then(Value::as_bool);
+
+    let mut extra = IndexMap::new();
+    for (k, v) in input {
+        if !matches!(
+            k.as_str(),
+            "issuer"
+                | "authorization_endpoint"
+                | "token_endpoint"
+                | "registration_endpoint"
+                | "scopes_supported"
+                | "response_types_supported"
+                | "grant_types_supported"
+                | "token_endpoint_auth_methods_supported"
+                | "code_challenge_methods_supported"
+                | "client_id_metadata_document_supported"
+                | "authorization_response_iss_parameter_supported"
+        ) {
+            extra.insert(k.clone(), v.clone());
+        }
+    }
+
+    Ok(AuthorizationServerMetadata {
+        issuer,
+        authorization_endpoint,
+        token_endpoint,
+        registration_endpoint,
+        scopes_supported,
+        response_types_supported: response_types,
+        grant_types_supported,
+        token_endpoint_auth_methods_supported,
+        code_challenge_methods_supported,
+        client_id_metadata_document_supported,
+        authorization_response_iss_parameter_supported,
+        extra,
+    })
 }
 
 pub fn parse_oauth_tokens(value: Value) -> Result<OAuthTokens> {
-    todo!("port: parse_oauth_tokens")
+    let input = object(&value, "OAuth token response")?;
+    let expires_in = match input.get("expires_in") {
+        None => None,
+        Some(v) if absent(v) => None,
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|f| f.is_finite())
+            .ok_or_else(|| pi_js::Error::msg("Invalid expires_in"))
+            .map(Some)?,
+        Some(Value::String(s)) => {
+            let trimmed = pi_js::str16::trim(s);
+            trimmed
+                .parse::<f64>()
+                .ok()
+                .filter(|f| f.is_finite())
+                .ok_or_else(|| pi_js::Error::msg("Invalid expires_in"))
+                .map(Some)?
+        }
+        Some(Value::Bool(b)) => Some(if *b { 1.0 } else { 0.0 }),
+        Some(_) => return Err(pi_js::Error::msg("Invalid expires_in")),
+    };
+    let access_token = required_string(input.get("access_token").unwrap_or(&Value::Null), "access_token")?;
+    let token_type = required_string(input.get("token_type").unwrap_or(&Value::Null), "token_type")?;
+    let scope = optional_string(input.get("scope").unwrap_or(&Value::Null), "scope")?;
+    let refresh_token = optional_string(input.get("refresh_token").unwrap_or(&Value::Null), "refresh_token")?;
+    let id_token = optional_string(input.get("id_token").unwrap_or(&Value::Null), "id_token")?;
+    Ok(OAuthTokens {
+        access_token,
+        token_type,
+        expires_in,
+        scope,
+        refresh_token,
+        id_token,
+    })
 }
 
 pub fn parse_client_information(value: Value) -> Result<OAuthClientInformationFull> {
-    todo!("port: parse_client_information")
+    let input = object(&value, "OAuth client registration response")?;
+    let client_id = required_string(input.get("client_id").unwrap_or(&Value::Null), "client_id")?;
+    let client_secret = optional_string(input.get("client_secret").unwrap_or(&Value::Null), "client_secret")?;
+    let client_id_issued_at = input
+        .get("client_id_issued_at")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite());
+    let client_secret_expires_at = input
+        .get("client_secret_expires_at")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite());
+    let redirect_uris = match input.get("redirect_uris") {
+        None => None,
+        Some(v) => optional_strings(v, "redirect_uris")?,
+    }
+    .unwrap_or_default();
+
+    let opt_str = |k: &str| -> Option<String> { input.get(k).and_then(Value::as_str).map(String::from) };
+    let opt_strs = |k: &str| -> Option<Vec<String>> {
+        input.get(k).and_then(Value::as_array).and_then(|arr| {
+            arr.iter()
+                .map(|item| item.as_str().map(String::from))
+                .collect::<Option<Vec<String>>>()
+        })
+    };
+
+    let token_endpoint_auth_method = opt_str("token_endpoint_auth_method");
+    let grant_types = opt_strs("grant_types");
+    let response_types = opt_strs("response_types");
+    let client_name = opt_str("client_name");
+    let client_uri = opt_str("client_uri");
+    let logo_uri = opt_str("logo_uri");
+    let scope = opt_str("scope");
+    let contacts = opt_strs("contacts");
+    let tos_uri = opt_str("tos_uri");
+    let policy_uri = opt_str("policy_uri");
+    let jwks_uri = opt_str("jwks_uri");
+    let jwks = input.get("jwks").filter(|v| !v.is_null()).cloned();
+    let software_id = opt_str("software_id");
+    let software_version = opt_str("software_version");
+    let software_statement = opt_str("software_statement");
+
+    let mut extra = IndexMap::new();
+    for (k, v) in input {
+        if !matches!(
+            k.as_str(),
+            "client_id"
+                | "client_secret"
+                | "client_id_issued_at"
+                | "client_secret_expires_at"
+                | "redirect_uris"
+                | "token_endpoint_auth_method"
+                | "grant_types"
+                | "response_types"
+                | "client_name"
+                | "client_uri"
+                | "logo_uri"
+                | "scope"
+                | "contacts"
+                | "tos_uri"
+                | "policy_uri"
+                | "jwks_uri"
+                | "jwks"
+                | "software_id"
+                | "software_version"
+                | "software_statement"
+        ) {
+            extra.insert(k.clone(), v.clone());
+        }
+    }
+
+    Ok(OAuthClientInformationFull {
+        client_id,
+        client_secret,
+        client_id_issued_at,
+        client_secret_expires_at,
+        redirect_uris,
+        token_endpoint_auth_method,
+        grant_types,
+        response_types,
+        client_name,
+        client_uri,
+        logo_uri,
+        scope,
+        contacts,
+        tos_uri,
+        policy_uri,
+        jwks_uri,
+        jwks,
+        software_id,
+        software_version,
+        software_statement,
+        extra,
+    })
 }
 
 fn object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>> {
-    todo!("port: object")
+    value
+        .as_object()
+        .ok_or_else(|| pi_js::Error::msg(format!("Invalid {name}")))
 }
 
 /// Treats `null` and `""` as absent: servers send them for fields they have no value for, like `scope: ""`.
 fn absent(value: &Value) -> bool {
-    todo!("port: absent")
+    matches!(value, Value::Null) || value.as_str().is_some_and(str::is_empty)
 }
 
 fn required_string(value: &Value, name: &str) -> Result<String> {
-    todo!("port: required_string")
+    match value.as_str() {
+        Some(s) if !s.is_empty() => Ok(s.to_string()),
+        _ => Err(pi_js::Error::msg(format!("Invalid {name}"))),
+    }
 }
 
 fn optional_string(value: &Value, name: &str) -> Result<Option<String>> {
-    todo!("port: optional_string")
+    if absent(value) {
+        return Ok(None);
+    }
+    required_string(value, name).map(Some)
 }
 
 fn optional_strings(value: &Value, name: &str) -> Result<Option<Vec<String>>> {
-    todo!("port: optional_strings")
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(arr) = value.as_array() else {
+        return Err(pi_js::Error::msg(format!("Invalid {name}")));
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(s) = item.as_str() else {
+            return Err(pi_js::Error::msg(format!("Invalid {name}")));
+        };
+        out.push(s.to_string());
+    }
+    Ok(Some(out))
 }
 
 fn safe_url(value: &Value, name: &str) -> Result<String> {
-    todo!("port: safe_url")
+    let text = required_string(value, name)?;
+    let parsed = url::Url::parse(&text).map_err(|_| pi_js::Error::msg(format!("Invalid {name}")))?;
+    if matches!(parsed.scheme(), "javascript" | "data" | "vbscript") {
+        return Err(pi_js::Error::msg(format!("Invalid {name}")));
+    }
+    Ok(text)
 }
 
 fn optional_url(value: &Value, name: &str) -> Result<Option<String>> {
-    todo!("port: optional_url")
+    if absent(value) {
+        Ok(None)
+    } else {
+        safe_url(value, name).map(Some)
+    }
 }
