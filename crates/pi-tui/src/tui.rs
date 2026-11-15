@@ -118,15 +118,108 @@ pub struct TuiMouseDispatchResult {
     pub focus_target: Option<Arc<dyn Component>>,
 }
 
+static PERCENT_SIZE_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^([0-9]+(?:\.[0-9]+)?)%$").expect("PERCENT_SIZE_REGEX"));
+static CELL_SIZE_RESPONSE_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new("^\x1b\\[6;([0-9]+);([0-9]+)t$").expect("CELL_SIZE_RESPONSE_REGEX"));
+
+struct NoopDispatchComponent;
+
+impl Component for NoopDispatchComponent {
+    fn render(&self, _width: usize) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn invalidate(&self) {}
+}
+
+pub(crate) fn dispatch_mouse_event_arc(
+    component: &Arc<dyn Component>,
+    event: &TuiMouseEvent,
+) -> Option<TuiMouseDispatchResult> {
+    let result = component.handle_mouse(event)?;
+    if let Some(forwarded_target) = result.target {
+        let focus = result.focus;
+        let focus_target = if focus.unwrap_or(false) && component.has_handle_input() {
+            Some(Arc::clone(component))
+        } else {
+            result.focus_target
+        };
+        return Some(TuiMouseDispatchResult {
+            handled: true,
+            capture: result.capture,
+            focus,
+            render: result.render,
+            target: forwarded_target,
+            focus_target,
+        });
+    }
+    if !result.handled.unwrap_or(false) && !result.capture.unwrap_or(false) && !result.focus.unwrap_or(false) {
+        return None;
+    }
+    let focus = result.focus;
+    Some(TuiMouseDispatchResult {
+        handled: true,
+        capture: result.capture,
+        focus,
+        render: result.render,
+        target: TuiMouseDispatchTarget {
+            component: Arc::clone(component),
+            origin_x: event.screen_x - event.x,
+            origin_y: event.screen_y - event.y,
+            width: event.width,
+            height: event.height,
+        },
+        focus_target: if focus.unwrap_or(false) {
+            Some(Arc::clone(component))
+        } else {
+            None
+        },
+    })
+}
+
 /// Dispatch an event to a component and retain the exact target and coordinate
 /// transform. Containers use this when forwarding events to nested children.
 pub fn dispatch_mouse_event(component: &dyn Component, event: &TuiMouseEvent) -> Option<TuiMouseDispatchResult> {
-    todo!("port: dispatch_mouse_event")
+    let result = component.handle_mouse(event)?;
+    if let Some(forwarded_target) = result.target {
+        return Some(TuiMouseDispatchResult {
+            handled: true,
+            capture: result.capture,
+            focus: result.focus,
+            render: result.render,
+            target: forwarded_target,
+            focus_target: result.focus_target,
+        });
+    }
+    if !result.handled.unwrap_or(false) && !result.capture.unwrap_or(false) && !result.focus.unwrap_or(false) {
+        return None;
+    }
+    Some(TuiMouseDispatchResult {
+        handled: true,
+        capture: result.capture,
+        focus: result.focus,
+        render: result.render,
+        target: TuiMouseDispatchTarget {
+            component: Arc::new(NoopDispatchComponent),
+            origin_x: event.screen_x - event.x,
+            origin_y: event.screen_y - event.y,
+            width: event.width,
+            height: event.height,
+        },
+        focus_target: result.focus_target,
+    })
 }
 
 /// Recreate local coordinates for a previously dispatched mouse target.
 pub fn retarget_mouse_event(event: &TuiMouseEvent, target: &TuiMouseDispatchTarget) -> TuiMouseEvent {
-    todo!("port: retarget_mouse_event")
+    TuiMouseEvent {
+        x: event.screen_x - target.origin_x,
+        y: event.screen_y - target.origin_y,
+        width: target.width,
+        height: target.height,
+        ..*event
+    }
 }
 
 /// Interface for components that can receive focus and display a hardware cursor.
@@ -261,7 +354,15 @@ pub enum SizeValue {
 
 /// Parse a SizeValue into absolute value given a reference size.
 fn parse_size_value(value: Option<&SizeValue>, reference_size: i64) -> Option<f64> {
-    todo!("port: parse_size_value")
+    let value = value?;
+    match value {
+        SizeValue::Absolute(n) => Some(*n),
+        SizeValue::Percent(raw) => {
+            let caps = PERCENT_SIZE_REGEX.captures(raw)?;
+            let pct: f64 = caps.get(1)?.as_str().parse().ok()?;
+            Some(((reference_size as f64) * pct / 100.0).floor())
+        }
+    }
 }
 
 /// Options for overlay positioning and sizing.
@@ -326,37 +427,244 @@ struct OverlayHandleInner {
 impl OverlayHandle {
     /// Permanently remove the overlay (cannot be shown again).
     pub fn hide(&self) {
-        todo!("port: OverlayHandle::hide")
+        let base = &self.inner.base;
+        let entry = &self.inner.entry;
+        let (removed, component, pre_focus, was_focused, empty_stack) = {
+            let mut state = base.lock();
+            let Some(index) = state
+                .overlay_stack
+                .iter()
+                .position(|o| Arc::ptr_eq(&o.inner, &entry.inner))
+            else {
+                return;
+            };
+            if let OverlayFocusRestoreState::Eligible { overlay } | OverlayFocusRestoreState::Blocked { overlay, .. } =
+                &state.overlay_focus_restore
+            {
+                if Arc::ptr_eq(&overlay.inner, &entry.inner) {
+                    state.overlay_focus_restore = OverlayFocusRestoreState::Inactive;
+                }
+            }
+            let (component, pre_focus) = {
+                let es = entry.inner.state.lock().unwrap();
+                (Arc::clone(&es.component), es.pre_focus.clone())
+            };
+            for other in &state.overlay_stack {
+                if !Arc::ptr_eq(&other.inner, &entry.inner) {
+                    let mut os = other.inner.state.lock().unwrap();
+                    if os.pre_focus.as_ref().is_some_and(|pf| Arc::ptr_eq(pf, &component)) {
+                        os.pre_focus = pre_focus.clone();
+                    }
+                }
+            }
+            state.overlay_stack.remove(index);
+            let was_focused = state
+                .focused_component
+                .as_ref()
+                .is_some_and(|fc| Arc::ptr_eq(fc, &component));
+            let empty_stack = state.overlay_stack.is_empty();
+            (true, component, pre_focus, was_focused, empty_stack)
+        };
+        if !removed {
+            return;
+        }
+        let _ = component;
+        if was_focused {
+            let top_visible = base.get_topmost_visible_overlay();
+            let target = top_visible
+                .map(|ov| ov.inner.state.lock().unwrap().component.clone())
+                .or(pre_focus);
+            base.set_focus(target);
+        }
+        if empty_stack {
+            base.hide_terminal_cursor();
+        }
+        base.request_render(None);
     }
 
     /// Temporarily hide or show the overlay.
     pub fn set_hidden(&self, hidden: bool) {
-        todo!("port: OverlayHandle::set_hidden")
+        let base = &self.inner.base;
+        let entry = &self.inner.entry;
+        let (changed, component, pre_focus, options, was_focused) = {
+            let mut state = base.lock();
+            let mut es = entry.inner.state.lock().unwrap();
+            if es.hidden == hidden {
+                return;
+            }
+            es.hidden = hidden;
+            let component = Arc::clone(&es.component);
+            let pre_focus = es.pre_focus.clone();
+            let options = es.options.clone();
+            drop(es);
+            if hidden {
+                if let OverlayFocusRestoreState::Eligible { overlay }
+                | OverlayFocusRestoreState::Blocked { overlay, .. } = &state.overlay_focus_restore
+                {
+                    if Arc::ptr_eq(&overlay.inner, &entry.inner) {
+                        state.overlay_focus_restore = OverlayFocusRestoreState::Inactive;
+                    }
+                }
+            }
+            let was_focused = state
+                .focused_component
+                .as_ref()
+                .is_some_and(|fc| Arc::ptr_eq(fc, &component));
+            (true, component, pre_focus, options, was_focused)
+        };
+        if !changed {
+            return;
+        }
+        if hidden {
+            if was_focused {
+                let top_visible = base.get_topmost_visible_overlay();
+                let target = top_visible
+                    .map(|ov| ov.inner.state.lock().unwrap().component.clone())
+                    .or(pre_focus);
+                base.set_focus(target);
+            }
+        } else if !options.and_then(|o| o.non_capturing).unwrap_or(false) && base.is_overlay_visible(entry) {
+            let next_order = {
+                let mut state = base.lock();
+                state.focus_order_counter += 1;
+                state.focus_order_counter
+            };
+            entry.inner.state.lock().unwrap().focus_order = next_order;
+            base.set_focus(Some(component));
+        }
+        base.request_render(None);
     }
 
     /// Check if overlay is temporarily hidden.
     pub fn is_hidden(&self) -> bool {
-        todo!("port: OverlayHandle::is_hidden")
+        self.inner.entry.inner.state.lock().unwrap().hidden
     }
 
     /// Focus this overlay and bring it to the visual front.
     pub fn focus(&self) {
-        todo!("port: OverlayHandle::focus")
+        let base = &self.inner.base;
+        let entry = &self.inner.entry;
+        let in_stack = base
+            .lock()
+            .overlay_stack
+            .iter()
+            .any(|o| Arc::ptr_eq(&o.inner, &entry.inner));
+        if !in_stack || !base.is_overlay_visible(entry) {
+            return;
+        }
+        let next_order = {
+            let mut state = base.lock();
+            state.focus_order_counter += 1;
+            state.focus_order_counter
+        };
+        let component = {
+            let mut es = entry.inner.state.lock().unwrap();
+            es.focus_order = next_order;
+            Arc::clone(&es.component)
+        };
+        base.set_focus(Some(component));
+        base.request_render(None);
     }
 
     /// Release focus to the next visible capturing overlay or previous target, or to an explicit target when provided.
     pub fn unfocus(&self, options: Option<OverlayUnfocusOptions>) {
-        todo!("port: OverlayHandle::unfocus")
+        let base = &self.inner.base;
+        let entry = &self.inner.entry;
+        let (component, pre_focus) = {
+            let es = entry.inner.state.lock().unwrap();
+            (Arc::clone(&es.component), es.pre_focus.clone())
+        };
+        let (is_focused, action) = {
+            let mut state = base.lock();
+            let is_focused = state
+                .focused_component
+                .as_ref()
+                .is_some_and(|fc| Arc::ptr_eq(fc, &component));
+            let has_pending_restore = match &state.overlay_focus_restore {
+                OverlayFocusRestoreState::Eligible { overlay } | OverlayFocusRestoreState::Blocked { overlay, .. } => {
+                    Arc::ptr_eq(&overlay.inner, &entry.inner)
+                }
+                OverlayFocusRestoreState::Inactive => false,
+            };
+            if !is_focused && !has_pending_restore {
+                return;
+            }
+            if let OverlayFocusRestoreState::Blocked {
+                overlay, blocked_by, ..
+            } = &state.overlay_focus_restore
+            {
+                if Arc::ptr_eq(&overlay.inner, &entry.inner)
+                    && state
+                        .focused_component
+                        .as_ref()
+                        .is_some_and(|fc| Arc::ptr_eq(fc, blocked_by))
+                {
+                    let blocked_by = Arc::clone(blocked_by);
+                    if let Some(ref opts) = options {
+                        state.overlay_focus_restore = OverlayFocusRestoreState::Blocked {
+                            overlay: overlay.clone(),
+                            blocked_by,
+                            resume: OverlayBlockedFocusResume::FocusTarget {
+                                target: opts.target.clone(),
+                            },
+                        };
+                    } else {
+                        state.overlay_focus_restore = OverlayFocusRestoreState::Inactive;
+                    }
+                    (is_focused, true)
+                } else {
+                    (is_focused, false)
+                }
+            } else {
+                (is_focused, false)
+            }
+        };
+        if action {
+            base.request_render(None);
+            return;
+        }
+        base.clear_overlay_focus_restore_for(entry);
+        if is_focused || options.is_some() {
+            let target = match options {
+                Some(opts) => opts.target,
+                None => {
+                    let top_visible = base.get_topmost_visible_overlay();
+                    match top_visible {
+                        Some(ov) if !Arc::ptr_eq(&ov.inner, &entry.inner) => {
+                            Some(ov.inner.state.lock().unwrap().component.clone())
+                        }
+                        _ => pre_focus,
+                    }
+                }
+            };
+            base.set_focus(target);
+        }
+        base.request_render(None);
     }
 
     /// Check if this overlay currently has focus.
     pub fn is_focused(&self) -> bool {
-        todo!("port: OverlayHandle::is_focused")
+        let base = &self.inner.base;
+        let component = self.inner.entry.inner.state.lock().unwrap().component.clone();
+        base.lock()
+            .focused_component
+            .as_ref()
+            .is_some_and(|fc| Arc::ptr_eq(fc, &component))
     }
 
     /// Get the most recent rendered bounds for a visible overlay.
     pub fn get_bounds(&self) -> Option<OverlayBounds> {
-        todo!("port: OverlayHandle::get_bounds")
+        let base = &self.inner.base;
+        let entry = &self.inner.entry;
+        let in_stack = base
+            .lock()
+            .overlay_stack
+            .iter()
+            .any(|o| Arc::ptr_eq(&o.inner, &entry.inner));
+        if !in_stack || !base.is_overlay_visible(entry) {
+            return None;
+        }
+        entry.inner.state.lock().unwrap().bounds
     }
 }
 
@@ -414,27 +722,100 @@ impl Container {
     }
 
     pub fn add_child(&self, component: Arc<dyn Component>) {
-        todo!("port: Container::add_child")
+        self.lock().children.push(component);
     }
 
     pub fn remove_child(&self, component: &Arc<dyn Component>) {
-        todo!("port: Container::remove_child")
+        let mut state = self.lock();
+        if let Some(index) = state.children.iter().position(|c| Arc::ptr_eq(c, component)) {
+            state.children.remove(index);
+        }
     }
 
     pub fn clear(&self) {
-        todo!("port: Container::clear")
+        self.lock().children.clear();
     }
 
     pub fn invalidate(&self) {
-        todo!("port: Container::invalidate")
+        let children = self.children();
+        for child in children {
+            child.invalidate();
+        }
     }
 
     pub fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
-        todo!("port: Container::handle_mouse")
+        if event.y < 0 || event.y >= event.height {
+            return None;
+        }
+        let mouse_children: Vec<(Arc<dyn Component>, i64)> = {
+            let state = self.lock();
+            if let Some(layout) = &state.mouse_layout {
+                if layout.width == event.width {
+                    layout
+                        .children
+                        .iter()
+                        .map(|c| (Arc::clone(&c.component), c.height))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        let mouse_children = if mouse_children.is_empty() {
+            let children = self.children();
+            let render_width = usize::try_from(event.width.max(0)).unwrap_or(0);
+            children
+                .into_iter()
+                .map(|c| {
+                    let h = c.render(render_width).len() as i64;
+                    (c, h)
+                })
+                .collect()
+        } else {
+            mouse_children
+        };
+
+        let mut child_y = 0i64;
+        for (child, child_height) in mouse_children {
+            if event.y >= child_y && event.y < child_y + child_height {
+                let sub_event = TuiMouseEvent {
+                    y: event.y - child_y,
+                    height: child_height,
+                    ..*event
+                };
+                return dispatch_mouse_event_arc(&child, &sub_event).map(|d| TuiMouseEventResult {
+                    handled: Some(true),
+                    capture: d.capture,
+                    focus: d.focus,
+                    render: d.render,
+                    target: Some(d.target),
+                    focus_target: d.focus_target,
+                });
+            }
+            child_y += child_height;
+        }
+        None
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
-        todo!("port: Container::render")
+        let children = self.children();
+        let mut lines = Vec::new();
+        let mut mouse_children = Vec::with_capacity(children.len());
+        for child in children {
+            let child_lines = child.render(width);
+            mouse_children.push(ContainerMouseChild {
+                component: Arc::clone(&child),
+                height: child_lines.len() as i64,
+            });
+            lines.extend(child_lines);
+        }
+        self.lock().mouse_layout = Some(ContainerMouseLayout {
+            width: width as i64,
+            children: mouse_children,
+        });
+        lines
     }
 }
 
@@ -468,7 +849,36 @@ pub fn composite_tui_line(
     overlay_width: i64,
     total_width: i64,
 ) -> String {
-    todo!("port: composite_tui_line")
+    if crate::terminal_image::is_image_line(base_line) {
+        return base_line.to_string();
+    }
+
+    let after_start = start_col + overlay_width;
+    let base = crate::utils::extract_segments(base_line, start_col, after_start, total_width - after_start, Some(true));
+    let overlay = crate::utils::slice_with_width(overlay_line, 0, overlay_width, Some(true));
+    let before_pad = usize::try_from(0.max(start_col - base.before_width)).unwrap_or(0);
+    let overlay_pad = usize::try_from(0.max(overlay_width - overlay.width)).unwrap_or(0);
+    let actual_before_width = start_col.max(base.before_width);
+    let actual_overlay_width = overlay_width.max(overlay.width);
+    let after_target = 0.max(total_width - actual_before_width - actual_overlay_width);
+    let after_pad = usize::try_from(0.max(after_target - base.after_width)).unwrap_or(0);
+    let result = format!(
+        "{}{}{}{}{}{}{}{}",
+        base.before,
+        " ".repeat(before_pad),
+        SEGMENT_RESET,
+        overlay.text,
+        " ".repeat(overlay_pad),
+        SEGMENT_RESET,
+        base.after,
+        " ".repeat(after_pad)
+    );
+
+    if crate::utils::visible_width(&result) <= total_width {
+        result
+    } else {
+        crate::utils::slice_by_column(&result, 0, total_width, Some(true))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,6 +1021,7 @@ struct PendingTerminalColorQuery {
     timer: Option<pi_js::time::Timeout>,
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
 pub(crate) struct CursorPosition {
     pub row: i64,
     pub col: i64,
@@ -689,11 +1100,47 @@ impl TuiBase {
     const MIN_RENDER_INTERVAL_MS: i64 = 16;
 
     pub fn new(terminal: Arc<dyn Terminal>, show_hardware_cursor: Option<bool>, log_directory: Option<&str>) -> Self {
-        todo!("port: TuiBase::new")
+        TuiBase {
+            inner: Arc::new(TuiBaseInner {
+                terminal,
+                log_directory: log_directory.map(ToString::to_string),
+                container: Container::new(),
+                overrides: Mutex::new(None),
+                state: Mutex::new(TuiBaseState {
+                    focused_component: None,
+                    input_listeners: Vec::new(),
+                    on_debug: None,
+                    render_requested: false,
+                    immediate_render_scheduled: false,
+                    render_timer: None,
+                    last_render_at: 0.0,
+                    show_hardware_cursor: show_hardware_cursor.unwrap_or(false),
+                    clear_on_shrink: false,
+                    full_redraw_count: 0,
+                    stopped: false,
+                    pending_terminal_color_queries: Vec::new(),
+                    terminal_color_scheme_listeners: Vec::new(),
+                    terminal_color_scheme_notifications_enabled: false,
+                    focus_order_counter: 0,
+                    overlay_stack: Vec::new(),
+                    rendered_overlay_layouts: Vec::new(),
+                    overlay_focus_restore: OverlayFocusRestoreState::Inactive,
+                }),
+            }),
+        }
     }
 
     pub(crate) fn bind_overrides(&self, overrides: Arc<dyn TuiBaseOverrides>) {
-        todo!("port: TuiBase::bind_overrides")
+        *self.inner.overrides.lock().unwrap() = Some(Arc::downgrade(&overrides));
+    }
+
+    fn overrides(&self) -> Option<Arc<dyn TuiBaseOverrides>> {
+        self.inner
+            .overrides
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     fn lock(&self) -> MutexGuard<'_, TuiBaseState> {
@@ -701,7 +1148,9 @@ impl TuiBase {
     }
 
     pub fn mode(&self) -> TuiMode {
-        todo!("port: TuiBase::mode")
+        self.overrides()
+            .map(|o| o.mode())
+            .unwrap_or(TuiMode::Regular)
     }
 
     pub fn children(&self) -> Vec<Arc<dyn Component>> {
@@ -769,7 +1218,17 @@ impl TuiBase {
     }
 
     pub fn set_show_hardware_cursor(&self, enabled: bool) {
-        todo!("port: TuiBase::set_show_hardware_cursor")
+        {
+            let mut state = self.lock();
+            if state.show_hardware_cursor == enabled {
+                return;
+            }
+            state.show_hardware_cursor = enabled;
+        }
+        if !enabled {
+            self.hide_terminal_cursor();
+        }
+        self.request_render(None);
     }
 
     pub fn get_clear_on_shrink(&self) -> bool {
@@ -788,7 +1247,7 @@ impl TuiBase {
     }
 
     pub fn set_focus(&self, component: Option<Arc<dyn Component>>) {
-        todo!("port: TuiBase::set_focus")
+        self.set_focus_internal(component, OverlayFocusRestorePolicy::Clear);
     }
 
     fn set_focus_internal(
@@ -796,67 +1255,302 @@ impl TuiBase {
         component: Option<Arc<dyn Component>>,
         overlay_focus_restore: OverlayFocusRestorePolicy,
     ) {
-        todo!("port: TuiBase::set_focus_internal")
+        let previous_focus = self.lock().focused_component.clone();
+        let mut next_focus = component;
+
+        let stack = self.lock().overlay_stack.clone();
+        let previous_focused_overlay = previous_focus.as_ref().and_then(|prev| {
+            stack.iter().find(|entry| {
+                let entry_comp = entry.inner.state.lock().unwrap().component.clone();
+                Arc::ptr_eq(&entry_comp, prev) && self.is_overlay_visible(entry)
+            })
+        }).cloned();
+
+        let next_focus_is_overlay = next_focus.as_ref().is_some_and(|nf| {
+            stack.iter().any(|entry| {
+                let entry_comp = entry.inner.state.lock().unwrap().component.clone();
+                Arc::ptr_eq(&entry_comp, nf)
+            })
+        });
+
+        let restore_state = self.get_visible_overlay_focus_restore();
+        if let Some(ref nf) = next_focus {
+            if !next_focus_is_overlay {
+                if let OverlayFocusRestoreState::Blocked {
+                    overlay,
+                    blocked_by,
+                    resume,
+                } = &restore_state
+                {
+                    if previous_focus.as_ref().is_some_and(|pf| Arc::ptr_eq(pf, blocked_by)) {
+                        if matches!(resume, OverlayBlockedFocusResume::FocusTarget { .. })
+                            || !self.is_component_mounted(blocked_by)
+                        {
+                            next_focus = self.resolve_blocked_overlay_focus_resume(&restore_state);
+                        } else {
+                            self.lock().overlay_focus_restore = OverlayFocusRestoreState::Blocked {
+                                overlay: overlay.clone(),
+                                blocked_by: Arc::clone(nf),
+                                resume: resume.clone(),
+                            };
+                        }
+                    }
+                } else if let Some(ref prev_ov) = previous_focused_overlay {
+                    let matches_restore = match &restore_state {
+                        OverlayFocusRestoreState::Eligible { overlay }
+                        | OverlayFocusRestoreState::Blocked { overlay, .. } => {
+                            Arc::ptr_eq(&overlay.inner, &prev_ov.inner)
+                        }
+                        OverlayFocusRestoreState::Inactive => false,
+                    };
+                    if matches_restore && !self.is_overlay_focus_ancestor(prev_ov, nf) {
+                        self.lock().overlay_focus_restore = OverlayFocusRestoreState::Blocked {
+                            overlay: prev_ov.clone(),
+                            blocked_by: Arc::clone(nf),
+                            resume: OverlayBlockedFocusResume::RestoreOverlay,
+                        };
+                    }
+                }
+            }
+        } else {
+            if let OverlayFocusRestoreState::Blocked { blocked_by, .. } = &restore_state {
+                if previous_focus.as_ref().is_some_and(|pf| Arc::ptr_eq(pf, blocked_by)) {
+                    next_focus = self.resolve_blocked_overlay_focus_resume(&restore_state);
+                }
+            } else if matches!(overlay_focus_restore, OverlayFocusRestorePolicy::Clear) {
+                self.clear_overlay_focus_restore();
+            }
+        }
+
+        let old_focused = self.lock().focused_component.clone();
+        if let Some(ref prev) = old_focused {
+            if let Some(focusable) = prev.as_focusable() {
+                focusable.set_focused(false);
+            }
+        }
+
+        self.lock().focused_component = next_focus.clone();
+
+        if let Some(ref nf) = next_focus {
+            if let Some(focusable) = nf.as_focusable() {
+                focusable.set_focused(true);
+            }
+        }
+
+        let focused_overlay = next_focus.as_ref().and_then(|nf| {
+            let stack_now = self.lock().overlay_stack.clone();
+            stack_now.into_iter().find(|entry| {
+                let entry_comp = entry.inner.state.lock().unwrap().component.clone();
+                Arc::ptr_eq(&entry_comp, nf) && self.is_overlay_visible(entry)
+            })
+        });
+        if let Some(ov) = focused_overlay {
+            self.lock().overlay_focus_restore = OverlayFocusRestoreState::Eligible { overlay: ov };
+        }
     }
 
     fn clear_overlay_focus_restore(&self) {
-        todo!("port: TuiBase::clear_overlay_focus_restore")
+        self.lock().overlay_focus_restore = OverlayFocusRestoreState::Inactive;
     }
 
     fn clear_overlay_focus_restore_for(&self, overlay: &OverlayStackEntry) {
-        todo!("port: TuiBase::clear_overlay_focus_restore_for")
+        let mut state = self.lock();
+        let should_clear = match &state.overlay_focus_restore {
+            OverlayFocusRestoreState::Eligible { overlay: ov }
+            | OverlayFocusRestoreState::Blocked { overlay: ov, .. } => Arc::ptr_eq(&ov.inner, &overlay.inner),
+            OverlayFocusRestoreState::Inactive => false,
+        };
+        if should_clear {
+            state.overlay_focus_restore = OverlayFocusRestoreState::Inactive;
+        }
     }
 
     fn resolve_blocked_overlay_focus_resume(
         &self,
         restore_state: &OverlayFocusRestoreState,
     ) -> Option<Arc<dyn Component>> {
-        todo!("port: TuiBase::resolve_blocked_overlay_focus_resume")
+        match restore_state {
+            OverlayFocusRestoreState::Blocked { overlay, resume, .. } => match resume {
+                OverlayBlockedFocusResume::RestoreOverlay => {
+                    Some(overlay.inner.state.lock().unwrap().component.clone())
+                }
+                OverlayBlockedFocusResume::FocusTarget { target } => {
+                    self.clear_overlay_focus_restore();
+                    target.clone()
+                }
+            },
+            _ => None,
+        }
     }
 
     fn get_visible_overlay_focus_restore(&self) -> OverlayFocusRestoreState {
-        todo!("port: TuiBase::get_visible_overlay_focus_restore")
+        let restore_state = self.lock().overlay_focus_restore.clone();
+        let overlay = match &restore_state {
+            OverlayFocusRestoreState::Inactive => return restore_state,
+            OverlayFocusRestoreState::Eligible { overlay } | OverlayFocusRestoreState::Blocked { overlay, .. } => {
+                overlay.clone()
+            }
+        };
+        let in_stack = self
+            .lock()
+            .overlay_stack
+            .iter()
+            .any(|o| Arc::ptr_eq(&o.inner, &overlay.inner));
+        if !in_stack || !self.is_overlay_visible(&overlay) {
+            return OverlayFocusRestoreState::Inactive;
+        }
+        restore_state
     }
 
     fn is_overlay_focus_ancestor(&self, entry: &OverlayStackEntry, component: &Arc<dyn Component>) -> bool {
-        todo!("port: TuiBase::is_overlay_focus_ancestor")
+        let stack = self.lock().overlay_stack.clone();
+        let mut visited: Vec<Arc<dyn Component>> = Vec::new();
+        let mut current = entry.inner.state.lock().unwrap().pre_focus.clone();
+        while let Some(curr) = current {
+            if visited.iter().any(|v| Arc::ptr_eq(v, &curr)) {
+                break;
+            }
+            if Arc::ptr_eq(&curr, component) {
+                return true;
+            }
+            visited.push(Arc::clone(&curr));
+            current = stack.iter().find_map(|ov| {
+                let es = ov.inner.state.lock().unwrap();
+                if Arc::ptr_eq(&es.component, &curr) {
+                    es.pre_focus.clone()
+                } else {
+                    None
+                }
+            });
+        }
+        false
     }
 
     fn retarget_overlay_pre_focus(&self, removed: &OverlayStackEntry) {
-        todo!("port: TuiBase::retarget_overlay_pre_focus")
+        let (removed_comp, removed_pre_focus) = {
+            let es = removed.inner.state.lock().unwrap();
+            (Arc::clone(&es.component), es.pre_focus.clone())
+        };
+        let stack = self.lock().overlay_stack.clone();
+        for overlay in stack {
+            if !Arc::ptr_eq(&overlay.inner, &removed.inner) {
+                let mut es = overlay.inner.state.lock().unwrap();
+                if es.pre_focus.as_ref().is_some_and(|pf| Arc::ptr_eq(pf, &removed_comp)) {
+                    es.pre_focus = removed_pre_focus.clone();
+                }
+            }
+        }
     }
 
     pub(crate) fn get_mounted_roots(&self) -> Vec<Arc<dyn Component>> {
-        todo!("port: TuiBase::get_mounted_roots")
+        if let Some(overrides) = self.overrides() {
+            overrides.get_mounted_roots(self)
+        } else {
+            self.children()
+        }
     }
 
     fn is_component_mounted(&self, component: &Arc<dyn Component>) -> bool {
-        todo!("port: TuiBase::is_component_mounted")
+        self.get_mounted_roots()
+            .iter()
+            .any(|child| self.contains_component(child, component))
     }
 
     fn contains_component(&self, root: &Arc<dyn Component>, target: &Arc<dyn Component>) -> bool {
-        todo!("port: TuiBase::contains_component")
+        if Arc::ptr_eq(root, target) {
+            return true;
+        }
+        let Some(children) = root.container_children() else {
+            return false;
+        };
+        children.iter().any(|child| self.contains_component(child, target))
     }
 
     /// Show an overlay component with configurable positioning and sizing.
     /// Returns a handle to control the overlay's visibility.
     pub fn show_overlay(&self, component: Arc<dyn Component>, options: Option<OverlayOptions>) -> OverlayHandle {
-        todo!("port: TuiBase::show_overlay")
+        let entry = {
+            let mut state = self.lock();
+            state.focus_order_counter += 1;
+            let focus_order = state.focus_order_counter;
+            let pre_focus = state.focused_component.clone();
+            let entry = OverlayStackEntry {
+                inner: Arc::new(OverlayStackEntryInner {
+                    state: Mutex::new(OverlayStackEntryState {
+                        component: Arc::clone(&component),
+                        options: options.clone(),
+                        pre_focus,
+                        hidden: false,
+                        focus_order,
+                        bounds: None,
+                    }),
+                }),
+            };
+            state.overlay_stack.push(entry.clone());
+            entry
+        };
+        let non_capturing = options.and_then(|o| o.non_capturing).unwrap_or(false);
+        if !non_capturing && self.is_overlay_visible(&entry) {
+            self.set_focus(Some(component));
+        }
+        self.hide_terminal_cursor();
+        self.request_render(None);
+        OverlayHandle {
+            inner: Arc::new(OverlayHandleInner {
+                base: self.clone(),
+                entry,
+            }),
+        }
     }
 
     /// Hide the topmost overlay and restore previous focus.
     pub fn hide_overlay(&self) {
-        todo!("port: TuiBase::hide_overlay")
+        let (overlay_comp, overlay_pre_focus, was_focused, empty_stack) = {
+            let state = self.lock();
+            let Some(overlay) = state.overlay_stack.last().cloned() else {
+                return;
+            };
+            drop(state);
+            self.clear_overlay_focus_restore_for(&overlay);
+            self.retarget_overlay_pre_focus(&overlay);
+            let (overlay_comp, overlay_pre_focus) = {
+                let es = overlay.inner.state.lock().unwrap();
+                (Arc::clone(&es.component), es.pre_focus.clone())
+            };
+            let mut state = self.lock();
+            state.overlay_stack.pop();
+            let was_focused = state
+                .focused_component
+                .as_ref()
+                .is_some_and(|fc| Arc::ptr_eq(fc, &overlay_comp));
+            let empty_stack = state.overlay_stack.is_empty();
+            (overlay_comp, overlay_pre_focus, was_focused, empty_stack)
+        };
+        let _ = overlay_comp;
+        if was_focused {
+            let top_visible = self.get_topmost_visible_overlay();
+            let target = top_visible
+                .map(|ov| ov.inner.state.lock().unwrap().component.clone())
+                .or(overlay_pre_focus);
+            self.set_focus(target);
+        }
+        if empty_stack {
+            self.hide_terminal_cursor();
+        }
+        self.request_render(None);
     }
 
     /// Hide the cursor while running. After stop(), the shell owns the cursor and it must stay visible.
     fn hide_terminal_cursor(&self) {
-        todo!("port: TuiBase::hide_terminal_cursor")
+        if !self.stopped() {
+            self.inner.terminal.hide_cursor();
+        }
     }
 
     /// Check if there are any visible overlays.
     pub fn has_overlay(&self) -> bool {
-        todo!("port: TuiBase::has_overlay")
+        let stack = self.lock().overlay_stack.clone();
+        stack.iter().any(|o| self.is_overlay_visible(o))
     }
 
     pub fn has_overlay_entries(&self) -> bool {
@@ -865,128 +1559,638 @@ impl TuiBase {
 
     /// Check if the focused component is a visible overlay.
     pub(crate) fn is_overlay_focused(&self) -> bool {
-        todo!("port: TuiBase::is_overlay_focused")
+        let (focused, stack) = {
+            let state = self.lock();
+            (state.focused_component.clone(), state.overlay_stack.clone())
+        };
+        let Some(focused) = focused else {
+            return false;
+        };
+        stack.iter().any(|entry| {
+            let comp = entry.inner.state.lock().unwrap().component.clone();
+            Arc::ptr_eq(&comp, &focused) && self.is_overlay_visible(entry)
+        })
     }
 
     /// Keep overlay containers as keyboard focus owners when a nested control is clicked.
     pub(crate) fn resolve_mouse_focus_target(&self, component: Arc<dyn Component>) -> Arc<dyn Component> {
-        todo!("port: TuiBase::resolve_mouse_focus_target")
+        let stack = self.lock().overlay_stack.clone();
+        for overlay in stack.iter().rev() {
+            if self.is_overlay_visible(overlay) {
+                let ov_comp = overlay.inner.state.lock().unwrap().component.clone();
+                if self.contains_component(&ov_comp, &component) {
+                    return ov_comp;
+                }
+            }
+        }
+        component
     }
 
     /// Dispatch to the visually topmost overlay under the pointer.
     pub(crate) fn dispatch_mouse_to_overlay(&self, event: &TuiMouseEvent) -> OverlayMouseDispatch {
-        todo!("port: TuiBase::dispatch_mouse_to_overlay")
+        let layouts: Vec<(OverlayStackEntry, i64, i64, i64, i64)> = {
+            let state = self.lock();
+            state
+                .rendered_overlay_layouts
+                .iter()
+                .map(|l| (l.entry.clone(), l.row, l.col, l.width, l.height))
+                .collect()
+        };
+        for (entry, row, col, width, height) in layouts.into_iter().rev() {
+            if event.screen_x < col
+                || event.screen_x >= col + width
+                || event.screen_y < row
+                || event.screen_y >= row + height
+            {
+                continue;
+            }
+            let ov_comp = entry.inner.state.lock().unwrap().component.clone();
+            let local_event = TuiMouseEvent {
+                x: event.screen_x - col,
+                y: event.screen_y - row,
+                width,
+                height,
+                ..*event
+            };
+            let result = dispatch_mouse_event_arc(&ov_comp, &local_event).map(|mut r| {
+                if r.focus.unwrap_or(false) {
+                    r.focus_target = Some(Arc::clone(&ov_comp));
+                }
+                r
+            });
+            return OverlayMouseDispatch { hit: true, result };
+        }
+        OverlayMouseDispatch {
+            hit: false,
+            result: None,
+        }
     }
 
     fn is_overlay_visible(&self, entry: &OverlayStackEntry) -> bool {
-        todo!("port: TuiBase::is_overlay_visible")
+        let (hidden, visible_cb) = {
+            let es = entry.inner.state.lock().unwrap();
+            (es.hidden, es.options.as_ref().and_then(|o| o.visible.clone()))
+        };
+        if hidden {
+            return false;
+        }
+        if let Some(cb) = visible_cb {
+            return cb(self.inner.terminal.columns(), self.inner.terminal.rows());
+        }
+        true
     }
 
     fn get_topmost_visible_overlay(&self) -> Option<OverlayStackEntry> {
-        todo!("port: TuiBase::get_topmost_visible_overlay")
+        let stack = self.lock().overlay_stack.clone();
+        let mut topmost: Option<(OverlayStackEntry, i64)> = None;
+        for overlay in stack {
+            let (non_capturing, focus_order) = {
+                let es = overlay.inner.state.lock().unwrap();
+                (
+                    es.options.as_ref().and_then(|o| o.non_capturing).unwrap_or(false),
+                    es.focus_order,
+                )
+            };
+            if non_capturing || !self.is_overlay_visible(&overlay) {
+                continue;
+            }
+            if topmost.as_ref().is_none_or(|(_, top_order)| focus_order > *top_order) {
+                topmost = Some((overlay, focus_order));
+            }
+        }
+        topmost.map(|(entry, _)| entry)
     }
 
     pub fn invalidate(&self) {
-        todo!("port: TuiBase::invalidate")
+        for root in self.get_mounted_roots() {
+            root.invalidate();
+        }
+        let stack = self.lock().overlay_stack.clone();
+        for overlay in stack {
+            let comp = overlay.inner.state.lock().unwrap().component.clone();
+            comp.invalidate();
+        }
     }
 
     pub fn start(&self) {
-        todo!("port: TuiBase::start")
+        self.lock().stopped = false;
+        self.before_terminal_start();
+        let this_input = self.clone();
+        let this_resize = self.clone();
+        self.inner.terminal.start(
+            Arc::new(move |data| this_input.handle_terminal_input(data)),
+            Arc::new(move || this_resize.request_render(None)),
+        );
+        self.after_terminal_start();
+        self.inner.terminal.hide_cursor();
+        if self.lock().terminal_color_scheme_notifications_enabled {
+            self.inner.terminal.write("\x1b[?2031h");
+        }
+        self.query_cell_size();
+        self.request_render(None);
     }
 
     pub fn add_input_listener(&self, listener: TuiInputListener) -> pi_js::Unsubscribe {
-        todo!("port: TuiBase::add_input_listener")
+        {
+            let mut state = self.lock();
+            if !state.input_listeners.iter().any(|l| Arc::ptr_eq(l, &listener)) {
+                state.input_listeners.push(Arc::clone(&listener));
+            }
+        }
+        let this = self.clone();
+        pi_js::Unsubscribe::new(move || {
+            this.remove_input_listener(&listener);
+        })
     }
 
     pub fn remove_input_listener(&self, listener: &TuiInputListener) {
-        todo!("port: TuiBase::remove_input_listener")
+        self.lock().input_listeners.retain(|l| !Arc::ptr_eq(l, listener));
     }
 
     pub fn on_terminal_color_scheme_change(
         &self,
         listener: Arc<dyn Fn(TerminalColorScheme) + Send + Sync>,
     ) -> pi_js::Unsubscribe {
-        todo!("port: TuiBase::on_terminal_color_scheme_change")
+        {
+            let mut state = self.lock();
+            if !state
+                .terminal_color_scheme_listeners
+                .iter()
+                .any(|l| Arc::ptr_eq(l, &listener))
+            {
+                state.terminal_color_scheme_listeners.push(Arc::clone(&listener));
+            }
+        }
+        let this = self.clone();
+        pi_js::Unsubscribe::new(move || {
+            this.lock()
+                .terminal_color_scheme_listeners
+                .retain(|l| !Arc::ptr_eq(l, &listener));
+        })
     }
 
     pub fn set_terminal_color_scheme_notifications(&self, enabled: bool) {
-        todo!("port: TuiBase::set_terminal_color_scheme_notifications")
+        let stopped = {
+            let mut state = self.lock();
+            if state.terminal_color_scheme_notifications_enabled == enabled {
+                return;
+            }
+            state.terminal_color_scheme_notifications_enabled = enabled;
+            state.stopped
+        };
+        if !stopped {
+            self.inner
+                .terminal
+                .write(if enabled { "\x1b[?2031h" } else { "\x1b[?2031l" });
+        }
     }
 
     fn query_cell_size(&self) {
-        todo!("port: TuiBase::query_cell_size")
+        if crate::terminal_image::get_capabilities().images.is_none() {
+            return;
+        }
+        // Query terminal for cell size in pixels: CSI 16 t
+        // Response format: CSI 6 ; height ; width t
+        self.inner.terminal.write("\x1b[16t");
     }
 
     pub fn stop(&self, options: Option<TuiStopOptions>) {
-        todo!("port: TuiBase::stop")
+        let opts = options.unwrap_or_default();
+        let notifications_enabled = {
+            let mut state = self.lock();
+            state.stopped = true;
+            state.terminal_color_scheme_notifications_enabled
+        };
+        self.cancel_render_timer();
+        if notifications_enabled {
+            self.inner.terminal.write("\x1b[?2031l");
+        }
+        self.before_terminal_stop(&opts);
+        self.inner.terminal.show_cursor();
+        self.inner.terminal.stop();
+        self.after_terminal_stop(&opts);
     }
 
     pub fn render_now(&self, force: Option<bool>) {
-        todo!("port: TuiBase::render_now")
+        if force.unwrap_or(false) {
+            self.reset_render_state();
+        }
+        let timer = {
+            let mut state = self.lock();
+            state.render_requested = false;
+            state.last_render_at = pi_js::time::performance_now();
+            state.render_timer.take()
+        };
+        if let Some(t) = timer {
+            t.clear();
+        }
+        self.do_render();
     }
 
     pub fn request_render(&self, force: Option<bool>) {
-        todo!("port: TuiBase::request_render")
+        if force.unwrap_or(false) {
+            self.reset_render_state();
+            self.request_immediate_render();
+            return;
+        }
+        {
+            let mut state = self.lock();
+            if state.render_requested {
+                return;
+            }
+            state.render_requested = true;
+        }
+        let this = self.clone();
+        pi_js::time::set_timeout(0, move || {
+            this.schedule_render();
+        });
     }
 
     fn request_immediate_render(&self) {
-        todo!("port: TuiBase::request_immediate_render")
+        self.cancel_render_timer();
+        {
+            let mut state = self.lock();
+            state.render_requested = true;
+            if state.immediate_render_scheduled {
+                return;
+            }
+            state.immediate_render_scheduled = true;
+        }
+        let this = self.clone();
+        pi_js::time::set_timeout(0, move || {
+            {
+                let mut state = this.lock();
+                state.immediate_render_scheduled = false;
+                if state.stopped || !state.render_requested {
+                    return;
+                }
+            }
+            // A previously queued scheduleRender() can create a timer before this callback runs.
+            this.cancel_render_timer();
+            {
+                let mut state = this.lock();
+                if state.stopped || !state.render_requested {
+                    return;
+                }
+                state.render_requested = false;
+                state.last_render_at = pi_js::time::performance_now();
+            }
+            this.do_render();
+        });
     }
 
     fn cancel_render_timer(&self) {
-        todo!("port: TuiBase::cancel_render_timer")
+        let timer = self.lock().render_timer.take();
+        if let Some(t) = timer {
+            t.clear();
+        }
     }
 
     fn schedule_render(&self) {
-        todo!("port: TuiBase::schedule_render")
+        let delay_ms = {
+            let state = self.lock();
+            if state.stopped || state.render_timer.is_some() || !state.render_requested {
+                return;
+            }
+            let elapsed = pi_js::time::performance_now() - state.last_render_at;
+            let delay = (Self::MIN_RENDER_INTERVAL_MS as f64 - elapsed).max(0.0);
+            delay.ceil().max(0.0) as u64
+        };
+        let this = self.clone();
+        let timer = pi_js::time::set_timeout(delay_ms, move || {
+            let should_render = {
+                let mut state = this.lock();
+                state.render_timer = None;
+                if state.stopped || !state.render_requested {
+                    false
+                } else {
+                    state.render_requested = false;
+                    state.last_render_at = pi_js::time::performance_now();
+                    true
+                }
+            };
+            if !should_render {
+                return;
+            }
+            this.do_render();
+            if this.lock().render_requested {
+                this.schedule_render();
+            }
+        });
+        let mut state = self.lock();
+        if state.stopped || !state.render_requested || state.render_timer.is_some() {
+            timer.clear();
+        } else {
+            state.render_timer = Some(timer);
+        }
     }
 
     pub(crate) fn do_render(&self) {
-        todo!("port: TuiBase::do_render")
+        if let Some(overrides) = self.overrides() {
+            overrides.do_render();
+        }
     }
 
     pub(crate) fn reset_render_state(&self) {
-        todo!("port: TuiBase::reset_render_state")
+        if let Some(overrides) = self.overrides() {
+            overrides.reset_render_state();
+        }
     }
 
     pub(crate) fn before_terminal_start(&self) {
-        todo!("port: TuiBase::before_terminal_start")
+        if let Some(overrides) = self.overrides() {
+            overrides.before_terminal_start();
+        }
     }
 
     pub(crate) fn after_terminal_start(&self) {
-        todo!("port: TuiBase::after_terminal_start")
+        if let Some(overrides) = self.overrides() {
+            overrides.after_terminal_start();
+        }
     }
 
     pub(crate) fn before_terminal_stop(&self, options: &TuiStopOptions) {
-        todo!("port: TuiBase::before_terminal_stop")
+        if let Some(overrides) = self.overrides() {
+            overrides.before_terminal_stop(options);
+        }
     }
 
     pub(crate) fn after_terminal_stop(&self, options: &TuiStopOptions) {
-        todo!("port: TuiBase::after_terminal_stop")
+        if let Some(overrides) = self.overrides() {
+            overrides.after_terminal_stop(options);
+        }
     }
 
     fn handle_terminal_input(&self, data: &str) {
-        todo!("port: TuiBase::handle_terminal_input")
+        if self.consume_terminal_color_response(data) {
+            return;
+        }
+        if self.consume_terminal_color_scheme_report(data) {
+            return;
+        }
+
+        let mut current_data = data.to_string();
+        let listeners = self.lock().input_listeners.clone();
+        if !listeners.is_empty() {
+            for listener in listeners {
+                if let Some(result) = listener(&current_data) {
+                    if result.consume.unwrap_or(false) {
+                        return;
+                    }
+                    if let Some(next) = result.data {
+                        current_data = next;
+                    }
+                }
+            }
+            if current_data.is_empty() {
+                return;
+            }
+        }
+
+        if self.consume_cell_size_response(&current_data) {
+            return;
+        }
+
+        if crate::keys::matches_key(&current_data, "shift+ctrl+d") {
+            let on_debug = self.on_debug();
+            if let Some(cb) = on_debug {
+                cb();
+                return;
+            }
+        }
+
+        let focused = self.get_focused_component();
+        let stack = self.lock().overlay_stack.clone();
+        let focused_overlay = focused.as_ref().and_then(|fc| {
+            stack.iter().find(|o| {
+                let comp = o.inner.state.lock().unwrap().component.clone();
+                Arc::ptr_eq(&comp, fc)
+            })
+        });
+        if let Some(ov) = focused_overlay {
+            if !self.is_overlay_visible(ov) {
+                if let Some(top_visible) = self.get_topmost_visible_overlay() {
+                    let top_comp = top_visible.inner.state.lock().unwrap().component.clone();
+                    self.set_focus(Some(top_comp));
+                } else {
+                    let pre_focus = ov.inner.state.lock().unwrap().pre_focus.clone();
+                    self.set_focus_internal(pre_focus, OverlayFocusRestorePolicy::Preserve);
+                }
+            }
+        }
+
+        let current_focused = self.get_focused_component();
+        let focus_is_overlay = current_focused.as_ref().is_some_and(|fc| {
+            let stack_now = self.lock().overlay_stack.clone();
+            stack_now.iter().any(|o| {
+                let comp = o.inner.state.lock().unwrap().component.clone();
+                Arc::ptr_eq(&comp, fc)
+            })
+        });
+        if !focus_is_overlay {
+            let restore_state = self.get_visible_overlay_focus_restore();
+            match restore_state {
+                OverlayFocusRestoreState::Eligible { overlay } => {
+                    let comp = overlay.inner.state.lock().unwrap().component.clone();
+                    self.set_focus(Some(comp));
+                }
+                OverlayFocusRestoreState::Blocked {
+                    overlay,
+                    blocked_by,
+                    resume,
+                } => {
+                    let still_blocked_by_focused = current_focused
+                        .as_ref()
+                        .is_some_and(|fc| Arc::ptr_eq(fc, &blocked_by));
+                    if !still_blocked_by_focused {
+                        match resume {
+                            OverlayBlockedFocusResume::RestoreOverlay => {
+                                let comp = overlay.inner.state.lock().unwrap().component.clone();
+                                self.set_focus(Some(comp));
+                            }
+                            OverlayBlockedFocusResume::FocusTarget { target } => {
+                                self.clear_overlay_focus_restore();
+                                self.set_focus(target);
+                            }
+                        }
+                    }
+                }
+                OverlayFocusRestoreState::Inactive => {}
+            }
+        }
+
+        if let Some(comp) = self.get_focused_component() {
+            if comp.has_handle_input() {
+                if crate::keys::is_key_release(&current_data) && !comp.wants_key_release() {
+                    return;
+                }
+                comp.handle_input(&current_data);
+                self.request_immediate_render();
+            }
+        }
     }
 
     fn consume_terminal_color_response(&self, data: &str) -> bool {
-        todo!("port: TuiBase::consume_terminal_color_response")
+        enum Action {
+            None,
+            RetTrue,
+            Complete {
+                deliver: Option<Arc<dyn Fn(TerminalColors) + Send + Sync>>,
+                timer: Option<pi_js::time::Timeout>,
+                result: TerminalColors,
+            },
+        }
+        if DEVICE_ATTRIBUTES_RESPONSE_PATTERN.is_match(data) {
+            let action = {
+                let mut state = self.lock();
+                if state.pending_terminal_color_queries.is_empty() {
+                    Action::None
+                } else {
+                    let mut query = state.pending_terminal_color_queries.remove(0);
+                    let result = self.terminal_color_query_result(&query);
+                    let deliver = query.deliver.take();
+                    let timer = query.timer.take();
+                    Action::Complete { deliver, timer, result }
+                }
+            };
+            return match action {
+                Action::None => false,
+                Action::RetTrue => true,
+                Action::Complete { deliver, timer, result } => {
+                    if let Some(t) = timer {
+                        t.clear();
+                    }
+                    if let Some(cb) = deliver {
+                        cb(result);
+                    }
+                    true
+                }
+            };
+        }
+
+        {
+            let state = self.lock();
+            if state.pending_terminal_color_queries.is_empty() {
+                return false;
+            }
+        }
+
+        let Some(response) = crate::terminal_colors::parse_osc_color_response(data) else {
+            return false;
+        };
+
+        let key = match response.target {
+            crate::terminal_colors::OscColorTarget::Foreground => "foreground".to_string(),
+            crate::terminal_colors::OscColorTarget::Background => "background".to_string(),
+            crate::terminal_colors::OscColorTarget::Index(idx) => idx.to_string(),
+        };
+
+        let action = {
+            let mut state = self.lock();
+            let Some(query) = state.pending_terminal_color_queries.first_mut() else {
+                return false;
+            };
+            if query.deliver.is_none() || query.replied.contains(&key) {
+                Action::RetTrue
+            } else {
+                query.replied.insert(key);
+                match response.target {
+                    crate::terminal_colors::OscColorTarget::Foreground => {
+                        query.foreground = response.rgb;
+                    }
+                    crate::terminal_colors::OscColorTarget::Background => {
+                        query.background = response.rgb;
+                    }
+                    crate::terminal_colors::OscColorTarget::Index(idx) => {
+                        if idx >= 0 && idx < TERMINAL_PALETTE_SIZE {
+                            query.palette[idx as usize] = response.rgb;
+                        }
+                    }
+                }
+                if query.replied.len() as i64 == TERMINAL_COLOR_REPLY_COUNT {
+                    let result = self.terminal_color_query_result(query);
+                    let deliver = query.deliver.take();
+                    let timer = query.timer.take();
+                    Action::Complete { deliver, timer, result }
+                } else {
+                    Action::RetTrue
+                }
+            }
+        };
+
+        match action {
+            Action::None => false,
+            Action::RetTrue => true,
+            Action::Complete { deliver, timer, result } => {
+                if let Some(t) = timer {
+                    t.clear();
+                }
+                if let Some(cb) = deliver {
+                    cb(result);
+                }
+                true
+            }
+        }
     }
 
     fn terminal_color_query_result(&self, query: &PendingTerminalColorQuery) -> TerminalColors {
-        todo!("port: TuiBase::terminal_color_query_result")
+        let all_palette = query.palette.len() as i64 == TERMINAL_PALETTE_SIZE
+            && query.palette.iter().all(Option::is_some);
+        let palette = if all_palette {
+            Some(query.palette.iter().filter_map(|c| *c).collect())
+        } else {
+            None
+        };
+        TerminalColors {
+            foreground: query.foreground,
+            background: query.background,
+            palette,
+        }
     }
 
     fn complete_terminal_color_query(&self, query: &mut PendingTerminalColorQuery) {
-        todo!("port: TuiBase::complete_terminal_color_query")
+        let deliver = query.deliver.take();
+        let timer = query.timer.take();
+        let result = self.terminal_color_query_result(query);
+        if let Some(t) = timer {
+            t.clear();
+        }
+        if let Some(cb) = deliver {
+            cb(result);
+        }
     }
 
     fn consume_terminal_color_scheme_report(&self, data: &str) -> bool {
-        todo!("port: TuiBase::consume_terminal_color_scheme_report")
+        let Some(scheme) = crate::terminal_colors::parse_terminal_color_scheme_report(data) else {
+            return false;
+        };
+        let listeners = self.lock().terminal_color_scheme_listeners.clone();
+        for listener in listeners {
+            listener(scheme);
+        }
+        true
     }
 
     fn consume_cell_size_response(&self, data: &str) -> bool {
-        todo!("port: TuiBase::consume_cell_size_response")
+        let Some(caps) = CELL_SIZE_RESPONSE_REGEX.captures(data) else {
+            return false;
+        };
+        let Some(height_px) = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()) else {
+            return false;
+        };
+        let Some(width_px) = caps.get(2).and_then(|m| m.as_str().parse::<i64>().ok()) else {
+            return false;
+        };
+        if height_px <= 0 || width_px <= 0 {
+            return true;
+        }
+        crate::terminal_image::set_cell_dimensions(crate::terminal_image::CellDimensions {
+            width_px,
+            height_px,
+        });
+        self.invalidate();
+        self.request_render(None);
+        true
     }
 
     fn resolve_overlay_layout(
@@ -996,24 +2200,235 @@ impl TuiBase {
         term_width: i64,
         term_height: i64,
     ) -> ResolvedOverlayLayout {
-        todo!("port: TuiBase::resolve_overlay_layout")
+        let default_opt = OverlayOptions::default();
+        let opt = options.unwrap_or(&default_opt);
+
+        let (margin_top, margin_right, margin_bottom, margin_left) = match opt.margin {
+            Some(OverlayMarginValue::All(m)) => {
+                let v = 0.max(m);
+                (v, v, v, v)
+            }
+            Some(OverlayMarginValue::Sides(m)) => (
+                0.max(m.top.unwrap_or(0)),
+                0.max(m.right.unwrap_or(0)),
+                0.max(m.bottom.unwrap_or(0)),
+                0.max(m.left.unwrap_or(0)),
+            ),
+            None => (0, 0, 0, 0),
+        };
+
+        let avail_width = 1.max(term_width - margin_left - margin_right);
+        let avail_height = 1.max(term_height - margin_top - margin_bottom);
+
+        let mut width = parse_size_value(opt.width.as_ref(), term_width)
+            .map(|v| v as i64)
+            .unwrap_or_else(|| 80.min(avail_width));
+        if let Some(min_width) = opt.min_width {
+            width = width.max(min_width);
+        }
+        width = 1.max(width.min(avail_width));
+
+        let mut max_height = parse_size_value(opt.max_height.as_ref(), term_height).map(|v| v as i64);
+        if let Some(mh) = max_height {
+            max_height = Some(1.max(mh.min(avail_height)));
+        }
+
+        let effective_height = match max_height {
+            Some(mh) => overlay_height.min(mh),
+            None => overlay_height,
+        };
+
+        let anchor = opt.anchor.unwrap_or(OverlayAnchor::Center);
+
+        let mut row = match opt.row.as_ref() {
+            Some(SizeValue::Percent(raw)) => {
+                if let Some(caps) = PERCENT_SIZE_REGEX.captures(raw) {
+                    if let Some(pct) = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()) {
+                        let max_row = 0.max(avail_height - effective_height);
+                        margin_top + ((max_row as f64) * (pct / 100.0)).floor() as i64
+                    } else {
+                        self.resolve_anchor_row(OverlayAnchor::Center, effective_height, avail_height, margin_top)
+                    }
+                } else {
+                    self.resolve_anchor_row(OverlayAnchor::Center, effective_height, avail_height, margin_top)
+                }
+            }
+            Some(SizeValue::Absolute(n)) => *n as i64,
+            None => self.resolve_anchor_row(anchor, effective_height, avail_height, margin_top),
+        };
+
+        let mut col = match opt.col.as_ref() {
+            Some(SizeValue::Percent(raw)) => {
+                if let Some(caps) = PERCENT_SIZE_REGEX.captures(raw) {
+                    if let Some(pct) = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()) {
+                        let max_col = 0.max(avail_width - width);
+                        margin_left + ((max_col as f64) * (pct / 100.0)).floor() as i64
+                    } else {
+                        self.resolve_anchor_col(OverlayAnchor::Center, width, avail_width, margin_left)
+                    }
+                } else {
+                    self.resolve_anchor_col(OverlayAnchor::Center, width, avail_width, margin_left)
+                }
+            }
+            Some(SizeValue::Absolute(n)) => *n as i64,
+            None => self.resolve_anchor_col(anchor, width, avail_width, margin_left),
+        };
+
+        if let Some(oy) = opt.offset_y {
+            row += oy;
+        }
+        if let Some(ox) = opt.offset_x {
+            col += ox;
+        }
+
+        row = margin_top.max(row.min(term_height - margin_bottom - effective_height));
+        col = margin_left.max(col.min(term_width - margin_right - width));
+
+        ResolvedOverlayLayout {
+            width,
+            row,
+            col,
+            max_height,
+        }
     }
 
     fn resolve_anchor_row(&self, anchor: OverlayAnchor, height: i64, avail_height: i64, margin_top: i64) -> i64 {
-        todo!("port: TuiBase::resolve_anchor_row")
+        match anchor {
+            OverlayAnchor::TopLeft | OverlayAnchor::TopCenter | OverlayAnchor::TopRight => margin_top,
+            OverlayAnchor::BottomLeft | OverlayAnchor::BottomCenter | OverlayAnchor::BottomRight => {
+                margin_top + avail_height - height
+            }
+            OverlayAnchor::LeftCenter | OverlayAnchor::Center | OverlayAnchor::RightCenter => {
+                margin_top + ((avail_height - height) as f64 / 2.0).floor() as i64
+            }
+        }
     }
 
     fn resolve_anchor_col(&self, anchor: OverlayAnchor, width: i64, avail_width: i64, margin_left: i64) -> i64 {
-        todo!("port: TuiBase::resolve_anchor_col")
+        match anchor {
+            OverlayAnchor::TopLeft | OverlayAnchor::LeftCenter | OverlayAnchor::BottomLeft => margin_left,
+            OverlayAnchor::TopRight | OverlayAnchor::RightCenter | OverlayAnchor::BottomRight => {
+                margin_left + avail_width - width
+            }
+            OverlayAnchor::TopCenter | OverlayAnchor::Center | OverlayAnchor::BottomCenter => {
+                margin_left + ((avail_width - width) as f64 / 2.0).floor() as i64
+            }
+        }
     }
 
     /// Composite all overlays into content lines (sorted by focusOrder, higher = on top).
     pub(crate) fn composite_overlays(&self, lines: Vec<String>, term_width: i64, term_height: i64) -> Vec<String> {
-        todo!("port: TuiBase::composite_overlays")
+        let stack = self.lock().overlay_stack.clone();
+        if stack.is_empty() {
+            self.lock().rendered_overlay_layouts.clear();
+            return lines;
+        }
+        let mut result = lines;
+
+        for entry in &stack {
+            entry.inner.state.lock().unwrap().bounds = None;
+        }
+
+        let mut visible_entries: Vec<(OverlayStackEntry, i64)> = Vec::new();
+        for entry in &stack {
+            if self.is_overlay_visible(entry) {
+                let order = entry.inner.state.lock().unwrap().focus_order;
+                visible_entries.push((entry.clone(), order));
+            }
+        }
+        visible_entries.sort_by_key(|(_, order)| *order);
+
+        struct RenderedItem {
+            entry: OverlayStackEntry,
+            overlay_lines: Vec<String>,
+            row: i64,
+            col: i64,
+            w: i64,
+        }
+
+        let mut rendered: Vec<RenderedItem> = Vec::with_capacity(visible_entries.len());
+        let mut min_lines_needed = result.len() as i64;
+
+        for (entry, _) in visible_entries {
+            let (component, options) = {
+                let es = entry.inner.state.lock().unwrap();
+                (Arc::clone(&es.component), es.options.clone())
+            };
+            let initial = self.resolve_overlay_layout(options.as_ref(), 0, term_width, term_height);
+            let render_width = usize::try_from(initial.width.max(0)).unwrap_or(0);
+            let mut overlay_lines = component.render(render_width);
+            if let Some(mh) = initial.max_height {
+                let mh_usize = usize::try_from(mh.max(0)).unwrap_or(0);
+                if overlay_lines.len() > mh_usize {
+                    overlay_lines.truncate(mh_usize);
+                }
+            }
+            let pos = self.resolve_overlay_layout(
+                options.as_ref(),
+                overlay_lines.len() as i64,
+                term_width,
+                term_height,
+            );
+            entry.inner.state.lock().unwrap().bounds = Some(OverlayBounds {
+                row: pos.row,
+                col: pos.col,
+                width: initial.width,
+                height: overlay_lines.len() as i64,
+            });
+            min_lines_needed = min_lines_needed.max(pos.row + overlay_lines.len() as i64);
+            rendered.push(RenderedItem {
+                entry,
+                overlay_lines,
+                row: pos.row,
+                col: pos.col,
+                w: initial.width,
+            });
+        }
+
+        self.lock().rendered_overlay_layouts = rendered
+            .iter()
+            .map(|r| RenderedOverlayLayout {
+                entry: r.entry.clone(),
+                row: r.row,
+                col: r.col,
+                width: r.w,
+                height: r.overlay_lines.len() as i64,
+            })
+            .collect();
+
+        let working_height = (result.len() as i64).max(term_height).max(min_lines_needed);
+        let working_height_usize = usize::try_from(working_height.max(0)).unwrap_or(0);
+        while result.len() < working_height_usize {
+            result.push(String::new());
+        }
+
+        let viewport_start = 0.max(working_height - term_height);
+        for r in rendered {
+            for (i, ov_line) in r.overlay_lines.into_iter().enumerate() {
+                let idx = viewport_start + r.row + i as i64;
+                if idx >= 0 && (idx as usize) < result.len() {
+                    let uidx = idx as usize;
+                    let truncated = if crate::utils::visible_width(&ov_line) > r.w {
+                        crate::utils::slice_by_column(&ov_line, 0, r.w, Some(true))
+                    } else {
+                        ov_line
+                    };
+                    result[uidx] = self.composite_line_at(&result[uidx], &truncated, r.col, r.w, term_width);
+                }
+            }
+        }
+
+        result
     }
 
-    pub(crate) fn apply_line_resets(&self, lines: Vec<String>) -> Vec<String> {
-        todo!("port: TuiBase::apply_line_resets")
+    pub(crate) fn apply_line_resets(&self, mut lines: Vec<String>) -> Vec<String> {
+        for line in &mut lines {
+            if !crate::terminal_image::is_image_line(line) {
+                let cleaned = line.replace(CURSOR_MARKER, "");
+                *line = format!("{}{}", crate::utils::normalize_terminal_output(&cleaned), SEGMENT_RESET);
+            }
+        }
+        lines
     }
 
     fn composite_line_at(
@@ -1024,18 +2439,85 @@ impl TuiBase {
         overlay_width: i64,
         total_width: i64,
     ) -> String {
-        todo!("port: TuiBase::composite_line_at")
+        composite_tui_line(base_line, overlay_line, start_col, overlay_width, total_width)
     }
 
     /// Find and extract cursor position from rendered lines.
     /// Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
     /// Only scans the bottom terminal height lines (visible viewport).
     pub(crate) fn extract_cursor_position(&self, lines: &mut [String], height: i64) -> Option<CursorPosition> {
-        todo!("port: TuiBase::extract_cursor_position")
+        let viewport_top = lines.len().saturating_sub(usize::try_from(height.max(0)).unwrap_or(0));
+        for row in (viewport_top..lines.len()).rev() {
+            if let Some(marker_idx) = lines[row].find(CURSOR_MARKER) {
+                let col = crate::utils::visible_width(&lines[row][..marker_idx]);
+                lines[row] = lines[row].replace(CURSOR_MARKER, "");
+                return Some(CursorPosition {
+                    row: row as i64,
+                    col,
+                });
+            }
+        }
+        None
     }
 
     pub async fn query_terminal_colors(&self, options: QueryTerminalColorsOptions) -> TerminalColors {
-        todo!("port: TuiBase::query_terminal_colors")
+        let (tx, rx) = tokio::sync::oneshot::channel::<TerminalColors>();
+        let tx_slot = Arc::new(Mutex::new(Some(tx)));
+        let deliver_slot = Arc::clone(&tx_slot);
+        let deliver: Arc<dyn Fn(TerminalColors) + Send + Sync> = Arc::new(move |colors| {
+            if let Some(sender) = deliver_slot.lock().unwrap().take() {
+                let _ = sender.send(colors);
+            }
+        });
+        let deliver_id = Arc::clone(&deliver);
+        let on_late_reply = options.on_late_reply;
+
+        let this_timeout = self.clone();
+        let delay_ms = u64::try_from(options.timeout_ms.max(0)).unwrap_or(0);
+        let timer = pi_js::time::set_timeout(delay_ms, move || {
+            let result = {
+                let mut state = this_timeout.lock();
+                if let Some(query) = state.pending_terminal_color_queries.iter_mut().find(|q| {
+                    q.deliver
+                        .as_ref()
+                        .is_some_and(|d| Arc::ptr_eq(d, &deliver_id))
+                }) {
+                    query.deliver = on_late_reply.clone();
+                    query.timer = None;
+                    let all_palette = query.palette.len() as i64 == TERMINAL_PALETTE_SIZE
+                        && query.palette.iter().all(Option::is_some);
+                    let palette = if all_palette {
+                        Some(query.palette.iter().filter_map(|c| *c).collect())
+                    } else {
+                        None
+                    };
+                    Some(TerminalColors {
+                        foreground: query.foreground,
+                        background: query.background,
+                        palette,
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(colors) = result {
+                if let Some(sender) = tx_slot.lock().unwrap().take() {
+                    let _ = sender.send(colors);
+                }
+            }
+        });
+
+        let query = PendingTerminalColorQuery {
+            foreground: None,
+            background: None,
+            palette: vec![None; TERMINAL_PALETTE_SIZE as usize],
+            replied: IndexSet::new(),
+            deliver: Some(deliver),
+            timer: Some(timer),
+        };
+        self.lock().pending_terminal_color_queries.push(query);
+        self.inner.terminal.write(TERMINAL_COLOR_QUERY);
+        rx.await.unwrap_or_default()
     }
 }
 

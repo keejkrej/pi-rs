@@ -882,11 +882,11 @@ impl VirtualTerminalInner {
                     [4, 0, ..] => style.underline = false,
                     [4, _, ..] => style.underline = true,
                     [38, 5, idx, ..] => style.fg = CellColor::Palette((*idx).min(255) as u8),
-                    [38, 2, _cs, r, g, b, ..] | [38, 2, r, g, b] => {
+                    [38, 2, _, r, g, b, ..] | [38, 2, r, g, b] => {
                         style.fg = CellColor::Rgb((*r).min(255) as u8, (*g).min(255) as u8, (*b).min(255) as u8);
                     }
                     [48, 5, idx, ..] => style.bg = CellColor::Palette((*idx).min(255) as u8),
-                    [48, 2, _cs, r, g, b, ..] | [48, 2, r, g, b] => {
+                    [48, 2, _, r, g, b, ..] | [48, 2, r, g, b] => {
                         style.bg = CellColor::Rgb((*r).min(255) as u8, (*g).min(255) as u8, (*b).min(255) as u8);
                     }
                     _ => {}
