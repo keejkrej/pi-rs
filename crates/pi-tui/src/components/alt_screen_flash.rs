@@ -49,17 +49,65 @@ impl AltScreenFlashContainer {
 
     /// `duration_ms` `None` is [`DEFAULT_DURATION_MS`] (1000).
     pub fn flash(&self, message: &str, duration_ms: Option<i64>) {
-        todo!("port: AltScreenFlashContainer::flash")
+        let duration = duration_ms.unwrap_or(DEFAULT_DURATION_MS).max(0) as u64;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let id = state.next_id;
+            state.next_id += 1;
+            let inner = Arc::clone(&self.inner);
+            let timer = pi_js::time::set_timeout(duration, move || {
+                let removed = {
+                    let mut state = inner.state.lock().unwrap();
+                    if let Some(index) = state.entries.iter().position(|e| e.id == id) {
+                        state.entries.remove(index);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if removed {
+                    (inner.request_render)();
+                }
+            });
+            timer.unref();
+            state.entries.push(FlashEntry {
+                id,
+                message: message.to_string(),
+                timer,
+            });
+        }
+        (self.inner.request_render)();
     }
 
     pub fn dispose(&self) {
-        todo!("port: AltScreenFlashContainer::dispose")
+        let entries = {
+            let mut state = self.inner.state.lock().unwrap();
+            std::mem::take(&mut state.entries)
+        };
+        for entry in entries {
+            entry.timer.clear();
+        }
     }
 
     pub fn invalidate(&self) {}
 
     pub fn render(&self, width: usize) -> Vec<String> {
-        todo!("port: AltScreenFlashContainer::render")
+        let messages: Vec<String> = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.message.clone())
+            .collect();
+        messages
+            .into_iter()
+            .map(|msg| {
+                let message = crate::utils::truncate_to_width(&format!(" {msg} "), width as i64, Some(""), None);
+                format!("\x1b[7m{message}\x1b[27m")
+            })
+            .collect()
     }
 }
 

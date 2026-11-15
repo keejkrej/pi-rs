@@ -55,6 +55,20 @@ impl PartialEq for Loader {
 
 impl Eq for Loader {}
 
+impl LoaderInner {
+    // Ensure background interval does not outlive a dropped Loader.
+}
+
+impl Drop for LoaderInner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && let Some(interval) = state.interval.take()
+        {
+            interval.clear();
+        }
+    }
+}
+
 impl Loader {
     fn state(&self) -> MutexGuard<'_, LoaderState> {
         self.inner.state.lock().unwrap()
@@ -68,7 +82,24 @@ impl Loader {
         message: Option<&str>,
         indicator: Option<LoaderIndicatorOptions>,
     ) -> Self {
-        todo!("port: Loader::new")
+        let loader = Self {
+            inner: Arc::new(LoaderInner {
+                text: Text::new(Some(""), Some(1), Some(0), None),
+                ui,
+                state: Mutex::new(LoaderState {
+                    frames: DEFAULT_FRAMES.iter().map(|s| (*s).to_string()).collect(),
+                    interval_ms: DEFAULT_INTERVAL_MS,
+                    current_frame: 0,
+                    interval: None,
+                    render_indicator_verbatim: false,
+                    spinner_color_fn,
+                    message_color_fn,
+                    message: message.unwrap_or("Loading...").to_string(),
+                }),
+            }),
+        };
+        loader.set_indicator(indicator);
+        loader
     }
 
     pub fn set_text(&self, text: &str) {
@@ -80,40 +111,109 @@ impl Loader {
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
-        todo!("port: Loader::render")
+        let mut out = vec![String::new()];
+        out.extend(self.inner.text.render(width));
+        out
     }
 
     pub fn start(&self) {
-        todo!("port: Loader::start")
+        self.update_display();
+        self.restart_animation();
     }
 
     pub fn stop(&self) {
-        todo!("port: Loader::stop")
+        let interval = self.state().interval.take();
+        if let Some(iv) = interval {
+            iv.clear();
+        }
     }
 
     pub fn set_message(&self, message: &str) {
-        todo!("port: Loader::set_message")
+        {
+            self.state().message = message.to_string();
+        }
+        self.update_display();
     }
 
     pub fn invalidate(&self) {
-        todo!("port: Loader::invalidate")
+        self.inner.text.invalidate();
+        self.update_display();
     }
 
     pub fn set_indicator(&self, indicator: Option<LoaderIndicatorOptions>) {
-        todo!("port: Loader::set_indicator")
+        {
+            let mut state = self.state();
+            state.render_indicator_verbatim = indicator.is_some();
+            state.frames = match indicator.as_ref().and_then(|ind| ind.frames.as_ref()) {
+                Some(frames) => frames.clone(),
+                None => DEFAULT_FRAMES.iter().map(|s| (*s).to_string()).collect(),
+            };
+            state.interval_ms = indicator
+                .and_then(|ind| ind.interval_ms)
+                .filter(|&ms| ms > 0)
+                .unwrap_or(DEFAULT_INTERVAL_MS);
+            state.current_frame = 0;
+        }
+        self.start();
     }
 
     fn restart_animation(&self) {
-        todo!("port: Loader::restart_animation")
+        self.stop();
+        let mut state = self.state();
+        if state.frames.len() <= 1 {
+            return;
+        }
+        let interval_ms = state.interval_ms.max(1) as u64;
+        let weak_inner = Arc::downgrade(&self.inner);
+        let interval = pi_js::time::set_interval(interval_ms, move || {
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+            let loader = Loader { inner };
+            {
+                let mut state = loader.state();
+                if state.frames.is_empty() {
+                    return;
+                }
+                state.current_frame = (state.current_frame + 1) % (state.frames.len() as i64);
+            }
+            loader.update_display();
+        });
+        state.interval = Some(interval);
     }
 
     /// PORT: TS `protected`. Public so another crate can delegate (§9.4).
     pub fn get_rendered_indicator(&self) -> String {
-        todo!("port: Loader::get_rendered_indicator")
+        let (frame, verbatim, spinner_fn) = {
+            let state = self.state();
+            let idx = if state.current_frame < 0 {
+                None
+            } else {
+                Some(state.current_frame as usize)
+            };
+            let frame = idx.and_then(|i| state.frames.get(i)).cloned().unwrap_or_default();
+            (
+                frame,
+                state.render_indicator_verbatim,
+                Arc::clone(&state.spinner_color_fn),
+            )
+        };
+        if verbatim { frame } else { spinner_fn(&frame) }
     }
 
     fn update_display(&self) {
-        todo!("port: Loader::update_display")
+        let rendered_frame = self.get_rendered_indicator();
+        let (message, message_fn) = {
+            let state = self.state();
+            (state.message.clone(), Arc::clone(&state.message_color_fn))
+        };
+        let indicator = if rendered_frame.is_empty() {
+            String::new()
+        } else {
+            format!("{rendered_frame} ")
+        };
+        self.set_text(&format!("{indicator}{}", message_fn(&message)));
+        self.inner.ui.request_render(None);
     }
 }
 

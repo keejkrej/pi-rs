@@ -31,7 +31,9 @@ impl Eq for MouseRegion {}
 
 impl MouseRegion {
     pub fn new(child: DynComponent, on_mouse: MouseRegionHandler) -> Self {
-        todo!("port: MouseRegion::new")
+        Self {
+            inner: Arc::new(MouseRegionInner { child, on_mouse }),
+        }
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
@@ -39,7 +41,17 @@ impl MouseRegion {
     }
 
     pub fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
-        todo!("port: MouseRegion::handle_mouse")
+        match crate::tui::dispatch_mouse_event(&*self.inner.child, event) {
+            Some(res) => Some(TuiMouseEventResult {
+                handled: Some(res.handled),
+                capture: res.capture,
+                focus: res.focus,
+                render: res.render,
+                target: Some(res.target),
+                focus_target: res.focus_target,
+            }),
+            None => (self.inner.on_mouse)(event),
+        }
     }
 
     pub fn invalidate(&self) {
