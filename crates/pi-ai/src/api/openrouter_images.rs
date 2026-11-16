@@ -313,9 +313,27 @@ pub async fn generate_images(
                         Ok((next, parsed))
                     };
 
-                    let res = match &combined.signal {
-                        Some(sig) => race_with_abort_signal(perform, sig).await,
-                        None => perform.await,
+                    let already_aborted = combined.signal.as_ref().is_some_and(AbortSignal::aborted);
+                    let res = if already_aborted {
+                        match perform.await {
+                            Ok(val) => {
+                                if let Some(sig) = &combined.signal {
+                                    if let Err(err) = sig.throw_if_aborted() {
+                                        Err(err)
+                                    } else {
+                                        Ok(val)
+                                    }
+                                } else {
+                                    Ok(val)
+                                }
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        match &combined.signal {
+                            Some(sig) => race_with_abort_signal(perform, sig).await,
+                            None => perform.await,
+                        }
                     };
                     combined.cleanup();
 

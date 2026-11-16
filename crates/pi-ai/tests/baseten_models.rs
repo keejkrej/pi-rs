@@ -12,7 +12,6 @@ use pi_ai::types::{
     Context, Message, ModelCompat, ModelInput, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingFormat,
     ThinkingLevel, UserMessage, UserMessageContent,
 };
-use pi_ai::utils::transcript::normalize_context;
 use pi_js::Error;
 use pi_js::env::testing::EnvGuard;
 
@@ -59,14 +58,14 @@ async fn models_kimi_k2_6_reasoning_as_explicit_off_on_toggle() {
 
     let captured = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
-    let context = normalize_context(&Context {
+    let context = Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
             content: UserMessageContent::Text("test".to_owned()),
             timestamp: 0,
         })],
         tools: None,
-    });
+    };
 
     let mut base = StreamOptions::default();
     base.api_key = Some("test-baseten-key".to_owned());
@@ -95,14 +94,14 @@ async fn sends_baseten_chat_template_args_with_reasoning_effort() {
     let model = get_model("baseten", "zai-org/GLM-5.2").expect("GLM-5.2 model");
     let captured = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
-    let context = normalize_context(&Context {
+    let context = Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
             content: UserMessageContent::Text("test".to_owned()),
             timestamp: 0,
         })],
         tools: None,
-    });
+    };
 
     let mut base = StreamOptions::default();
     base.api_key = Some("test-baseten-key".to_owned());
@@ -131,14 +130,14 @@ async fn disables_baseten_opt_in_reasoning_when_thinking_is_off() {
     let model = get_model("baseten", "zai-org/GLM-5.2").expect("GLM-5.2 model");
     let captured = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
-    let context = normalize_context(&Context {
+    let context = Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
             content: UserMessageContent::Text("test".to_owned()),
             timestamp: 0,
         })],
         tools: None,
-    });
+    };
 
     let mut base = StreamOptions::default();
     base.api_key = Some("test-baseten-key".to_owned());

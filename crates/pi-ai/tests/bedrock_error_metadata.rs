@@ -42,7 +42,7 @@ fn respond_with_failing_stream(err: BedrockTransportError) -> BedrockTransportOu
     })
 }
 
-async fn run_bedrock(signal: Option<pi_js::AbortSignal>) -> AssistantMessage {
+async fn run_bedrock(signal: Option<pi_js::abort::AbortSignal>) -> AssistantMessage {
     let context = normalize_context(&Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
@@ -242,7 +242,7 @@ async fn emits_no_diagnostic_for_aborted_turn() {
         })
     });
 
-    let message = run_bedrock(Some(pi_js::AbortSignal::abort(None))).await;
+    let message = run_bedrock(Some(pi_js::abort::AbortSignal::abort(None))).await;
     assert_eq!(message.stop_reason, StopReason::Aborted);
     assert_eq!(find_diagnostic(&message), None);
 }

@@ -12,7 +12,6 @@ use indexmap::IndexMap;
 use tokio::sync::Notify;
 
 use pi_js::abort::AbortController;
-use pi_js::json::JsonValue;
 use pi_js::{Error, Result};
 
 use pi_ai::api::lazy::{LazyApiCapabilities, lazy_api};
@@ -23,7 +22,7 @@ use pi_ai::auth::types::{
 };
 use pi_ai::compat::{get_model as get_compat_model, get_models as get_compat_models};
 use pi_ai::models::{
-    CreateModelsOptions, CreateProviderApi, CreateProviderOptions, ModelsApi, ModelsDeferredCancelOptions,
+    CreateModelsOptions, CreateProviderApi, CreateProviderOptions, ModelsDeferredCancelOptions,
     ModelsDeferredFetchOptions, ModelsRefreshOptions, ModelsSimpleStreamOptions, create_models, create_provider,
     get_supported_thinking_levels,
 };
@@ -44,10 +43,9 @@ use pi_ai::providers::faux::{
 use pi_ai::providers::google_vertex::google_vertex_provider;
 use pi_ai::types::{
     AssistantContentBlock, AssistantMessageEvent, Context, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
-    DeferredOption, DeferredWindow, Message, Model, ModelCompat, ModelCost, ModelImageInputLimits,
-    ModelImageResizeOptions, ModelInputLimits, ModelModality, ModelThinkingLevel, ProviderEnv, ProviderHeaders,
-    ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, UserMessage,
-    UserMessageContent,
+    DeferredOption, DeferredWindow, JsonValue, Message, Model, ModelCompat, ModelCost, ModelImageInputLimits,
+    ModelImageResizeOptions, ModelInputLimits, ModelModality, ModelThinkingLevel, ProviderEnv, ProviderRequestOptions,
+    ProviderStreams, SimpleStreamOptions, StopReason, UserMessage, UserMessageContent,
 };
 use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use pi_ai::utils::transcript::normalize_context;

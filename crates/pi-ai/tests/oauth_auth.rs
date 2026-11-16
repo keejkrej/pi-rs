@@ -3,22 +3,19 @@
 use std::sync::{Arc, Mutex};
 
 use pi_ai::auth::credential_store::InMemoryCredentialStore;
-use pi_ai::auth::helpers::lazy_oauth;
 use pi_ai::auth::oauth::anthropic::anthropic_oauth;
 use pi_ai::auth::oauth::github_copilot::github_copilot_oauth;
 use pi_ai::auth::oauth::kimi_coding::kimi_coding_oauth;
-use pi_ai::auth::oauth::load::load_github_copilot_oauth;
 use pi_ai::auth::oauth::openai_chatgpt::openai_chatgpt_oauth;
 use pi_ai::auth::oauth::openai_codex::openai_codex_oauth;
 use pi_ai::auth::oauth::openrouter::openrouter_oauth;
 use pi_ai::auth::oauth::xai::xai_oauth;
-use pi_ai::auth::types::{AuthOperationOptions, Credential, CredentialStore, ModelAuth, OAuthCredential, ProviderAuth};
-use pi_ai::models::{CreateModelsOptions, Provider, create_models};
+use pi_ai::auth::types::{AuthOperationOptions, Credential, CredentialStore, ModelAuth, OAuthCredential};
+use pi_ai::models::{CreateModelsOptions, create_models};
 use pi_ai::oauth as extension_oauth_compatibility;
 use pi_ai::providers::anthropic::anthropic_provider;
+use pi_ai::providers::github_copilot::github_copilot_provider;
 use pi_ai::providers::openai::openai_provider;
-use pi_ai::types::{ApiStreamOptions, Model, ModelCost, ModelInput, SimpleStreamOptions, TranscriptContext};
-use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use pi_js::abort::AbortController;
 use pi_js::fetch::testing::{mock_fetch, response};
 use pi_js::time;
@@ -263,42 +260,6 @@ async fn resolves_stored_anthropic_oauth_credentials_via_the_lazy_flow_import() 
 
 #[tokio::test]
 async fn resolves_stored_github_copilot_oauth_credentials_including_per_credential_base_url() {
-    // WIRE(@mcp-w2): use crate::providers::github_copilot::github_copilot_provider() once @mcp lands.
-    struct CopilotTestProvider {
-        auth: ProviderAuth,
-        model: Model,
-    }
-    impl Provider for CopilotTestProvider {
-        fn id(&self) -> &str {
-            "github-copilot"
-        }
-        fn name(&self) -> &str {
-            "GitHub Copilot"
-        }
-        fn auth(&self) -> &ProviderAuth {
-            &self.auth
-        }
-        fn get_models(&self) -> Vec<Model> {
-            vec![self.model.clone()]
-        }
-        fn stream(
-            &self,
-            _model: &Model,
-            _context: &TranscriptContext,
-            _options: Option<ApiStreamOptions>,
-        ) -> AssistantMessageEventStream {
-            AssistantMessageEventStream::new()
-        }
-        fn stream_simple(
-            &self,
-            _model: &Model,
-            _context: &TranscriptContext,
-            _options: Option<SimpleStreamOptions>,
-        ) -> AssistantMessageEventStream {
-            AssistantMessageEventStream::new()
-        }
-    }
-
     let access = "tid=abc;exp=123;proxy-ep=proxy.business.githubcopilot.com;rest";
     let credentials = Arc::new(InMemoryCredentialStore::new());
     let expires = time::now_ms() + 10 * 60_000;
@@ -324,36 +285,7 @@ async fn resolves_stored_github_copilot_oauth_credentials_including_per_credenti
         credentials: Some(credentials),
         ..Default::default()
     }));
-    models.set_provider(Arc::new(CopilotTestProvider {
-        auth: ProviderAuth {
-            api_key: None,
-            oauth: Some(lazy_oauth(
-                "GitHub Copilot",
-                true,
-                None::<&str>,
-                Arc::new(|| Box::pin(load_github_copilot_oauth())),
-            )),
-        },
-        model: Model {
-            r#type: None,
-            id: "gpt-4o".to_owned(),
-            name: "GPT-4o".to_owned(),
-            api: "openai-completions".to_owned(),
-            provider: "github-copilot".to_owned(),
-            base_url: "https://api.individual.githubcopilot.com".to_owned(),
-            reasoning: false,
-            thinking_level_map: None,
-            prompt_cache: None,
-            input: vec![ModelInput::Text],
-            input_limits: None,
-            cost: ModelCost::default(),
-            context_window: 128000,
-            max_tokens: 16384,
-            headers: None,
-            sampling_params: None,
-            compat: None,
-        },
-    }));
+    models.set_provider(github_copilot_provider());
 
     let model = models.get_models(Some("github-copilot"))[0].clone();
     let result = models

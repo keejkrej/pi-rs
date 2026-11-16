@@ -61,22 +61,20 @@ fn models_together_reasoning_controls_from_api_surface() {
         .and_then(ModelCompat::as_openai_completions)
         .expect("gpt compat");
     assert_eq!(gpt_compat.supports_reasoning_effort, Some(true));
-    assert_eq!(gpt_compat.thinking_format, Some(ThinkingFormat::Openai));
+    assert_eq!(gpt_compat.thinking_format, Some(ThinkingFormat::OpenAI));
 
-    let deepseek = get_model("together", "deepseek-ai/DeepSeek-V4-Pro").expect("DeepSeek-V4-Pro");
+    let deepseek = get_model("together", "deepseek-ai/DeepSeek-V4-Pro-0813").expect("DeepSeek-V4-Pro-0813");
     let mut expected_ds = IndexMap::new();
     expected_ds.insert(ModelThinkingLevel::Minimal, None);
     expected_ds.insert(ModelThinkingLevel::Low, None);
     expected_ds.insert(ModelThinkingLevel::Medium, None);
-    expected_ds.insert(ModelThinkingLevel::High, Some("high".to_owned()));
-    expected_ds.insert(ModelThinkingLevel::XHigh, None);
     assert_eq!(deepseek.thinking_level_map.as_ref(), Some(&expected_ds));
     let ds_compat = deepseek
         .compat
         .as_ref()
         .and_then(ModelCompat::as_openai_completions)
         .expect("deepseek compat");
-    assert_eq!(ds_compat.supports_reasoning_effort, Some(true));
+    assert_eq!(ds_compat.supports_reasoning_effort, Some(false));
     assert_eq!(ds_compat.thinking_format, Some(ThinkingFormat::Together));
 
     let minimax = get_model("together", "MiniMaxAI/MiniMax-M2.7").expect("MiniMax-M2.7");

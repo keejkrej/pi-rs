@@ -924,6 +924,7 @@ async fn times_out_after_repeated_slow_down_responses() {
         None,
     ));
 
+    tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(4999)).await;
     tokio::task::yield_now().await;
     assert!(access_token_poll_times.lock().unwrap().is_empty());

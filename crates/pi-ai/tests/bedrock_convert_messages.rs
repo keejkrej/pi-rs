@@ -82,7 +82,7 @@ async fn capture_payload(context: Context, model: &Model) -> JsonValue {
     let options = BedrockOptions {
         base: StreamOptions {
             cache_retention: Some(CacheRetention::None),
-            signal: Some(pi_js::AbortSignal::abort(None)),
+            signal: Some(pi_js::abort::AbortSignal::abort(None)),
             on_payload: Some(Arc::new(move |payload, _model| {
                 let captured_inner = Arc::clone(&captured_ref);
                 Box::pin(async move {

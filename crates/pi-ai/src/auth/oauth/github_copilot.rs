@@ -13,7 +13,6 @@ use crate::auth::oauth::device_code::{OAuthDeviceCodePollResult, poll_oauth_devi
 use crate::auth::types::{
     AuthEvent, AuthPrompt, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential, ProviderAuthInteraction,
 };
-use crate::model_catalog::flatten_chat_catalog_json;
 
 const CLIENT_ID_B64: &str = "SXYxLmI1MDdhMDhjODdlY2ZlOTg=";
 const COPILOT_HEADERS: &[(&str, &str)] = &[
@@ -30,15 +29,12 @@ fn client_id() -> Result<String> {
 }
 
 fn known_github_copilot_model_ids() -> &'static IndexSet<String> {
-    // WIRE(@mcp-w2): switch to crate::providers::github_copilot_models::github_copilot_models() once @mcp lands.
     static IDS: OnceLock<IndexSet<String>> = OnceLock::new();
     IDS.get_or_init(|| {
-        flatten_chat_catalog_json(
-            "github-copilot",
-            include_str!("../../providers/data/github-copilot.json"),
-        )
-        .map(|catalog| catalog.into_keys().collect())
-        .unwrap_or_default()
+        crate::providers::github_copilot_models::github_copilot_models()
+            .keys()
+            .cloned()
+            .collect()
     })
 }
 

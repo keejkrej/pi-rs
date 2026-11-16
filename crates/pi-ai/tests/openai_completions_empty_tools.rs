@@ -238,7 +238,6 @@ async fn sends_default_and_explicit_max_tokens_and_clamps_to_remaining_context()
 }
 
 #[tokio::test]
-#[ignore = "WIRE(@mcp-w2): requires @mcp's providers/cloudflare_ai_gateway.rs wired in providers/all.rs"]
 async fn handles_cloudflare_ai_gateway_compat_url_auth_and_session_affinity() {
     let kimi = get_model("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6").unwrap();
 

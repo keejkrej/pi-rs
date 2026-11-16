@@ -13,9 +13,9 @@ use pi_ai::providers::all::{
     builtin_models, get_all_builtin_models, get_builtin_classifier_model, get_builtin_classifier_models,
 };
 use pi_ai::types::{
-    AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierQuestion,
-    ClassifierResult, ClassifierStopReason, FetchFunction, Model, ModelCost, ModelModality, ModelType,
-    ProviderClassifier, ProviderStreams,
+    AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
+    ClassifierQuestion, ClassifierResult, ClassifierStopReason, FetchFunction, Model, ModelCost, ModelModality,
+    ModelType, ProviderClassifier, ProviderRequestOptions, ProviderStreams,
 };
 use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use pi_ai::utils::model_operations::assert_classifier_model;
@@ -283,9 +283,17 @@ async fn routes_gateway_and_opencode_jev_to_typesafe_compatible_endpoints() {
             })
         });
 
-        let mut opts = ModelsClassifierOptions::default();
-        opts.base.base.api_key = Some("secret".to_owned());
-        opts.base.base.fetch = Some(fetch_fn);
+        let opts = ModelsClassifierOptions {
+            base: ClassifierOptions {
+                base: ProviderRequestOptions {
+                    api_key: Some("secret".to_owned()),
+                    fetch: Some(fetch_fn),
+                    ..Default::default()
+                },
+                temperature: None,
+            },
+            transform_headers: None,
+        };
 
         let result = models.classify(&jev, &context, Some(opts)).await;
         let captured = requests.lock().unwrap();

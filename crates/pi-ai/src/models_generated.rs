@@ -9,9 +9,8 @@ use crate::model_catalog::{
     flatten_classifier_catalog_json, flatten_image_catalog_json,
 };
 
-// WIRE(@mcp-w2): When @mcp lands the remaining per-provider `*_models.rs` catalogs, per-provider
-// strongly-typed statics can also delegate here; loading directly from `providers/data/*.json`
-// provides complete runtime coverage across all 42 built-in providers without cross-crate imports.
+// Per-provider strongly-typed catalogs live in `providers/*_models.rs` and `providers/all.rs`;
+// loading directly from `providers/data/*.json` provides complete runtime coverage across all 42 built-in providers.
 
 const PROVIDER_DATA: &[(&str, &str)] = &[
     ("amazon-bedrock", include_str!("providers/data/amazon-bedrock.json")),

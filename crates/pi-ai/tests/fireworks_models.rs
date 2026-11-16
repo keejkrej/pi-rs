@@ -17,19 +17,18 @@ use pi_ai::types::{
     CacheRetention, Context, Message, ModelCompat, ModelInput, ModelThinkingLevel, SimpleStreamOptions, StreamOptions,
     ThinkingFormat, ThinkingLevel, UserMessage, UserMessageContent,
 };
-use pi_ai::utils::transcript::normalize_context;
 use pi_js::Error;
 use pi_js::env::testing::EnvGuard;
 
-fn user_context(text: &str) -> pi_ai::types::TranscriptContext {
-    normalize_context(&Context {
+fn user_context(text: &str) -> Context {
+    Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
             content: UserMessageContent::Text(text.to_owned()),
             timestamp: 0,
         })],
         tools: None,
-    })
+    }
 }
 
 #[test]
@@ -109,7 +108,7 @@ async fn routes_kimi_k3_through_openai_compatible_api_with_native_effort() {
     assert_eq!(compat.supports_developer_role, Some(false));
     assert_eq!(compat.supports_strict_mode, Some(true));
     assert_eq!(compat.requires_reasoning_content_on_assistant_messages, Some(true));
-    assert_eq!(compat.thinking_format, Some(ThinkingFormat::Openai));
+    assert_eq!(compat.thinking_format, Some(ThinkingFormat::OpenAI));
     assert_eq!(compat.supports_mid_convo_system_messages, Some(true));
     assert_eq!(compat.supports_mid_convo_tool_additions, Some(true));
     assert_eq!(compat.send_session_affinity_headers, Some(true));

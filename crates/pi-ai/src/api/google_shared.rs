@@ -1154,7 +1154,7 @@ fn create_google_http_error(
     headers: Headers,
 ) -> Error {
     let error_json = if content_type.is_some_and(|ct| ct.contains("application/json")) {
-        if let Ok(parsed) = pi_js::json::parse::<JsonValue>(body_text) {
+        if let Ok(parsed) = pi_js::json::parse(body_text) {
             pi_js::json::stringify(&parsed)
         } else {
             build_fallback_error_json(status, status_text, body_text)

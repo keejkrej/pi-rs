@@ -3,6 +3,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, OnceLock};
 
+use gcp_auth::TokenProvider;
 use indexmap::IndexMap;
 use pi_js::fetch::Headers;
 use pi_js::{BoxFuture, Error, Result};

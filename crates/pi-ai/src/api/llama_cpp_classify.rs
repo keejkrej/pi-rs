@@ -395,7 +395,7 @@ async fn post(request: &RequestContext<'_>, path: &str, body: Value, observe: bo
         ProviderRetryOptions {
             max_retries,
             max_retry_delay_ms,
-            signal: caller_signal,
+            signal: caller_signal.clone(),
         },
     )
     .await;

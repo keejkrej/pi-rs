@@ -183,11 +183,15 @@ async fn chat_models_without_type_work_and_narrow_with_is_model_type() {
 
 #[test]
 fn builtin_catalog_getters_return_model_shapes_that_can_be_reassigned() {
-    // WIRE(@mcp-w2): also test providers::all::get_builtin_model
     let mut compat = get_compat_model("openai", "gpt-4o-mini").unwrap();
     assert_eq!(compat.id, "gpt-4o-mini");
     compat = get_compat_model("openai", "gpt-4o").unwrap();
     assert_eq!(compat.id, "gpt-4o");
+
+    let mut builtin = pi_ai::providers::all::get_builtin_model("openai", "gpt-4o-mini").unwrap();
+    assert_eq!(builtin.id, "gpt-4o-mini");
+    builtin = pi_ai::providers::all::get_builtin_model("openai", "gpt-4o").unwrap();
+    assert_eq!(builtin.id, "gpt-4o");
 }
 
 #[tokio::test]

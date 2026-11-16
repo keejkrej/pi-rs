@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use pi_ai::providers::faux::faux_assistant_message;
+use pi_ai::providers::faux::{FauxAssistantMessageContent, faux_assistant_message};
 use pi_ai::providers::opencode_headers::with_open_code_session_header;
 use pi_ai::types::{
     ApiStreamOptions, AssistantMessageEvent, CacheRetention, Context, Message, Model, ModelCost, ModelInput,
@@ -53,7 +53,7 @@ fn fixture_context() -> TranscriptContext {
 
 fn completed_stream() -> AssistantMessageEventStream {
     let stream = create_assistant_message_event_stream();
-    let message = faux_assistant_message("ok".into(), None);
+    let message = faux_assistant_message(FauxAssistantMessageContent::Text("ok".to_owned()), None);
     stream.push(AssistantMessageEvent::Start {
         partial: message.clone(),
     });

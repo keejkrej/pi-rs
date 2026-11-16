@@ -14,8 +14,8 @@ use pi_ai::models::{ModelsClassifierOptions, MutableModels, create_models};
 use pi_ai::providers::all::get_builtin_classifier_model;
 use pi_ai::providers::cloudflare_workers_ai::cloudflare_workers_ai_provider;
 use pi_ai::types::{
-    AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierQuestion,
-    ClassifierStopReason, FetchFunction, ModelType, ProviderEnv,
+    AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
+    ClassifierQuestion, ClassifierStopReason, FetchFunction, ModelType, ProviderEnv, ProviderRequestOptions,
 };
 use pi_js::fetch::{Headers, Response};
 
@@ -88,11 +88,18 @@ fn setup() -> (MutableModels, ClassifierModel) {
 fn auth_options(fetch_fn: FetchFunction) -> ModelsClassifierOptions {
     let mut env = ProviderEnv::new();
     env.insert("CLOUDFLARE_ACCOUNT_ID".to_owned(), "account-id".to_owned());
-    let mut opts = ModelsClassifierOptions::default();
-    opts.base.base.api_key = Some("cf-key".to_owned());
-    opts.base.base.env = Some(env);
-    opts.base.base.fetch = Some(fetch_fn);
-    opts
+    ModelsClassifierOptions {
+        base: ClassifierOptions {
+            base: ProviderRequestOptions {
+                api_key: Some("cf-key".to_owned()),
+                env: Some(env),
+                fetch: Some(fetch_fn),
+                ..Default::default()
+            },
+            temperature: None,
+        },
+        transform_headers: None,
+    }
 }
 
 #[test]

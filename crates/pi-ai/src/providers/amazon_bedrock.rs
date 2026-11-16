@@ -21,7 +21,7 @@ pub struct BedrockApiKeyAuth;
 
 async fn read_env(
     ctx: &Arc<dyn crate::auth::types::AuthContext>,
-    signal: &pi_js::AbortSignal,
+    signal: &pi_js::abort::AbortSignal,
     name: &str,
 ) -> Result<Option<String>> {
     signal.throw_if_aborted()?;

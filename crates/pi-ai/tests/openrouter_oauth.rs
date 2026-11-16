@@ -153,8 +153,17 @@ async fn runs_pkce_on_a_one_shot_loopback_callback_and_exchanges_code() {
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: AbortSignal::never(),
         on_prompt: Arc::new(move |prompt| {
-            *ms_ref.lock().unwrap() = prompt.signal;
-            Box::pin(async { pending::<Result<String>>().await })
+            let ms_ref = Arc::clone(&ms_ref);
+            Box::pin(async move {
+                let sig = prompt.signal;
+                *ms_ref.lock().unwrap() = sig.clone();
+                if let Some(s) = sig {
+                    s.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Prompt aborted"))
+            })
         }),
         on_notify: Arc::new(move |event| {
             let AuthEvent::AuthUrl { url, .. } = event else {
@@ -227,7 +236,16 @@ async fn reports_token_exchange_failures_through_both_callback_page_and_login() 
 
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: AbortSignal::never(),
-        on_prompt: Arc::new(|_| Box::pin(async { pending::<Result<String>>().await })),
+        on_prompt: Arc::new(|prompt| {
+            Box::pin(async move {
+                if let Some(sig) = prompt.signal {
+                    sig.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Login cancelled"))
+            })
+        }),
         on_notify: Arc::new(move |event| {
             let AuthEvent::AuthUrl { url, .. } = event else {
                 return;
@@ -289,7 +307,16 @@ async fn allows_only_one_token_exchange_for_a_callback() {
 
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: AbortSignal::never(),
-        on_prompt: Arc::new(|_| Box::pin(async { pending::<Result<String>>().await })),
+        on_prompt: Arc::new(|prompt| {
+            Box::pin(async move {
+                if let Some(sig) = prompt.signal {
+                    sig.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Login cancelled"))
+            })
+        }),
         on_notify: Arc::new(move |event| {
             let AuthEvent::AuthUrl { url, .. } = event else {
                 return;
@@ -347,7 +374,16 @@ async fn rejects_a_successful_response_that_does_not_contain_a_key() {
 
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: AbortSignal::never(),
-        on_prompt: Arc::new(|_| Box::pin(async { pending::<Result<String>>().await })),
+        on_prompt: Arc::new(|prompt| {
+            Box::pin(async move {
+                if let Some(sig) = prompt.signal {
+                    sig.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Login cancelled"))
+            })
+        }),
         on_notify: Arc::new(move |event| {
             let AuthEvent::AuthUrl { url, .. } = event else {
                 return;
@@ -519,14 +555,23 @@ async fn rejects_empty_manual_input_without_exchanging_a_code() {
 
 #[tokio::test]
 async fn closes_the_pending_callback_when_login_is_cancelled() {
-    let controller = AbortController::new();
-    let ctrl_for_notify = controller.clone();
+    let controller = Arc::new(AbortController::new());
+    let ctrl_for_notify = Arc::clone(&controller);
     let callback_url = Arc::new(Mutex::new(None::<String>));
     let cb_ref = Arc::clone(&callback_url);
 
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: controller.signal(),
-        on_prompt: Arc::new(|_| Box::pin(async { pending::<Result<String>>().await })),
+        on_prompt: Arc::new(|prompt| {
+            Box::pin(async move {
+                if let Some(sig) = prompt.signal {
+                    sig.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Login cancelled"))
+            })
+        }),
         on_notify: Arc::new(move |event| {
             if let AuthEvent::AuthUrl { url, .. } = event {
                 let parsed = url::Url::parse(&url).unwrap();
@@ -573,14 +618,23 @@ async fn rejects_before_opening_a_callback_server_when_login_is_already_cancelle
 #[serial]
 async fn uses_the_configured_oauth_callback_host() {
     let _env = EnvGuard::set("PI_OAUTH_CALLBACK_HOST", Some("localhost"));
-    let controller = AbortController::new();
-    let ctrl_for_notify = controller.clone();
+    let controller = Arc::new(AbortController::new());
+    let ctrl_for_notify = Arc::clone(&controller);
     let callback_url = Arc::new(Mutex::new(None::<String>));
     let cb_ref = Arc::clone(&callback_url);
 
     let interaction = Arc::new(TestOpenRouterInteraction {
         signal: controller.signal(),
-        on_prompt: Arc::new(|_| Box::pin(async { pending::<Result<String>>().await })),
+        on_prompt: Arc::new(|prompt| {
+            Box::pin(async move {
+                if let Some(sig) = prompt.signal {
+                    sig.cancelled().await;
+                } else {
+                    pending::<()>().await;
+                }
+                Err(Error::msg("Login cancelled"))
+            })
+        }),
         on_notify: Arc::new(move |event| {
             if let AuthEvent::AuthUrl { url, .. } = event {
                 let parsed = url::Url::parse(&url).unwrap();

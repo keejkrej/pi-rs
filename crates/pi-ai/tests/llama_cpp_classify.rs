@@ -1,6 +1,5 @@
 //! Port of packages/ai/test/llama-cpp-classify.test.ts
 
-use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 

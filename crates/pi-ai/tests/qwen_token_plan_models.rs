@@ -11,7 +11,6 @@ use pi_ai::types::{
     Context, Message, Model, ModelThinkingLevel, ProviderEnv, SimpleStreamOptions, StreamOptions, ThinkingLevel,
     UserMessage, UserMessageContent,
 };
-use pi_ai::utils::transcript::normalize_context;
 use pi_js::fetch::testing::{chunked_response, mock_fetch};
 use pi_js::time;
 
@@ -93,14 +92,14 @@ async fn capture_qwen_payload(model: &Model, reasoning: ThinkingLevel) -> serde_
     let _fetch_guard = mock_fetch(|_req| Box::pin(async { Ok(sse_stub_response()) }));
     let captured = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
-    let context = normalize_context(&Context {
+    let context = Context {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
             content: UserMessageContent::Text("Hi".to_owned()),
             timestamp: time::now_ms(),
         })],
         tools: None,
-    });
+    };
 
     let mut base = StreamOptions::default();
     base.api_key = Some("test".to_owned());
@@ -121,7 +120,7 @@ async fn capture_qwen_payload(model: &Model, reasoning: ThinkingLevel) -> serde_
 
 #[test]
 fn exposes_exact_documented_individual_text_models() {
-    let mut model_ids: Vec<String> = get_models("qwen-token-plan-individual")
+    let mut model_ids: Vec<String> = get_models(Some("qwen-token-plan-individual"))
         .into_iter()
         .map(|m| m.id)
         .collect();
@@ -145,7 +144,7 @@ fn reuses_international_token_plan_env_var() {
 #[test]
 fn exposes_all_text_models_and_omits_image_models() {
     for provider in ["qwen-token-plan", "qwen-token-plan-cn"] {
-        let model_ids: Vec<String> = get_models(provider).into_iter().map(|m| m.id).collect();
+        let model_ids: Vec<String> = get_models(Some(provider)).into_iter().map(|m| m.id).collect();
         for &expected in TEXT_MODELS {
             assert!(
                 model_ids.iter().any(|id| id == expected),
@@ -174,7 +173,7 @@ async fn sends_qwen_thinking_fields_for_all_thinking_models() {
     }
 
     for (provider, model_id) in cases {
-        let model = get_models(provider)
+        let model = get_models(Some(provider))
             .into_iter()
             .find(|m| m.id == model_id)
             .unwrap_or_else(|| panic!("missing model {provider}/{model_id}"));
@@ -210,7 +209,7 @@ fn exposes_qwen_reasoning_effort_and_qwen38_maps() {
     expected_effort.insert(ModelThinkingLevel::Max, Some("max".to_owned()));
 
     for (provider, model_id) in effort_cases {
-        let model = get_models(provider)
+        let model = get_models(Some(provider))
             .into_iter()
             .find(|m| m.id == model_id)
             .unwrap_or_else(|| panic!("missing model {provider}/{model_id}"));
@@ -230,7 +229,7 @@ fn exposes_qwen_reasoning_effort_and_qwen38_maps() {
 
     for provider in ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"] {
         for &model_id in QWEN38_MODELS {
-            let model = get_models(provider)
+            let model = get_models(Some(provider))
                 .into_iter()
                 .find(|m| m.id == model_id)
                 .unwrap_or_else(|| panic!("missing model {provider}/{model_id}"));
@@ -245,7 +244,7 @@ fn exposes_qwen_reasoning_effort_and_qwen38_maps() {
 #[test]
 fn omits_retired_qwen3_8_max_preview() {
     for provider in ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"] {
-        let ids: Vec<String> = get_models(provider).into_iter().map(|m| m.id).collect();
+        let ids: Vec<String> = get_models(Some(provider)).into_iter().map(|m| m.id).collect();
         assert!(!ids.iter().any(|id| id == "qwen3.8-max-preview"));
     }
 }
@@ -268,7 +267,7 @@ async fn sends_qwen_reasoning_effort_and_xhigh_payloads() {
     }
 
     for (provider, model_id) in effort_cases {
-        let model = get_models(provider)
+        let model = get_models(Some(provider))
             .into_iter()
             .find(|m| m.id == model_id)
             .unwrap_or_else(|| panic!("missing model {provider}/{model_id}"));
@@ -278,7 +277,7 @@ async fn sends_qwen_reasoning_effort_and_xhigh_payloads() {
 
     for provider in ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"] {
         for &model_id in QWEN38_MODELS {
-            let model = get_models(provider)
+            let model = get_models(Some(provider))
                 .into_iter()
                 .find(|m| m.id == model_id)
                 .unwrap_or_else(|| panic!("missing model {provider}/{model_id}"));

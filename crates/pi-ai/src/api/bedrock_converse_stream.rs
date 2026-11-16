@@ -16,6 +16,7 @@ use aws_sdk_bedrockruntime::config::{
     Config as BedrockSdkConfig, ConfigBag, Credentials, Intercept, Region, RuntimeComponents, Token,
 };
 use aws_sdk_bedrockruntime::error::{BoxError, DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_bedrockruntime::operation::RequestId;
 use aws_sdk_bedrockruntime::operation::converse_stream::{ConverseStreamError, ConverseStreamInput};
 use aws_sdk_bedrockruntime::types::error::ConverseStreamOutputError;
 use aws_sdk_bedrockruntime::types::{
@@ -28,7 +29,8 @@ use aws_sdk_bedrockruntime::types::{
 };
 use aws_smithy_types::{Blob, Document, Number};
 use indexmap::IndexMap;
-use pi_js::{BoxFuture, Error, Result, b64, json, seam, time};
+use pi_js::abort::AbortSignal;
+use pi_js::{BoxFuture, Error, Result, b64, seam, time};
 use serde::de::{self, Deserializer};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -43,7 +45,7 @@ use crate::api::transform_messages::transform_messages;
 use crate::models::calculate_cost;
 use crate::types::{
     AnyModel, Api, ApiStreamOptions, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention,
-    ImageContent, JsonObject, JsonValue, KnownApi, Message, Model, ModelThinkingLevel, ProviderEnv, ProviderResponse,
+    JsonObject, JsonValue, KnownApi, Message, Model, ModelThinkingLevel, ProviderEnv, ProviderResponse,
     ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
     ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, TranscriptContext, Usage, UsageCost,
 };
@@ -794,7 +796,7 @@ fn convert_messages(
 ) -> Result<Vec<Value>> {
     let mut result: Vec<Value> = Vec::new();
     let stripped = without_initial_system_message(&context.messages);
-    let transformed_messages = transform_messages(&stripped, model, Some(&normalize_tool_call_id));
+    let transformed_messages = transform_messages(&stripped, model, Some(&|id, _, _| normalize_tool_call_id(id)));
 
     let mut i = 0;
     while i < transformed_messages.len() {
@@ -2020,9 +2022,7 @@ fn failure_from_converse_stream_sdk_error(
     }
 }
 
-fn failure_from_stream_output_error(
-    err: SdkError<ConverseStreamOutputError, aws_sdk_bedrockruntime::primitives::event_stream::RawMessage>,
-) -> BedrockFailureInfo {
+fn failure_from_stream_output_error<R: fmt::Debug>(err: SdkError<ConverseStreamOutputError, R>) -> BedrockFailureInfo {
     match &err {
         SdkError::ServiceError(ctx) => {
             let service_err = ctx.err();
@@ -2214,7 +2214,7 @@ async fn build_bedrock_sdk_client(
     BedrockRuntimeClient::from_conf(builder.build())
 }
 
-fn check_aborted(signal: Option<&pi_js::AbortSignal>) -> Result<()> {
+fn check_aborted(signal: Option<&AbortSignal>) -> Result<()> {
     if let Some(sig) = signal
         && sig.aborted()
     {
@@ -2224,7 +2224,7 @@ fn check_aborted(signal: Option<&pi_js::AbortSignal>) -> Result<()> {
 }
 
 async fn race_abort<T>(
-    signal: Option<&pi_js::AbortSignal>,
+    signal: Option<&AbortSignal>,
     fut: impl std::future::Future<Output = T>,
 ) -> std::result::Result<T, Error> {
     match signal {
@@ -2245,14 +2245,14 @@ fn finalize_terminal_failure(
     scratches: &mut [BlockScratch],
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
-    signal: Option<&pi_js::AbortSignal>,
+    signal: Option<&AbortSignal>,
     failure: &BedrockFailureInfo,
     response_request_id: Option<&str>,
 ) {
     for (block, scratch) in output.content.iter_mut().zip(scratches.iter_mut()) {
         finalize_streaming_block(block, scratch);
     }
-    let aborted = signal.is_some_and(pi_js::AbortSignal::aborted);
+    let aborted = signal.is_some_and(AbortSignal::aborted);
     output.stop_reason = if aborted {
         StopReason::Aborted
     } else {

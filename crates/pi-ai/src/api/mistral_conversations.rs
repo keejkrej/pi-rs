@@ -22,10 +22,10 @@ use crate::api::simple_options::build_base_options;
 use crate::api::transform_messages::transform_messages;
 use crate::models::{calculate_cost, clamp_thinking_level};
 use crate::types::{
-    ApiStreamOptions, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention, JsonObject,
-    JsonValue, Message, Model, ModelInput, ModelThinkingLevel, ProviderHeaders, ProviderResponse, ProviderStreams,
-    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolChoice,
-    TranscriptContext, Usage, UsageCost, UserContentBlock, UserMessageContent,
+    AnyModel, ApiStreamOptions, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention,
+    JsonObject, JsonValue, Message, Model, ModelInput, ModelThinkingLevel, ProviderHeaders, ProviderResponse,
+    ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall,
+    ToolChoice, TranscriptContext, Usage, UsageCost, UserContentBlock, UserMessageContent,
 };
 use crate::utils::error_body::{MAX_PROVIDER_ERROR_BODY_CHARS, truncate_error_text};
 use crate::utils::event_stream::AssistantMessageEventStream;
@@ -1285,13 +1285,12 @@ async fn run_mistral_stream(
     match output.stop_reason {
         StopReason::Pending => return Err(Error::msg("Mistral stream ended without a finish reason")),
         StopReason::Aborted | StopReason::Error => {
-            return Err(Error::msg(
-                output
-                    .error_message
-                    .clone()
-                    .filter(|m| !m.is_empty())
-                    .unwrap_or_else(|| "An unknown error occurred".to_owned()),
-            ));
+            stream.push(AssistantMessageEvent::Error {
+                reason: output.stop_reason,
+                error: output.clone(),
+            });
+            stream.end(Some(output));
+            return Ok(());
         }
         _ => {}
     }

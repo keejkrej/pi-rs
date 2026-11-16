@@ -773,9 +773,9 @@ async fn aborts_while_waiting_for_an_sse_chunk() {
         ..Default::default()
     };
 
-    let result_fut = stream_with_options(&model, &normalize_context(&context), Some(opts)).result();
+    let stream = stream_with_options(&model, &normalize_context(&context), Some(opts));
     controller.abort(None);
-    let message = result_fut.await;
+    let message = stream.result().await;
 
     assert_eq!(message.stop_reason, StopReason::Aborted);
 }
