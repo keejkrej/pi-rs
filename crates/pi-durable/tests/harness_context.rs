@@ -7,10 +7,10 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use pi_ai::types::{Message, StopReason};
 use pi_durable::harness::harness::{Conversation, Harness};
+use pi_durable::harness::types::ConversationCreateOptions;
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::types::{
-    ContextEdit, ConversationCreateOptions, ConversationOwnership, EntryDraft, EntryDraftHead, EntryId, EntryRecord,
-    SelfHead,
+    ContextEdit, ConversationOwnership, EntryDraft, EntryDraftHead, EntryId, EntryRecord, SelfHead,
 };
 use pretty_assertions::assert_eq;
 use serde_json::json;

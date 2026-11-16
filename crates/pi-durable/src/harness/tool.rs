@@ -7,13 +7,14 @@ use indexmap::IndexMap;
 use pi_ai::types::{AssistantContentBlock, Message, TextContent, ToolCall, ToolResultMessage, UserContentBlock};
 use pi_ai::utils::validation::validate_tool_arguments;
 use pi_chord::context::await_with_context;
-use pi_chord::delta::{DraftInput, overlap};
+use pi_chord::delta::overlap;
+use pi_chord::delta::tracker::DraftInput;
 use pi_chord::json::copy_json;
 use pi_chord::{Context, JsonValue};
 use serde::{Deserialize, Serialize};
 
 use crate::documents::ErasedDocDefinition;
-use crate::entries::{ASSISTANT_ENTRY, TOOL_RESULT_ENTRY, ToolResultEntryData, TypedEntryDraft};
+use crate::entries::{ASSISTANT_ENTRY, TOOL_RESULT_ENTRY, ToolResultEntryData};
 use crate::env::ExecutionEnv;
 use crate::harness::json::{JsonKey, assign_json};
 use crate::harness::live::{LIVE_DOC, ToolSlot, ToolSlotStatus, clear_progress, finish_slot, tool_slot, tool_slot_mut};
@@ -29,7 +30,7 @@ use crate::tasks::{AnyTask, Task, TaskDefinition, TaskRuntimeHandle, define_task
 use crate::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, utf8_byte_length};
 use crate::types::{
     ConversationId, DocumentWatch, EntryId, ErasedTaskRecord, JsonObject, NextTaskState, RunningTask, TaskId,
-    TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TypedEntry,
+    TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TypedEntry, TypedEntryDraft,
 };
 
 const OVERLAP_SCAN_BYTES: i64 = 65_536;
@@ -52,7 +53,7 @@ pub enum ToolTaskCheckpoint {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTaskResult {
     pub entry_id: EntryId,
@@ -242,7 +243,7 @@ impl ToolExecutionApiBackend for ToolExecutionBackend {
             reported.details = Some(copy_json(&value, None)?);
         }
         let committed = self.progress.mark_and_wait();
-        await_with_context(committed, &context).await
+        await_with_context(committed, context.clone()).await
     }
 
     async fn commit_erased(
@@ -337,7 +338,10 @@ impl ToolExecutionApiBackend for ToolExecutionBackend {
 /// separates resolution from settlement. `execute` is reached only by recovery and applies the replay rule.
 pub static TOOL_TASK: LazyLock<Task<ToolTaskInput, ToolTaskCheckpoint, ToolTaskResult, ToolHooks>> =
     LazyLock::new(|| {
-        let mut phases = IndexMap::new();
+        let mut phases: IndexMap<
+            String,
+            crate::tasks::TypedPhaseHandler<ToolTaskInput, ToolTaskCheckpoint, ToolTaskResult, ToolHooks>,
+        > = IndexMap::new();
         phases.insert(
             "call".to_owned(),
             Arc::new(
@@ -345,6 +349,7 @@ pub static TOOL_TASK: LazyLock<Task<ToolTaskInput, ToolTaskCheckpoint, ToolTaskR
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_call(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
             )
                 as crate::tasks::TypedPhaseHandler<ToolTaskInput, ToolTaskCheckpoint, ToolTaskResult, ToolHooks>,
@@ -356,8 +361,10 @@ pub static TOOL_TASK: LazyLock<Task<ToolTaskInput, ToolTaskCheckpoint, ToolTaskR
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_execute(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<ToolTaskInput, ToolTaskCheckpoint, ToolTaskResult, ToolHooks>,
         );
 
         define_task(TaskDefinition {
@@ -390,7 +397,7 @@ async fn phase_call(
         CheckedArgs::Valid(args) => validate_args(&tool, &call, args),
         err @ CheckedArgs::Error(_) => err,
     };
-    let mut args = match checked {
+    let args = match checked {
         CheckedArgs::Valid(args) => args,
         CheckedArgs::Error(message) => {
             let err = invalid_args(message);
@@ -422,7 +429,7 @@ async fn phase_call(
                 let hook_call = ToolCall {
                     id: call_template.id,
                     name: call_template.name,
-                    arguments: cur_args,
+                    arguments: to_pi_map(&cur_args),
                     thought_signature: call_template.thought_signature,
                     namespace: call_template.namespace,
                 };
@@ -579,22 +586,28 @@ async fn read_call(runtime: &Runtime, input: &ToolTaskInput, context: Context) -
     found.ok_or_else(|| pi_js::Error::msg(format!("Entry {} has no tool call {}", input.assistant, input.call_id)))
 }
 
-fn prepare_args(tool: &ToolRegistration, args: &JsonObject) -> CheckedArgs {
-    let Some(prepare) = &tool.prepare_arguments else {
-        return CheckedArgs::Valid(args.clone());
-    };
+fn to_serde_map(args: &pi_ai::types::JsonObject) -> JsonObject {
     let mut map = serde_json::Map::with_capacity(args.len());
     for (k, v) in args {
         map.insert(k.clone(), v.clone());
     }
-    match prepare(&JsonValue::Object(map)) {
-        Ok(JsonValue::Object(out)) => {
-            let mut obj = IndexMap::with_capacity(out.len());
-            for (k, v) in out {
-                obj.insert(k, v);
-            }
-            CheckedArgs::Valid(obj)
-        }
+    map
+}
+
+fn to_pi_map(args: &JsonObject) -> pi_ai::types::JsonObject {
+    let mut obj = IndexMap::with_capacity(args.len());
+    for (k, v) in args {
+        obj.insert(k.clone(), v.clone());
+    }
+    obj
+}
+
+fn prepare_args(tool: &ToolRegistration, args: &pi_ai::types::JsonObject) -> CheckedArgs {
+    let Some(prepare) = &tool.prepare_arguments else {
+        return CheckedArgs::Valid(to_serde_map(args));
+    };
+    match prepare(&JsonValue::Object(to_serde_map(args))) {
+        Ok(JsonValue::Object(out)) => CheckedArgs::Valid(out),
         Ok(other) => CheckedArgs::Error(format!(
             "Tool {} prepareArguments must return an object, got {}",
             tool.name, other
@@ -608,19 +621,13 @@ fn validate_args(tool: &ToolRegistration, call: &ToolCall, args: JsonObject) -> 
     let candidate = ToolCall {
         id: call.id.clone(),
         name: call.name.clone(),
-        arguments: args,
+        arguments: to_pi_map(&args),
         thought_signature: call.thought_signature.clone(),
         namespace: call.namespace.clone(),
     };
     match validate_tool_arguments(&pi_tool, &candidate) {
-        Ok(JsonValue::Object(map)) => {
-            let mut obj = IndexMap::with_capacity(map.len());
-            for (k, v) in map {
-                obj.insert(k, v);
-            }
-            CheckedArgs::Valid(obj)
-        }
-        Ok(_) => CheckedArgs::Valid(candidate.arguments),
+        Ok(JsonValue::Object(map)) => CheckedArgs::Valid(map),
+        Ok(_) => CheckedArgs::Valid(args),
         Err(err) => CheckedArgs::Error(err.message()),
     }
 }

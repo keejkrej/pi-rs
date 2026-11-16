@@ -5,9 +5,9 @@ use pi_ai::types::{Message, SystemMessage, SystemMessageContent, Tool, ToolRefer
 use pi_ai::utils::transcript::{declarations_equal, get_current_tools, to_tool_declaration};
 use pi_chord::Context;
 
-use crate::entries::{SYSTEM_ENTRY, TypedEntryDraft};
+use crate::entries::SYSTEM_ENTRY;
 use crate::harness::types::{ContextView, PromptInput, PromptSection};
-use crate::types::ContextEdit;
+use crate::types::{ContextEdit, TypedEntryDraft};
 
 type SystemDraft = TypedEntryDraft<()>;
 
@@ -46,7 +46,7 @@ pub async fn render_sections(
     sections: &[PromptSection],
     input: &PromptInput,
     shown: &IndexMap<String, String>,
-    report: &dyn Fn(pi_js::Error),
+    report: &(dyn Fn(pi_js::Error) + Send + Sync),
     context: Context,
 ) -> pi_js::Result<IndexMap<String, String>> {
     let mut desired = IndexMap::new();

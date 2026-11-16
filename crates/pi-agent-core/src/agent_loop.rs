@@ -7,10 +7,9 @@ use futures::StreamExt;
 use futures::future::join_all;
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, EventStream, FauxAssistantMessageContent,
-    JsonObject, Message, ModelThinkingLevel, SimpleStreamOptions, StopReason, SystemMessage, SystemMessageContent,
-    Tool, ToolCall, ToolReference, ToolResultMessage, ToolStateChanges, UserContentBlock, faux_assistant_message,
-    faux_text, get_current_tools, get_tool_state_changes, normalize_context, to_tool_declaration,
-    validate_tool_arguments,
+    JsonObject, Message, SimpleStreamOptions, StopReason, StreamOptions, SystemMessage, SystemMessageContent, Tool,
+    ToolCall, ToolResultMessage, ToolStateChanges, faux_assistant_message, faux_text, get_current_tools,
+    get_tool_state_changes, normalize_context, to_tool_declaration, validate_tool_arguments,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::time::now_ms;
@@ -57,8 +56,6 @@ pub struct RunToolCallOptions {
 
 enum PreparedToolCall {
     Immediate {
-        tool_call: ToolCall,
-        args: Value,
         outcome: AgentToolCallOutcome,
     },
     Execute {
@@ -282,7 +279,7 @@ fn create_agent_stream() -> AgentEventStream {
     EventStream::new(
         |event| matches!(event, AgentEvent::AgentEnd { .. }),
         |event| match event {
-            AgentEvent::AgentEnd { messages } => messages,
+            AgentEvent::AgentEnd { messages } => messages.clone(),
             _ => Vec::new(),
         },
     )
@@ -321,9 +318,9 @@ async fn run_loop(
         while has_more_tool_calls || !pending_messages.is_empty() {
             let mut prepared_messages = Vec::new();
             if !first_turn {
-                if let Some(last_turn) = last_completed_turn.take() {
+                if let Some(_last_turn) = last_completed_turn.take() {
                     prepared_messages =
-                        apply_next_turn_refresh(&mut current_context, last_turn, &mut config, signal.as_ref()).await?;
+                        apply_next_turn_refresh(&mut current_context, &mut config, signal.as_ref()).await?;
                 }
                 if pending_messages.is_empty() {
                     if let Some(get_steering) = &config.get_steering_messages {
@@ -591,19 +588,24 @@ async fn stream_assistant_response(
     };
 
     let stream_options = SimpleStreamOptions {
-        temperature: config.temperature,
-        max_tokens: config.max_tokens,
-        api_key,
-        cache_retention: config.cache_retention,
+        base: StreamOptions {
+            temperature: config.temperature,
+            max_tokens: config.max_tokens,
+            api_key,
+            cache_retention: config.cache_retention,
+            session_id: config.session_id.clone(),
+            transport: config.transport,
+            max_retry_delay_ms: config.max_retry_delay_ms,
+            metadata: config.metadata.clone(),
+            headers: config.headers.clone(),
+            on_payload: config.on_payload.clone(),
+            signal: signal.cloned(),
+            ..Default::default()
+        },
+        tool_choice: None,
         reasoning: request_thinking_level.to_ai_thinking_level(),
-        session_id: config.session_id.clone(),
-        transport: config.transport,
+        deferred: None,
         thinking_budgets: config.thinking_budgets.clone(),
-        max_retry_delay_ms: config.max_retry_delay_ms,
-        metadata: config.metadata.clone(),
-        headers: config.headers.clone(),
-        on_payload: config.on_payload.clone(),
-        signal: signal.cloned(),
     };
 
     let mut response_stream = if let Some(f) = override_stream_fn {
@@ -746,7 +748,7 @@ fn declare_tool_changes(context: &AgentContext, pending_messages: Vec<AgentMessa
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(to_tool_declaration)
+        .map(|t| to_tool_declaration(&t.to_tool()))
         .collect();
     let current_tools = get_current_tools(&combined_llm_messages);
     let changes = get_tool_state_changes(&current_tools, &declared_tools);
@@ -1048,16 +1050,12 @@ async fn prepare_tool_call(
     let raw_args = json_object_to_value(&tc.arguments);
     if signal.is_some_and(AbortSignal::aborted) {
         return PreparedToolCall::Immediate {
-            tool_call: tc.clone(),
-            args: raw_args,
             outcome: aborted_outcome(tc),
         };
     }
 
     let Some(tool) = tools.iter().find(|t| t.name == tc.name).cloned() else {
         return PreparedToolCall::Immediate {
-            tool_call: tc.clone(),
-            args: raw_args,
             outcome: error_outcome(tc, format!("Tool {} not found", tc.name)),
         };
     };
@@ -1073,12 +1071,10 @@ async fn prepare_tool_call(
         validation_call.arguments = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     }
 
-    let validated_args = match validate_tool_arguments(&tool.to_tool(), &validation_call) {
+    let mut validated_args = match validate_tool_arguments(&tool.to_tool(), &validation_call) {
         Ok(args) => args,
         Err(err) => {
             return PreparedToolCall::Immediate {
-                tool_call: validation_call,
-                args: prepared_args,
                 outcome: error_outcome(tc, err.message()),
             };
         }
@@ -1098,8 +1094,6 @@ async fn prepare_tool_call(
         match hook_res {
             Ok(_) if signal.is_some_and(AbortSignal::aborted) => {
                 return PreparedToolCall::Immediate {
-                    tool_call: validation_call,
-                    args: validated_args,
                     outcome: aborted_outcome(tc),
                 };
             }
@@ -1109,11 +1103,7 @@ async fn prepare_tool_call(
                 if res.terminate == Some(true) {
                     outcome.result.terminate = Some(true);
                 }
-                return PreparedToolCall::Immediate {
-                    tool_call: validation_call,
-                    args: validated_args,
-                    outcome,
-                };
+                return PreparedToolCall::Immediate { outcome };
             }
             Ok(Some(res)) => {
                 if let Some(updated) = res.args {
@@ -1122,8 +1112,6 @@ async fn prepare_tool_call(
             }
             Err(err) => {
                 return PreparedToolCall::Immediate {
-                    tool_call: validation_call,
-                    args: validated_args,
                     outcome: error_outcome(tc, err.message()),
                 };
             }
@@ -1331,6 +1319,7 @@ fn make_tool_result_message(outcome: &AgentToolCallOutcome) -> ToolResultMessage
         tool_name: outcome.tool_call.name.clone(),
         content: outcome.result.content.clone(),
         details: outcome.result.details.clone(),
+        nested_calls: None,
         is_error: outcome.is_error,
         usage: outcome.result.usage.clone(),
         timestamp: now_ms(),

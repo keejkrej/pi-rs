@@ -24,8 +24,8 @@ use crate::session::observation::{CommittedStateSource, CommittedWatch, Observed
 use crate::session::transaction::{LoadedDocument, Transaction, TransactionHost, TransactionScope, Tx, clone_pi_error};
 use crate::types::{
     CommitChange, CommitPublication, ConversationId, ConversationRecord, DocumentAddress, DocumentCommitChange,
-    DocumentPoint, DocumentScope, DocumentState, DocumentWatch, EntryId, JsonObject, Seq, Storage, StorageWrite,
-    TableCommitChange, TaskId,
+    DocumentPoint, DocumentRecord, DocumentScope, DocumentState, DocumentWatch, EntryId, JsonObject, Seq, Storage,
+    StorageWrite, TableCommitChange, TaskId,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -148,8 +148,8 @@ impl Session {
         self.inner.commit(change, context)
     }
 
-    pub async fn close(&self, context: Context) -> pi_js::Result<()> {
-        self.inner.close(context).await
+    pub fn close(&self, context: Context) -> pi_js::BoxFuture<pi_js::Result<()>> {
+        self.inner.close(context)
     }
 
     pub fn subscribe_commits<F>(&self, listener: F) -> pi_js::Result<pi_js::Unsubscribe>
@@ -332,7 +332,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(&token.definition, None, None, None, context)
+            .watch_doc_erased(&token.definition, None, None, None, context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -345,7 +345,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(token.definition(), Some(conversation_id), None, None, context)
+            .watch_doc_erased(token.definition(), Some(conversation_id), None, None, context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -358,7 +358,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(&token.definition, None, Some(task_id), None, context)
+            .watch_doc_erased(&token.definition, None, Some(task_id), None, context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -371,7 +371,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(&token.definition, None, None, Some(key), context)
+            .watch_doc_erased(&token.definition, None, None, Some(key), context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -385,7 +385,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(token.definition(), Some(conversation_id), None, Some(key), context)
+            .watch_doc_erased(token.definition(), Some(conversation_id), None, Some(key), context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -399,7 +399,7 @@ impl Session {
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
         let raw = self
             .inner
-            .watch_erased(&token.definition, None, Some(task_id), Some(key), context)
+            .watch_doc_erased(&token.definition, None, Some(task_id), Some(key), context)
             .await?;
         Ok(raw.map(crate::harness::types::wrap_typed_watch))
     }
@@ -646,67 +646,77 @@ impl SessionImpl {
         Ok(Some(DocumentState::from_raw(attached)))
     }
 
-    pub async fn close(self: &Arc<Self>, context: Context) -> pi_js::Result<()> {
-        let rx = {
+    pub fn close(self: &Arc<Self>, context: Context) -> pi_js::BoxFuture<pi_js::Result<()>> {
+        let (rx, run_tx) = {
             let mut slot = lock(&self.close_result);
             if let Some(rx) = slot.as_ref() {
-                rx.clone()
+                (rx.clone(), None)
             } else {
                 self.closing_started.store(true, Ordering::Release);
                 let (tx, rx) = watch::channel(None);
                 *slot = Some(rx.clone());
-                drop(slot);
-
-                let cleanup = without_abort_signal(context.clone());
-                let this = Arc::clone(self);
-                let run_close = async move {
-                    this.hooks.before_close().await;
-                    let _permit = this.line_lock.lock().await;
-                    this.storage_closed.store(true, Ordering::Release);
-                    {
-                        lock(&this.listeners).commit_listeners.clear();
-                    }
-                    lock(&this.documents).clear();
-                    let res = this.storage.close(cleanup).await.map_err(Arc::new);
-                    let _ = tx.send(Some(res));
-                };
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(run_close);
-                } else {
-                    run_close.await;
-                }
-
-                let listeners: Vec<CloseListener> = {
-                    let mut guard = lock(&self.listeners);
-                    let list: Vec<CloseListener> = guard.close_listeners.values().cloned().collect();
-                    guard.close_listeners.clear();
-                    list
-                };
-                for listener in listeners {
-                    listener();
-                }
-                rx
+                (rx, Some(tx))
             }
         };
 
-        await_with_context(
-            async move {
-                let mut rx = rx;
-                loop {
-                    if let Some(res) = rx.borrow_and_update().clone() {
-                        return match res {
-                            Ok(()) => Ok(()),
-                            Err(err) => Err(clone_pi_error(&err)),
-                        };
-                    }
-                    if rx.changed().await.is_err() {
-                        return Ok(());
-                    }
+        let deferred_close = if let Some(tx) = run_tx {
+            let cleanup = without_abort_signal(context.clone());
+            let this = Arc::clone(self);
+            let run_close = async move {
+                this.hooks.before_close().await;
+                let _permit = this.line_lock.lock().await;
+                this.storage_closed.store(true, Ordering::Release);
+                {
+                    lock(&this.listeners).commit_listeners.clear();
                 }
-            },
-            context,
-        )
-        .await
+                lock(&this.documents).clear();
+                let res = this.storage.close(cleanup).await.map_err(Arc::new);
+                let _ = tx.send(Some(res));
+            };
+            let pending = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(run_close);
+                None
+            } else {
+                Some(run_close)
+            };
+
+            let listeners: Vec<CloseListener> = {
+                let mut guard = lock(&self.listeners);
+                let list: Vec<CloseListener> = guard.close_listeners.values().cloned().collect();
+                guard.close_listeners.clear();
+                list
+            };
+            for listener in listeners {
+                listener();
+            }
+            pending
+        } else {
+            None
+        };
+
+        Box::pin(async move {
+            if let Some(run_close) = deferred_close {
+                run_close.await;
+            }
+            await_with_context(
+                async move {
+                    let mut rx = rx;
+                    loop {
+                        if let Some(res) = rx.borrow_and_update().clone() {
+                            return match res {
+                                Ok(()) => Ok(()),
+                                Err(err) => Err(clone_pi_error(&err)),
+                            };
+                        }
+                        if rx.changed().await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                },
+                context,
+            )
+            .await
+        })
     }
 
     pub fn subscribe_commits(self: &Arc<Self>, listener: CommitListener) -> pi_js::Result<pi_js::Unsubscribe> {
@@ -719,7 +729,7 @@ impl SessionImpl {
             id
         };
         let weak = Arc::downgrade(self);
-        Ok(Arc::new(move || {
+        Ok(pi_js::Unsubscribe::new(move || {
             if let Some(session) = weak.upgrade() {
                 lock(&session.listeners).commit_listeners.shift_remove(&id);
             }
@@ -736,7 +746,7 @@ impl SessionImpl {
             id
         };
         let weak = Arc::downgrade(self);
-        Ok(Arc::new(move || {
+        Ok(pi_js::Unsubscribe::new(move || {
             if let Some(session) = weak.upgrade() {
                 lock(&session.listeners).close_listeners.shift_remove(&id);
             }
@@ -870,10 +880,10 @@ impl SessionImpl {
         let unsub_close_detach = Arc::clone(&unsub_close);
         let detach: Box<dyn FnOnce() + Send + Sync> = Box::new(move || {
             if let Some(u) = lock(&unsub_commit_detach).take() {
-                u();
+                u.call();
             }
             if let Some(u) = lock(&unsub_close_detach).take() {
-                u();
+                u.call();
             }
         });
         let observer = create(loaded.tracker.value());
@@ -929,11 +939,19 @@ impl SessionImpl {
         address: &DocumentAddress,
         context: &Context,
     ) -> pi_js::Result<Option<Arc<LoadedDocument>>> {
-        if let Some(cached) = lock(&self.documents).get(address_id).cloned() {
-            if cached.value_version == definition.version {
-                return Ok(Some(cached));
+        let cached_hit = {
+            let mut docs = lock(&self.documents);
+            match docs.get(address_id).cloned() {
+                Some(cached) if cached.value_version == definition.version => Some(cached),
+                Some(_) => {
+                    docs.shift_remove(address_id);
+                    None
+                }
+                None => None,
             }
-            lock(&self.documents).shift_remove(address_id);
+        };
+        if let Some(cached) = cached_hit {
+            return Ok(Some(cached));
         }
         let Some(record) = self
             .storage

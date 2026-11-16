@@ -4,52 +4,47 @@ mod support;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use indexmap::IndexMap;
-use pi_ai::models::{Models, Provider, ProviderAuth};
+use pi_ai::auth::types::ProviderAuth;
+use pi_ai::models::Provider;
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
-    faux_assistant_message, faux_text,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message,
 };
 use pi_ai::types::{
     ApiStreamOptions, AssistantMessage, AssistantMessageEvent, CancelDeferredFunction, DeferredCancelOptions,
     DeferredHandle, Message, Model, SimpleStreamFunction, SimpleStreamOptions, StopReason, ThinkingLevel,
-    TranscriptContext, create_assistant_message_event_stream,
+    TranscriptContext,
 };
+use pi_ai::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use pi_durable::documents::{DocDefinitionInput, define_conversation_doc};
 use pi_durable::entries::{ASSISTANT_ENTRY, USER_ENTRY};
+use pi_durable::errors::StorageRejected;
 use pi_durable::harness::agent::{DEFAULT_COMPACTION_POLICY, DEFAULT_RETRY_POLICY, resolve_settings};
 use pi_durable::harness::define::{SectionOptions, define_extension, wrap_section};
-use pi_durable::harness::generation::{
-    GENERATION_TASK, GenerationCheckpoint, GenerationHooks, GenerationInput, GenerationResult,
-};
+use pi_durable::harness::generation::{GENERATION_TASK, GenerationInput, GenerationResult};
 use pi_durable::harness::harness::{Conversation, Harness, RootConversationOptions};
 use pi_durable::harness::live::{LIVE_DOC, LiveRun, LiveState};
 use pi_durable::harness::registry::{Registry, create_registry};
 use pi_durable::harness::scheduler::AbortTaskResult;
 use pi_durable::harness::types::{
-    AgentChange, ConversationCreateOptions, ConversationOwnership, DocumentReaderExt, Extension, FieldChange,
-    HarnessOptions, HarnessSettings, HarnessSettingsSnapshot, ModelRef, PartialCompactionPolicy, PartialRetryPolicy,
-    PromptSection, QueueMode, RegistryReader, RegistrySnapshot, Settings, SubmissionDraft, ToolExecutionMode,
-    UserInput, WhenBusy,
+    AgentChange, ConversationCreateOptions, Extension, FieldChange, GenerationHooks, HarnessOptions, HarnessSettings,
+    HarnessSettingsSnapshot, ModelRef, PartialCompactionPolicy, PartialRetryPolicy, PromptSection, QueueMode,
+    RegistryReader, RegistrySnapshot, SubmissionDraft, ToolExecutionMode, UserInput, WhenBusy,
 };
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::tasks::{NextTaskState, Task, TaskDefinition, define_task};
+use pi_durable::tasks::{Task, TaskDefinition, define_task};
 use pi_durable::types::{
-    InputSubmissionState, LatestFork, SubmissionCreate, SubmissionSettlement, SubmissionState, SubmissionStatus,
-    TaskId, TaskOptions, TaskOutcome, TaskOwnership, TaskQuery, TaskState, TypedEntryDraft,
+    ConversationOwnership, DocumentScope, InputSubmissionState, LatestFork, NextTaskState, Storage, SubmissionCreate,
+    SubmissionSettlement, SubmissionState, SubmissionStatus, TaskId, TaskOptions, TaskOutcome, TaskOwnership,
+    TaskQuery, TaskState, TypedEntryDraft,
 };
 use pi_js::BoxFuture;
-use pi_js::abort::AbortSignal;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use support::chat_support::{
-    ChatSetup, OpenChatEnv, all_entries, chat_setup, open_chat, text_of, unanswered, wait_for,
-};
+use support::chat_support::{OpenChatEnv, all_entries, chat_setup, open_chat, text_of, unanswered, wait_for};
 use support::harness_support::add_section;
 use support::session_support::{ControlledStorage, context, document_changes};
-use support::task_support::aborted;
 
 fn error_503() -> AssistantMessage {
     faux_assistant_message(
@@ -71,18 +66,21 @@ async fn live_state(harness: &Harness, conversation: &Conversation) -> Option<Li
 
 async fn run_task(harness: &Harness, conversation: &Conversation) -> TaskId {
     let mut found = None;
-    wait_for(|| {
-        let harness = harness.clone();
-        let id = conversation.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.run)
-                .is_some()
-        }
-    })
+    wait_for(
+        || {
+            let harness = harness.clone();
+            let id = conversation.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.run)
+                    .is_some()
+            }
+        },
+        5_000,
+    )
     .await;
     if let Some(live) = live_state(harness, conversation).await
         && let Some(run) = live.run
@@ -128,7 +126,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         context: &TranscriptContext,
         options: Option<ApiStreamOptions>,
-    ) -> pi_ai::types::AssistantMessageEventStream {
+    ) -> AssistantMessageEventStream {
         self.inner.stream(model, context, options)
     }
 
@@ -137,7 +135,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         context: &TranscriptContext,
         options: Option<SimpleStreamOptions>,
-    ) -> pi_ai::types::AssistantMessageEventStream {
+    ) -> AssistantMessageEventStream {
         if let Some(override_fn) = &self.stream_simple_override {
             return override_fn(model, context, options);
         }
@@ -149,7 +147,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         handle: &DeferredHandle,
         options: Option<pi_ai::types::DeferredFetchOptions>,
-    ) -> Option<pi_ai::types::AssistantMessageEventStream> {
+    ) -> Option<AssistantMessageEventStream> {
         self.inner.fetch_deferred(model, handle, options)
     }
 
@@ -170,7 +168,7 @@ fn live_publications(harness: &Harness) -> (Arc<Mutex<Vec<LiveState>>>, pi_js::U
     let values = Arc::new(Mutex::new(Vec::<LiveState>::new()));
     let values_cb = Arc::clone(&values);
     let sub = harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live"
                     && let Some(val) = change.value
@@ -179,7 +177,7 @@ fn live_publications(harness: &Harness) -> (Arc<Mutex<Vec<LiveState>>>, pi_js::U
                     values_cb.lock().expect("lock values").push(parsed);
                 }
             }
-        }))
+        })
         .expect("subscribe commits");
     (values, sub)
 }
@@ -229,15 +227,20 @@ async fn answers_an_input_and_settles_its_submission() {
     let answer_entry = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*ASSISTANT_ENTRY, answer).await },
+            move |tx| async move { tx.typed_entry(&ASSISTANT_ENTRY, answer).await },
             context(),
         )
         .await
         .expect("read answer")
         .expect("answer present");
     assert_eq!(
-        answer_entry.model.as_ref().and_then(|m| m.first()).and_then(text_of),
-        Some("Hello there".to_owned())
+        answer_entry
+            .record
+            .model
+            .as_ref()
+            .and_then(|m| m.first())
+            .and_then(text_of),
+        Some("Hello there")
     );
     let entries = all_entries(&opened.root, None).await.expect("entries");
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
@@ -288,7 +291,7 @@ async fn answers_an_input_and_settles_its_submission() {
         task.state,
         TaskState::Terminal {
             outcome: TaskOutcome::Completed {
-                result: Some(json!({ "entryId": answer.as_i64() })),
+                result: json!({ "entryId": answer.as_i64() }),
             },
         }
     );
@@ -298,7 +301,7 @@ async fn answers_an_input_and_settles_its_submission() {
 #[tokio::test]
 async fn stores_partials_as_deltas_and_a_complete_base_once_nothing_is_in_flight() {
     let setup = chat_setup(Some(pi_ai::providers::faux::RegisterFauxProviderOptions {
-        tokens_per_second: Some(200),
+        tokens_per_second: Some(200.0),
         token_size: Some(pi_ai::providers::faux::FauxTokenSize {
             min: Some(1),
             max: Some(1),
@@ -317,8 +320,10 @@ async fn stores_partials_as_deltas_and_a_complete_base_once_nothing_is_in_flight
         .expect("open chat");
     let record = storage
         .find_document(
-            pi_durable::types::DocumentAddress::Conversation {
-                conversation_id: opened.root.id(),
+            pi_durable::types::DocumentAddress {
+                scope: DocumentScope::Conversation {
+                    conversation_id: opened.root.id(),
+                },
                 kind: "pi.live".to_owned(),
                 key: None,
             },
@@ -408,7 +413,13 @@ async fn still_ends_a_run_whose_input_something_else_already_settled() {
         .wait_for_task(TaskId::<GenerationResult>::new_unchecked(task_id.as_i64()), context())
         .await
         .expect("wait_for_task");
-    assert_eq!(settled_task.outcome, TaskOutcome::Aborted);
+    assert_eq!(
+        settled_task.outcome,
+        TaskOutcome::Aborted {
+            reason: None,
+            result: None,
+        }
+    );
     // The earlier settlement stays; the run's own settlement leaves it unchanged.
     let status = submission.status(context()).await.expect("status");
     assert!(matches!(
@@ -464,10 +475,10 @@ async fn fails_with_no_model_when_no_model_is_configured_or_the_model_is_unknown
         .root
         .configure(
             AgentChange {
-                model: FieldChange::Set(ModelRef::Resolved(pi_durable::harness::types::ResolvedModelRef {
+                model: FieldChange::Set(ModelRef {
                     provider: "faux".to_owned(),
                     model_id: "missing".to_owned(),
-                })),
+                }),
                 ..Default::default()
             },
             context(),
@@ -871,7 +882,7 @@ async fn polls_a_deferred_response_until_it_is_ready() {
         ))]);
     setup.settings.update(|s| {
         s.stream = Some(pi_durable::harness::types::ConversationStreamOptions {
-            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Enabled(true)),
+            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Bool(true)),
             ..Default::default()
         });
     });
@@ -910,15 +921,15 @@ async fn polls_a_deferred_response_until_it_is_ready() {
     let entry = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*ASSISTANT_ENTRY, answer).await },
+            move |tx| async move { tx.typed_entry(&ASSISTANT_ENTRY, answer).await },
             context(),
         )
         .await
         .expect("read")
         .expect("present");
     assert_eq!(
-        entry.model.as_ref().and_then(|m| m.first()).and_then(text_of),
-        Some("deferred answer".to_owned())
+        entry.record.model.as_ref().and_then(|m| m.first()).and_then(text_of),
+        Some("deferred answer")
     );
     opened.harness.close(context()).await.expect("close");
 }
@@ -926,7 +937,7 @@ async fn polls_a_deferred_response_until_it_is_ready() {
 #[tokio::test]
 async fn converts_the_committed_partial_when_aborted_during_streaming() {
     let setup = chat_setup(Some(pi_ai::providers::faux::RegisterFauxProviderOptions {
-        tokens_per_second: Some(20),
+        tokens_per_second: Some(20.0),
         token_size: Some(pi_ai::providers::faux::FauxTokenSize {
             min: Some(1),
             max: Some(1),
@@ -956,19 +967,22 @@ async fn converts_the_committed_partial_when_aborted_during_streaming() {
         .await
         .expect("submit");
     let task_id = run_task(&opened.harness, &opened.root).await;
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .and_then(|g| g.message)
-                .is_some_and(|m| text_of(&Message::Assistant(m)).is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .and_then(|g| g.message)
+                    .is_some_and(|m| text_of(&Message::Assistant(m)).is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let partial = live_state(&opened.harness, &opened.root)
         .await
@@ -977,7 +991,8 @@ async fn converts_the_committed_partial_when_aborted_during_streaming() {
         .expect("gen")
         .message
         .expect("msg");
-    let partial_text = text_of(&Message::Assistant(partial)).expect("partial text");
+    let partial_msg = Message::Assistant(partial);
+    let partial_text = text_of(&partial_msg).expect("partial text").to_owned();
 
     assert_eq!(
         opened.harness.abort_task(task_id, context()).await.expect("abort"),
@@ -997,7 +1012,8 @@ async fn converts_the_committed_partial_when_aborted_during_streaming() {
         panic!("expected assistant");
     };
     assert_eq!(converted.stop_reason, StopReason::Aborted);
-    let converted_text = text_of(&Message::Assistant(converted.clone())).expect("converted text");
+    let converted_msg = Message::Assistant(converted.clone());
+    let converted_text = text_of(&converted_msg).expect("converted text");
     assert!(converted_text.starts_with(&partial_text));
     assert_eq!(
         live_state(&opened.harness, &opened.root).await,
@@ -1008,7 +1024,13 @@ async fn converts_the_committed_partial_when_aborted_during_streaming() {
         .wait_for_task(TaskId::<GenerationResult>::new_unchecked(task_id.as_i64()), context())
         .await
         .expect("wait_for_task");
-    assert_eq!(waited.outcome, TaskOutcome::Aborted);
+    assert_eq!(
+        waited.outcome,
+        TaskOutcome::Aborted {
+            reason: None,
+            result: None,
+        }
+    );
     opened.harness.close(context()).await.expect("close");
 }
 
@@ -1029,7 +1051,7 @@ async fn cancels_a_deferred_response_when_aborted_during_polling() {
         ))]);
     setup.settings.update(|s| {
         s.stream = Some(pi_durable::harness::types::ConversationStreamOptions {
-            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Enabled(true)),
+            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Bool(true)),
             ..Default::default()
         });
     });
@@ -1050,18 +1072,21 @@ async fn cancels_a_deferred_response_when_aborted_during_polling() {
         .await
         .expect("submit");
     let task_id = run_task(&opened.harness, &opened.root).await;
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.deferred.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.deferred.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     opened.harness.abort_task(task_id, context()).await.expect("abort");
     let settled = submission.wait(context()).await.expect("wait");
@@ -1103,7 +1128,7 @@ async fn reports_a_failed_deferred_cancellation_and_still_ends_the_run_aborted()
     setup.models.set_provider(proxy);
     setup.settings.update(|s| {
         s.stream = Some(pi_durable::harness::types::ConversationStreamOptions {
-            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Enabled(true)),
+            deferred: Some(pi_durable::harness::types::StreamDeferredOption::Bool(true)),
             ..Default::default()
         });
     });
@@ -1124,18 +1149,21 @@ async fn reports_a_failed_deferred_cancellation_and_still_ends_the_run_aborted()
         .await
         .expect("submit");
     let task_id = run_task(&opened.harness, &opened.root).await;
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.deferred.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.deferred.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     opened.harness.abort_task(task_id, context()).await.expect("abort");
     let settled = submission.wait(context()).await.expect("wait");
@@ -1260,7 +1288,7 @@ async fn forwards_stream_options_and_the_thinking_level() {
             .headers
             .as_ref()
             .and_then(|h| h.get("x-test"))
-            .map(String::as_str),
+            .and_then(|v| v.as_deref()),
         Some("1")
     );
     assert_eq!(first.reasoning, Some(ThinkingLevel::High));
@@ -1338,10 +1366,10 @@ async fn reads_settings_through_getters_at_every_decision() {
             context(),
             Some(RootConversationOptions {
                 agent: Some(AgentChange {
-                    model: FieldChange::Set(ModelRef::Resolved(pi_durable::harness::types::ResolvedModelRef {
+                    model: FieldChange::Set(ModelRef {
                         provider: "faux".to_owned(),
                         model_id: "faux-1".to_owned(),
-                    })),
+                    }),
                     ..Default::default()
                 }),
                 init: None,
@@ -1372,18 +1400,14 @@ async fn reads_settings_through_getters_at_every_decision() {
 
 #[test]
 fn resolves_settings_over_the_built_in_defaults() {
-    assert_eq!(
-        resolve_settings(None),
-        Settings {
-            extensions: None,
-            stream: Default::default(),
-            retry: DEFAULT_RETRY_POLICY,
-            compaction: DEFAULT_COMPACTION_POLICY,
-            tool_execution: ToolExecutionMode::Parallel,
-            steering_mode: QueueMode::OneAtATime,
-            follow_up_mode: QueueMode::OneAtATime,
-        }
-    );
+    let resolved = resolve_settings(None);
+    assert!(resolved.extensions.is_none());
+    assert_eq!(resolved.stream, Default::default());
+    assert_eq!(resolved.retry, DEFAULT_RETRY_POLICY);
+    assert_eq!(resolved.compaction, DEFAULT_COMPACTION_POLICY);
+    assert_eq!(resolved.tool_execution, ToolExecutionMode::Parallel);
+    assert_eq!(resolved.steering_mode, QueueMode::OneAtATime);
+    assert_eq!(resolved.follow_up_mode, QueueMode::OneAtATime);
     let partial = HarnessSettingsSnapshot {
         retry: Some(PartialRetryPolicy {
             enabled: Some(false),
@@ -1502,10 +1526,10 @@ async fn renders_sections_that_read_conversation_documents_through_input_read() 
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
                 agent: Some(AgentChange {
-                    model: FieldChange::Set(ModelRef::Resolved(pi_durable::harness::types::ResolvedModelRef {
+                    model: FieldChange::Set(ModelRef {
                         provider: "faux".to_owned(),
                         model_id: "faux-1".to_owned(),
-                    })),
+                    }),
                     ..Default::default()
                 }),
                 init: Some(Arc::new(move |tx, id| {
@@ -1652,18 +1676,21 @@ async fn commits_no_partial_for_a_response_that_turns_deferred_after_an_empty_st
         )
         .await
         .expect("submit");
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.deferred.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.deferred.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     assert!(
         !values
@@ -1696,8 +1723,10 @@ async fn commits_no_partial_for_a_response_that_turns_deferred_after_an_empty_st
 async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_partial() {
     let storage = Arc::new(ControlledStorage::new());
     let partial_committed = Arc::new(tokio::sync::Notify::new());
+    let notified_once = Arc::new(AtomicBool::new(false));
     let storage_cb = Arc::clone(&storage);
     let committed_cb = Arc::clone(&partial_committed);
+    let committed_flag = Arc::clone(&notified_once);
 
     let mut setup = chat_setup(None);
     let proxy = Arc::new(ProxyProvider {
@@ -1707,6 +1736,7 @@ async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_part
             let stream_bg = stream.clone();
             let storage_cb = Arc::clone(&storage_cb);
             let committed_cb = Arc::clone(&committed_cb);
+            let committed_flag = Arc::clone(&committed_flag);
             tokio::spawn(async move {
                 let partial = faux_assistant_message(
                     FauxAssistantMessageContent::Text("partial".to_owned()),
@@ -1718,8 +1748,14 @@ async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_part
                 stream_bg.push(AssistantMessageEvent::Start { partial });
                 // Wait until the partial reaches pi.live, then reject the final classification commit.
                 let _ = pi_js::time::sleep(300, None).await;
-                committed_cb.notified().await;
-                storage_cb.fail_next_commit(pi_js::Error::msg("non-JSON function"));
+                loop {
+                    let notified = committed_cb.notified();
+                    if committed_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+                    notified.await;
+                }
+                storage_cb.fail_next_commit(StorageRejected::new("non-JSON function").into_error());
                 let final_msg = faux_assistant_message(FauxAssistantMessageContent::Text("final".to_owned()), None);
                 stream_bg.push(AssistantMessageEvent::Done {
                     reason: StopReason::Stop,
@@ -1738,11 +1774,10 @@ async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_part
         .expect("open chat");
     let values = Arc::new(Mutex::new(Vec::<LiveState>::new()));
     let values_cb = Arc::clone(&values);
-    let notified_once = Arc::new(AtomicBool::new(false));
     let notify_cb = Arc::clone(&partial_committed);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live"
                     && let Some(val) = change.value
@@ -1757,7 +1792,7 @@ async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_part
                     values_cb.lock().expect("lock values").push(parsed);
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened.harness.resume().expect("resume");
     let settled = opened
@@ -1791,9 +1826,7 @@ async fn faults_a_run_task_settling_its_inputs_and_converting_the_committed_part
         v.generation
             .as_ref()
             .and_then(|g| g.message.as_ref())
-            .and_then(|m| text_of(&Message::Assistant(m.clone())))
-            .as_deref()
-            == Some("partial")
+            .is_some_and(|m| text_of(&Message::Assistant(m.clone())) == Some("partial"))
     }));
     let entries = all_entries(&opened.root, None).await.expect("entries");
     assert_eq!(
@@ -1858,9 +1891,14 @@ async fn orphans_a_blocked_run_task_with_full_run_cleanup() {
                 Box::pin(async move {
                     runtime
                         .commit(
-                            |_| {
-                                Ok(NextTaskState::Terminal {
-                                    outcome: TaskOutcome::Aborted,
+                            |_tx, _current| {
+                                Box::pin(async {
+                                    Ok(Some(NextTaskState::Terminal {
+                                        outcome: TaskOutcome::Aborted {
+                                            reason: None,
+                                            result: None,
+                                        },
+                                    }))
                                 })
                             },
                             ctx,
@@ -1879,11 +1917,10 @@ async fn orphans_a_blocked_run_task_with_full_run_cleanup() {
             move |tx| async move {
                 let entry = tx
                     .append_typed_entry(
-                        &*USER_ENTRY,
+                        &USER_ENTRY,
                         root_id,
                         TypedEntryDraft {
                             model: Some(vec![Message::User(pi_ai::types::UserMessage {
-                                role: "user".to_owned(),
                                 content: pi_ai::types::UserMessageContent::Text("hi".to_owned()),
                                 timestamp: 1,
                             })]),
@@ -1897,7 +1934,7 @@ async fn orphans_a_blocked_run_task_with_full_run_cleanup() {
                     .create_submission(SubmissionCreate {
                         conversation_id: root_id,
                         request_id: None,
-                        state: SubmissionState::Input(InputSubmissionState::Placed { entry: entry.id }),
+                        state: SubmissionState::Input(InputSubmissionState::Placed { entry: entry.record.id }),
                     })
                     .await?;
                 let task_id = tx
@@ -1925,7 +1962,7 @@ async fn orphans_a_blocked_run_task_with_full_run_cleanup() {
         .await
         .expect("setup blocked run");
     opened.harness.resume().expect("resume");
-    let err = opened
+    let err = match opened
         .root
         .submit(
             SubmissionDraft::Input {
@@ -1936,7 +1973,10 @@ async fn orphans_a_blocked_run_task_with_full_run_cleanup() {
             context(),
         )
         .await
-        .expect_err("should reject");
+    {
+        Ok(_) => panic!("should reject"),
+        Err(err) => err,
+    };
     assert!(err.to_string().contains("is busy"));
     assert_eq!(
         opened
@@ -1996,8 +2036,8 @@ async fn rejects_a_registry_without_the_built_in_tasks() {
         fn sections(&self) -> Vec<pi_durable::harness::types::ExtensionSection> {
             self.inner.sections()
         }
-        fn tasks(&self) -> &[pi_durable::tasks::AnyTask] {
-            &self.filtered_tasks
+        fn tasks(&self) -> Vec<pi_durable::tasks::AnyTask> {
+            self.filtered_tasks.clone()
         }
         fn task(&self, name: &str) -> Option<&pi_durable::tasks::AnyTask> {
             if name == "pi.generation" {
@@ -2015,7 +2055,7 @@ async fn rejects_a_registry_without_the_built_in_tasks() {
             Arc::clone(&self.snapshot) as _
         }
         fn subscribe(&self, _listener: Arc<dyn Fn() + Send + Sync>) -> pi_js::Unsubscribe {
-            Box::new(|| {})
+            pi_js::Unsubscribe::noop()
         }
     }
 

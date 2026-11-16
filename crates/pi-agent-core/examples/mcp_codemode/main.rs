@@ -13,7 +13,7 @@ use pi_mcp::{McpClient, McpClientOptions, McpTransport, StdioTransport, StdioTra
 
 use crate::tools::{create_codemode_tool, create_mcp_tools, create_nested_tool_runner};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     pi_js::ensure_crypto_provider();
     if let Err(err) = run().await {
@@ -31,7 +31,7 @@ async fn run() -> Result<()> {
     let args: Vec<String> = cli_args.collect();
 
     let models = create_models(None);
-    models.set_provider(pi_ai::providers::anthropic::anthropic_provider());
+    models.set_provider(pi_ai::providers::anthropic::anthropic_provider()?);
     let model = models
         .get_model("anthropic", "claude-sonnet-4-6")
         .ok_or_else(|| Error::msg("Model not found"))?;
@@ -59,7 +59,7 @@ async fn run() -> Result<()> {
     }));
     client.connect(transport).await?;
 
-    let run_result = async {
+    let run_result: Result<()> = async {
         let models_for_stream = models.clone();
         let stream_fn: StreamFn = Arc::new(move |m, ctx, opts| {
             let models = models_for_stream.clone();

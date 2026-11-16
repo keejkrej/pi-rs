@@ -2,18 +2,16 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use pi_ai::models::Models;
 use pi_ai::types::{
-    AssistantMessage, CacheRetention, Message, ModelThinkingLevel, Tool, ToolCall, ToolResultContentBlock, Transport,
-    Usage, UserContent,
+    AssistantMessage, CacheRetention, Message, ModelThinkingLevel, Tool, ToolCall, Transport, Usage, UserContentBlock,
+    UserMessageContent,
 };
-use pi_chord::delta::Op;
-use pi_chord::{AttachedReplicatedState, Context, JsonValue};
+use pi_chord::{Context, JsonValue};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +22,9 @@ use crate::documents::{
 use crate::env::ExecutionEnv;
 use crate::tasks::{AnyTask, Task};
 use crate::types::{
-    CommitPublication, ConversationId, ConversationOwnership, ConversationRecord, Cursor, DocumentWatch, EntryDraft,
-    EntryId, EntryQuery, EntryRecord, ErasedTaskRecord, JoinPolicy, JsonObject, NextTaskState, Page, RunningTask, Seq,
-    SubmissionId, SubmissionRecord, TaskId, TaskOptions, TaskOutcome, TaskRecord, WatchHandle,
+    ConversationId, ConversationOwnership, ConversationRecord, DocumentWatch, EntryDraft, EntryId, EntryRecord,
+    ErasedTaskRecord, JoinPolicy, JsonObject, NextTaskState, RunningTask, SubmissionId, SubmissionRecord, TaskId,
+    TaskOutcome, TaskOwnership, WatchHandle,
 };
 
 /// Provider and model ID resolved through pi-ai `Models`.
@@ -37,7 +35,8 @@ pub struct ModelRef {
     pub model_id: String,
 }
 
-pub type UserInput = UserContent;
+pub type ToolResultContentBlock = UserContentBlock;
+pub type UserInput = UserMessageContent;
 
 /// Behavior when submitting input to a busy conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -251,7 +250,8 @@ impl ToolRegistration {
         Tool {
             name: self.name.clone(),
             description: self.description.clone(),
-            parameters: self.parameters.clone(),
+            parameters: pi_js::vendor::typebox::Schema::from(self.parameters.clone()),
+            constrained_sampling: None,
         }
     }
 }
@@ -1273,6 +1273,10 @@ pub(crate) fn wrap_typed_watch<T: DeserializeOwned + Send + Sync + 'static>(
             }))
         }
 
+        fn stop_now(&self) {
+            self.raw.stop_now();
+        }
+
         async fn stop(&self) -> crate::types::WatchEnd {
             self.raw.stop().await
         }
@@ -1324,7 +1328,7 @@ pub trait TaskRuntimeBackend: DocumentReaderBackend + DocumentObserverBackend + 
         context: Context,
         at: Option<EntryId>,
     ) -> pi_js::Result<ContextView>;
-    fn now(&self) -> i64;
+    fn now(&self) -> pi_js::Result<i64>;
     fn report(&self, error: pi_js::Error);
     async fn sleep(&self, until: i64, context: Context) -> pi_js::Result<()>;
     fn hook_api(&self) -> HookApi;
@@ -1676,9 +1680,9 @@ where
         Ok(Some(wrap_typed_watch(watch)))
     }
 
-    pub async fn watch_doc_session_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+    pub async fn watch_doc_session_family<T: DeserializeOwned + Send + Sync + 'static, F>(
         &self,
-        token: &SessionDocFamilyToken<T, I>,
+        token: &SessionDocFamilyToken<T, F>,
         key: &str,
         context: Context,
     ) -> pi_js::Result<Option<DocumentWatch<T>>> {
@@ -1692,9 +1696,9 @@ where
         Ok(Some(wrap_typed_watch(watch)))
     }
 
-    pub async fn watch_doc_conversation_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+    pub async fn watch_doc_conversation_family<T: DeserializeOwned + Send + Sync + 'static, F>(
         &self,
-        token: &impl ConversationDocFamily<T, I>,
+        token: &impl ConversationDocFamily<T, F>,
         conversation_id: ConversationId,
         key: &str,
         context: Context,
@@ -1709,9 +1713,9 @@ where
         Ok(Some(wrap_typed_watch(watch)))
     }
 
-    pub async fn watch_doc_task_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+    pub async fn watch_doc_task_family<T: DeserializeOwned + Send + Sync + 'static, F>(
         &self,
-        token: &TaskDocFamilyToken<T, I>,
+        token: &TaskDocFamilyToken<T, F>,
         task_id: TaskId,
         key: &str,
         context: Context,
@@ -1727,7 +1731,7 @@ where
     }
 
     pub fn now(&self) -> pi_js::Result<i64> {
-        Ok(self.rt()?.now())
+        self.rt()?.now()
     }
 
     pub fn report(&self, error: pi_js::Error) {

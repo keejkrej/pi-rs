@@ -734,27 +734,27 @@ fn insert_map_id<MapKey, K, T>(
 
 fn scope_key(scope: &DocumentScope) -> pi_js::Result<String> {
     match scope {
-        DocumentScope::Session => pi_js::json::stringify(&["session"]),
+        DocumentScope::Session => pi_js::json::try_stringify(&["session"]),
         DocumentScope::Conversation { conversation_id } => {
-            pi_js::json::stringify(&("conversation", conversation_id.as_i64()))
+            pi_js::json::try_stringify(&("conversation", conversation_id.as_i64()))
         }
-        DocumentScope::Task { task_id } => pi_js::json::stringify(&("task", task_id.as_i64())),
+        DocumentScope::Task { task_id } => pi_js::json::try_stringify(&("task", task_id.as_i64())),
     }
 }
 
 fn address_key(address: &DocumentAddress) -> pi_js::Result<String> {
     let sk = scope_key(&address.scope)?;
     match &address.key {
-        None => pi_js::json::stringify(&(&address.kind, &sk, ("singleton",))),
-        Some(k) => pi_js::json::stringify(&(&address.kind, &sk, ("family", k))),
+        None => pi_js::json::try_stringify(&(&address.kind, &sk, ("singleton",))),
+        Some(k) => pi_js::json::try_stringify(&(&address.kind, &sk, ("family", k))),
     }
 }
 
 fn record_address_key(kind: &str, scope: &DocumentScope, key: Option<&str>) -> pi_js::Result<String> {
     let sk = scope_key(scope)?;
     match key {
-        None => pi_js::json::stringify(&(kind, &sk, ("singleton",))),
-        Some(k) => pi_js::json::stringify(&(kind, &sk, ("family", k))),
+        None => pi_js::json::try_stringify(&(kind, &sk, ("singleton",))),
+        Some(k) => pi_js::json::try_stringify(&(kind, &sk, ("family", k))),
     }
 }
 

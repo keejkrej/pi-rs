@@ -156,6 +156,7 @@ pub fn create_edit_tool() -> ToolRegistration {
                 let EditToolInput { path, edits } = args;
                 let env = require_env(&api)?;
                 let absolute_path = resolve_tool_path(env.as_ref(), &path, &context).await?;
+                let absolute_path_task = absolute_path.clone();
                 let env_for_queue = Arc::clone(&env);
                 let queue_ctx = context.clone();
                 with_file_mutation_queue(
@@ -169,7 +170,7 @@ pub fn create_edit_tool() -> ToolRegistration {
                                 return Err(pi_js::Error::msg("Operation aborted"));
                             }
                             let info = env
-                                .file_info(&absolute_path, &context)
+                                .file_info(&absolute_path_task, &context)
                                 .await
                                 .map_err(|err| edit_access_error(&path, err))?;
                             if !matches!(info.kind, FileKind::File | FileKind::Symlink) {
@@ -179,7 +180,7 @@ pub fn create_edit_tool() -> ToolRegistration {
                             }
 
                             let raw_content = env
-                                .read_text_file(&absolute_path, &context)
+                                .read_text_file(&absolute_path_task, &context)
                                 .await
                                 .map_err(|err| edit_access_error(&path, err))?;
                             if context.abort_signal().is_some_and(|s| s.aborted()) {
@@ -198,7 +199,7 @@ pub fn create_edit_tool() -> ToolRegistration {
                             final_content.push_str(bom);
                             final_content.push_str(&restore_line_endings(&applied.new_content, original_ending));
 
-                            env.write_file(&absolute_path, FileContent::Text(&final_content), &context)
+                            env.write_file(&absolute_path_task, FileContent::Text(&final_content), &context)
                                 .await
                                 .map_err(|err| edit_access_error(&path, err))?;
                             if context.abort_signal().is_some_and(|s| s.aborted()) {

@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use indexmap::IndexMap;
 use pi_agent_core::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentEventStream, AgentLoopConfig, AgentLoopTurnUpdate,
     AgentMessage, AgentTool, AgentToolCall, AgentToolResult, BeforeToolCallResult, FinishTurnAction,
@@ -15,14 +14,13 @@ use pi_agent_core::{
 };
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, FauxAssistantMessageContent, FauxToolCallOptions,
-    JsonObject, Message, Model, StopReason, SystemMessage, SystemMessageContent, ToolCall, ToolResultMessage,
-    UserContentBlock, UserMessage, UserMessageContent, create_assistant_message_event_stream, faux_assistant_message,
-    faux_text, faux_tool_call,
+    JsonObject, Message, Model, StopReason, SystemMessage, SystemMessageContent, UserContentBlock, UserMessage,
+    UserMessageContent, create_assistant_message_event_stream, faux_assistant_message, faux_text, faux_tool_call,
 };
+use pi_js::Error;
 use pi_js::abort::AbortController;
 use pi_js::time::now_ms;
 use pi_js::vendor::typebox::t;
-use pi_js::{BoxFuture, Error};
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -91,7 +89,6 @@ fn make_tool_call(id: &str, name: &str, args: Value) -> AgentToolCall {
         id: id.to_string(),
         name: name.to_string(),
         arguments: json_obj(args),
-        thought_signature: None,
     }
 }
 
@@ -138,7 +135,7 @@ async fn collect_stream(mut stream: AgentEventStream) -> (Vec<AgentEvent>, Vec<A
     while let Some(ev) = stream.next().await {
         events.push(ev);
     }
-    let result = stream.result().await;
+    let result = stream.result().await.unwrap_or_default();
     (events, result)
 }
 
@@ -880,10 +877,10 @@ async fn injects_queued_messages_after_all_tool_calls_complete() {
 
 #[tokio::test]
 async fn answers_every_tool_call_of_sequential_batch_aborted_mid_batch() {
-    let controller = AbortController::new();
+    let controller = Arc::new(AbortController::new());
     let executed = Arc::new(Mutex::new(Vec::<String>::new()));
     let executed_ref = Arc::clone(&executed);
-    let ctrl_ref = controller.clone();
+    let ctrl_ref = Arc::clone(&controller);
 
     let tool = AgentTool {
         name: "slow".to_string(),
@@ -974,12 +971,12 @@ async fn answers_every_tool_call_of_sequential_batch_aborted_mid_batch() {
 
 #[tokio::test]
 async fn answers_every_tool_call_of_parallel_batch_aborted_while_calls_are_prepared() {
-    let controller = AbortController::new();
+    let controller = Arc::new(AbortController::new());
     let executed = Arc::new(Mutex::new(Vec::<String>::new()));
     let hook_calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let executed_ref = Arc::clone(&executed);
     let hook_calls_ref = Arc::clone(&hook_calls);
-    let ctrl_ref = controller.clone();
+    let ctrl_ref = Arc::clone(&controller);
 
     let tool = AgentTool {
         name: "slow".to_string(),
@@ -2264,7 +2261,8 @@ async fn agent_loop_continue_validation_and_custom_message_continuation() {
         None,
         None,
     )
-    .expect_err("empty context must fail");
+    .err()
+    .expect("empty context must fail");
     assert!(err.message().contains("Cannot continue: no messages in context"));
 
     let stream_fn: StreamFn = Arc::new(|_m, _ctx, _opts| {

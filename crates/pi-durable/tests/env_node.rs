@@ -5,13 +5,11 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use pi_chord::context::{BACKGROUND_CONTEXT, with_abort_signal};
-use pi_durable::env::node::{
-    NodeExecutionEnv, NodeExecutionEnvOptions, NodeTextLineReader, kill_process_tree,
-};
+use pi_durable::env::node::{NodeExecutionEnv, NodeExecutionEnvOptions, NodeTextLineReader, kill_process_tree};
 use pi_durable::env::{
-    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionErrorCode, FileContent,
-    FileError, FileErrorCode, FileKind, FileSystem, ReadTextLinesOptions, RemoveOptions, Shell,
-    ShellExecOptions, ShellExecResult, ShellSpillOptions, TextLine, get_or_throw,
+    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionErrorCode, FileContent, FileErrorCode, FileKind,
+    FileSystem, ReadTextLinesOptions, RemoveOptions, Shell, ShellExecOptions, ShellExecResult, ShellSpillOptions,
+    TextLine, TextLineReader, get_or_throw,
 };
 use pi_js::abort::AbortController;
 use pi_js::text::decode_utf8;
@@ -51,7 +49,7 @@ impl Drop for CleanupTracker {
 fn aborted_context() -> pi_chord::Context {
     let controller = AbortController::new();
     controller.abort(None);
-    with_abort_signal(&BACKGROUND_CONTEXT, controller.signal())
+    with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone())
 }
 
 async fn collect_shell_output(
@@ -71,10 +69,7 @@ async fn collect_shell_output(
         if let Some(prev_cb) = &prev {
             prev_cb(text, ctx)?;
         }
-        output_clone
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_str(text);
+        output_clone.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
         Ok(())
     }));
     let res = env.exec(command, Some(opts), context).await;
@@ -102,36 +97,20 @@ async fn reads_writes_lists_and_removes_files_and_directories() {
         pi_js::path::join(&[&root, "nested", "child"])
     );
 
+    get_or_throw(env.create_dir("nested/child", None, &BACKGROUND_CONTEXT).await).unwrap();
     get_or_throw(
-        env.create_dir("nested/child", None, &BACKGROUND_CONTEXT)
+        env.write_file("nested/child/file.txt", FileContent::from("hel"), &BACKGROUND_CONTEXT)
             .await,
     )
     .unwrap();
     get_or_throw(
-        env.write_file(
-            "nested/child/file.txt",
-            FileContent::from("hel"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
-    )
-    .unwrap();
-    get_or_throw(
-        env.append_file(
-            "nested/child/file.txt",
-            FileContent::from("lo"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.append_file("nested/child/file.txt", FileContent::from("lo"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
 
     assert_eq!(
-        get_or_throw(
-            env.read_text_file("nested/child/file.txt", &BACKGROUND_CONTEXT)
-                .await
-        )
-        .unwrap(),
+        get_or_throw(env.read_text_file("nested/child/file.txt", &BACKGROUND_CONTEXT).await).unwrap(),
         "hello"
     );
     assert_eq!(
@@ -146,11 +125,7 @@ async fn reads_writes_lists_and_removes_files_and_directories() {
         .unwrap(),
         vec!["hello".to_string()]
     );
-    let bin = get_or_throw(
-        env.read_binary_file("nested/child/file.txt", &BACKGROUND_CONTEXT)
-            .await,
-    )
-    .unwrap();
+    let bin = get_or_throw(env.read_binary_file("nested/child/file.txt", &BACKGROUND_CONTEXT).await).unwrap();
     assert_eq!(decode_utf8(&bin), "hello");
 
     let entries = get_or_throw(env.list_dir("nested/child", &BACKGROUND_CONTEXT).await).unwrap();
@@ -162,11 +137,7 @@ async fn reads_writes_lists_and_removes_files_and_directories() {
     assert!(entries[0].mtime_ms.is_finite());
 
     assert!(get_or_throw(env.exists("nested/child/file.txt", &BACKGROUND_CONTEXT).await).unwrap());
-    get_or_throw(
-        env.remove("nested/child/file.txt", None, &BACKGROUND_CONTEXT)
-            .await,
-    )
-    .unwrap();
+    get_or_throw(env.remove("nested/child/file.txt", None, &BACKGROUND_CONTEXT).await).unwrap();
     assert!(!get_or_throw(env.exists("nested/child/file.txt", &BACKGROUND_CONTEXT).await).unwrap());
 }
 
@@ -181,9 +152,7 @@ async fn expands_home_relative_paths_and_file_urls() {
         pi_js::path::join(&[&pi_js::env::home_dir(), "pi-node-env-test"])
     );
     let file_path = pi_js::path::join(&[&root, "file with spaces.txt"]);
-    let file_url = url::Url::from_file_path(&file_path)
-        .expect("file url")
-        .to_string();
+    let file_url = url::Url::from_file_path(&file_path).expect("file url").to_string();
     assert_eq!(
         get_or_throw(env.absolute_path(&file_url, &BACKGROUND_CONTEXT).await).unwrap(),
         file_path
@@ -197,17 +166,17 @@ async fn returns_file_info_for_files_dirs_and_symlinks_without_following() {
     let env = NodeExecutionEnv::new(&root);
 
     get_or_throw(
-        env.create_dir("dir", Some(CreateDirOptions { recursive: Some(true) }), &BACKGROUND_CONTEXT)
-            .await,
-    )
-    .unwrap();
-    get_or_throw(
-        env.write_file(
-            "dir/file.txt",
-            FileContent::from("hello"),
+        env.create_dir(
+            "dir",
+            Some(CreateDirOptions { recursive: Some(true) }),
             &BACKGROUND_CONTEXT,
         )
         .await,
+    )
+    .unwrap();
+    get_or_throw(
+        env.write_file("dir/file.txt", FileContent::from("hello"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     pi_js::fs::promises::symlink(
@@ -267,10 +236,7 @@ async fn lists_symlinks_as_symlinks() {
     let mut entries = get_or_throw(env.list_dir(".", &BACKGROUND_CONTEXT).await).unwrap();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     assert_eq!(
-        entries
-            .into_iter()
-            .map(|e| (e.name, e.kind))
-            .collect::<Vec<_>>(),
+        entries.into_iter().map(|e| (e.name, e.kind)).collect::<Vec<_>>(),
         vec![
             ("link.txt".to_string(), FileKind::Symlink),
             ("target.txt".to_string(), FileKind::File),
@@ -284,12 +250,8 @@ async fn stops_reading_text_lines_at_requested_limit() {
     let root = tracker.temp_dir();
     let env = NodeExecutionEnv::new(&root);
     get_or_throw(
-        env.write_file(
-            "file.txt",
-            FileContent::from("one\ntwo\nthree"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.write_file("file.txt", FileContent::from("one\ntwo\nthree"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     let lines = get_or_throw(
@@ -310,10 +272,7 @@ async fn returns_file_error_for_missing_paths_and_listing_non_dirs() {
     let root = tracker.temp_dir();
     let env = NodeExecutionEnv::new(&root);
 
-    let info_err = env
-        .file_info("missing.txt", &BACKGROUND_CONTEXT)
-        .await
-        .unwrap_err();
+    let info_err = env.file_info("missing.txt", &BACKGROUND_CONTEXT).await.unwrap_err();
     assert_eq!(info_err.name(), "FileError");
     assert_eq!(info_err.code, FileErrorCode::NotFound);
     assert_eq!(
@@ -338,29 +297,17 @@ async fn appends_atomically_renames_creates_temp_and_honors_dir_remove_options()
     let env = NodeExecutionEnv::new(&root);
 
     get_or_throw(
-        env.append_file(
-            "new/nested/file.txt",
-            FileContent::from("a"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.append_file("new/nested/file.txt", FileContent::from("a"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     get_or_throw(
-        env.append_file(
-            "new/nested/file.txt",
-            FileContent::from("b"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.append_file("new/nested/file.txt", FileContent::from("b"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     assert_eq!(
-        get_or_throw(
-            env.read_text_file("new/nested/file.txt", &BACKGROUND_CONTEXT)
-                .await
-        )
-        .unwrap(),
+        get_or_throw(env.read_text_file("new/nested/file.txt", &BACKGROUND_CONTEXT).await).unwrap(),
         "ab"
     );
 
@@ -399,11 +346,7 @@ async fn appends_atomically_renames_creates_temp_and_honors_dir_remove_options()
         "new"
     );
 
-    let temp_dir = get_or_throw(
-        env.create_temp_dir(Some("node-env-test-"), &BACKGROUND_CONTEXT)
-            .await,
-    )
-    .unwrap();
+    let temp_dir = get_or_throw(env.create_temp_dir(Some("node-env-test-"), &BACKGROUND_CONTEXT).await).unwrap();
     tracker.extra_dirs.push(temp_dir.clone());
     assert!(pi_js::fs::promises::access(&temp_dir, 0).await.is_ok());
 
@@ -418,9 +361,7 @@ async fn appends_atomically_renames_creates_temp_and_honors_dir_remove_options()
         .await,
     )
     .unwrap();
-    tracker
-        .extra_dirs
-        .push(pi_js::path::dirname(&temp_file));
+    tracker.extra_dirs.push(pi_js::path::dirname(&temp_file));
     assert!(temp_file.ends_with(".txt"));
     assert_eq!(
         get_or_throw(env.read_text_file(&temp_file, &BACKGROUND_CONTEXT).await).unwrap(),
@@ -430,9 +371,7 @@ async fn appends_atomically_renames_creates_temp_and_honors_dir_remove_options()
     let create_non_rec = env
         .create_dir(
             "missing/child",
-            Some(CreateDirOptions {
-                recursive: Some(false),
-            }),
+            Some(CreateDirOptions { recursive: Some(false) }),
             &BACKGROUND_CONTEXT,
         )
         .await
@@ -509,14 +448,8 @@ async fn returns_aborted_without_side_effects_for_pre_aborted_file_ops() {
 
     let codes = vec![
         env.read_text_file("file.txt", &ctx).await.unwrap_err().code,
-        env.read_text_lines("file.txt", None, &ctx)
-            .await
-            .unwrap_err()
-            .code,
-        env.read_binary_file("file.txt", &ctx)
-            .await
-            .unwrap_err()
-            .code,
+        env.read_text_lines("file.txt", None, &ctx).await.unwrap_err().code,
+        env.read_binary_file("file.txt", &ctx).await.unwrap_err().code,
         env.open_text_line_reader("file.txt", &ctx)
             .await
             .err()
@@ -532,10 +465,7 @@ async fn returns_aborted_without_side_effects_for_pre_aborted_file_ops() {
             .code,
         env.truncate_file("file.txt", 1, &ctx).await.unwrap_err().code,
         env.flush_file("file.txt", &ctx).await.unwrap_err().code,
-        env.rename_file("file.txt", "renamed.txt", &ctx)
-            .await
-            .unwrap_err()
-            .code,
+        env.rename_file("file.txt", "renamed.txt", &ctx).await.unwrap_err().code,
         env.file_info("file.txt", &ctx).await.unwrap_err().code,
         env.list_dir(".", &ctx).await.unwrap_err().code,
         env.canonical_path("file.txt", &ctx).await.unwrap_err().code,
@@ -567,12 +497,8 @@ async fn truncates_extends_and_flushes_files() {
 
     let bytes = vec![0x61u8, 0xc3, 0xa9, 0x0a, 0x62, 0x0a];
     get_or_throw(
-        env.write_file(
-            "file.bin",
-            FileContent::from(&bytes),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.write_file("file.bin", FileContent::from(&bytes), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     get_or_throw(env.truncate_file("file.bin", 2, &BACKGROUND_CONTEXT).await).unwrap();
@@ -637,10 +563,7 @@ async fn truncates_extends_and_flushes_files() {
     );
     get_or_throw(env.create_dir("dir", None, &BACKGROUND_CONTEXT).await).unwrap();
     assert_eq!(
-        env.flush_file("dir", &BACKGROUND_CONTEXT)
-            .await
-            .unwrap_err()
-            .code,
+        env.flush_file("dir", &BACKGROUND_CONTEXT).await.unwrap_err().code,
         FileErrorCode::IsDirectory
     );
 
@@ -765,12 +688,8 @@ async fn text_line_reader_handles_crlf_empty_multibyte_and_cancel() {
     // Pending read cancelled mid-read preserves offset for retry.
     let path = pi_js::path::join(&[&root, "cancel.txt"]);
     get_or_throw(
-        env.write_file(
-            "cancel.txt",
-            FileContent::from("one\ntwo\n"),
-            &BACKGROUND_CONTEXT,
-        )
-        .await,
+        env.write_file("cancel.txt", FileContent::from("one\ntwo\n"), &BACKGROUND_CONTEXT)
+            .await,
     )
     .unwrap();
     let _ = path;
@@ -779,8 +698,8 @@ async fn text_line_reader_handles_crlf_empty_multibyte_and_cancel() {
         .await
         .unwrap();
     reader_box.set_read_delay_for_test(Some(150));
-    let controller = AbortController::new();
-    let ctx = with_abort_signal(&BACKGROUND_CONTEXT, controller.signal());
+    let controller = Arc::new(AbortController::new());
+    let ctx = with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone());
     let trigger = controller.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -804,10 +723,7 @@ async fn text_line_reader_handles_crlf_empty_multibyte_and_cancel() {
             terminated: true
         })
     );
-    assert_eq!(
-        reader_box.read_line(&BACKGROUND_CONTEXT).await.unwrap(),
-        None
-    );
+    assert_eq!(reader_box.read_line(&BACKGROUND_CONTEXT).await.unwrap(), None);
     reader_box.close(&BACKGROUND_CONTEXT).await;
     let _ = std::any::type_name::<NodeTextLineReader>();
 
@@ -844,15 +760,9 @@ async fn shell_executes_env_overrides_cleanup_and_streams() {
     assert_eq!(output, format!("{real_root}:ok"));
 
     let mut base_env = IndexMap::new();
-    base_env.insert(
-        "PI_SESSION_FILE".to_string(),
-        "/stale/parent.jsonl".to_string(),
-    );
+    base_env.insert("PI_SESSION_FILE".to_string(), "/stale/parent.jsonl".to_string());
     base_env.insert("PI_CODING_AGENT".to_string(), "true".to_string());
-    base_env.insert(
-        "PI_NODE_ENV_PRESERVED_TEST".to_string(),
-        "preserved".to_string(),
-    );
+    base_env.insert("PI_NODE_ENV_PRESERVED_TEST".to_string(), "preserved".to_string());
     let configured = NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: root.clone(),
         shell_path: None,
@@ -871,10 +781,7 @@ async fn shell_executes_env_overrides_cleanup_and_streams() {
         (
             Some({
                 let mut m = IndexMap::new();
-                m.insert(
-                    "PI_SESSION_FILE".to_string(),
-                    "/sessions/current.jsonl".to_string(),
-                );
+                m.insert("PI_SESSION_FILE".to_string(), "/sessions/current.jsonl".to_string());
                 m
             }),
             "x:/sessions/current.jsonl",
@@ -902,9 +809,7 @@ async fn shell_executes_env_overrides_cleanup_and_streams() {
     explicit.insert(explicit_key.to_string(), "explicit".to_string());
     let (r, out) = collect_shell_output(
         &configured,
-        &format!(
-            "printf '%s:%s:%s' \"${{{inherited_key}-}}\" \"${{PI_CODING_AGENT-}}\" \"${{{explicit_key}-}}\""
-        ),
+        &format!("printf '%s:%s:%s' \"${{{inherited_key}-}}\" \"${{PI_CODING_AGENT-}}\" \"${{{explicit_key}-}}\""),
         Some(ShellExecOptions {
             inherit_env: Some(false),
             env: Some(explicit),
@@ -954,10 +859,7 @@ async fn shell_handles_errors_signals_timeouts_aborts_and_cleanup() {
 
     #[cfg(unix)]
     {
-        let killed = env
-            .exec("kill -9 $$", None, &BACKGROUND_CONTEXT)
-            .await
-            .unwrap();
+        let killed = env.exec("kill -9 $$", None, &BACKGROUND_CONTEXT).await.unwrap();
         assert_eq!(killed.exit_code, 128 + 9);
     }
 
@@ -1048,8 +950,8 @@ async fn shell_handles_errors_signals_timeouts_aborts_and_cleanup() {
     );
     assert!(!get_or_throw(env.exists("spawned", &BACKGROUND_CONTEXT).await).unwrap());
 
-    let controller = AbortController::new();
-    let ctx = with_abort_signal(&BACKGROUND_CONTEXT, controller.signal());
+    let controller = Arc::new(AbortController::new());
+    let ctx = with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone());
     let fut = env.exec("sleep 5", None, &ctx);
     controller.abort(None);
     assert_eq!(fut.await.unwrap_err().code, ExecutionErrorCode::Aborted);
@@ -1172,9 +1074,7 @@ async fn shell_spills_large_and_timed_out_outputs_cleanly() {
         .await
         .unwrap_err();
     assert_eq!(fail_err.code, ExecutionErrorCode::Unknown);
-    assert!(fail_err
-        .message
-        .contains("Failed to preserve complete shell output"));
+    assert!(fail_err.message.contains("Failed to preserve complete shell output"));
 
     // Large output + many lines spill
     let (res, out) = collect_shell_output(

@@ -7,13 +7,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use pi_durable::harness::types::{
-    SchedulingStatus, SubmissionDraft, TaskBlockedReason, TaskInspection, TaskInspectionState, UserInput,
+    ConversationCreateOptions, SchedulingStatus, SubmissionDraft, TaskBlockedReason, TaskInspection,
+    TaskInspectionState, UserInput,
 };
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::tasks::{
-    MigrationResult, Task, TaskDefinition, TaskMigrationFn, TaskOptions, TaskOwnership, define_task,
-};
-use pi_durable::types::{ConversationCreateOptions, ConversationOwnership, EntryDraft, JsonValue, TaskId};
+use pi_durable::tasks::{Task, TaskDefinition, TypedMigrateFn, define_task};
+use pi_durable::types::{ConversationOwnership, EntryDraft, JsonValue, TaskId, TaskOptions, TaskOwnership};
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::chat_support::{chat_setup, open_chat, unanswered, wait_for};
@@ -57,19 +56,16 @@ fn make_task(
                             ctx,
                         )
                         .await
-                })
+                }) as pi_js::BoxFuture<pi_js::Result<()>>
             },
         ) as pi_durable::tasks::TypedPhaseHandler<JsonValue, RunStep, JsonValue, ()>,
     );
 
-    let migrate_fn: Option<TaskMigrationFn<JsonValue, RunStep>> = migrate.map(|cb| {
+    let migrate_fn: Option<TypedMigrateFn<JsonValue, RunStep>> = migrate.map(|cb| {
         Arc::new(move |_raw_in: JsonValue, _raw_chk: JsonValue, _from: i64| {
             cb()?;
-            Ok(MigrationResult {
-                input: JsonValue::Null,
-                checkpoint: RunStep::Run,
-            })
-        }) as TaskMigrationFn<JsonValue, RunStep>
+            Ok((JsonValue::Null, RunStep::Run))
+        }) as TypedMigrateFn<JsonValue, RunStep>
     });
 
     define_task(TaskDefinition {
@@ -118,7 +114,7 @@ async fn derives_every_live_tasks_state_without_running_task_code() {
                             ctx,
                         )
                         .await
-                })
+                }) as pi_js::BoxFuture<pi_js::Result<()>>
             },
         ) as pi_durable::tasks::TypedPhaseHandler<JsonValue, DepStep, JsonValue, ()>,
     );
@@ -133,7 +129,7 @@ async fn derives_every_live_tasks_state_without_running_task_code() {
                             ctx,
                         )
                         .await
-                })
+                }) as pi_js::BoxFuture<pi_js::Result<()>>
             },
         ) as pi_durable::tasks::TypedPhaseHandler<JsonValue, DepStep, JsonValue, ()>,
     );
@@ -176,9 +172,13 @@ async fn derives_every_live_tasks_state_without_running_task_code() {
         make_task("test.too-old", 1, None, None).as_any().clone(),
     ];
 
-    let opened = open_tasks(Arc::new(MemoryStorage::new()), &registered, OpenTasksOptions::default())
-        .await
-        .expect("open tasks");
+    let opened = open_tasks(
+        Arc::new(MemoryStorage::new()),
+        registered.clone(),
+        OpenTasksOptions::default(),
+    )
+    .await
+    .expect("open tasks");
     let root = opened.harness.root(context(), None).await.expect("root");
 
     let migrating_v1 = make_task("test.migrating", 1, None, None);
@@ -377,7 +377,8 @@ async fn lists_unsettled_submissions() {
         .create_conversation(
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
-                ..Default::default()
+                agent: None,
+                init: None,
             },
             context(),
         )

@@ -891,7 +891,10 @@ async fn cancels_acquisition_without_leaking_a_registered_watch() {
     (child.cancel)(Some(AbortReason::error("Error", "cancel acquisition")));
     gate.release();
 
-    let err = acquisition.await.expect("join").expect_err("acquisition error");
+    let err = match acquisition.await.expect("join") {
+        Ok(_) => panic!("acquisition error"),
+        Err(err) => err,
+    };
     assert!(err.to_string().contains("cancel acquisition"));
     harness.facade.close(context()).await.expect("close");
 }

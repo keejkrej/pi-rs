@@ -12,23 +12,25 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::AssistantMessage;
 use pi_chord::context::with_abort_signal;
-use pi_chord::delta::{Op, OpDelete, OpSet, OpSplice, Seg, SpliceVerb, apply_immutable};
+use pi_chord::delta::{
+    DeleteVerb, Op, OpDelete, OpReplace, OpSet, OpSplice, ReplaceVerb, Seg, SetVerb, SpliceVerb, apply_immutable,
+};
 use pi_durable::documents::{DocDefinitionInput, define_conversation_doc};
 use pi_durable::harness::agent::AGENT_DOC;
 use pi_durable::harness::harness::Conversation;
 use pi_durable::harness::inbox::INBOX_DOC;
 use pi_durable::harness::live::LIVE_DOC;
 use pi_durable::harness::types::{
-    AgentChange, ConversationCreateOptions, ConversationOwnership, ConversationView, ConversationWatch, FieldChange,
-    SubmissionDraft, UserInput,
+    AgentChange, ConversationCreateOptions, ConversationView, ConversationWatch, FieldChange, SubmissionDraft,
+    UserInput,
 };
 use pi_durable::harness::usage::USAGE_DOC;
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::types::{
-    CommitChange, ConversationRecord, DocumentCommitChange, EntryDraft, EntryDraftHead, EntryId, JsonObject, JsonValue,
-    LatestFork, TableCommitChange, WatchEnd,
+    CommitChange, ConversationOwnership, ConversationRecord, DocumentCommitChange, EntryDraft, EntryDraftHead, EntryId,
+    JsonObject, LatestFork, TableCommitChange, WatchEnd,
 };
-use pi_js::abort::AbortController;
+use pi_js::abort::{AbortController, AbortReason};
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -137,7 +139,7 @@ async fn committed(
 fn replay(initial: &ConversationView, frames: &[Frame]) -> ConversationView {
     let mut value = serde_json::to_value(initial).expect("to value");
     for frame in frames {
-        value = apply_immutable(value, &frame.ops).expect("apply ops");
+        value = apply_immutable(Some(value), &frame.ops).expect("apply ops");
         let parsed: ConversationView = serde_json::from_value(value.clone()).expect("from value");
         assert_eq!(parsed, frame.value);
     }
@@ -162,7 +164,7 @@ fn count_touches(
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_cb = Arc::clone(&counter);
     let sub = harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             let touched = publication.changes.iter().any(|change| match change {
                 CommitChange::Table(TableCommitChange::Entry(e)) => e.conversation_id == conversation_id,
                 CommitChange::Document(DocumentCommitChange::Document {
@@ -176,7 +178,7 @@ fn count_touches(
             if touched {
                 counter_cb.fetch_add(1, Ordering::AcqRel);
             }
-        }))
+        })
         .expect("subscribe");
     (counter, sub)
 }
@@ -213,7 +215,7 @@ async fn hydrates_the_active_entries_and_the_built_in_documents() {
     let view = fresh(&opened.root).await;
     assert_eq!(view.conversation.id, opened.root.id());
     assert!(view.conversation.parent.is_none());
-    assert_eq!(view.entries, all_entries(&opened.root).await.expect("entries"));
+    assert_eq!(view.entries, all_entries(&opened.root, None).await.expect("entries"));
     let mut keys: Vec<&str> = view.docs.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, MOUNTED);
@@ -263,16 +265,19 @@ async fn publishes_one_frame_per_touching_commit_whose_operations_rebuild_every_
         )
         .await
         .expect("submit");
-    wait_for(|| {
-        let frames = Arc::clone(&rec.frames);
-        async move {
-            frames
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|f| f.value.docs.get("pi.live").and_then(|d| d.get("generation")).is_some())
-        }
-    })
+    wait_for(
+        || {
+            let frames = Arc::clone(&rec.frames);
+            async move {
+                frames
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|f| f.value.docs.get("pi.live").and_then(|d| d.get("generation")).is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     release.resolve(());
     submission.wait(context()).await.expect("wait");
@@ -293,6 +298,7 @@ async fn publishes_one_frame_per_touching_commit_whose_operations_rebuild_every_
     });
     assert!(has_user_splice);
     let expected_gen_op = Op::Set(OpSet(
+        SetVerb::S,
         vec![
             Seg::String("docs".to_owned()),
             Seg::String("pi.live".to_owned()),
@@ -321,6 +327,8 @@ async fn shares_unchanged_parts_between_revisions_and_skips_commits_that_touch_n
         .create_conversation(
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -385,6 +393,7 @@ async fn shares_unchanged_parts_between_revisions_and_skips_commits_that_touch_n
     assert_eq!(
         frames[0].ops,
         vec![Op::Set(OpSet(
+            SetVerb::S,
             vec![
                 Seg::String("docs".to_owned()),
                 Seg::String("pi.agent".to_owned()),
@@ -599,6 +608,8 @@ async fn cuts_a_forks_view_into_its_inherited_entries() {
             b.id,
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -671,6 +682,8 @@ async fn shows_a_forks_inherited_entries_and_follows_only_the_forks_own_commits(
             first.id,
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -769,12 +782,13 @@ async fn unmounts_a_retired_document_and_mounts_its_recreation_whole() {
     assert_eq!(
         frame_ops,
         vec![
-            &vec![Op::Delete(OpDelete(vec![
-                Seg::String("docs".to_owned()),
-                Seg::String("pi.live".to_owned()),
-            ]))],
-            &vec![Op::Set(OpSet(
+            &vec![Op::Delete(OpDelete(
+                DeleteVerb::D,
                 vec![Seg::String("docs".to_owned()), Seg::String("pi.live".to_owned()),],
+            ))],
+            &vec![Op::Set(OpSet(
+                SetVerb::S,
+                vec![Seg::String("docs".to_owned()), Seg::String("pi.live".to_owned())],
                 json!({ "tools": [] }),
             ))],
         ]
@@ -829,7 +843,8 @@ async fn replaces_undelivered_frames_with_the_newest_view_after_100_pending_fram
     assert_eq!(guard.len(), 1);
     assert_eq!(
         guard[0].ops,
-        vec![Op::Replace(pi_chord::delta::OpReplace(
+        vec![Op::Replace(OpReplace(
+            ReplaceVerb::R,
             serde_json::to_value(&guard[0].value).expect("json")
         ))]
     );
@@ -940,10 +955,13 @@ async fn rejects_an_acquisition_cancelled_or_closed_while_it_waits_for_the_sessi
     let root_for_watch = opened.root.clone();
     let cancelled = tokio::spawn(async move { root_for_watch.watch(cancel_ctx).await });
     flush().await;
-    controller.abort(Some(pi_js::Error::msg("cancelled").into()));
+    controller.abort(Some(AbortReason::from_error(&pi_js::Error::msg("cancelled"))));
     release.resolve(());
     blocking.await.expect("join blocking").expect("commit ok");
-    let err = cancelled.await.expect("join cancelled").expect_err("expected err");
+    let err = match cancelled.await.expect("join cancelled") {
+        Ok(_) => panic!("expected err"),
+        Err(err) => err,
+    };
     assert!(err.to_string().contains("cancelled"));
 
     let (release2, blocking2) = hold();
@@ -955,10 +973,10 @@ async fn rejects_an_acquisition_cancelled_or_closed_while_it_waits_for_the_sessi
     flush().await;
     release2.resolve(());
     blocking2.await.expect("join blocking2").expect("commit ok");
-    let err2 = closed_while_queued
-        .await
-        .expect("join closed")
-        .expect_err("expected closed err");
+    let err2 = match closed_while_queued.await.expect("join closed") {
+        Ok(_) => panic!("expected closed err"),
+        Err(err) => err,
+    };
     assert!(err2.to_string().contains("Harness is closed"));
     closing.await.expect("join closing").expect("close ok");
 }

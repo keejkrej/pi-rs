@@ -1,27 +1,36 @@
 //! Port of packages/durable/test/types.test.ts
 
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
+use pi_ai::create_models;
+use pi_ai::models::Models;
 use pi_chord::Context;
-use pi_chord::delta::Op;
+use pi_chord::delta::{Op, OpSet, Seg, SetVerb};
 use pi_durable::documents::{
-    DocDefinitionInput, address_id, check_create_scope, check_record_scope, check_record_version,
-    define_conversation_doc, define_rewindable_conversation_doc, define_session_doc,
-    document_create, materialize_create_value, materialize_document,
+    DocDefinitionInput, ErasedDocDefinition, address_id, check_create_scope, check_record_scope, check_record_version,
+    define_conversation_doc, define_rewindable_conversation_doc, define_session_doc, document_create,
+    materialize_create_value, materialize_document,
 };
+use pi_durable::env::ExecutionEnv;
 use pi_durable::errors::ReadAfterWrite;
-use pi_durable::harness::types::TaskRuntimeBackend;
+use pi_durable::harness::registry::create_registry;
+use pi_durable::harness::types::{
+    Agent, ContextView, ConversationHandle, DocumentObserverBackend, DocumentReaderBackend, HookApi, HookApiBackend,
+    RegistryReader, RegistrySnapshot, Settings, SettledTask, TaskRuntimeBackend,
+};
 use pi_durable::ids::{DocumentId, EntryId, TaskId, id_from_number, seq_from_number};
+use pi_durable::session::transaction::Tx;
 use pi_durable::tasks::{
-    ErasedTaskDefinition, TaskDefinition, checkpoint_phase, decode_outcome, decode_task_record,
-    define_task, task_outcome_error,
+    ErasedTaskDefinition, TaskDefinition, checkpoint_phase, decode_outcome, decode_task_record, define_task,
+    task_outcome_error,
 };
 use pi_durable::types::{
-    DocumentCreate, DocumentPoint, DocumentRecord, DocumentScope, JsonObject, LatestFork,
-    NextTaskState, RewindableFork, StoredDocument, TaskOutcome, TaskOutcomeError, TaskRecord,
+    ConversationId, DocumentPoint, DocumentRecord, DocumentScope, DocumentWatch, EntryRecord, ErasedTaskRecord,
+    JsonObject, LatestFork, NextTaskState, RewindableFork, RunningTask, StoredDocument, TaskOutcome, TaskRecord,
     TaskState, WatchEnd, WatchHandle, WatchHandleApi, WatchListener, mint_typed_id,
 };
 use pretty_assertions::assert_eq;
@@ -57,57 +66,198 @@ struct ReviewTaskResult {
 
 struct MockRuntimeHandle {
     id: TaskId<ReviewTaskResult>,
+    #[allow(dead_code)]
     outcome: TaskOutcome,
+}
+
+static MOCK_MODELS: LazyLock<Models> = LazyLock::new(|| create_models(None));
+
+struct DummyHookApiBackend(TaskId);
+
+#[async_trait::async_trait]
+impl DocumentReaderBackend for DummyHookApiBackend {
+    async fn snapshot_erased(
+        &self,
+        _def: &Arc<ErasedDocDefinition>,
+        _conversation_id: Option<ConversationId>,
+        _task_id: Option<TaskId>,
+        _key: Option<&str>,
+        _context: Context,
+    ) -> pi_js::Result<Option<JsonObject>> {
+        Ok(None)
+    }
+
+    async fn snapshot_as_of_erased(
+        &self,
+        _def: &Arc<ErasedDocDefinition>,
+        _conversation_id: ConversationId,
+        _key: Option<&str>,
+        _at: EntryId,
+        _context: Context,
+    ) -> pi_js::Result<Option<JsonObject>> {
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl HookApiBackend for DummyHookApiBackend {
+    fn task_id(&self) -> TaskId {
+        self.0
+    }
+
+    fn conversation_id(&self) -> ConversationId {
+        id_from_number(1)
+    }
+
+    async fn memo_get(&self, _name: &str, _context: Context) -> pi_js::Result<Option<JsonValue>> {
+        Ok(None)
+    }
+
+    async fn memo_set(&self, _name: &str, candidate: JsonValue, _context: Context) -> pi_js::Result<JsonValue> {
+        Ok(candidate)
+    }
+}
+
+#[async_trait::async_trait]
+impl DocumentReaderBackend for MockRuntimeHandle {
+    async fn snapshot_erased(
+        &self,
+        _def: &Arc<ErasedDocDefinition>,
+        _conversation_id: Option<ConversationId>,
+        _task_id: Option<TaskId>,
+        _key: Option<&str>,
+        _context: Context,
+    ) -> pi_js::Result<Option<JsonObject>> {
+        Ok(None)
+    }
+
+    async fn snapshot_as_of_erased(
+        &self,
+        _def: &Arc<ErasedDocDefinition>,
+        _conversation_id: ConversationId,
+        _key: Option<&str>,
+        _at: EntryId,
+        _context: Context,
+    ) -> pi_js::Result<Option<JsonObject>> {
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl DocumentObserverBackend for MockRuntimeHandle {
+    async fn watch_erased(
+        &self,
+        _def: &Arc<ErasedDocDefinition>,
+        _conversation_id: Option<ConversationId>,
+        _task_id: Option<TaskId>,
+        _key: Option<&str>,
+        _context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<JsonObject>>> {
+        Ok(None)
+    }
 }
 
 #[async_trait::async_trait]
 impl TaskRuntimeBackend for MockRuntimeHandle {
-    async fn checkpoint(
-        &self,
-        _checkpoint: JsonValue,
-        _context: &Context,
-    ) -> pi_js::Result<()> {
-        Ok(())
-    }
-
-    async fn wait(
-        &self,
-        _ids: Vec<TaskId>,
-        _policy: pi_durable::types::JoinPolicy,
-        _checkpoint: JsonValue,
-        _context: &Context,
-    ) -> pi_js::Result<()> {
-        Ok(())
-    }
-
-    async fn finish(&self, _result: JsonValue, _context: &Context) -> pi_js::Result<()> {
-        Ok(())
-    }
-
-    async fn fail(
-        &self,
-        _error: TaskOutcomeError,
-        _result: Option<JsonValue>,
-        _context: &Context,
-    ) -> pi_js::Result<()> {
-        Ok(())
-    }
-
-    async fn abort_task(
-        &self,
-        _reason: Option<String>,
-        _result: Option<JsonValue>,
-        _context: &Context,
-    ) -> pi_js::Result<()> {
-        Ok(())
-    }
-
-    async fn outcome(&self, _context: &Context) -> pi_js::Result<TaskOutcome> {
-        Ok(self.outcome.clone())
-    }
-
-    fn id(&self) -> TaskId {
+    fn task_id(&self) -> TaskId {
         self.id.cast()
+    }
+
+    fn conversation_id(&self) -> ConversationId {
+        id_from_number(1)
+    }
+
+    fn signal(&self) -> pi_js::abort::AbortSignal {
+        pi_js::abort::AbortController::new().signal()
+    }
+
+    fn registry(&self) -> Arc<dyn RegistrySnapshot> {
+        create_registry().snapshot()
+    }
+
+    async fn agent(&self, _context: Context) -> pi_js::Result<Agent> {
+        Err(pi_js::Error::msg("mock"))
+    }
+
+    fn settings(&self) -> Settings {
+        Settings::default()
+    }
+
+    fn models(&self) -> &Models {
+        &MOCK_MODELS
+    }
+
+    async fn env(&self, _context: Context) -> pi_js::Result<Option<Arc<dyn ExecutionEnv>>> {
+        Ok(None)
+    }
+
+    async fn hooks_for_task(&self, _task_name: &str) -> pi_js::Result<Vec<Arc<dyn Any + Send + Sync>>> {
+        Ok(Vec::new())
+    }
+
+    async fn commit_erased(
+        &self,
+        _change: Box<
+            dyn FnOnce(
+                    Tx,
+                    RunningTask<JsonValue, JsonValue, JsonValue>,
+                ) -> pi_js::BoxFuture<pi_js::Result<Option<NextTaskState<JsonValue, JsonValue>>>>
+                + Send,
+        >,
+        _context: Context,
+    ) -> pi_js::Result<()> {
+        Ok(())
+    }
+
+    async fn memo_get(&self, _name: &str, _context: Context) -> pi_js::Result<Option<JsonValue>> {
+        Ok(None)
+    }
+
+    async fn memo_set(&self, _name: &str, candidate: JsonValue, _context: Context) -> pi_js::Result<JsonValue> {
+        Ok(candidate)
+    }
+
+    async fn get_task(&self, _id: TaskId, _context: Context) -> pi_js::Result<Option<ErasedTaskRecord>> {
+        Ok(None)
+    }
+
+    async fn wait_for_task(&self, _id: TaskId, _context: Context) -> pi_js::Result<SettledTask<JsonValue>> {
+        Err(pi_js::Error::msg("mock"))
+    }
+
+    async fn outcomes(&self, _ids: &[TaskId], _context: Context) -> pi_js::Result<Vec<TaskOutcome<JsonValue>>> {
+        Ok(Vec::new())
+    }
+
+    async fn conversation(&self, _id: ConversationId, _context: Context) -> pi_js::Result<Option<ConversationHandle>> {
+        Ok(None)
+    }
+
+    async fn entry(&self, _id: EntryId, _context: Context) -> pi_js::Result<Option<EntryRecord>> {
+        Ok(None)
+    }
+
+    async fn context_view(
+        &self,
+        _conversation_id: ConversationId,
+        _context: Context,
+        _at: Option<EntryId>,
+    ) -> pi_js::Result<ContextView> {
+        Err(pi_js::Error::msg("mock"))
+    }
+
+    fn now(&self) -> pi_js::Result<i64> {
+        Ok(0)
+    }
+
+    fn report(&self, _error: pi_js::Error) {}
+
+    async fn sleep(&self, _until: i64, _context: Context) -> pi_js::Result<()> {
+        Ok(())
+    }
+
+    fn hook_api(&self) -> HookApi {
+        HookApi::from_backend(Arc::new(DummyHookApiBackend(self.id.cast())))
     }
 }
 
@@ -122,6 +272,8 @@ impl<T: Clone + Send + Sync + 'static> WatchHandleApi<T> for DummyWatchApi<T> {
     fn start(&self, _listener: WatchListener<T>) -> pi_js::Result<()> {
         Ok(())
     }
+
+    fn stop_now(&self) {}
 
     async fn stop(&self) -> WatchEnd {
         WatchEnd::Stopped
@@ -176,8 +328,7 @@ fn document_tokens_validate_scope_version_and_materialize() {
             migrate: Some(|val, _from| {
                 let mut map = val.clone();
                 map.entry("steps".to_string()).or_insert_with(|| json!([]));
-                serde_json::from_value(JsonValue::Object(map))
-                    .map_err(|e| pi_js::Error::msg(e.to_string()))
+                serde_json::from_value(JsonValue::Object(map)).map_err(|e| pi_js::Error::msg(e.to_string()))
             }),
             checkpoint_when: None,
         },
@@ -233,8 +384,7 @@ fn document_tokens_validate_scope_version_and_materialize() {
 
     let create_obj = json_obj(json!({ "steps": ["a", "b"] }));
     let materialized =
-        materialize_create_value(&conv_doc.definition, &create_rec, 2, &create_obj)
-            .expect("create value");
+        materialize_create_value(&conv_doc.definition, &create_rec, 2, &create_obj).expect("create value");
     assert_eq!(materialized, create_obj);
 
     assert!(check_record_version(&conv_doc.definition, record.id, &record.kind, 2).is_ok());
@@ -253,16 +403,12 @@ fn document_tokens_validate_scope_version_and_materialize() {
 #[test]
 fn task_definitions_decode_and_encode_outcomes() {
     let mut phases = IndexMap::new();
-    let phase_fn: pi_durable::tasks::TypedPhaseHandler<
-        ReviewTaskInput,
-        ReviewTaskState,
-        ReviewTaskResult,
-        (),
-    > = Arc::new(
-        |_task, _rt, _ctx| -> Pin<Box<dyn Future<Output = pi_js::Result<()>> + Send>> {
-            Box::pin(async { Ok(()) })
-        },
-    );
+    let phase_fn: pi_durable::tasks::TypedPhaseHandler<ReviewTaskInput, ReviewTaskState, ReviewTaskResult, ()> =
+        Arc::new(
+            |_task, _rt, _ctx| -> Pin<Box<dyn Future<Output = pi_js::Result<()>> + Send>> {
+                Box::pin(async { Ok(()) })
+            },
+        );
     phases.insert("start".to_string(), phase_fn);
 
     let def = define_task(TaskDefinition::<ReviewTaskInput, ReviewTaskState, ReviewTaskResult> {
@@ -297,13 +443,10 @@ fn task_definitions_decode_and_encode_outcomes() {
         abort_requested: false,
         memos: None,
     };
-    let decoded = decode_task_record::<ReviewTaskInput, ReviewTaskState, ReviewTaskResult>(&rec)
-        .expect("decode task record");
+    let decoded =
+        decode_task_record::<ReviewTaskInput, ReviewTaskState, ReviewTaskResult>(&rec).expect("decode task record");
     assert_eq!(decoded.input.target, "src");
-    assert_eq!(
-        decoded.state.checkpoint().map(|c| c.count),
-        Some(3)
-    );
+    assert_eq!(decoded.state.checkpoint().map(|c| c.count), Some(3));
 
     let completed = TaskOutcome::Completed {
         result: json!({ "approved": true }),
@@ -324,10 +467,7 @@ fn task_definitions_decode_and_encode_outcomes() {
             result: ReviewTaskResult { approved: false },
         },
     };
-    let _op = Op::Set {
-        path: Vec::new(),
-        value: json!(1),
-    };
+    let _op = Op::Set(OpSet(SetVerb::S, vec![Seg::String("k".to_owned())], json!(1)));
     let _mock = MockRuntimeHandle {
         id: id_from_number(1),
         outcome: TaskOutcome::Aborted {

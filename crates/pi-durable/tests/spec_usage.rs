@@ -27,7 +27,7 @@ use pi_durable::{
     AgentChange, AgentExtensionsChange, AgentToolsChange, DocDraft, Extension, FieldChange, GENERATION_TASK,
     GenerationHooks, Harness, HarnessOptions, HarnessSettingsSnapshot, HookApi, InputSubmissionDraft, LIVE_DOC,
     LiveState, ModelRef, PartialCompactionPolicy, Registry, RegistryReader, RootConversationOptions, SectionOptions,
-    Session, Storage, TOOL_TASK, ToolHooks, ToolRegistration, ToolReplayMode, Tx, UserInput, configure,
+    Session, Storage, TOOL_TASK, TaskDefinition, ToolHooks, ToolRegistration, ToolReplayMode, Tx, UserInput, configure,
     create_registry, define_extension, define_task, define_tool, hook, section, section_with_options, wrap_tool,
 };
 use serde::{Deserialize, Serialize};

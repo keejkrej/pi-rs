@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 use pi_chord::context::BACKGROUND_CONTEXT;
-use pi_chord::delta::{Op, OpReplace, OpSet, ReplaceVerb, Seg, SetVerb};
+use pi_chord::delta::{Op, OpSet, Seg, SetVerb};
 use serde_json::{Value as JsonValue, json};
 
 use crate::ids::Seq;
@@ -417,11 +417,11 @@ fn expect_tail_1024(_: &StorageBenchmarkDataset) -> i64 {
     1_024
 }
 
-fn read_replay_tail(
-    storage: &dyn Storage,
-    dataset: &StorageBenchmarkDataset,
+fn read_replay_tail<'a>(
+    storage: &'a dyn Storage,
+    dataset: &'a StorageBenchmarkDataset,
     tail: usize,
-) -> Pin<Box<dyn Future<Output = pi_js::Result<i64>> + Send + '_>> {
+) -> Pin<Box<dyn Future<Output = pi_js::Result<i64>> + Send + 'a>> {
     Box::pin(async move {
         let Some(&doc_id) = dataset.replay_document_ids.get(&tail) else {
             return Ok(-1);

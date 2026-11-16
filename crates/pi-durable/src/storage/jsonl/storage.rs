@@ -1094,11 +1094,11 @@ fn is_current_only_create(record: &DocumentCreate) -> bool {
 }
 
 fn sidecar_key(file: &str, seq: Seq, ordinal: usize) -> pi_js::Result<String> {
-    pi_js::json::stringify(&(file, seq.as_i64(), ordinal))
+    pi_js::json::try_stringify(&(file, seq.as_i64(), ordinal))
 }
 
 fn json_line<T: Serialize>(value: &T) -> pi_js::Result<String> {
-    let mut s = pi_js::json::stringify(value)?;
+    let mut s = pi_js::json::try_stringify(value)?;
     s.push('\n');
     Ok(s)
 }
@@ -1133,86 +1133,90 @@ fn as_safe_int(val: &JsonValue) -> Option<i64> {
 }
 
 fn validate_main_operation(val: JsonValue, description: &str) -> pi_js::Result<MainOperation> {
-    let Some(obj) = val.as_object() else {
-        return Err(JsonlCorruptionError::new(format!("Invalid write in {description}")).into_error());
-    };
-    let Some(op_type) = obj.get("type").and_then(JsonValue::as_str) else {
-        return Err(JsonlCorruptionError::new(format!("Invalid write in {description}")).into_error());
-    };
+    let op_type = {
+        let Some(obj) = val.as_object() else {
+            return Err(JsonlCorruptionError::new(format!("Invalid write in {description}")).into_error());
+        };
+        let Some(op_type) = obj.get("type").and_then(JsonValue::as_str) else {
+            return Err(JsonlCorruptionError::new(format!("Invalid write in {description}")).into_error());
+        };
 
-    match op_type {
-        "conversation" | "entry" | "submission" => {
-            let valid_id = obj
-                .get("value")
-                .and_then(JsonValue::as_object)
-                .and_then(|v| v.get("id"))
-                .and_then(as_safe_int)
-                .is_some();
-            if !valid_id {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid {op_type} write in {description}")).into_error(),
-                );
+        match op_type {
+            "conversation" | "entry" | "submission" => {
+                let valid_id = obj
+                    .get("value")
+                    .and_then(JsonValue::as_object)
+                    .and_then(|v| v.get("id"))
+                    .and_then(as_safe_int)
+                    .is_some();
+                if !valid_id {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid {op_type} write in {description}")).into_error(),
+                    );
+                }
+            }
+            "task" => {
+                let valid_task = obj.get("value").and_then(JsonValue::as_object).is_some_and(|task_obj| {
+                    task_obj.get("id").and_then(as_safe_int).is_some()
+                        && task_obj
+                            .get("state")
+                            .and_then(JsonValue::as_object)
+                            .and_then(|s| s.get("status"))
+                            .and_then(JsonValue::as_str)
+                            == Some("terminal")
+                });
+                if !valid_task {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid terminal task write in {description}")).into_error(),
+                    );
+                }
+            }
+            "document.retire" => {
+                if obj.get("id").and_then(as_safe_int).is_none() {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid document retirement in {description}")).into_error(),
+                    );
+                }
+            }
+            "task.sidecar" => {
+                let valid = obj.get("id").and_then(as_safe_int).is_some()
+                    && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
+                if !valid {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid task sidecar write in {description}")).into_error(),
+                    );
+                }
+            }
+            "document.create" => {
+                let valid = obj
+                    .get("record")
+                    .and_then(JsonValue::as_object)
+                    .and_then(|r| r.get("id"))
+                    .and_then(as_safe_int)
+                    .is_some()
+                    && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
+                if !valid {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid document creation in {description}")).into_error(),
+                    );
+                }
+            }
+            "document.change" => {
+                let valid = obj.get("id").and_then(as_safe_int).is_some()
+                    && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
+                if !valid {
+                    return Err(
+                        JsonlCorruptionError::new(format!("Invalid document change in {description}")).into_error(),
+                    );
+                }
+            }
+            _ => {
+                return Err(JsonlCorruptionError::new(format!("Unknown write type in {description}")).into_error());
             }
         }
-        "task" => {
-            let valid_task = obj.get("value").and_then(JsonValue::as_object).is_some_and(|task_obj| {
-                task_obj.get("id").and_then(as_safe_int).is_some()
-                    && task_obj
-                        .get("state")
-                        .and_then(JsonValue::as_object)
-                        .and_then(|s| s.get("status"))
-                        .and_then(JsonValue::as_str)
-                        == Some("terminal")
-            });
-            if !valid_task {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid terminal task write in {description}")).into_error(),
-                );
-            }
-        }
-        "document.retire" => {
-            if obj.get("id").and_then(as_safe_int).is_none() {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid document retirement in {description}")).into_error(),
-                );
-            }
-        }
-        "task.sidecar" => {
-            let valid = obj.get("id").and_then(as_safe_int).is_some()
-                && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
-            if !valid {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid task sidecar write in {description}")).into_error(),
-                );
-            }
-        }
-        "document.create" => {
-            let valid = obj
-                .get("record")
-                .and_then(JsonValue::as_object)
-                .and_then(|r| r.get("id"))
-                .and_then(as_safe_int)
-                .is_some()
-                && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
-            if !valid {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid document creation in {description}")).into_error(),
-                );
-            }
-        }
-        "document.change" => {
-            let valid = obj.get("id").and_then(as_safe_int).is_some()
-                && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
-            if !valid {
-                return Err(
-                    JsonlCorruptionError::new(format!("Invalid document change in {description}")).into_error(),
-                );
-            }
-        }
-        _ => {
-            return Err(JsonlCorruptionError::new(format!("Unknown write type in {description}")).into_error());
-        }
-    }
+
+        op_type.to_owned()
+    };
 
     serde_json::from_value::<MainOperation>(val).map_err(|err| {
         JsonlCorruptionError::with_cause(

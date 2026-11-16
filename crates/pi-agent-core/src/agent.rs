@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::{
-    AssistantContentBlock, AssistantMessage, FauxAssistantMessageContent, ImageContent, Message, Model, StopReason,
+    AssistantContentBlock, FauxAssistantMessageContent, ImageContent, Message, Model, ModelCost, StopReason,
     SystemMessage, SystemMessageContent, ThinkingBudgets, Transport, UserContentBlock, UserMessage, UserMessageContent,
     compat, create_initial_system_message, faux_assistant_message, faux_text, get_current_system_message,
     get_current_system_prompt, to_tool_declaration,
@@ -86,7 +86,7 @@ pub struct AgentOptions {
     pub on_payload: Option<OnPayloadFn>,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub transport: Option<Transport>,
-    pub max_retry_delay_ms: Option<i64>,
+    pub max_retry_delay_ms: Option<u64>,
     pub tool_execution: Option<ToolExecutionMode>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
@@ -160,14 +160,14 @@ struct AgentInnerState {
     transform_context: Option<TransformContextFn>,
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
-    abort_controller: Option<AbortController>,
+    abort_controller: Option<Arc<AbortController>>,
     stream_fn: Option<StreamFn>,
     session_id: Option<String>,
     get_api_key: Option<GetApiKeyFn>,
     on_payload: Option<OnPayloadFn>,
     thinking_budgets: Option<ThinkingBudgets>,
     transport: Transport,
-    max_retry_delay_ms: Option<i64>,
+    max_retry_delay_ms: Option<u64>,
     tool_execution: ToolExecutionMode,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
@@ -292,11 +292,11 @@ impl Agent {
         self.lock().transport = value;
     }
 
-    pub fn max_retry_delay_ms(&self) -> Option<i64> {
+    pub fn max_retry_delay_ms(&self) -> Option<u64> {
         self.lock().max_retry_delay_ms
     }
 
-    pub fn set_max_retry_delay_ms(&self, value: Option<i64>) {
+    pub fn set_max_retry_delay_ms(&self, value: Option<u64>) {
         self.lock().max_retry_delay_ms = value;
     }
 
@@ -480,7 +480,7 @@ impl Agent {
 
     /// Returns the active [`AbortSignal`] for the current run, if any.
     pub fn signal(&self) -> Option<AbortSignal> {
-        self.lock().abort_controller.as_ref().map(AbortController::signal)
+        self.lock().abort_controller.as_ref().map(|c| c.signal())
     }
 
     /// Registers a synchronous event listener. Call [`Unsubscribe::call`] to detach it.
@@ -669,7 +669,7 @@ impl Agent {
         messages: Option<Vec<AgentMessage>>,
         skip_initial_steering_poll: bool,
     ) -> Result<()> {
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
 
         let (context, config, effective_stream_fn, model) = {
@@ -682,7 +682,7 @@ impl Agent {
             guard.state.is_streaming = true;
             guard.state.stream_message = None;
             guard.state.error = None;
-            guard.abort_controller = Some(controller);
+            guard.abort_controller = Some(Arc::clone(&controller));
 
             let model = guard.state.model.clone();
             let context = AgentContext {
@@ -911,10 +911,29 @@ fn to_tool_declarations(tools: &[AgentTool]) -> Vec<pi_ai::Tool> {
 }
 
 fn default_fallback_model() -> Model {
-    serde_json::from_str(
-        r#"{"id":"unknown","name":"unknown","api":"unknown","provider":"unknown","baseUrl":"","reasoning":false,"input":[],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":0,"maxTokens":0}"#,
-    )
-    .ok()
-    .or_else(|| compat::get_model("google", "gemini-2.5-flash-lite-preview-06-17"))
-    .unwrap_or_default()
+    compat::get_model("google", "gemini-2.5-flash-lite-preview-06-17").unwrap_or_else(|| Model {
+        r#type: None,
+        id: "unknown".to_owned(),
+        name: "unknown".to_owned(),
+        api: "unknown".to_owned(),
+        provider: "unknown".to_owned(),
+        base_url: String::new(),
+        reasoning: false,
+        thinking_level_map: None,
+        prompt_cache: None,
+        input: Vec::new(),
+        input_limits: None,
+        cost: ModelCost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            tiers: None,
+        },
+        context_window: 0,
+        max_tokens: 0,
+        headers: None,
+        sampling_params: None,
+        compat: None,
+    })
 }

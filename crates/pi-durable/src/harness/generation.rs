@@ -18,7 +18,7 @@ use pi_chord::json::copy_json;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
-use crate::entries::{ASSISTANT_ENTRY, RESET_ENTRY, SYSTEM_ENTRY, TypedEntryDraft, USER_ENTRY};
+use crate::entries::{ASSISTANT_ENTRY, RESET_ENTRY, SYSTEM_ENTRY, USER_ENTRY};
 use crate::env::ExecutionEnv;
 use crate::harness::agent::add_tools;
 use crate::harness::compaction::{CompactionInput, create_compaction, estimate_context, select_cut};
@@ -39,6 +39,7 @@ use crate::tasks::{Task, TaskDefinition, TaskRuntimeHandle, define_task};
 use crate::types::{
     ConversationId, EntryDraftHead, EntryId, EntryQuery, JoinPolicy, JsonValue, NextTaskState, RunningTask, SelfHead,
     SubmissionId, SubmissionSettlement, TaskId, TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TypedEntry,
+    TypedEntryDraft,
 };
 
 const PARTIAL_THROTTLE_MS: u64 = 100;
@@ -138,8 +139,14 @@ pub(crate) fn to_simple_stream_options(
         timeout_ms: stream_options.timeout_ms,
         max_retries: stream_options.max_retries,
         max_retry_delay_ms: stream_options.max_retry_delay_ms,
-        headers: stream_options.headers.clone(),
-        metadata: stream_options.metadata.clone(),
+        headers: stream_options
+            .headers
+            .as_ref()
+            .map(|h| h.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect()),
+        metadata: stream_options
+            .metadata
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
         cache_retention: cache_retention_override.or(stream_options.cache_retention),
         max_tokens,
         ..Default::default()
@@ -180,7 +187,10 @@ pub(crate) fn to_simple_stream_options(
 /// retries, and classifies the response. The run's inputs live in `pi.live.run`.
 pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint, GenerationResult, GenerationHooks>> =
     LazyLock::new(|| {
-        let mut phases = IndexMap::new();
+        let mut phases: IndexMap<
+            String,
+            crate::tasks::TypedPhaseHandler<GenerationInput, GenerationCheckpoint, GenerationResult, GenerationHooks>,
+        > = IndexMap::new();
         phases.insert(
             "prepare".to_owned(),
             Arc::new(
@@ -188,6 +198,7 @@ pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_prepare(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
             )
                 as crate::tasks::TypedPhaseHandler<
@@ -204,8 +215,15 @@ pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_request(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<
+                    GenerationInput,
+                    GenerationCheckpoint,
+                    GenerationResult,
+                    GenerationHooks,
+                >,
         );
         phases.insert(
             "retry".to_owned(),
@@ -214,8 +232,15 @@ pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_retry(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<
+                    GenerationInput,
+                    GenerationCheckpoint,
+                    GenerationResult,
+                    GenerationHooks,
+                >,
         );
         phases.insert(
             "poll".to_owned(),
@@ -224,8 +249,15 @@ pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_poll(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<
+                    GenerationInput,
+                    GenerationCheckpoint,
+                    GenerationResult,
+                    GenerationHooks,
+                >,
         );
         phases.insert(
             "tools".to_owned(),
@@ -234,8 +266,15 @@ pub static GENERATION_TASK: LazyLock<Task<GenerationInput, GenerationCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_tools(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<
+                    GenerationInput,
+                    GenerationCheckpoint,
+                    GenerationResult,
+                    GenerationHooks,
+                >,
         );
 
         define_task(TaskDefinition {
@@ -929,8 +968,9 @@ impl PartialFlusher {
     }
 
     fn spawn_timer(this: Self) -> JoinHandle<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(PARTIAL_THROTTLE_MS);
         tokio::spawn(async move {
-            let _ = pi_js::time::sleep(PARTIAL_THROTTLE_MS, None).await;
+            tokio::time::sleep_until(deadline).await;
             let partial = {
                 let mut guard = this.state.lock().unwrap_or_else(|e| e.into_inner());
                 guard.timer = None;
@@ -1302,11 +1342,13 @@ async fn answer(runtime: &Runtime, message: AssistantMessage, context: Context) 
     let conversation_id = runtime.conversation_id()?;
     let gen_task_id = runtime.task_id()?.erased();
     let now = runtime.now()?;
-    let queue_modes = QueueModes::from(&runtime.settings()?);
+    let rt_settings = runtime.clone();
     runtime
         .commit(
             move |tx, _current| {
+                let rt_settings = rt_settings.clone();
                 Box::pin(async move {
+                    let queue_modes = QueueModes::from(&rt_settings.settings()?);
                     let mut boundary = prepare_boundary(&tx, conversation_id, queue_modes).await?;
                     let live_draft = tx.doc_conversation(&*LIVE_DOC, conversation_id).await?;
                     let mut live = live_draft.get()?;
@@ -1535,11 +1577,13 @@ async fn finish_tool_round(
 
     let gen_task_id = runtime.task_id()?.erased();
     let now = runtime.now()?;
-    let queue_modes = QueueModes::from(&runtime.settings()?);
+    let rt_settings = runtime.clone();
     runtime
         .commit(
             move |tx, _current| {
+                let rt_settings = rt_settings.clone();
                 Box::pin(async move {
+                    let queue_modes = QueueModes::from(&rt_settings.settings()?);
                     let mut boundary = prepare_boundary(&tx, conversation_id, queue_modes).await?;
                     if !added.is_empty() {
                         add_tools(&tx, conversation_id, &added).await?;

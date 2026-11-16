@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::delta::{Op, OpReplace, OpSet, OpSplice, ReplaceVerb, Seg, SetVerb, SpliceVerb};
 use serde::Serialize;
@@ -570,7 +571,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
 
                 let round_tripped: Option<crate::types::Cursor> = match first.next {
                     Some(c) => {
-                        let s = match pi_js::json::stringify(&c) {
+                        let s = match pi_js::json::try_stringify(&c) {
                             Ok(s) => s,
                             Err(e) => panic!("stringify failed: {e}"),
                         };

@@ -10,6 +10,7 @@ use pi_ai::types::{Message, SystemMessage, SystemMessageContent, Tool};
 use pi_ai::{Type, get_current_tools, to_tool_declaration};
 use pi_chord::Context;
 use pi_chord::context::with_abort_signal;
+use pi_durable::RegistryReader;
 use pi_durable::documents::ErasedDocDefinition;
 use pi_durable::entries::SYSTEM_ENTRY;
 use pi_durable::harness::agent::{resolve_agent, resolve_settings};
@@ -20,7 +21,7 @@ use pi_durable::harness::registry::{Registry, create_registry};
 use pi_durable::harness::types::{Agent, DocumentReader, DocumentReaderBackend, Extension, PromptInput, PromptSection};
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::types::{
-    ContextEdit, ConversationId, EntryDraft, EntryDraftHead, EntryId, JsonObject, SelfHead, TaskId, TypedEntryDraft,
+    ContextEdit, ConversationId, EntryDraft, EntryDraftHead, EntryId, JsonObject, SelfHead, TaskId,
 };
 use pi_js::abort::{AbortController, AbortReason};
 use pretty_assertions::assert_eq;
@@ -346,7 +347,7 @@ async fn renders_sections_in_order_with_tags_omissions_wrappers_and_failures() {
 async fn propagates_section_errors_after_cancellation() {
     let controller = AbortController::new();
     controller.abort(Some(AbortReason::error("Error", "cancelled")));
-    let cancelled = with_abort_signal(&context(), controller.signal());
+    let cancelled = with_abort_signal(controller.signal(), context());
     let failing = PromptSection {
         key: "a".to_owned(),
         tag: true,
@@ -582,7 +583,7 @@ fn declaration(name: &str, description: &str) -> Tool {
     Tool {
         name: name.to_owned(),
         description: description.to_owned(),
-        parameters: Type::object([]),
+        parameters: Type::object::<_, &str>([]),
         constrained_sampling: None,
     }
 }

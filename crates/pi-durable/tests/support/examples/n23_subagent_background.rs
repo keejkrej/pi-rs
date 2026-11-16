@@ -504,6 +504,7 @@ fn build_subagent_tools(
                                 .get(&agent_name_c)
                                 .map(|a| a.conversation_id)
                                 .ok_or_else(|| pi_js::Error::msg("subagent missing after spawn"))?;
+                            let agent_name_reply = agent_name_c.clone();
                             let reporter_id = tx
                                 .create_task(
                                     &reporter_commit,
@@ -520,9 +521,9 @@ fn build_subagent_tools(
                                 state.reporters.insert(task_id.to_string(), reporter_id.erased());
                             })?;
                             Ok(if action_c == "send" {
-                                format!("Sent to {agent_name}.")
+                                format!("Sent to {agent_name_reply}.")
                             } else {
-                                format!("Started {agent_name}.")
+                                format!("Started {agent_name_reply}.")
                             })
                         },
                         call_context.clone(),

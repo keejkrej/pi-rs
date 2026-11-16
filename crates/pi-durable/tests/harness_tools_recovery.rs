@@ -11,28 +11,29 @@ use pi_ai::providers::faux::{
     faux_assistant_message, faux_text, faux_tool_call,
 };
 use pi_ai::types::{AssistantMessage, Message, StopReason, ToolResultMessage, UserContentBlock};
+use pi_ai::{TSchema as Schema, Type as t};
 use pi_chord::Context;
 use pi_durable::entries::TOOL_RESULT_ENTRY;
 use pi_durable::env::ExecutionEnv;
 use pi_durable::env::node::NodeExecutionEnv;
 use pi_durable::harness::define::define_tool;
-use pi_durable::harness::generation::{GENERATION_TASK, GenerationHooks};
+use pi_durable::harness::generation::GENERATION_TASK;
 use pi_durable::harness::harness::Harness;
 use pi_durable::harness::live::LIVE_DOC;
 use pi_durable::harness::scheduler::AbortTaskResult;
-use pi_durable::harness::tool::{TOOL_TASK, ToolHooks, ToolTaskResult};
+use pi_durable::harness::tool::{TOOL_TASK, ToolTaskResult};
 use pi_durable::harness::types::{
-    AgentChange, AgentExtensionsChange, DocumentReaderExt, FieldChange, SubmissionDraft, ToolExecutionApi,
-    ToolExecutionResult, ToolRegistration, ToolReplayMode, UserInput,
+    AgentChange, AgentExtensionsChange, FieldChange, GenerationHooks, SubmissionDraft, ToolDiagnostic,
+    ToolExecutionApi, ToolExecutionResult, ToolHooks, ToolRegistration, ToolReplayMode, UserInput,
 };
-use pi_durable::storage::sqlite::node::{NodeSqliteStorage, NodeSqliteStorageOptions, open_node_sqlite_storage};
+use pi_durable::storage::sqlite::SqliteStorage;
+use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::types::{
     ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject,
-    JsonValue, Page, Seq, Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord,
-    SubmissionStatus, TaskId, TaskOutcome, TaskQuery, TaskState,
+    DocumentQuery, DocumentRecord, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonValue, Page,
+    Seq, Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionStatus,
+    TaskId, TaskOutcome, TaskQuery, TaskState,
 };
-use pi_js::vendor::typebox::{Schema, builder as t};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use support::chat_support::{ChatSetup, OpenChatEnv, all_entries, chat_setup, open_chat, wait_for};
@@ -48,7 +49,7 @@ async fn sqlite_path() -> (TempDir, String) {
 }
 
 async fn open_sqlite_chat(path: &str, setup: &ChatSetup, env: OpenChatEnv) -> support::chat_support::OpenedChat {
-    let storage: Arc<NodeSqliteStorage> = Arc::new(
+    let storage: Arc<SqliteStorage> = Arc::new(
         open_node_sqlite_storage(path, NodeSqliteStorageOptions::default())
             .await
             .expect("open sqlite"),
@@ -81,7 +82,7 @@ fn call(name: &str, id: &str) -> AssistantMessage {
     faux_assistant_message(
         FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
             name,
-            JsonObject::new(),
+            pi_ai::types::JsonObject::new(),
             Some(FauxToolCallOptions {
                 id: Some(id.to_owned()),
             }),
@@ -103,7 +104,7 @@ fn done_msg() -> AssistantMessage {
 fn results(entries: &[EntryRecord]) -> Vec<ToolResultMessage> {
     entries
         .iter()
-        .filter(|entry| TOOL_RESULT_ENTRY.matches(entry))
+        .filter(|entry| TOOL_RESULT_ENTRY.matches(Some(entry)))
         .filter_map(|entry| match entry.model.as_ref()?.first() {
             Some(Message::ToolResult(tr)) => Some(tr.clone()),
             _ => None,
@@ -226,13 +227,12 @@ async fn answers_an_unsafe_tool_interrupted_after_intent_with_its_durable_partia
         .expect("task present");
     assert_eq!(
         rec.state,
-        TaskState::Running {
+        TaskState::Pending {
             checkpoint: json!({
                 "phase": "execute",
                 "arguments": {},
                 "replay": "unsafe",
             }),
-            sleep_until: None,
         }
     );
     let settled = opened
@@ -679,7 +679,7 @@ async fn answers_an_aborted_tool_with_its_partial_output_and_continues_the_run()
 }
 
 struct FailingToolResultStorage {
-    inner: NodeSqliteStorage,
+    inner: SqliteStorage,
 }
 
 #[async_trait]
@@ -690,7 +690,7 @@ impl Storage for FailingToolResultStorage {
             _ => false,
         });
         if has_tool_result {
-            return Err(pi_js::Error::js("TypeError", "non-strict json in tool result"));
+            return Err(pi_durable::errors::StorageRejected::new("non-strict json in tool result").into_error());
         }
         self.inner.commit(writes, context).await
     }
@@ -922,7 +922,7 @@ async fn answers_a_real_bash_command_interrupted_by_close_and_reopen_then_finish
     let env: Arc<dyn ExecutionEnv> = Arc::new(NodeExecutionEnv::new(dir.path().to_string_lossy().into_owned()));
     let setup = chat_setup(None);
     add_tool(&setup.registry, pi_durable::tools::create_bash_tool(None), None).expect("add bash");
-    let mut call_args = JsonObject::new();
+    let mut call_args = pi_ai::types::JsonObject::new();
     call_args.insert("command".to_owned(), json!("echo started; sleep 30"));
     setup.faux.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(

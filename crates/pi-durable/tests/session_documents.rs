@@ -5,16 +5,18 @@ mod support;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use pi_chord::delta::{DraftInput, Op, OpSet};
+use pi_chord::delta::tracker::DraftInput;
+use pi_chord::delta::{Op, OpSet, Seg};
 use pi_durable::documents::{
     ConversationDocToken, DocDefinitionCallbacks, DocDefinitionInput, DocFamilyDefinitionCallbacks,
     RewindableConversationDocToken, SessionDocFamilyToken, SessionDocToken, define_conversation_doc,
     define_rewindable_conversation_doc, define_session_doc, define_session_doc_family_with, define_session_doc_with,
 };
-use pi_durable::ids::{TaskId, id_from_number};
+use pi_durable::ids::id_from_number;
+use pi_durable::session::TransactionScope;
 use pi_durable::types::{
     ConversationId, DocumentAddress, DocumentContent, DocumentPoint, DocumentScope, ErasedTaskRecord, JsonObject,
-    JsonValue, LatestFork, RewindableFork, Storage, StorageWrite, TaskState, TransactionScope,
+    LatestFork, RewindableFork, Storage, StorageWrite, TaskId, TaskState,
 };
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
@@ -195,10 +197,10 @@ async fn creates_initial_base_on_first_access_and_adopts_after_storage_success()
     assert_eq!(writes.len(), 1);
     match &writes[0] {
         StorageWrite::DocumentCreate { record, version, value } => {
-            assert_eq!(record.address.kind, "test.live");
-            assert_eq!(record.address.scope, DocumentScope::Conversation { conversation_id });
-            assert_eq!(record.history, pi_durable::types::DocumentHistory::Latest);
-            assert_eq!(record.fork, pi_durable::types::DocumentFork::Initial);
+            assert_eq!(record.kind, "test.live");
+            assert_eq!(record.scope, DocumentScope::Conversation { conversation_id });
+            assert_eq!(record.history, Some(pi_durable::types::DocumentHistory::Latest));
+            assert_eq!(record.fork, Some(pi_durable::types::DocumentFork::Initial));
             assert_eq!(*version, 1);
             assert_eq!(value.get("message"), Some(&json!("hello")));
         }
@@ -346,7 +348,7 @@ async fn adopts_and_shares_operation_payloads_with_published_revision() {
         } => {
             assert_eq!(&published.ops, ops);
             assert!(published.ops.iter().any(|op| {
-                matches!(op, Op::Set(OpSet(_, path, val)) if path == &vec!["other".to_owned().into()] && val == &json!({ "label": "y" }))
+                matches!(op, Op::Set(OpSet(_, path, val)) if path == &vec![Seg::String("other".to_owned()), Seg::String("label".to_owned())] && val == &json!("y"))
             }));
         }
         other => panic!("Expected delta, got {other:?}"),
@@ -1051,7 +1053,7 @@ async fn rolls_back_prepared_documents_when_batch_assembly_fails() {
                     .update(|l| l.message = Some("lost".to_owned()))?;
                 tx.doc_session(&ctr_c2).await?.update(|c| c.count = 2)?;
                 tx.set_task(ErasedTaskRecord {
-                    id: id_from_number::<TaskId>(999),
+                    id: TaskId::new_unchecked(999),
                     conversation_id,
                     kind: "missing".to_owned(),
                     version: 1,
@@ -1238,7 +1240,7 @@ async fn retires_documents_and_creates_new_incarnation_at_same_address() {
     assert!(writes.contains(&StorageWrite::DocumentRetire { id: old_id }));
     assert!(writes.iter().any(|w| matches!(
         w,
-        StorageWrite::DocumentCreate { record, .. } if record.address.kind == "test.live"
+        StorageWrite::DocumentCreate { record, .. } if record.kind == "test.live"
     )));
 
     flush().await;
@@ -1322,9 +1324,9 @@ async fn retires_without_acquisition_and_recreates_existing_and_absent_addresses
         .session
         .commit(
             move |tx| async move {
-                let (replacement, retired) = tokio::join!(
-                    tx.doc_conversation(&doc_c, conversation_id),
-                    tx.retire_doc_conversation(&doc_c, conversation_id)
+                let (retired, replacement) = tokio::join!(
+                    tx.retire_doc_conversation(&doc_c, conversation_id),
+                    tx.doc_conversation(&doc_c, conversation_id)
                 );
                 let _ = retired?;
                 replacement?.update(|live| live.message = Some("replacement".to_owned()))
@@ -1338,7 +1340,7 @@ async fn retires_without_acquisition_and_recreates_existing_and_absent_addresses
     assert!(existing_writes.contains(&StorageWrite::DocumentRetire { id: old_id }));
     assert!(existing_writes.iter().any(|w| matches!(
         w,
-        StorageWrite::DocumentCreate { record, .. } if record.address.kind == "test.live"
+        StorageWrite::DocumentCreate { record, .. } if record.kind == "test.live"
     )));
 
     let member = member_doc(Arc::new(Mutex::new(Vec::new())));
@@ -1347,9 +1349,9 @@ async fn retires_without_acquisition_and_recreates_existing_and_absent_addresses
         .session
         .commit(
             move |tx| async move {
-                let (replacement, retired) = tokio::join!(
-                    tx.doc_session_family(&m_c, "absent", "seed".to_owned()),
-                    tx.retire_doc_session_family(&m_c, "absent")
+                let (retired, replacement) = tokio::join!(
+                    tx.retire_doc_session_family(&m_c, "absent"),
+                    tx.doc_session_family(&m_c, "absent", "seed".to_owned())
                 );
                 let _ = retired?;
                 replacement?.update(|m| m.hits = 1)
@@ -1474,7 +1476,7 @@ async fn retires_existing_incarnation_when_retirement_races_pending_acquisition(
     assert!(writes.contains(&StorageWrite::DocumentRetire { id: second_id }));
     assert!(writes.iter().any(|w| matches!(
         w,
-        StorageWrite::DocumentCreate { record, .. } if record.address.kind == "test.live"
+        StorageWrite::DocumentCreate { record, .. } if record.kind == "test.live"
     )));
     assert_eq!(
         harness
@@ -1540,7 +1542,7 @@ async fn delivers_complete_publications_synchronously_after_adoption() {
     let unsub = harness
         .facade
         .subscribe_commits(move |_pub, delivered| {
-            *seen_cb.lock().unwrap_or_else(|e| e.into_inner()) = delivered.get(&marker_key).copied();
+            *seen_cb.lock().unwrap_or_else(|e| e.into_inner()) = delivered.value(&marker_key);
         })
         .expect("sub");
 
@@ -1561,7 +1563,7 @@ async fn delivers_complete_publications_synchronously_after_adoption() {
     assert_eq!(result, "done");
     assert_eq!(*seen_value.lock().unwrap_or_else(|e| e.into_inner()), Some("ok"));
     assert_eq!(harness.publications_snapshot().len(), published + 1);
-    unsub();
+    unsub.call();
 }
 
 #[tokio::test]
@@ -1582,7 +1584,7 @@ async fn publishes_close_synchronously_and_supports_unsubscription() {
             c2.lock().unwrap_or_else(|e| e.into_inner()).push("removed");
         })
         .expect("sub2");
-    unsub();
+    unsub.call();
     harness.facade.close(context()).await.expect("close");
     assert_eq!(*calls.lock().unwrap_or_else(|e| e.into_inner()), vec!["active"]);
 }

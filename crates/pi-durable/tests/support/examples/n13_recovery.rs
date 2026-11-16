@@ -136,7 +136,7 @@ pub async fn run() -> pi_js::Result<()> {
     let registry = create_registry();
     registry.install(define_extension(Extension {
         name: "ticker".to_owned(),
-        tasks: vec![ticker.clone().erase()],
+        tasks: vec![pi_durable::AnyTask::from(ticker.clone())],
         ..Default::default()
     }))?;
 
@@ -208,9 +208,8 @@ pub async fn run() -> pi_js::Result<()> {
     // was never saved, but its memo says it was already printed.
     let second_run = open().await?;
     let counted = second_run.wait_for_task(ticker_id, context.clone()).await?;
-    if let TaskState::Terminal { outcome } = &counted.state {
-        pi_js::console::log(&format!("after reopen: {outcome:?}"));
-    }
+    let outcome = &counted.outcome;
+    pi_js::console::log(&format!("after reopen: {outcome:?}"));
     second_run.close(context).await?;
     Ok(())
 }

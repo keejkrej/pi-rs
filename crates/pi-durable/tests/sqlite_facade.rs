@@ -5,19 +5,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_chord::background_context;
+use pi_chord::Context;
+use pi_chord::context::BACKGROUND_CONTEXT;
+
+fn background_context() -> Context {
+    BACKGROUND_CONTEXT.clone()
+}
 use pi_durable::errors::StorageRejected;
 use pi_durable::ids::{DocumentId, EntryId, id_from_number, seq_from_number};
-use pi_durable::storage::sqlite::node::{
-    NodeSqliteDatabase, NodeSqliteStorageOptions, open_node_sqlite_database,
-};
+use pi_durable::storage::sqlite::node::{NodeSqliteDatabase, NodeSqliteStorageOptions, open_node_sqlite_database};
 use pi_durable::storage::sqlite::{
-    BoxedSqliteTxCallback, SqliteDatabase, SqliteDatabaseExt, SqliteExecutor, SqliteRow,
-    SqliteRowExt, SqliteStorage, SqliteValue,
+    BoxedSqliteTxCallback, SqliteDatabase, SqliteDatabaseExt, SqliteExecutor, SqliteRow, SqliteRowExt, SqliteStorage,
+    SqliteValue,
 };
 use pi_durable::types::{
-    ConversationRecord, DocumentContent, DocumentCreate, DocumentPoint, DocumentScope, EntryRecord,
-    JsonObject, ROOT_CONVERSATION_ID, Storage, StorageWrite,
+    ConversationRecord, DocumentContent, DocumentCreate, DocumentPoint, DocumentScope, EntryRecord, JsonObject,
+    ROOT_CONVERSATION_ID, Storage, StorageWrite,
 };
 use serde_json::{Map, json};
 use tokio::sync::{Notify, oneshot};
@@ -145,7 +148,7 @@ async fn prepares_each_storage_statement_once_and_reuses_it_across_transactions(
     let batch: Vec<StorageWrite> = (0..100)
         .map(|index| StorageWrite::Entry {
             value: EntryRecord {
-                id: id_from_number::<EntryId>(index + 2),
+                id: EntryId::new_unchecked(index + 2),
                 conversation_id: ROOT_CONVERSATION_ID,
                 kind: "cached".to_string(),
                 model: None,
@@ -161,7 +164,7 @@ async fn prepares_each_storage_statement_once_and_reuses_it_across_transactions(
         .commit(
             vec![StorageWrite::Entry {
                 value: EntryRecord {
-                    id: id_from_number::<EntryId>(102),
+                    id: EntryId::new_unchecked(102),
                     conversation_id: ROOT_CONVERSATION_ID,
                     kind: "cached-again".to_string(),
                     model: None,
@@ -178,7 +181,7 @@ async fn prepares_each_storage_statement_once_and_reuses_it_across_transactions(
 
     assert_eq!(
         storage
-            .entry(id_from_number::<EntryId>(2), context.clone())
+            .entry(EntryId::new_unchecked(2), context.clone())
             .await
             .expect("entry 2")
             .expect("present")
@@ -188,7 +191,7 @@ async fn prepares_each_storage_statement_once_and_reuses_it_across_transactions(
     );
     assert_eq!(
         storage
-            .entry(id_from_number::<EntryId>(102), context.clone())
+            .entry(EntryId::new_unchecked(102), context.clone())
             .await
             .expect("entry 102")
             .expect("present")
@@ -218,7 +221,7 @@ async fn prepares_each_storage_statement_once_and_reuses_it_across_transactions(
     );
     assert_eq!(
         storage
-            .entry(id_from_number::<EntryId>(2), context.clone())
+            .entry(EntryId::new_unchecked(2), context.clone())
             .await
             .expect("entry 2 after err")
             .expect("present")
@@ -270,8 +273,7 @@ async fn serializes_concurrent_transactions() {
     let db1 = Arc::clone(&database);
     let first = tokio::spawn(async move {
         db1.transaction(move |tx| async move {
-            tx.exec("INSERT INTO transaction_queue (value) VALUES (1)")
-                .await?;
+            tx.exec("INSERT INTO transaction_queue (value) VALUES (1)").await?;
             first_started_signal.notify_one();
             let _ = gate_rx.await;
             Ok(())
@@ -286,8 +288,7 @@ async fn serializes_concurrent_transactions() {
     let second = tokio::spawn(async move {
         db2.transaction(move |tx| async move {
             second_started_flag.store(true, Ordering::SeqCst);
-            tx.exec("INSERT INTO transaction_queue (value) VALUES (2)")
-                .await?;
+            tx.exec("INSERT INTO transaction_queue (value) VALUES (2)").await?;
             Ok(())
         })
         .await
@@ -304,10 +305,7 @@ async fn serializes_concurrent_transactions() {
         .all("SELECT value FROM transaction_queue ORDER BY value", &[])
         .await
         .expect("select all");
-    let values: Vec<i64> = rows
-        .iter()
-        .map(|row| row.get_i64("value").expect("val"))
-        .collect();
+    let values: Vec<i64> = rows.iter().map(|row| row.get_i64("value").expect("val")).collect();
     assert_eq!(values, vec![1, 2]);
     database.close().await.expect("close");
 }
@@ -331,19 +329,13 @@ async fn runs_operations_in_call_order_whether_they_start_immediately_or_wait() 
         Err::<(), _>(pi_js::Error::msg("roll back"))
     });
     let before_write = database.all("SELECT value FROM call_order ORDER BY value", &[]);
-    let write = database.run(
-        "INSERT INTO call_order (value) VALUES (?)",
-        &[SqliteValue::Integer(2)],
-    );
+    let write = database.run("INSERT INTO call_order (value) VALUES (?)", &[SqliteValue::Integer(2)]);
     let after_write = database.all("SELECT value FROM call_order ORDER BY value", &[]);
 
-    let (tx_res, before_res, write_res, after_res) =
-        tokio::join!(tx_fut, before_write, write, after_write);
-    assert!(
-        tx_res.expect_err("expected rollback").to_string().contains("roll back")
-    );
+    let (tx_res, before_res, write_res, after_res) = tokio::join!(tx_fut, before_write, write, after_write);
+    assert!(tx_res.expect_err("expected rollback").to_string().contains("roll back"));
     write_res.expect("write ok");
-    assert_eq!(before_res.expect("before ok"), vec![]);
+    assert!(before_res.expect("before ok").is_empty());
     let after_values: Vec<i64> = after_res
         .expect("after ok")
         .iter()
@@ -393,8 +385,7 @@ async fn queues_ordinary_operations_behind_an_active_transaction() {
     let db1 = Arc::clone(&database);
     let pending = tokio::spawn(async move {
         db1.transaction(move |tx| async move {
-            tx.exec("INSERT INTO operation_queue (value) VALUES (1)")
-                .await?;
+            tx.exec("INSERT INTO operation_queue (value) VALUES (1)").await?;
             tx_started_signal.notify_one();
             let _ = gate_rx.await;
             Ok(())
@@ -408,18 +399,14 @@ async fn queues_ordinary_operations_behind_an_active_transaction() {
     let db_w = Arc::clone(&database);
     let w_flag = Arc::clone(&write_settled);
     let write = tokio::spawn(async move {
-        let res = db_w
-            .exec("INSERT INTO operation_queue (value) VALUES (2)")
-            .await;
+        let res = db_w.exec("INSERT INTO operation_queue (value) VALUES (2)").await;
         w_flag.store(true, Ordering::SeqCst);
         res
     });
     let db_r = Arc::clone(&database);
     let r_flag = Arc::clone(&read_settled);
     let read = tokio::spawn(async move {
-        let res = db_r
-            .all("SELECT value FROM operation_queue ORDER BY value", &[])
-            .await;
+        let res = db_r.all("SELECT value FROM operation_queue ORDER BY value", &[]).await;
         r_flag.store(true, Ordering::SeqCst);
         res
     });
@@ -432,10 +419,7 @@ async fn queues_ordinary_operations_behind_an_active_transaction() {
     pending.await.expect("join tx").expect("tx ok");
     write.await.expect("join write").expect("write ok");
     let rows = read.await.expect("join read").expect("read ok");
-    let values: Vec<i64> = rows
-        .iter()
-        .map(|row| row.get_i64("value").expect("value"))
-        .collect();
+    let values: Vec<i64> = rows.iter().map(|row| row.get_i64("value").expect("value")).collect();
     assert_eq!(values, vec![1, 2]);
     database.close().await.expect("close");
 }
@@ -478,11 +462,7 @@ async fn queues_database_calls_made_synchronously_by_a_transaction() {
         .expect_err("expected rollback");
     assert!(err.to_string().contains("roll back"));
 
-    let outside_handle = outside_holder
-        .lock()
-        .expect("lock")
-        .take()
-        .expect("outside spawned");
+    let outside_handle = outside_holder.lock().expect("lock").take().expect("outside spawned");
     outside_handle.await.expect("join").expect("outside write ok");
 
     let rows = database
@@ -587,11 +567,8 @@ async fn rejects_transaction_handle_used_after_transaction_settles() {
     let holder = Arc::clone(&stale_handle);
     database
         .transaction(move |tx| async move {
-            tx.run(
-                "INSERT INTO stale_probe (value) VALUES (?)",
-                &[SqliteValue::Integer(1)],
-            )
-            .await?;
+            tx.run("INSERT INTO stale_probe (value) VALUES (?)", &[SqliteValue::Integer(1)])
+                .await?;
             *holder.lock().expect("lock") = Some(tx);
             Ok(())
         })
@@ -606,10 +583,7 @@ async fn rejects_transaction_handle_used_after_transaction_settles() {
         .expect_err("stale exec");
     assert!(exec_err.to_string().contains(stale_msg));
     let run_err = handle
-        .run(
-            "INSERT INTO stale_probe (value) VALUES (?)",
-            &[SqliteValue::Integer(3)],
-        )
+        .run("INSERT INTO stale_probe (value) VALUES (?)", &[SqliteValue::Integer(3)])
         .await
         .expect_err("stale run");
     assert!(run_err.to_string().contains(stale_msg));
@@ -684,7 +658,7 @@ async fn awaits_async_transaction_settlement_and_adopts_ids_only_after_success()
             .commit(
                 vec![StorageWrite::Entry {
                     value: EntryRecord {
-                        id: id_from_number::<EntryId>(100),
+                        id: EntryId::new_unchecked(100),
                         conversation_id: ROOT_CONVERSATION_ID,
                         kind: "settled".to_string(),
                         model: None,
@@ -718,7 +692,7 @@ async fn awaits_async_transaction_settlement_and_adopts_ids_only_after_success()
             .commit(
                 vec![StorageWrite::Entry {
                     value: EntryRecord {
-                        id: id_from_number::<EntryId>(200),
+                        id: EntryId::new_unchecked(200),
                         conversation_id: ROOT_CONVERSATION_ID,
                         kind: "rejected".to_string(),
                         model: None,
@@ -735,20 +709,15 @@ async fn awaits_async_transaction_settlement_and_adopts_ids_only_after_success()
     tokio::task::yield_now().await;
     assert_eq!(storage.mint_id().await.expect("mint during reject"), 102);
     database.settle();
-    let reject_err = rejected
-        .await
-        .expect("join reject")
-        .expect_err("expected rejection");
+    let reject_err = rejected.await.expect("join reject").expect_err("expected rejection");
     assert!(
-        reject_err
-            .to_string()
-            .contains("controlled settlement rejection"),
+        reject_err.to_string().contains("controlled settlement rejection"),
         "unexpected error: {reject_err}"
     );
     assert_eq!(storage.mint_id().await.expect("mint after reject"), 103);
     assert!(
         storage
-            .entry(id_from_number::<EntryId>(200), context.clone())
+            .entry(EntryId::new_unchecked(200), context.clone())
             .await
             .expect("lookup rejected")
             .is_none()
@@ -790,8 +759,7 @@ async fn reads_document_from_one_committed_state_while_commit_replaces_its_base(
 
         let s_read = Arc::clone(&storage);
         let ctx_r = context.clone();
-        let read_task =
-            tokio::spawn(async move { s_read.document(id, DocumentPoint::Current, ctx_r).await });
+        let read_task = tokio::spawn(async move { s_read.document(id, DocumentPoint::Current, ctx_r).await });
 
         for _ in 0..yields {
             tokio::task::yield_now().await;

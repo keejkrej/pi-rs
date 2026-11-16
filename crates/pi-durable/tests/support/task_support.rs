@@ -306,10 +306,10 @@ impl RegistryReader for CountingReader {
         let unsubscribe = self.inner.subscribe(listener);
         let count = Arc::clone(&self.count);
         let active = AtomicBool::new(true);
-        Box::new(move || {
+        pi_js::Unsubscribe::new(move || {
             if active.swap(false, Ordering::SeqCst) {
                 count.fetch_sub(1, Ordering::SeqCst);
-                unsubscribe();
+                unsubscribe.call();
             }
         })
     }

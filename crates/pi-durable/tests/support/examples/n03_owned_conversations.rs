@@ -47,7 +47,8 @@ pub async fn run() -> pi_js::Result<()> {
     let mut phases = IndexMap::new();
     phases.insert(
         "ready".to_owned(),
-        Arc::new(|_, _, _| Box::pin(async { Ok(()) })) as TypedPhaseHandler<(), SupervisorState, (), ()>,
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>)
+            as TypedPhaseHandler<(), SupervisorState, (), ()>,
     );
     let supervisor = define_task(TaskDefinition {
         name: "example.supervisor".to_owned(),

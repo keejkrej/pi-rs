@@ -7,49 +7,49 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use pi_ai::auth::types::ProviderAuth;
+use pi_ai::models::Provider;
 use pi_ai::models::create_models;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep, FauxToolCallOptions,
     faux_assistant_message, faux_text, faux_tool_call,
 };
 use pi_ai::types::{
-    AssistantMessage, AssistantMessageEvent, CancelDeferredFunction, Context as TranscriptContext,
-    DeferredCancelOptions, DeferredHandle, Message, Model, Provider, ProviderAuth, SimpleStreamFunction,
-    SimpleStreamOptions, StopReason,
+    ApiStreamOptions, AssistantMessage, AssistantMessageEvent, CancelDeferredFunction, DeferredCancelOptions,
+    DeferredHandle, Message, Model, SimpleStreamFunction, SimpleStreamOptions, StopReason, TranscriptContext,
 };
-use pi_ai::vendor::provider_base::ApiStreamOptions;
-use pi_ai::vendor::stream::create_assistant_message_event_stream;
+use pi_ai::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
+use pi_ai::{TSchema as Schema, Type as t};
 use pi_chord::Context;
+use pi_durable::AbortTaskResult;
+use pi_durable::define_tool;
 use pi_durable::documents::{DocDefinitionInput, TaskDocToken, define_task_doc};
 use pi_durable::entries::TOOL_RESULT_ENTRY;
 use pi_durable::errors::StorageRejected;
 use pi_durable::harness::events::{AgentEvent, AgentEventStream};
-use pi_durable::harness::generation::{GENERATION_TASK, GenerationHooks, GenerationResult};
+use pi_durable::harness::generation::{GENERATION_TASK, GenerationResult};
 use pi_durable::harness::harness::{Conversation, Harness};
 use pi_durable::harness::live::{LIVE_DOC, LiveState, ToolSlotStatus};
 use pi_durable::harness::registry::RegistryImpl;
-use pi_durable::harness::tool::{TOOL_TASK, ToolHooks};
 use pi_durable::harness::types::{
-    ConversationAbortOptions, ConversationOwnership, DocumentObserverExt, DocumentReaderExt, HarnessInspection,
-    SubmissionDraft, TaskBlockedReason, TaskInspectionState, ToolExecutionMode, ToolExecutionResult, ToolRegistration,
-    UserInput,
+    ConversationAbortOptions, ConversationCreateOptions, GenerationHooks, HarnessInspection, SubmissionDraft,
+    TaskBlockedReason, TaskInspectionState, ToolExecutionMode, ToolExecutionResult, ToolRegistration, UserInput,
 };
 use pi_durable::session::session::create_session;
 use pi_durable::session::transaction::Tx;
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, ErasedTaskRecord,
-    InputSubmissionState, JoinPolicy, JsonValue, NextTaskState, Page, Seq, Storage, StorageWrite, StoredDocument,
-    SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState, SubmissionStatus, TaskId, TaskOptions,
-    TaskOutcome, TaskOwnership, TaskQuery, TaskState, TaskStatus,
+    ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId,
+    DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, InputSubmissionState, JoinPolicy, JsonValue, NextTaskState, Page, Seq, Storage, StorageWrite,
+    StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState, SubmissionStatus, TaskId,
+    TaskOptions, TaskOutcome, TaskOwnership, TaskQuery, TaskState, TaskStatus,
 };
 use pi_js::BoxFuture;
-use pi_js::vendor::typebox::{Schema, builder as t};
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
-use support::chat_support::{ChatSetup, OpenChatEnv, all_entries, chat_setup, open_chat, text_of, wait_for};
+use support::chat_support::{OpenChatEnv, all_entries, chat_setup, open_chat, text_of, wait_for};
 use support::harness_support::{Installed, add_hooks, add_task, add_tool};
 use support::session_support::context;
 use support::task_support::{Deferred, OpenTasksOptions, aborted, deferred, open_tasks, settled, track};
@@ -74,7 +74,7 @@ type NodeRuntime = pi_durable::tasks::TaskRuntimeHandle<NodeInput, NodeCheckpoin
 type Next = NextTaskState<NodeCheckpoint, String>;
 type NodeTask = pi_durable::tasks::Task<NodeInput, NodeCheckpoint, String, ()>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ending {
     Completed,
     Failed,
@@ -245,12 +245,14 @@ impl StructuredState {
             phases,
             abort,
             migrate: None,
+            _hooks: std::marker::PhantomData,
         })
     }
 }
 
 async fn default_run(state: &StructuredState, runtime: &NodeRuntime, ctx: Context, name: &str) -> pi_js::Result<()> {
-    let gate_fut = state.gate(name).wait();
+    let gate = state.gate(name);
+    let gate_fut = gate.wait();
     let signal = runtime.signal()?;
     let ending = tokio::select! {
         res = gate_fut => res?,
@@ -307,6 +309,7 @@ fn unregistered_task() -> pi_durable::tasks::Task<NodeInput, NodeCheckpoint, Str
         phases,
         abort: Arc::new(|_, _, _| Box::pin(async { Ok(()) })),
         migrate: None,
+        _hooks: std::marker::PhantomData,
     })
 }
 
@@ -411,7 +414,7 @@ async fn outcome_of(harness: &Harness, id: TaskId) -> &'static str {
         .wait_for_task::<JsonValue>(id.cast(), context())
         .await
         .expect("wait_for_task");
-    outcome_status(&rec.state.outcome)
+    outcome_status(&rec.outcome)
 }
 
 fn outcome_status<R>(outcome: &TaskOutcome<R>) -> &'static str {
@@ -461,13 +464,14 @@ async fn creates_a_child_in_its_owners_conversation_with_its_owner_recorded() {
                 let child_cb = Arc::clone(&child_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_cb = Arc::clone(&child_cb);
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let child = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let child = spawn(&tx, &node_cb, owner, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     Ok(Some(wait_on(&[child.erased()], JoinPolicy::AllSettled, 1)))
                                 })
@@ -523,7 +527,14 @@ async fn rejects_missing_owner_wrong_conversation_and_background_child() {
         .expect("start parent");
     let other = opened
         .harness
-        .create_conversation(ConversationOwnership::Ownerless, None, context())
+        .create_conversation(
+            ConversationCreateOptions {
+                ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
+            },
+            context(),
+        )
         .await
         .expect("other");
 
@@ -618,12 +629,13 @@ async fn rejects_new_owned_work_below_completing_terminal_or_abort_marked_owner(
             run: Some(Arc::new(move |runtime, ctx| {
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let _ = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let _ = spawn(&tx, &node_cb, owner, "child").await?;
                                     Ok(Some(NextTaskState::Running {
                                         checkpoint: NodeCheckpoint::Resume { round: 1 },
                                     }))
@@ -754,12 +766,13 @@ async fn cannot_create_child_in_finishing_commit_but_work_in_owned_conversation_
             run: Some(Arc::new(move |runtime, ctx| {
                 let node_eager = node_eager.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let node_eager = node_eager.clone();
                                 Box::pin(async move {
-                                    let _ = spawn(&tx, &node_eager, runtime.task_id()?.erased(), "never").await?;
+                                    let _ = spawn(&tx, &node_eager, owner, "never").await?;
                                     Ok(Some(end_completed("eager")))
                                 })
                             },
@@ -781,7 +794,7 @@ async fn cannot_create_child_in_finishing_commit_but_work_in_owned_conversation_
         .wait_for_task(eager, context())
         .await
         .expect("wait eager");
-    match eager_rec.state.outcome {
+    match eager_rec.outcome {
         TaskOutcome::Faulted { error } => assert!(error.message.contains("is completing")),
         other => panic!("expected Faulted, got {other:?}"),
     }
@@ -820,15 +833,14 @@ async fn cannot_create_child_in_finishing_commit_but_work_in_owned_conversation_
             run: Some(Arc::new(move |runtime, ctx| {
                 let child_run = Arc::clone(&child_run);
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_run = Arc::clone(&child_run);
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     *child_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(conv.id);
                                     Ok(Some(NextTaskState::Running {
@@ -890,7 +902,7 @@ async fn cannot_create_child_in_finishing_commit_but_work_in_owned_conversation_
     assert!(!settled(&waiter).await);
     st.open_ok("inner");
     let host_settled = waiter.wait().await.expect("wait host");
-    assert_eq!(outcome_status(&host_settled.state.outcome), "completed");
+    assert_eq!(outcome_status(&host_settled.outcome), "completed");
     opened.harness.close(context()).await.expect("close");
 }
 
@@ -922,6 +934,7 @@ fn parent_of(
                 let node_run = node_run.clone();
                 let names_run = names_run.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -929,7 +942,6 @@ fn parent_of(
                                 let node_run = node_run.clone();
                                 let names_run = names_run.clone();
                                 Box::pin(async move {
-                                    let owner = runtime.task_id()?.erased();
                                     let mut created = Vec::with_capacity(names_run.len());
                                     for name in &names_run {
                                         created.push(spawn(&tx, &node_run, owner, name).await?.erased());
@@ -990,6 +1002,7 @@ async fn resumes_once_every_awaited_task_is_terminal_and_reads_outcomes_in_order
                 let node_run = node_run.clone();
                 let unreg_run = unreg_run.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -997,7 +1010,6 @@ async fn resumes_once_every_awaited_task_is_terminal_and_reads_outcomes_in_order
                                 let node_run = node_run.clone();
                                 let unreg_run = unreg_run.clone();
                                 Box::pin(async move {
-                                    let owner = runtime.task_id()?.erased();
                                     let mut created = Vec::new();
                                     for name in ["ok", "fails", "throws", "aborted"] {
                                         created.push(spawn(&tx, &node_run, owner, name).await?.erased());
@@ -1062,7 +1074,7 @@ async fn resumes_once_every_awaited_task_is_terminal_and_reads_outcomes_in_order
     st.open("throws", Ending::Throw);
     opened.harness.abort_task(id_list[3], context()).await.expect("abort 3");
     let res4 = opened.harness.abort_task(id_list[4], context()).await.expect("abort 4");
-    assert_eq!(res4, pi_durable::harness::types::AbortTaskResult::Marked);
+    assert_eq!(res4, AbortTaskResult::Marked);
     assert_eq!(outcome_of(&opened.harness, parent.erased()).await, "completed");
     assert_eq!(
         *outcomes.lock().unwrap_or_else(|e| e.into_inner()),
@@ -1139,12 +1151,13 @@ async fn fails_fast_on_a_held_failure_before_the_failing_child_drains() {
             run: Some(Arc::new(move |runtime, ctx| {
                 let node_p1 = node_p1.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let node_p1 = node_p1.clone();
                                 Box::pin(async move {
-                                    let _ = spawn(&tx, &node_p1, runtime.task_id()?.erased(), "grandchild").await?;
+                                    let _ = spawn(&tx, &node_p1, owner, "grandchild").await?;
                                     Ok(Some(NextTaskState::Running {
                                         checkpoint: NodeCheckpoint::Resume { round: 1 },
                                     }))
@@ -1206,6 +1219,7 @@ async fn fails_fast_on_a_held_failure_before_the_failing_child_drains() {
                 let out_parent = Arc::clone(&out_parent);
                 let node_parent = node_parent.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -1213,7 +1227,6 @@ async fn fails_fast_on_a_held_failure_before_the_failing_child_drains() {
                                 let out_parent = Arc::clone(&out_parent);
                                 let node_parent = node_parent.clone();
                                 Box::pin(async move {
-                                    let owner = runtime.task_id()?.erased();
                                     let mut created = Vec::new();
                                     for name in ["p1", "p2"] {
                                         created.push(spawn(&tx, &node_parent, owner, name).await?.erased());
@@ -1437,7 +1450,7 @@ async fn rejects_waits_on_itself_its_owner_missing_task_and_fail_fast_on_foreign
             .await
             .expect("start case");
         let rec = opened.harness.wait_for_task(id, context()).await.expect("wait case");
-        match rec.state.outcome {
+        match rec.outcome {
             TaskOutcome::Faulted { error } => assert!(error.message.contains(msg), "got {}", error.message),
             other => panic!("expected Faulted for {name}, got {other:?}"),
         }
@@ -1479,13 +1492,14 @@ async fn rejects_waits_on_itself_its_owner_missing_task_and_fail_fast_on_foreign
                 let child_cb = Arc::clone(&child_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_cb = Arc::clone(&child_cb);
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let child = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let child = spawn(&tx, &node_cb, owner, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     Ok(Some(wait_on(&[child.erased()], JoinPolicy::AllSettled, 1)))
                                 })
@@ -1508,14 +1522,14 @@ async fn rejects_waits_on_itself_its_owner_missing_task_and_fail_fast_on_foreign
         .wait_for_task(parent, context())
         .await
         .expect("wait parent");
-    assert_eq!(outcome_status(&parent_settled.state.outcome), "completed");
+    assert_eq!(outcome_status(&parent_settled.outcome), "completed");
     let child_id = child_slot.lock().unwrap_or_else(|e| e.into_inner()).expect("child");
     let child_settled = opened
         .harness
         .wait_for_task(child_id, context())
         .await
         .expect("wait child");
-    match child_settled.state.outcome {
+    match child_settled.outcome {
         TaskOutcome::Faulted { error } => assert!(error.message.contains("cannot wait on itself or its owner")),
         other => panic!("expected Faulted, got {other:?}"),
     }
@@ -1569,13 +1583,13 @@ async fn keeps_running_phases_after_spawning_and_waits_on_subsets_in_sequence() 
                 let ids_run = Arc::clone(&ids_run);
                 let node_run = node_run.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let ids_run = Arc::clone(&ids_run);
                                 let node_run = node_run.clone();
                                 Box::pin(async move {
-                                    let owner = runtime.task_id()?.erased();
                                     let mut created = Vec::new();
                                     for name in ["a", "b", "c"] {
                                         created.push(spawn(&tx, &node_run, owner, name).await?.erased());
@@ -1693,6 +1707,7 @@ async fn holds_a_finished_task_until_its_owned_work_drains_waiters_and_task_docs
                 let node_cb = node_cb.clone();
                 let notes_cb = notes_cb.clone();
                 Box::pin(async move {
+                    let tid = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -1700,10 +1715,8 @@ async fn holds_a_finished_task_until_its_owned_work_drains_waiters_and_task_docs
                                 let node_cb = node_cb.clone();
                                 let notes_cb = notes_cb.clone();
                                 Box::pin(async move {
-                                    let tid = runtime.task_id()?.erased();
                                     tx.doc_task(&notes_cb, tid).await?.update(|doc| {
                                         doc.text = "notes".to_owned();
-                                        Ok(())
                                     })?;
                                     let child = spawn(&tx, &node_cb, tid, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
@@ -1758,7 +1771,7 @@ async fn holds_a_finished_task_until_its_owned_work_drains_waiters_and_task_docs
         .iter()
         .find(|t| t.record.id == parent.erased())
         .expect("inspected");
-    assert_eq!(found.state, TaskInspectionState::Completing);
+    assert!(matches!(found.state, TaskInspectionState::Completing));
 
     let r_w = opened.root.clone();
     let root_idle = track(async move { r_w.wait_for_idle(context()).await });
@@ -1766,9 +1779,9 @@ async fn holds_a_finished_task_until_its_owned_work_drains_waiters_and_task_docs
 
     st.open_ok("child");
     let settled_parent = waiter.wait().await.expect("wait");
-    assert_eq!(outcome_status(&settled_parent.state.outcome), "completed");
+    assert_eq!(outcome_status(&settled_parent.outcome), "completed");
     assert_eq!(
-        settled_parent.state.outcome,
+        settled_parent.outcome,
         TaskOutcome::Completed {
             result: "parent".to_owned()
         }
@@ -1801,6 +1814,7 @@ async fn keeps_holding_for_ordinary_work_created_during_the_hold() {
                 let conv_cb = Arc::clone(&conv_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -1808,9 +1822,7 @@ async fn keeps_holding_for_ordinary_work_created_during_the_hold() {
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     let mut opts = own_conversation();
                                     opts.conversation_id = Some(conv.id);
@@ -1886,13 +1898,14 @@ async fn run_held_failure_case(ending: Ending, expected_parent_outcome: &str) {
                 let child_cb = Arc::clone(&child_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_cb = Arc::clone(&child_cb);
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let child = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let child = spawn(&tx, &node_cb, owner, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     Ok(Some(NextTaskState::Running {
                                         checkpoint: NodeCheckpoint::Resume { round: 1 },
@@ -1961,13 +1974,14 @@ async fn only_marks_a_completing_task_when_aborted_work_below_aborted_held_outco
                 let child_cb = Arc::clone(&child_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_cb = Arc::clone(&child_cb);
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let child = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let child = spawn(&tx, &node_cb, owner, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     Ok(Some(NextTaskState::Running {
                                         checkpoint: NodeCheckpoint::Resume { round: 1 },
@@ -1999,7 +2013,7 @@ async fn only_marks_a_completing_task_when_aborted_work_below_aborted_held_outco
             .abort_task(parent.erased(), context())
             .await
             .expect("abort parent"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(outcome_of(&opened.harness, child.erased()).await, "aborted");
     let settled_parent = opened
@@ -2008,7 +2022,7 @@ async fn only_marks_a_completing_task_when_aborted_work_below_aborted_held_outco
         .await
         .expect("wait parent");
     assert_eq!(
-        settled_parent.state.outcome,
+        settled_parent.outcome,
         TaskOutcome::Completed {
             result: "parent".to_owned()
         }
@@ -2021,7 +2035,7 @@ async fn only_marks_a_completing_task_when_aborted_work_below_aborted_held_outco
             .abort_task(parent.erased(), context())
             .await
             .expect("abort terminal"),
-        pi_durable::harness::types::AbortTaskResult::Terminal
+        AbortTaskResult::Terminal
     );
     opened.harness.close(context()).await.expect("close");
 }
@@ -2053,6 +2067,7 @@ fn chain(
                 let node_run = node_run.clone();
                 let child_name = child_name.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -2060,7 +2075,7 @@ fn chain(
                                 let node_run = node_run.clone();
                                 let child_name = child_name.clone();
                                 Box::pin(async move {
-                                    let cid = spawn(&tx, &node_run, runtime.task_id()?.erased(), &child_name).await?;
+                                    let cid = spawn(&tx, &node_run, owner, &child_name).await?;
                                     *found_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid);
                                     Ok(Some(wait_on(&[cid.erased()], JoinPolicy::AllSettled, 1)))
                                 })
@@ -2087,7 +2102,13 @@ fn chain(
                         .unwrap_or_else(|e| e.into_inner())
                         .expect("child id")
                         .erased();
-                    let status_str = task_state(&h, cid).await.status().as_str();
+                    let status_str = match task_state(&h, cid).await.status() {
+                        TaskStatus::Pending => "pending",
+                        TaskStatus::Running => "running",
+                        TaskStatus::Waiting => "waiting",
+                        TaskStatus::Completing => "completing",
+                        TaskStatus::Terminal => "terminal",
+                    };
                     st_abort.push_log(format!("{name_abort} saw {status_str}"));
                     runtime
                         .commit(
@@ -2135,7 +2156,7 @@ async fn runs_abort_handlers_bottom_up_across_three_levels_each_after_level_belo
     .await;
     assert_eq!(
         opened.harness.abort_task(a.erased(), context()).await.expect("abort a"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(outcome_of(&opened.harness, a.erased()).await, "aborted");
     let filtered: Vec<String> = st
@@ -2242,13 +2263,14 @@ async fn reports_an_abort_marked_task_as_waiting_for_its_live_owned_work() {
                 let child_cb = Arc::clone(&child_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let child_cb = Arc::clone(&child_cb);
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
-                                    let child = spawn(&tx, &node_cb, runtime.task_id()?.erased(), "child").await?;
+                                    let child = spawn(&tx, &node_cb, owner, "child").await?;
                                     *child_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     Ok(Some(wait_on(&[child.erased()], JoinPolicy::AllSettled, 1)))
                                 })
@@ -2288,12 +2310,10 @@ async fn reports_an_abort_marked_task_as_waiting_for_its_live_owned_work() {
         .iter()
         .find(|task| task.record.id == parent.erased())
         .expect("found");
-    assert_eq!(
-        found.state,
-        TaskInspectionState::Waiting {
-            on: vec![child_id.erased()]
-        }
-    );
+    assert!(matches!(
+        &found.state,
+        TaskInspectionState::Waiting { on } if on == &vec![child_id.erased()]
+    ));
     st.open_ok("abort.child");
     assert_eq!(outcome_of(&opened.harness, parent.erased()).await, "aborted");
     opened.harness.close(context()).await.expect("close");
@@ -2334,7 +2354,7 @@ async fn faults_an_abort_handler_that_tries_to_wait() {
         .await
         .expect("abort");
     let rec = opened.harness.wait_for_task(parent, context()).await.expect("wait");
-    match rec.state.outcome {
+    match rec.outcome {
         TaskOutcome::Faulted { error } => assert!(error.message.contains("cannot wait")),
         other => panic!("expected Faulted, got {other:?}"),
     }
@@ -2382,7 +2402,7 @@ async fn orphans_a_blocked_task_only_after_its_owned_work_drained() {
             .abort_task(owner.erased(), context())
             .await
             .expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(outcome_of(&opened.harness, child.erased()).await, "aborted");
     let rec = opened
@@ -2391,7 +2411,7 @@ async fn orphans_a_blocked_task_only_after_its_owned_work_drained() {
         .await
         .expect("wait owner");
     assert_eq!(
-        rec.state.outcome,
+        rec.outcome,
         TaskOutcome::Orphaned {
             reason: "missing_task".to_owned(),
         }
@@ -2412,12 +2432,13 @@ async fn cascades_through_task_and_conversation_edges_bottom_up() {
             run: Some(Arc::new(move |runtime, ctx| {
                 let node_a = node_a.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let node_a = node_a.clone();
                                 Box::pin(async move {
-                                    let b = spawn(&tx, &node_a, runtime.task_id()?.erased(), "b").await?;
+                                    let b = spawn(&tx, &node_a, owner, "b").await?;
                                     Ok(Some(wait_on(&[b.erased()], JoinPolicy::AllSettled, 1)))
                                 })
                             },
@@ -2439,6 +2460,7 @@ async fn cascades_through_task_and_conversation_edges_bottom_up() {
                 let x_cb = Arc::clone(&x_cb);
                 let node_b = node_b.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -2446,9 +2468,7 @@ async fn cascades_through_task_and_conversation_edges_bottom_up() {
                                 let node_b = node_b.clone();
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     let mut opts = own_conversation();
                                     opts.conversation_id = Some(conv.id);
@@ -2513,6 +2533,7 @@ async fn keeps_background_work_through_conversation_abort_background_true_aborts
                 let below_cb = Arc::clone(&below_cb);
                 let node_bg = node_bg.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -2520,7 +2541,6 @@ async fn keeps_background_work_through_conversation_abort_background_true_aborts
                                 let below_cb = Arc::clone(&below_cb);
                                 let node_bg = node_bg.clone();
                                 Box::pin(async move {
-                                    let owner = runtime.task_id()?.erased();
                                     let child = spawn(&tx, &node_bg, owner, "child").await?;
                                     let conv = tx
                                         .create_conversation(ConversationOwnership::Task { task_id: owner })
@@ -2594,15 +2614,14 @@ async fn never_cascades_from_a_terminal_owner_aborted_subagent_conversation_runs
             run: Some(Arc::new(move |runtime, ctx| {
                 let conv_cb = Arc::clone(&conv_cb);
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let conv_cb = Arc::clone(&conv_cb);
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     *conv_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(conv.id);
                                     Ok(Some(NextTaskState::Running {
@@ -2718,7 +2737,7 @@ where
         .commit(
             move |tx| async move {
                 let rec = tx.task(id).await?.expect("task");
-                tx.set_task(f(rec))
+                tx.as_transaction().set_task(f(rec))
             },
             context(),
         )
@@ -2978,7 +2997,7 @@ async fn reopens_a_checkout_waiting_on_live_payments_and_finishes_it() {
 fn blocking_tool(name: &str, mode: ToolExecutionMode) -> (Deferred<()>, ToolRegistration) {
     let started = deferred();
     let started_cb = started.clone();
-    let reg = pi_durable::tasks::define_tool(ToolRegistration {
+    let reg = define_tool(ToolRegistration {
         name: name.to_owned(),
         description: format!("The {name} tool"),
         parameters: empty_schema(),
@@ -2991,8 +3010,8 @@ fn blocking_tool(name: &str, mode: ToolExecutionMode) -> (Deferred<()>, ToolRegi
             Box::pin(async move {
                 api.output("partial")?;
                 started_cb.resolve(());
-                let sig = call_context.abort_signal.as_ref().expect("abort signal");
-                aborted::<ToolExecutionResult>(sig).await
+                let sig = call_context.abort_signal().expect("abort signal");
+                aborted::<ToolExecutionResult>(&sig).await
             })
         }),
     });
@@ -3005,7 +3024,7 @@ fn tool_calls(calls: &[(&str, &str)]) -> AssistantMessage {
         .map(|(name, id)| {
             FauxContentBlock::ToolCall(faux_tool_call(
                 name,
-                pi_durable::types::JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some((*id).to_owned()),
                 }),
@@ -3029,7 +3048,7 @@ fn done_assistant() -> AssistantMessage {
 }
 
 fn noop_tool() -> ToolRegistration {
-    pi_durable::tasks::define_tool(ToolRegistration {
+    define_tool(ToolRegistration {
         name: "noop".to_owned(),
         description: "Does nothing".to_owned(),
         parameters: empty_schema(),
@@ -3163,7 +3182,7 @@ async fn aborts_a_parallel_round_with_its_generation_tools_first_then_generation
     let entries = all_entries(&opened.root, None).await.expect("entries");
     let call_ids: Vec<String> = entries
         .iter()
-        .filter(|entry| TOOL_RESULT_ENTRY.matches(entry))
+        .filter(|entry| TOOL_RESULT_ENTRY.matches(Some(*entry)))
         .map(|entry| match &entry.model.as_ref().expect("model")[0] {
             Message::ToolResult(tr) => tr.tool_call_id.clone(),
             other => panic!("expected toolResult, got {other:?}"),
@@ -3218,7 +3237,13 @@ async fn answers_the_unstarted_calls_of_an_aborted_sequential_round_with_aborted
         .await
         .expect("snap")
         .expect("live");
-    let started_flags: Vec<bool> = live.tools.iter().map(|slot| slot.task_id.is_some()).collect();
+    let started_flags: Vec<bool> = live
+        .tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|slot| slot.task_id.is_some())
+        .collect();
     assert_eq!(started_flags, vec![true, false, false]);
     let generation = live.run.expect("run").task_id;
     opened.harness.abort_task(generation, context()).await.expect("abort");
@@ -3231,7 +3256,7 @@ async fn answers_the_unstarted_calls_of_an_aborted_sequential_round_with_aborted
     let entries = all_entries(&opened.root, None).await.expect("entries");
     let results: Vec<_> = entries
         .iter()
-        .filter(|entry| TOOL_RESULT_ENTRY.matches(entry))
+        .filter(|entry| TOOL_RESULT_ENTRY.matches(Some(*entry)))
         .map(|entry| match &entry.model.as_ref().expect("model")[0] {
             Message::ToolResult(tr) => tr.clone(),
             other => panic!("expected toolResult, got {other:?}"),
@@ -3306,6 +3331,7 @@ async fn ends_a_turn_at_the_generations_hold_before_its_successors_turn_starts()
             })),
             ..Default::default()
         },
+        None,
     )
     .expect("add_hooks");
 
@@ -3438,7 +3464,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         context: &TranscriptContext,
         options: Option<ApiStreamOptions>,
-    ) -> pi_ai::types::AssistantMessageEventStream {
+    ) -> AssistantMessageEventStream {
         self.inner.stream(model, context, options)
     }
 
@@ -3447,7 +3473,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         context: &TranscriptContext,
         options: Option<SimpleStreamOptions>,
-    ) -> pi_ai::types::AssistantMessageEventStream {
+    ) -> AssistantMessageEventStream {
         if let Some(override_fn) = &self.stream_simple_override {
             return override_fn(model, context, options);
         }
@@ -3459,7 +3485,7 @@ impl Provider for ProxyProvider {
         model: &Model,
         handle: &DeferredHandle,
         options: Option<pi_ai::types::DeferredFetchOptions>,
-    ) -> Option<pi_ai::types::AssistantMessageEventStream> {
+    ) -> Option<AssistantMessageEventStream> {
         self.inner.fetch_deferred(model, handle, options)
     }
 
@@ -3480,6 +3506,7 @@ struct RejectingStorage {
     inner: MemoryStorage,
     reject_assistant_once: Arc<Mutex<bool>>,
     reject_final: Arc<Mutex<Option<TaskId>>>,
+    reject_tool_result: bool,
 }
 
 impl RejectingStorage {
@@ -3488,6 +3515,16 @@ impl RejectingStorage {
             inner: MemoryStorage::new(),
             reject_assistant_once,
             reject_final,
+            reject_tool_result: false,
+        }
+    }
+
+    fn reject_tool_result() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            reject_assistant_once: Arc::new(Mutex::new(false)),
+            reject_final: Arc::new(Mutex::new(None)),
+            reject_tool_result: true,
         }
     }
 }
@@ -3495,6 +3532,13 @@ impl RejectingStorage {
 #[async_trait]
 impl Storage for RejectingStorage {
     async fn commit(&self, writes: Vec<StorageWrite>, context: Context) -> pi_js::Result<Seq> {
+        if self.reject_tool_result
+            && writes
+                .iter()
+                .any(|w| matches!(w, StorageWrite::Entry { value } if value.kind == "pi.tool-result"))
+        {
+            return Err(StorageRejected::new("Tool result is not strict JSON").into_error());
+        }
         let should_reject_assistant = {
             let mut guard = self.reject_assistant_once.lock().unwrap_or_else(|e| e.into_inner());
             if *guard
@@ -3509,7 +3553,7 @@ impl Storage for RejectingStorage {
             }
         };
         if should_reject_assistant {
-            return Err(pi_js::Error::msg("final assistant message is not strict JSON"));
+            return Err(StorageRejected::new("final assistant message is not strict JSON").into_error());
         }
 
         let should_reject_final = {
@@ -3729,6 +3773,7 @@ async fn keeps_run_control_with_a_faulted_generation_until_owned_work_drains_and
             })),
             ..Default::default()
         },
+        None,
     )
     .expect("add hooks");
 
@@ -3864,11 +3909,12 @@ async fn keeps_run_control_with_a_faulted_generation_until_owned_work_drains_and
     );
     assert!(!settled(&sub_waiter).await);
 
+    let root_c_id = root_c.id();
     root_c
         .commit(
             move |tx| async move {
                 tx.append_entry(
-                    root_c.id(),
+                    root_c_id,
                     EntryDraft {
                         kind: "note".to_owned(),
                         ..Default::default()
@@ -3883,7 +3929,7 @@ async fn keeps_run_control_with_a_faulted_generation_until_owned_work_drains_and
         .expect("note");
 
     let settled_sub = sub_waiter.wait().await.expect("wait");
-    assert_eq!(settled_sub.id, sub_id);
+    assert_eq!(settled_sub.record.id, sub_id);
     assert!(matches!(
         settled_sub.record.state,
         SubmissionState::Input(InputSubmissionState::Unanswered { ref reason, .. }) if reason == "faulted"
@@ -4027,6 +4073,7 @@ fn versioned_task(version: i64) -> pi_durable::tasks::Task<VersionedInput, Versi
             })
         }),
         migrate,
+        _hooks: std::marker::PhantomData,
     })
 }
 
@@ -4048,6 +4095,7 @@ fn spawn_and_finish(
                 let node_run = node_run.clone();
                 let child_name = child_name.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -4055,7 +4103,7 @@ fn spawn_and_finish(
                                 let node_run = node_run.clone();
                                 let child_name = child_name.clone();
                                 Box::pin(async move {
-                                    let cid = spawn(&tx, &node_run, runtime.task_id()?.erased(), &child_name).await?;
+                                    let cid = spawn(&tx, &node_run, owner, &child_name).await?;
                                     *found_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid);
                                     Ok(Some(NextTaskState::Running {
                                         checkpoint: NodeCheckpoint::Resume { round: 1 },
@@ -4116,12 +4164,13 @@ async fn keeps_a_waiting_task_blocked_without_its_definition_and_resumes_it_migr
         .iter()
         .find(|t| t.record.id == waiter.erased())
         .expect("found");
-    assert_eq!(
+    assert!(matches!(
         entry.state,
         TaskInspectionState::Blocked {
-            reason: TaskBlockedReason::MissingTask
+            reason: TaskBlockedReason::MissingTask,
+            ..
         }
-    );
+    ));
     assert_eq!(
         task_state(&opened.harness, waiter.erased()).await.status(),
         TaskStatus::Waiting
@@ -4133,7 +4182,7 @@ async fn keeps_a_waiting_task_blocked_without_its_definition_and_resumes_it_migr
         .await
         .expect("wait waiter");
     assert_eq!(
-        rec.state.outcome,
+        rec.outcome,
         TaskOutcome::Completed {
             result: "v2".to_owned()
         }
@@ -4178,7 +4227,7 @@ async fn orphans_an_aborted_waiting_task_without_definition_at_once_leaving_wait
             .abort_task(waiter.erased(), context())
             .await
             .expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     let waiter_state = task_state(&opened.harness, waiter.erased()).await;
     match waiter_state {
@@ -4267,6 +4316,7 @@ async fn never_migrates_a_held_outcome_a_newer_definition_leaves_it_and_version_
                 })
             }),
             migrate: Some(Arc::new(|_, _, _| Err(pi_js::Error::msg("never migrates")))),
+            _hooks: std::marker::PhantomData,
         })
     };
 
@@ -4289,7 +4339,7 @@ async fn never_migrates_a_held_outcome_a_newer_definition_leaves_it_and_version_
     st.open_ok("child");
     let settled_parent = opened.harness.wait_for_task(parent, context()).await.expect("wait");
     assert_eq!(
-        settled_parent.state.outcome,
+        settled_parent.outcome,
         TaskOutcome::Completed {
             result: "held".to_owned()
         }
@@ -4380,7 +4430,7 @@ async fn marks_a_held_completed_task_with_conversation_abort_work_below_aborted_
     let cid = child.lock().unwrap_or_else(|e| e.into_inner()).expect("child id");
     assert_eq!(outcome_of(&opened.harness, cid.erased()).await, "aborted");
     let record = opened.harness.wait_for_task(held, context()).await.expect("wait");
-    assert_eq!(outcome_status(&record.state.outcome), "completed");
+    assert_eq!(outcome_status(&record.outcome), "completed");
     assert!(record.abort_requested);
     opened.harness.close(context()).await.expect("close");
 }
@@ -4729,7 +4779,10 @@ async fn shows_an_abort_marked_owner_waiting_for_work_in_its_owned_conversation_
         .expect("open tasks");
     let inspected = opened.harness.inspect(context()).await.expect("inspect");
     let found = inspected.tasks.iter().find(|t| t.record.id == owner).expect("found");
-    assert_eq!(found.state, TaskInspectionState::Waiting { on: vec![inner] });
+    assert!(matches!(
+        &found.state,
+        TaskInspectionState::Waiting { on } if on == &vec![inner]
+    ));
     opened.harness.resume().expect("resume");
     assert_eq!(outcome_of(&opened.harness, owner).await, "aborted");
     let aborts: Vec<String> = st
@@ -4757,6 +4810,7 @@ async fn keeps_the_root_busy_after_reopen_for_work_below_a_child_tasks_owned_con
                 let inner_cb = Arc::clone(&inner_cb);
                 let node_cb = node_cb.clone();
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
@@ -4764,9 +4818,7 @@ async fn keeps_the_root_busy_after_reopen_for_work_below_a_child_tasks_owned_con
                                 let node_cb = node_cb.clone();
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     let mut opts = own_conversation();
                                     opts.conversation_id = Some(conv.id);
@@ -4841,15 +4893,14 @@ async fn keeps_a_finished_background_ancestor_a_boundary_after_reopen_which_back
             run: Some(Arc::new(move |runtime, ctx| {
                 let conv_cb = Arc::clone(&conv_cb);
                 Box::pin(async move {
+                    let owner = runtime.task_id()?.erased();
                     runtime
                         .commit(
                             move |tx, _current| {
                                 let conv_cb = Arc::clone(&conv_cb);
                                 Box::pin(async move {
                                     let conv = tx
-                                        .create_conversation(ConversationOwnership::Task {
-                                            task_id: runtime.task_id()?.erased(),
-                                        })
+                                        .create_conversation(ConversationOwnership::Task { task_id: owner })
                                         .await?;
                                     *conv_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(conv.id);
                                     Ok(Some(NextTaskState::Running {
@@ -5063,6 +5114,7 @@ async fn emits_one_turn_end_per_generation_also_for_a_stream_attached_while_it_h
             })),
             ..Default::default()
         },
+        None,
     )
     .expect("hooks");
 
@@ -5169,7 +5221,7 @@ async fn lets_a_tool_that_owns_live_work_finish_its_call_at_hold_while_generatio
     let node_cb = node.clone();
     add_tool(
         &setup.registry,
-        pi_durable::tasks::define_tool(ToolRegistration {
+        define_tool(ToolRegistration {
             name: "delegate".to_owned(),
             description: "Starts work in a conversation it owns".to_owned(),
             parameters: empty_schema(),
@@ -5244,7 +5296,12 @@ async fn lets_a_tool_that_owns_live_work_finish_its_call_at_hold_while_generatio
                 .snapshot_conversation(&*LIVE_DOC, root_id, context())
                 .await
                 .expect("snap")
-                .and_then(|s| s.tools.first().map(|slot| slot.status == ToolSlotStatus::Done))
+                .and_then(|s| {
+                    s.tools
+                        .as_deref()
+                        .and_then(|t| t.first())
+                        .map(|slot| slot.status == ToolSlotStatus::Done)
+                })
                 == Some(true)
         }
     })
@@ -5256,8 +5313,9 @@ async fn lets_a_tool_that_owns_live_work_finish_its_call_at_hold_while_generatio
         .await
         .expect("snap")
         .expect("live");
-    let tool_id = live.tools[0].task_id.expect("tool task id");
-    assert!(live.tools[0].entry.is_some());
+    let live_tools = live.tools.as_deref().unwrap_or_default();
+    let tool_id = live_tools[0].task_id.expect("tool task id");
+    assert!(live_tools[0].entry.is_some());
     assert_eq!(
         task_state(&opened.harness, tool_id).await.status(),
         TaskStatus::Completing
@@ -5326,7 +5384,7 @@ async fn holds_a_faulted_tools_slot_and_task_failed_until_the_work_it_owns_drain
     let node_cb = node.clone();
     add_tool(
         &setup.registry,
-        pi_durable::tasks::define_tool(ToolRegistration {
+        define_tool(ToolRegistration {
             name: "broken".to_owned(),
             description: "Starts owned work, then returns a result that faults at settlement".to_owned(),
             parameters: empty_schema(),
@@ -5357,30 +5415,17 @@ async fn holds_a_faulted_tools_slot_and_task_failed_until_the_work_it_owns_drain
     )
     .expect("broken");
 
-    add_hooks(
-        &setup.registry,
-        &*TOOL_TASK,
-        ToolHooks {
-            after_tool: Some(Arc::new(|call, _res, _api, _ctx| {
-                Box::pin(async move {
-                    if call.name == "broken" {
-                        return Err(pi_js::Error::msg("Tool result is not strict JSON"));
-                    }
-                    Ok(None)
-                })
-            })),
-            ..Default::default()
-        },
-    )
-    .expect("tool hooks");
-
     setup.faux.set_responses(vec![
         FauxResponseStep::Message(tool_calls(&[("broken", "c1")])),
         FauxResponseStep::Message(done_assistant()),
     ]);
-    let opened = open_chat(Arc::new(MemoryStorage::new()), &setup, OpenChatEnv::None)
-        .await
-        .expect("open");
+    let opened = open_chat(
+        Arc::new(RejectingStorage::reject_tool_result()),
+        &setup,
+        OpenChatEnv::None,
+    )
+    .await
+    .expect("open");
     opened.harness.resume().expect("resume");
     let (stream, events) = listen(&opened.root).await;
 
@@ -5408,14 +5453,15 @@ async fn holds_a_faulted_tools_slot_and_task_failed_until_the_work_it_owns_drain
         .await
         .expect("snap")
         .expect("live");
-    let tool_id = live.tools[0].task_id.expect("tool id");
+    let live_tools = live.tools.as_deref().unwrap_or_default();
+    let tool_id = live_tools[0].task_id.expect("tool id");
     assert!(matches!(
         task_state(&opened.harness, tool_id).await,
         TaskState::Completing {
             outcome: TaskOutcome::Faulted { .. }
         }
     ));
-    assert_ne!(live.tools[0].status, ToolSlotStatus::Done);
+    assert_ne!(live_tools[0].status, ToolSlotStatus::Done);
     assert!(
         !events
             .lock()

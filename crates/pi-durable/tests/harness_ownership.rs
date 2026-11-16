@@ -2,49 +2,46 @@
 
 mod support;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use pi_ai::TextContent;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseFactory, FauxResponseStep,
     FauxToolCallOptions, faux_assistant_message, faux_text, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason};
+use pi_ai::{TSchema, TextContent, Type};
 use pi_chord::Context;
 use pi_chord::context::with_abort_signal;
-use pi_durable::documents::{ConversationDocToken, define_conversation_doc};
-use pi_durable::documents::{DocDefinitionInput, latest_fork_to_document_fork};
+use pi_durable::documents::{ConversationDocToken, DocDefinitionInput, define_conversation_doc};
 use pi_durable::errors::StorageRejected;
 use pi_durable::harness::agent::configure;
 use pi_durable::harness::harness::{Conversation, ConversationEntriesQuery, Harness};
 use pi_durable::harness::live::{LIVE_DOC, LiveRun};
 use pi_durable::harness::types::{
-    AbortTaskResult, AgentChange, ConversationCreateOptions, ConversationHandle, ConversationOwnership, FieldChange,
-    InputSubmissionDraft, ModelRef, SubmissionDraft, ToolExecutionResult, ToolRegistration, ToolReplayMode,
-    ToolResultContentBlock, UserInput,
+    AgentChange, ConversationHandle, FieldChange, InputSubmissionDraft, ModelRef, SubmissionDraft, ToolExecutionResult,
+    ToolRegistration, ToolReplayMode, ToolResultContentBlock, UserInput,
 };
 use pi_durable::session::session::Session;
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::storage::sqlite::node::{NodeSqliteStorage, NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::tasks::{AnyTask, Task, TaskDefinition, TypedPhaseHandler, define_task, define_tool};
+use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
+use pi_durable::tasks::{AnyTask, Task, TaskDefinition, TypedPhaseHandler, define_task};
 use pi_durable::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, ErasedTaskRecord,
-    InputSubmissionState, JoinPolicy, JsonObject, JsonValue, LatestFork, NextTaskState, Page, Seq, Storage,
+    ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId,
+    DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, InputSubmissionState, JoinPolicy, JsonValue, LatestFork, NextTaskState, Page, Seq, Storage,
     StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState, TaskId,
     TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TaskQuery, TaskState, TaskStatus, WriteSubmissionState,
 };
+use pi_durable::{AbortTaskResult, define_tool};
 use pi_js::abort::AbortController;
-use pi_js::vendor::typebox::Type;
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::chat_support::{ChatSetup, OpenChatEnv, chat_setup, open_chat};
 use support::harness_support::{add_task, add_tool};
-use support::session_support::{ControlledStorage, context, flush};
+use support::session_support::context;
 use support::task_support::{Deferred, OpenTasksOptions, aborted, deferred, open_tasks, settled, track};
 use tempfile::TempDir;
 
@@ -129,7 +126,8 @@ fn hold_task_with_state(state: OwnershipState) -> Task<HoldInput, HoldCheckpoint
                     let mut runs = state_hold.runs.lock().unwrap_or_else(|e| e.into_inner());
                     *runs.entry(task.input.name.clone()).or_insert(0) += 1;
                 }
-                let gate_fut = state_hold.gate(&task.input.name).wait();
+                let gate = state_hold.gate(&task.input.name);
+                let gate_fut = gate.wait();
                 let signal = runtime.signal()?;
                 let abort_fut = aborted::<Ending>(&signal);
                 let ending = tokio::select! {
@@ -351,6 +349,7 @@ async fn owned_child(
 struct GatedResponse {
     step: FauxResponseStep,
     reached: Deferred<()>,
+    #[allow(dead_code)]
     gate: Deferred<()>,
 }
 
@@ -411,7 +410,6 @@ async fn busy(conversation: &Conversation, task: TaskId) {
                         task_id: task,
                         inputs: Vec::new(),
                     });
-                    Ok(())
                 })
             },
             context(),
@@ -422,7 +420,7 @@ async fn busy(conversation: &Conversation, task: TaskId) {
 
 async fn status(harness: &Harness, id: TaskId<()>) -> TaskState {
     harness
-        .get_task(id, context())
+        .get_erased_task(id.erased(), context())
         .await
         .expect("get_task")
         .expect("task present")
@@ -436,8 +434,8 @@ struct OpenedOwnership {
 }
 
 async fn open_harness_with(storage: Arc<dyn Storage>, state: &OwnershipState) -> OpenedOwnership {
-    let hold_any: AnyTask = state.hold_task().any();
-    let waiter_any: AnyTask = waiter_task().any();
+    let hold_any: AnyTask = state.hold_task().into_any();
+    let waiter_any: AnyTask = waiter_task().into_any();
     let opened = open_tasks(storage, vec![hold_any, waiter_any], OpenTasksOptions::default())
         .await
         .expect("open tasks");
@@ -456,7 +454,7 @@ async fn sqlite_path() -> (TempDir, String) {
     (dir, path)
 }
 
-async fn open_sqlite(path: &str) -> Arc<NodeSqliteStorage> {
+async fn open_sqlite(path: &str) -> Arc<dyn Storage> {
     Arc::new(
         open_node_sqlite_storage(path, NodeSqliteStorageOptions::default())
             .await
@@ -1224,7 +1222,7 @@ async fn run_derives_unapplied_marks_at_open(abort_requested: bool, state_overri
                 let mut record = tx.task(owner.erased()).await?.expect("owner task");
                 record.abort_requested = abort_requested;
                 record.state = state_override;
-                tx.set_task(record)?;
+                tx.as_transaction().set_task(record)?;
                 Ok(())
             },
             context(),
@@ -1507,7 +1505,7 @@ async fn cancels_only_the_callers_wait_never_the_shared_work() {
             move |tx| async move {
                 let mut record = tx.task(slow.owner.erased()).await?.expect("slow owner");
                 record.input = serde_json::json!({ "name": "slow", "slowAbort": true });
-                tx.set_task(record)?;
+                tx.as_transaction().set_task(record)?;
                 Ok(())
             },
             context(),
@@ -1618,8 +1616,8 @@ async fn aborts_a_waiting_child_whose_awaited_task_completes_in_the_commit_that_
                     },
                 };
                 marked.abort_requested = true;
-                tx.set_task(completed_dep)?;
-                tx.set_task(marked)?;
+                tx.as_transaction().set_task(completed_dep)?;
+                tx.as_transaction().set_task(marked)?;
                 Ok(())
             },
             context(),
@@ -1798,7 +1796,7 @@ async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_
         define_tool(ToolRegistration {
             name: "delegate".to_owned(),
             description: "Delegates".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1870,7 +1868,7 @@ async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "delegate",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -1881,11 +1879,11 @@ async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("child answer")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("child answer"))),
             None,
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("done")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("done"))),
             None,
         )),
     ]);
@@ -1920,7 +1918,7 @@ async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_
         .expect("submission");
 
     assert!(
-        handle
+        match handle
             .submit(
                 InputSubmissionDraft {
                     request_id: None,
@@ -1930,9 +1928,12 @@ async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_
                 context(),
             )
             .await
-            .expect_err("submit after end")
-            .to_string()
-            .contains("invocation has ended")
+        {
+            Ok(_) => panic!("submit after end"),
+            Err(err) => err,
+        }
+        .to_string()
+        .contains("invocation has ended")
     );
     assert!(
         handle
@@ -1996,19 +1997,22 @@ async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_
     let setup = chat_setup(None);
     let ready = deferred::<(ConversationId, TaskId)>();
     let go = deferred::<()>();
-    let queued =
-        deferred::<support::task_support::Tracked<pi_js::Result<pi_durable::harness::submissions::SubmissionHandle>>>();
+    let queued = deferred::<()>();
+    let queued_slot = Arc::new(Mutex::new(
+        None::<support::task_support::Tracked<pi_js::Result<pi_durable::harness::submissions::SubmissionHandle>>>,
+    ));
 
     let ready_c = ready.clone();
     let go_c = go.clone();
     let queued_c = queued.clone();
+    let queued_slot_for_tool = Arc::clone(&queued_slot);
 
     add_tool(
         &setup.registry,
         define_tool(ToolRegistration {
             name: "delegate".to_owned(),
             description: "Delegates late".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -2017,6 +2021,7 @@ async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_
                 let ready_c = ready_c.clone();
                 let go_c = go_c.clone();
                 let queued_c = queued_c.clone();
+                let queued_slot_c = Arc::clone(&queued_slot_for_tool);
                 Box::pin(async move {
                     let task_id = api.task_id();
                     let child = api
@@ -2047,7 +2052,8 @@ async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_
                             )
                             .await
                     });
-                    queued_c.resolve(submitting);
+                    *queued_slot_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitting);
+                    queued_c.resolve(());
                     match call_context.abort_signal() {
                         Some(sig) => aborted(&sig).await,
                         None => Ok(ToolExecutionResult::default()),
@@ -2064,7 +2070,7 @@ async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_
         .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "delegate",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -2109,7 +2115,12 @@ async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_
     let harness_c = opened.harness.clone();
     let aborting = track(async move { harness_c.abort_task(task_id, context()).await });
     go.resolve(());
-    let submitting = queued.wait().await.expect("queued");
+    queued.wait().await.expect("queued");
+    let submitting = queued_slot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .expect("submitting");
     release.resolve(());
     holding.wait().await.expect("holding");
     aborting.wait().await.expect("aborting");
@@ -2150,7 +2161,7 @@ async fn aborts_a_subagent_run_with_its_parents_conversation_rejecting_the_waiti
         define_tool(ToolRegistration {
             name: "delegate".to_owned(),
             description: "Delegates".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -2220,14 +2231,14 @@ async fn aborts_a_subagent_run_with_its_parents_conversation_rejecting_the_waiti
     .expect("add tool");
 
     let child_run = gated_response(faux_assistant_message(
-        FauxAssistantMessageContent::Block(faux_text("never")),
+        FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("never"))),
         None,
     ));
     setup.faux.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "delegate",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -2291,7 +2302,7 @@ async fn aborts_a_subagent_run_with_its_parents_conversation_rejecting_the_waiti
 async fn lets_a_running_tool_abort_its_owned_child_and_continue() {
     let setup = chat_setup(None);
     let child_run = gated_response(faux_assistant_message(
-        FauxAssistantMessageContent::Block(faux_text("never")),
+        FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("never"))),
         None,
     ));
     let reached_c = child_run.reached.clone();
@@ -2301,7 +2312,7 @@ async fn lets_a_running_tool_abort_its_owned_child_and_continue() {
         define_tool(ToolRegistration {
             name: "delegate".to_owned(),
             description: "Delegates and cancels".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -2369,7 +2380,7 @@ async fn lets_a_running_tool_abort_its_owned_child_and_continue() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "delegate",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -2381,7 +2392,7 @@ async fn lets_a_running_tool_abort_its_owned_child_and_continue() {
         )),
         child_run.step,
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("done")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("done"))),
             None,
         )),
     ]);
@@ -2416,7 +2427,7 @@ async fn aborts_the_children_of_a_tool_call_that_throws_or_is_interrupted_while_
     let children = Arc::new(Mutex::new(Vec::<TaskId<()>>::new()));
     let tool_running = deferred::<()>();
     let setup = chat_setup(None);
-    add_task(&setup.registry, hold.clone().any(), None).expect("add hold");
+    add_task(&setup.registry, hold.clone().into_any(), None).expect("add hold");
 
     let children_c = Arc::clone(&children);
     let running_c = tool_running.clone();
@@ -2475,7 +2486,7 @@ async fn aborts_the_children_of_a_tool_call_that_throws_or_is_interrupted_while_
     .expect("add spawn");
 
     let call = |mode: &str, id: &str| {
-        let mut args = JsonObject::new();
+        let mut args = IndexMap::new();
         args.insert("mode".to_owned(), JsonValue::String(mode.to_owned()));
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
@@ -2495,7 +2506,7 @@ async fn aborts_the_children_of_a_tool_call_that_throws_or_is_interrupted_while_
     setup.faux.set_responses(vec![
         call("throw", "c1"),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("after throw")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("after throw"))),
             None,
         )),
         call("hang", "c2"),
@@ -2545,7 +2556,7 @@ async fn aborts_the_children_of_a_tool_call_that_throws_or_is_interrupted_while_
     setup
         .faux
         .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("after interrupt")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("after interrupt"))),
             None,
         ))]);
     opened = open_chat(open_sqlite(&path).await, &setup, OpenChatEnv::None)
@@ -2615,7 +2626,7 @@ async fn reruns_a_replay_safe_subagent_tool_after_a_restart_with_the_same_child_
         define_tool(ToolRegistration {
             name: "subagent".to_owned(),
             description: "Delegates".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: Some(ToolReplayMode::Safe),
             execution_mode: None,
             prepare_arguments: None,
@@ -2691,14 +2702,14 @@ async fn reruns_a_replay_safe_subagent_tool_after_a_restart_with_the_same_child_
     .expect("add tool");
 
     let child_run = gated_response(faux_assistant_message(
-        FauxAssistantMessageContent::Block(faux_text("never")),
+        FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("never"))),
         None,
     ));
     setup.faux.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "subagent",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -2732,11 +2743,11 @@ async fn reruns_a_replay_safe_subagent_tool_after_a_restart_with_the_same_child_
 
     setup.faux.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("child answer")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("child answer"))),
             None,
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("done")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("done"))),
             None,
         )),
     ]);
@@ -2807,7 +2818,7 @@ struct SupervisorResult {
 async fn lets_a_background_supervisor_resubmit_after_a_restart_without_submitting_twice() {
     let (_dir, path) = sqlite_path().await;
     let children_doc: ConversationDocToken<ChildrenDoc> = define_conversation_doc(
-        latest_fork_to_document_fork(LatestFork::Initial),
+        LatestFork::Initial.into(),
         DocDefinitionInput {
             kind: "test.children",
             version: 1,
@@ -2896,15 +2907,15 @@ async fn lets_a_background_supervisor_resubmit_after_a_restart_without_submittin
         });
 
     let setup = chat_setup(None);
-    add_task(&setup.registry, supervisor_task.clone().any(), None).expect("add supervisor");
+    add_task(&setup.registry, supervisor_task.clone().into_any(), None).expect("add supervisor");
     let first = gated_response(faux_assistant_message(
-        FauxAssistantMessageContent::Block(faux_text("never")),
+        FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("never"))),
         None,
     ));
     setup.faux.set_responses(vec![
         first.step,
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Block(faux_text("answer")),
+            FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("answer"))),
             None,
         )),
     ]);
@@ -2949,7 +2960,6 @@ async fn lets_a_background_supervisor_resubmit_after_a_restart_without_submittin
                 .await?;
                 tx.doc_conversation(&doc_c2, root_id).await?.update(|d| {
                     d.child = Some(created.id);
-                    Ok(())
                 })?;
                 Ok((supervisor, created.id))
             },

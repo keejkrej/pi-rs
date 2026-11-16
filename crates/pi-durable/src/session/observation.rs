@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use pi_chord::context::without_abort_signal;
 use pi_chord::delta::{Op, OpReplace, ReplaceVerb};
+use pi_chord::types::ReplicatedStateSourceSnapshot;
 use pi_chord::{
     Context, JsonValue, ReplicatedStateSource, ReplicatedStateSourceAttachment, ReplicatedStateSourceFrame,
-    ReplicatedStateSourceSnapshot,
 };
 use pi_js::abort::{AbortSignal, ListenerGuard};
 use tokio::sync::watch;
@@ -388,6 +388,7 @@ pub struct CommittedWatch<T> {
     to_json: fn(&T) -> JsonValue,
     replace: Option<Box<dyn Fn() -> T + Send + Sync>>,
     closed_tx: watch::Sender<Option<WatchEnd>>,
+    _closed_rx: watch::Receiver<Option<WatchEnd>>,
     state: Mutex<WatchState<T>>,
 }
 
@@ -419,13 +420,14 @@ impl<T: Clone + Send + Sync + 'static> CommittedWatch<T> {
         detach: Box<dyn FnOnce() + Send + Sync>,
         replace: Option<Box<dyn Fn() -> T + Send + Sync>>,
     ) -> Arc<Self> {
-        let (closed_tx, _) = watch::channel(None);
+        let (closed_tx, closed_rx) = watch::channel(None);
         Arc::new_cyclic(|weak| Self {
             self_weak: weak.clone(),
             is_retired,
             to_json,
             replace,
             closed_tx,
+            _closed_rx: closed_rx,
             state: Mutex::new(WatchState {
                 value,
                 detach: Some(detach),
@@ -657,7 +659,7 @@ impl<T: Clone + Send + Sync + 'static> CommittedWatch<T> {
         if let Some(detach) = detach {
             detach();
         }
-        let _ = self.closed_tx.send(Some(resolved_end));
+        let _ = self.closed_tx.send_replace(Some(resolved_end));
     }
 }
 
@@ -669,6 +671,10 @@ impl<T: Clone + Send + Sync + 'static> WatchHandleApi<T> for CommittedWatch<T> {
 
     fn start(&self, listener: WatchListener<T>) -> pi_js::Result<()> {
         CommittedWatch::start(self, listener)
+    }
+
+    fn stop_now(&self) {
+        CommittedWatch::terminate(self, WatchEnd::Stopped);
     }
 
     async fn stop(&self) -> WatchEnd {

@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use pi_chord::delta::{Op, OpReplace, ReplaceVerb};
 use pi_durable::documents::{
-    DocDefinitionCallbacks, DocDefinitionInput, DocFamilyDefinitionInput, define_conversation_doc_family,
-    define_rewindable_conversation_doc, define_rewindable_conversation_doc_with, define_session_doc,
+    DocDefinitionCallbacks, DocDefinitionInput, DocFamilyDefinitionInput, define_rewindable_conversation_doc,
+    define_rewindable_conversation_doc_family, define_rewindable_conversation_doc_with, define_session_doc,
     define_session_doc_with,
 };
 use pi_durable::types::{
@@ -265,7 +265,7 @@ async fn selects_bases_only_for_nonempty_ordinary_batches_and_passes_exact_revis
         StorageWrite::DocumentChange {
             content: DocumentContent::Base { value, .. },
             ..
-        } => assert_eq!(value, snapshot.items_as_json_object().expect("base obj")),
+        } => assert_eq!(value, &snapshot.items_as_json_object().expect("base obj")),
         other => panic!("Expected checkpoint base, got {other:?}"),
     }
 }
@@ -1619,7 +1619,7 @@ async fn migrates_current_and_historical_rewindable_values_independently_and_fol
         },
     )
     .expect("v1");
-    let family = define_conversation_doc_family(
+    let _family = define_rewindable_conversation_doc_family(
         RewindableFork::AsOf,
         DocFamilyDefinitionInput {
             kind: "history.family",
@@ -2172,8 +2172,8 @@ async fn sends_observers_of_older_shape_root_replacement_after_newer_token_write
         .expect("state")
         .expect("present");
     let watch = harness
-        .facade
-        .watch_doc_session(&v1_doc, context())
+        .session
+        .watch_doc_erased(&v1_doc.definition, None, None, None, context())
         .await
         .expect("watch")
         .expect("present");
@@ -2212,11 +2212,10 @@ async fn sends_observers_of_older_shape_root_replacement_after_newer_token_write
     }
     done_rx.await.expect("delivered");
     assert_eq!(state.as_raw().value(), json!({ "names": ["first", "second"] }));
-    let raw_watch = harness
-        .session
-        .watch_erased(&v1_doc.definition, None, None, None, context())
-        .await;
-    drop(raw_watch);
+    assert_eq!(
+        watch.value().expect("watch value").get("names").cloned(),
+        Some(json!(["first", "second"]))
+    );
     assert_eq!(
         *frames.lock().unwrap_or_else(|e| e.into_inner()),
         vec![vec![Op::Replace(OpReplace(

@@ -2,7 +2,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -21,12 +20,12 @@ use pi_durable::harness::types::{
     ToolExecutionResult, ToolRegistration, ToolResultContentBlock,
 };
 use pi_durable::session::transaction::Tx;
-use pi_durable::tasks::{AnyTask, TaskOwnership};
+use pi_durable::tasks::AnyTask;
 use pi_durable::tools::file_mutation_queue::with_file_mutation_queue;
 use pi_durable::tools::image::detect_supported_image_mime_type;
 use pi_durable::tools::{BashToolOptions, create_bash_tool, create_edit_tool, create_read_tool, create_write_tool};
 use pi_durable::truncate::DEFAULT_MAX_LINES;
-use pi_durable::types::{ConversationId, DocumentWatch, EntryId, ErasedTaskRecord, JsonObject, TaskId};
+use pi_durable::types::{ConversationId, DocumentWatch, EntryId, ErasedTaskRecord, JsonObject, TaskId, TaskOwnership};
 use pi_js::abort::AbortController;
 use pi_js::vendor::jsdiff::apply_patch;
 use pretty_assertions::assert_eq;
@@ -275,7 +274,7 @@ async fn run_tool(
 
 async fn run_failing(tool: &ToolRegistration, args: JsonValue, env: Arc<dyn ExecutionEnv>) -> FailingOutcome {
     let fake = fake_api(Some(env));
-    let err = (tool.execute)(args, fake.api, BACKGROUND_CONTEXT)
+    let err = (tool.execute)(args, fake.api, BACKGROUND_CONTEXT.clone())
         .await
         .expect_err("Expected the tool to throw");
     let output = fake.output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -335,87 +334,114 @@ impl SignalFlag {
 }
 
 async fn delay_ms(ms: u64) {
-    pi_js::time::sleep(Duration::from_millis(ms)).await;
+    let _ = pi_js::time::sleep(ms, None).await;
 }
 
-macro_rules! delegate_fs_common {
-    ($inner:expr) => {
-        fn cwd(&self) -> &str {
-            $inner.cwd()
-        }
-        async fn absolute_path(&self, path: &str, context: &Context) -> Result<String, FileError> {
-            $inner.absolute_path(path, context).await
-        }
-        async fn join_path(&self, parts: &[&str], context: &Context) -> Result<String, FileError> {
-            $inner.join_path(parts, context).await
-        }
-        async fn open_text_line_reader(
-            &self,
-            path: &str,
-            context: &Context,
-        ) -> Result<Box<dyn TextLineReader>, FileError> {
-            $inner.open_text_line_reader(path, context).await
-        }
-        async fn read_text_lines(
-            &self,
-            path: &str,
-            options: Option<ReadTextLinesOptions>,
-            context: &Context,
-        ) -> Result<Vec<String>, FileError> {
-            $inner.read_text_lines(path, options, context).await
-        }
-        async fn read_binary_file(&self, path: &str, context: &Context) -> Result<Vec<u8>, FileError> {
-            $inner.read_binary_file(path, context).await
-        }
-        async fn append_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
-            $inner.append_file(path, content, context).await
-        }
-        async fn truncate_file(&self, path: &str, size: u64, context: &Context) -> Result<(), FileError> {
-            $inner.truncate_file(path, size, context).await
-        }
-        async fn flush_file(&self, path: &str, context: &Context) -> Result<(), FileError> {
-            $inner.flush_file(path, context).await
-        }
-        async fn rename_file(
-            &self,
-            source_path: &str,
-            destination_path: &str,
-            context: &Context,
-        ) -> Result<(), FileError> {
-            $inner.rename_file(source_path, destination_path, context).await
-        }
-        async fn file_info(&self, path: &str, context: &Context) -> Result<FileInfo, FileError> {
-            $inner.file_info(path, context).await
-        }
-        async fn list_dir(&self, path: &str, context: &Context) -> Result<Vec<FileInfo>, FileError> {
-            $inner.list_dir(path, context).await
-        }
-        async fn canonical_path(&self, path: &str, context: &Context) -> Result<String, FileError> {
-            $inner.canonical_path(path, context).await
-        }
-        async fn exists(&self, path: &str, context: &Context) -> Result<bool, FileError> {
-            $inner.exists(path, context).await
-        }
-        async fn create_dir(
-            &self,
-            path: &str,
-            options: Option<CreateDirOptions>,
-            context: &Context,
-        ) -> Result<(), FileError> {
-            $inner.create_dir(path, options, context).await
-        }
-        async fn remove(&self, path: &str, options: Option<RemoveOptions>, context: &Context) -> Result<(), FileError> {
-            $inner.remove(path, options, context).await
-        }
-        async fn create_temp_dir(&self, prefix: Option<&str>, context: &Context) -> Result<String, FileError> {
-            $inner.create_temp_dir(prefix, context).await
-        }
-        async fn create_temp_file(
-            &self,
-            options: Option<CreateTempFileOptions>,
-            context: &Context,
-        ) -> Result<String, FileError> {
-            $inner.create_temp_file(options, context).await
+macro_rules! impl_delegating_fs {
+    ($ty:ty, id: |$id_self:ident| $id_expr:expr, read: |$r_self:ident, $r_path:ident, $r_ctx:ident| $read_expr:expr, write: |$w_self:ident, $w_path:ident, $w_content:ident, $w_ctx:ident| $write_expr:expr) => {
+        #[async_trait]
+        impl FileSystem for $ty {
+            fn id(&$id_self) -> &str {
+                $id_expr
+            }
+            fn cwd(&self) -> &str {
+                self.inner.cwd()
+            }
+            async fn read_text_file(&$r_self, $r_path: &str, $r_ctx: &Context) -> Result<String, FileError> {
+                $read_expr
+            }
+            async fn write_file(
+                &$w_self,
+                $w_path: &str,
+                $w_content: FileContent<'_>,
+                $w_ctx: &Context,
+            ) -> Result<(), FileError> {
+                $write_expr
+            }
+            async fn absolute_path(&self, path: &str, context: &Context) -> Result<String, FileError> {
+                self.inner.absolute_path(path, context).await
+            }
+            async fn join_path(&self, parts: &[&str], context: &Context) -> Result<String, FileError> {
+                self.inner.join_path(parts, context).await
+            }
+            async fn open_text_line_reader(
+                &self,
+                path: &str,
+                context: &Context,
+            ) -> Result<Box<dyn TextLineReader>, FileError> {
+                self.inner.open_text_line_reader(path, context).await
+            }
+            async fn read_text_lines(
+                &self,
+                path: &str,
+                options: Option<ReadTextLinesOptions>,
+                context: &Context,
+            ) -> Result<Vec<String>, FileError> {
+                self.inner.read_text_lines(path, options, context).await
+            }
+            async fn read_binary_file(&self, path: &str, context: &Context) -> Result<Vec<u8>, FileError> {
+                self.inner.read_binary_file(path, context).await
+            }
+            async fn append_file(
+                &self,
+                path: &str,
+                content: FileContent<'_>,
+                context: &Context,
+            ) -> Result<(), FileError> {
+                self.inner.append_file(path, content, context).await
+            }
+            async fn truncate_file(&self, path: &str, size: u64, context: &Context) -> Result<(), FileError> {
+                self.inner.truncate_file(path, size, context).await
+            }
+            async fn flush_file(&self, path: &str, context: &Context) -> Result<(), FileError> {
+                self.inner.flush_file(path, context).await
+            }
+            async fn rename_file(
+                &self,
+                source_path: &str,
+                destination_path: &str,
+                context: &Context,
+            ) -> Result<(), FileError> {
+                self.inner.rename_file(source_path, destination_path, context).await
+            }
+            async fn file_info(&self, path: &str, context: &Context) -> Result<FileInfo, FileError> {
+                self.inner.file_info(path, context).await
+            }
+            async fn list_dir(&self, path: &str, context: &Context) -> Result<Vec<FileInfo>, FileError> {
+                self.inner.list_dir(path, context).await
+            }
+            async fn canonical_path(&self, path: &str, context: &Context) -> Result<String, FileError> {
+                self.inner.canonical_path(path, context).await
+            }
+            async fn exists(&self, path: &str, context: &Context) -> Result<bool, FileError> {
+                self.inner.exists(path, context).await
+            }
+            async fn create_dir(
+                &self,
+                path: &str,
+                options: Option<CreateDirOptions>,
+                context: &Context,
+            ) -> Result<(), FileError> {
+                self.inner.create_dir(path, options, context).await
+            }
+            async fn remove(
+                &self,
+                path: &str,
+                options: Option<RemoveOptions>,
+                context: &Context,
+            ) -> Result<(), FileError> {
+                self.inner.remove(path, options, context).await
+            }
+            async fn create_temp_dir(&self, prefix: Option<&str>, context: &Context) -> Result<String, FileError> {
+                self.inner.create_temp_dir(prefix, context).await
+            }
+            async fn create_temp_file(
+                &self,
+                options: Option<CreateTempFileOptions>,
+                context: &Context,
+            ) -> Result<String, FileError> {
+                self.inner.create_temp_file(options, context).await
+            }
         }
     };
 }
@@ -439,20 +465,15 @@ impl EnvCleanup for SlowReadExecutionEnv {
     }
 }
 
-#[async_trait]
-impl FileSystem for SlowReadExecutionEnv {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-    async fn read_text_file(&self, path: &str, context: &Context) -> Result<String, FileError> {
+impl_delegating_fs!(
+    SlowReadExecutionEnv,
+    id: |self| self.inner.id(),
+    read: |self, path, context| {
         delay_ms(20).await;
         self.inner.read_text_file(path, context).await
-    }
-    async fn write_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
-        self.inner.write_file(path, content, context).await
-    }
-    delegate_fs_common!(self.inner);
-}
+    },
+    write: |self, path, content, context| self.inner.write_file(path, content, context).await
+);
 
 #[async_trait]
 impl Shell for SlowReadExecutionEnv {
@@ -493,15 +514,11 @@ impl EnvCleanup for BlockingWriteExecutionEnv {
     }
 }
 
-#[async_trait]
-impl FileSystem for BlockingWriteExecutionEnv {
-    fn id(&self) -> &str {
-        self.custom_id.as_deref().unwrap_or_else(|| self.inner.id())
-    }
-    async fn read_text_file(&self, path: &str, context: &Context) -> Result<String, FileError> {
-        self.inner.read_text_file(path, context).await
-    }
-    async fn write_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
+impl_delegating_fs!(
+    BlockingWriteExecutionEnv,
+    id: |self| self.custom_id.as_deref().unwrap_or_else(|| self.inner.id()),
+    read: |self, path, context| self.inner.read_text_file(path, context).await,
+    write: |self, path, content, context| {
         if let FileContent::Text(text) = content {
             if text == "first\n" {
                 self.first_write_started.resolve();
@@ -512,8 +529,7 @@ impl FileSystem for BlockingWriteExecutionEnv {
         }
         self.inner.write_file(path, content, context).await
     }
-    delegate_fs_common!(self.inner);
-}
+);
 
 #[async_trait]
 impl Shell for BlockingWriteExecutionEnv {
@@ -554,15 +570,11 @@ impl EnvCleanup for BlockingEditExecutionEnv {
     }
 }
 
-#[async_trait]
-impl FileSystem for BlockingEditExecutionEnv {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-    async fn read_text_file(&self, path: &str, context: &Context) -> Result<String, FileError> {
-        self.inner.read_text_file(path, context).await
-    }
-    async fn write_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
+impl_delegating_fs!(
+    BlockingEditExecutionEnv,
+    id: |self| self.inner.id(),
+    read: |self, path, context| self.inner.read_text_file(path, context).await,
+    write: |self, path, content, context| {
         if let FileContent::Text(text) = content {
             if text == "ALPHA\nbeta\n" {
                 self.first_edit_write_started.resolve();
@@ -577,8 +589,7 @@ impl FileSystem for BlockingEditExecutionEnv {
         }
         self.inner.write_file(path, content, context).await
     }
-    delegate_fs_common!(self.inner);
-}
+);
 
 #[async_trait]
 impl Shell for BlockingEditExecutionEnv {
@@ -613,19 +624,12 @@ impl EnvCleanup for TimeoutOutputExecutionEnv {
     }
 }
 
-#[async_trait]
-impl FileSystem for TimeoutOutputExecutionEnv {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-    async fn read_text_file(&self, path: &str, context: &Context) -> Result<String, FileError> {
-        self.inner.read_text_file(path, context).await
-    }
-    async fn write_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
-        self.inner.write_file(path, content, context).await
-    }
-    delegate_fs_common!(self.inner);
-}
+impl_delegating_fs!(
+    TimeoutOutputExecutionEnv,
+    id: |self| self.inner.id(),
+    read: |self, path, context| self.inner.read_text_file(path, context).await,
+    write: |self, path, content, context| self.inner.write_file(path, content, context).await
+);
 
 #[async_trait]
 impl Shell for TimeoutOutputExecutionEnv {
@@ -653,13 +657,13 @@ impl Shell for TimeoutOutputExecutionEnv {
                 )
                 .await,
         )
-        .map_err(|e| ExecutionError::new(ExecutionErrorCode::SpawnFailed, e.to_string()))?;
+        .map_err(|e| ExecutionError::new(ExecutionErrorCode::SpawnError, e.to_string()))?;
         get_or_throw(
             self.inner
                 .write_file(&spill_path, FileContent::Text(&output), context)
                 .await,
         )
-        .map_err(|e| ExecutionError::new(ExecutionErrorCode::SpawnFailed, e.to_string()))?;
+        .map_err(|e| ExecutionError::new(ExecutionErrorCode::SpawnError, e.to_string()))?;
         if let Some(on_output) = options.as_ref().and_then(|o| o.on_output.as_ref()) {
             let _ = on_output(&output, context);
         }
@@ -899,7 +903,7 @@ async fn write_keeps_mutation_queue_locked_until_aborted_write_settles() {
     let env = Arc::new(BlockingWriteExecutionEnv::new(&path, None));
     let tool = Arc::new(create_write_tool());
     let controller = AbortController::new();
-    let aborted_ctx = with_abort_signal(controller.signal(), &BACKGROUND_CONTEXT);
+    let aborted_ctx = with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone());
 
     let tool1 = Arc::clone(&tool);
     let env1: Arc<dyn ExecutionEnv> = Arc::clone(&env) as Arc<dyn ExecutionEnv>;
@@ -971,7 +975,7 @@ async fn edit_applies_disjoint_edits_and_returns_both_diff_formats() {
     assert!(diff.contains("ALPHA"));
     assert!(diff.contains("GAMMA"));
     assert_eq!(
-        apply_patch(original, patch, Default::default()),
+        apply_patch(original, patch, Default::default()).expect("apply patch"),
         Some("ALPHA\nbeta\nGAMMA\ndelta\n".to_owned())
     );
     let read_back = get_or_throw(env.read_text_file("edit.txt", &BACKGROUND_CONTEXT).await).expect("read");
@@ -982,7 +986,7 @@ async fn edit_applies_disjoint_edits_and_returns_both_diff_formats() {
 fn edit_repairs_edits_sent_as_json_string_single_object_or_top_level_without_mutating() {
     let prepare = create_edit_tool().prepare_arguments.expect("prepare_arguments");
     let edit = json!({ "oldText": "a", "newText": "b" });
-    let edits_json = pi_js::json::stringify(&json!([edit])).expect("stringify array");
+    let edits_json = pi_js::json::stringify(&json!([edit]));
     let as_string = json!({ "path": "f", "edits": edits_json });
     assert_eq!(
         prepare(&as_string).expect("prepare"),
@@ -990,7 +994,7 @@ fn edit_repairs_edits_sent_as_json_string_single_object_or_top_level_without_mut
     );
     assert_eq!(as_string["edits"], json!(edits_json));
 
-    let single_json = pi_js::json::stringify(&edit).expect("stringify single");
+    let single_json = pi_js::json::stringify(&edit);
     assert_eq!(
         prepare(&json!({ "path": "f", "edits": single_json })).expect("prepare"),
         json!({ "path": "f", "edits": [edit] })
@@ -1085,7 +1089,7 @@ async fn edit_keeps_mutation_queue_locked_until_aborted_edit_write_settles() {
 
     let tool = Arc::new(create_edit_tool());
     let controller = AbortController::new();
-    let aborted_ctx = with_abort_signal(controller.signal(), &BACKGROUND_CONTEXT);
+    let aborted_ctx = with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone());
 
     let tool1 = Arc::clone(&tool);
     let env1: Arc<dyn ExecutionEnv> = Arc::clone(&env) as Arc<dyn ExecutionEnv>;
@@ -1454,23 +1458,18 @@ async fn bash_prepares_command_cwd_and_explicit_environment_with_calls_api() {
     let tool = create_bash_tool(Some(BashToolOptions {
         command_prefix: Some("prefix=ready".to_owned()),
         prepare: Some(Arc::new(move |execution, api, call_context| {
-            let received_env_id_cb = Arc::clone(&received_env_id_cb);
-            let received_aborted_cb = Arc::clone(&received_aborted_cb);
-            let workspace_cb = workspace_cb.clone();
-            Box::pin(async move {
-                *received_env_id_cb.lock().unwrap_or_else(|e| e.into_inner()) = api.env().map(|e| e.cwd().to_owned());
-                *received_aborted_cb.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(call_context.abort_signal().is_some());
-                execution.cwd = workspace_cb;
-                let mut explicit = IndexMap::new();
-                explicit.insert("PI_BASH_PREPARE_EXPLICIT".to_owned(), "explicit".to_owned());
-                execution.env = explicit;
-                execution.inherit_env = false;
-                execution.command.push_str(
-                    "\nprintf '%s:%s:%s:%s' \"$prefix\" \"${PI_BASH_PREPARE_INHERITED-}\" \"$PI_BASH_PREPARE_EXPLICIT\" \"$PWD\"",
-                );
-                Ok(())
-            })
+            *received_env_id_cb.lock().unwrap_or_else(|e| e.into_inner()) = api.env().map(|e| e.cwd().to_owned());
+            *received_aborted_cb.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(call_context.abort_signal().is_some());
+            execution.cwd = workspace_cb.clone();
+            let mut explicit = IndexMap::new();
+            explicit.insert("PI_BASH_PREPARE_EXPLICIT".to_owned(), "explicit".to_owned());
+            execution.env = explicit;
+            execution.inherit_env = false;
+            execution.command.push_str(
+                "\nprintf '%s:%s:%s:%s' \"$prefix\" \"${PI_BASH_PREPARE_INHERITED-}\" \"$PI_BASH_PREPARE_EXPLICIT\" \"$PWD\"",
+            );
+            Box::pin(async { Ok(()) })
         })),
     }));
 
@@ -1478,7 +1477,7 @@ async fn bash_prepares_command_cwd_and_explicit_environment_with_calls_api() {
         &tool,
         json!({ "command": ":" }),
         Some(Arc::clone(&env) as Arc<dyn ExecutionEnv>),
-        with_abort_signal(controller.signal(), &BACKGROUND_CONTEXT),
+        with_abort_signal(controller.signal(), BACKGROUND_CONTEXT.clone()),
     )
     .await
     .expect("bash");

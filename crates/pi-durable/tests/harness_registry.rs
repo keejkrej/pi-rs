@@ -20,8 +20,8 @@ use pi_durable::harness::registry::{Registry, create_registry};
 use pi_durable::harness::tool::TOOL_TASK;
 use pi_durable::harness::types::{
     Agent, AgentExtensionsFilter, AgentState, AgentToolsFilter, DocumentReader, DocumentReaderBackend, Extension,
-    GenerationHooks, HarnessSettingsSnapshot, HookResult, ModelRef, PromptInput, PromptSection, RegistryReader,
-    RegistrySnapshot, ToolExecutionResult, ToolHooks, ToolRegistration,
+    GenerationHooks, HarnessSettingsSnapshot, ModelRef, PromptInput, PromptSection, RegistryReader, RegistrySnapshot,
+    ToolExecutionResult, ToolHooks, ToolRegistration,
 };
 use pi_durable::tasks::{Task, TaskDefinition, define_task};
 use pi_durable::types::{ConversationId, EntryId, JsonObject, TaskId};
@@ -34,7 +34,7 @@ fn tool(name: &str, description: Option<&str>) -> ToolRegistration {
         description: description
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{name} tool")),
-        parameters: Type::object([]).to_value(),
+        parameters: Type::object::<_, &str>([]).to_value(),
         replay: None,
         execution_mode: None,
         prepare_arguments: None,
@@ -45,7 +45,10 @@ fn tool(name: &str, description: Option<&str>) -> ToolRegistration {
 
 fn task(name: &str, version: i64) -> Task<(), String, (), ()> {
     let mut phases = IndexMap::new();
-    phases.insert("run".to_owned(), Arc::new(|_, _, _| Box::pin(async { Ok(()) })) as _);
+    phases.insert(
+        "run".to_owned(),
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>) as _,
+    );
     define_task(TaskDefinition {
         name: name.to_owned(),
         version,
@@ -291,7 +294,8 @@ fn validates_the_registry_as_it_would_be_after_an_install_and_publishes_nothing_
 fn always_holds_the_built_in_tasks_which_are_not_an_extension() {
     let registry = create_registry();
     assert!(registry.snapshot().installed().is_empty());
-    let builtin_names: Vec<&str> = registry.snapshot().tasks().iter().map(|t| t.name()).collect();
+    let tasks = registry.snapshot().tasks();
+    let builtin_names: Vec<&str> = tasks.iter().map(|t| t.name()).collect();
     assert_eq!(
         builtin_names,
         vec![GENERATION_TASK.name(), TOOL_TASK.name(), COMPACTION_TASK.name()]
@@ -305,7 +309,8 @@ fn always_holds_the_built_in_tasks_which_are_not_an_extension() {
             ..Default::default()
         }))
         .expect("install custom");
-    let with_custom: Vec<&str> = registry.snapshot().tasks().iter().map(|t| t.name()).collect();
+    let custom_tasks = registry.snapshot().tasks();
+    let with_custom: Vec<&str> = custom_tasks.iter().map(|t| t.name()).collect();
     assert_eq!(
         with_custom,
         vec![
@@ -653,17 +658,17 @@ async fn orders_sections_by_extension_replaces_same_keys_in_place_and_renders_in
 fn collects_hooks_of_the_selected_extensions_in_extension_order_and_applies_field_defaults() {
     let local = create_registry();
     let first = ToolHooks {
-        before_tool: Some(Arc::new(|_, _, _| Box::pin(async { Ok(HookResult::Continue) }))),
+        before_tool: Some(Arc::new(|_, _, _| Box::pin(async { Ok(None) }))),
         after_tool: None,
     };
     let second = ToolHooks {
-        before_tool: Some(Arc::new(|_, _, _| Box::pin(async { Ok(HookResult::Continue) }))),
+        before_tool: Some(Arc::new(|_, _, _| Box::pin(async { Ok(None) }))),
         after_tool: None,
     };
     let on_yield = GenerationHooks {
         before_request: None,
         after_response: None,
-        on_yield: Some(Arc::new(|_, _, _| Box::pin(async { Ok(HookResult::Continue) }))),
+        on_yield: Some(Arc::new(|_, _, _| Box::pin(async { Ok(None) }))),
         after_tools: None,
     };
     local

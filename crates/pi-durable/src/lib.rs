@@ -68,7 +68,7 @@ pub use crate::session::transaction::{DocDraft, Tx};
 pub use crate::storage::memory::MemoryStorage;
 pub use crate::tasks::{AnyTask, Task, TaskDefinition, define_task};
 pub use crate::types::{
-    CheckpointInfo, CommitChange, CommitPublication, ContextEdit, ConversationId, ConversationOwnership,
+    AttachedState, CheckpointInfo, CommitChange, CommitPublication, ContextEdit, ConversationId, ConversationOwnership,
     ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentCommitChange, DocumentContent,
     DocumentCopySource, DocumentCreate, DocumentFork, DocumentHistory, DocumentId, DocumentPoint, DocumentQuery,
     DocumentRecord, DocumentScope, DocumentSemantics, DocumentState, DocumentWatch, EntryDraft, EntryDraftHead,

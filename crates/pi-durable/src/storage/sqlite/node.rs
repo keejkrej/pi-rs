@@ -151,7 +151,7 @@ pub struct NodeSqliteDatabase {
 }
 
 impl NodeSqliteDatabase {
-    pub fn new(mut conn: rusqlite::Connection) -> Self {
+    pub fn new(conn: rusqlite::Connection) -> Self {
         conn.set_prepared_statement_cache_capacity(128);
         Self {
             access: AsyncMutex::new(()),

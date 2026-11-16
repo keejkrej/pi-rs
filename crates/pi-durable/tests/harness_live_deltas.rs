@@ -4,7 +4,6 @@ mod support;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -13,7 +12,8 @@ use pi_ai::providers::faux::{
     FauxToolCallOptions, RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_tool_call,
 };
 use pi_ai::types::StopReason;
-use pi_ai::{JsonValue, Type};
+use pi_ai::{JsonValue, TSchema, Type};
+use pi_chord::Context;
 use pi_chord::delta::{
     AppendVerb, DeleteVerb, Op, OpAppend, OpDelete, OpSet, OpSplice, OpTruncate, Seg, SetVerb, SpliceVerb, TruncateVerb,
 };
@@ -26,10 +26,10 @@ use pi_durable::harness::types::{
 };
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::types::{
-    CheckpointInfo, CommitChange, CommitPublication, Context, ConversationId, ConversationQuery, ConversationRecord,
-    Cursor, DocumentAddress, DocumentContent, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, EntryId,
-    EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, Page, Seq, Storage, StorageWrite, StoredDocument,
-    SubmissionId, SubmissionQuery, SubmissionRecord, TableCommitChange, TaskId, TaskQuery,
+    CheckpointInfo, CommitChange, CommitPublication, ConversationId, ConversationQuery, ConversationRecord, Cursor,
+    DocumentAddress, DocumentContent, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, EntryId, EntryLookup,
+    EntryQuery, EntryRecord, ErasedTaskRecord, Page, Seq, Storage, StorageWrite, StoredDocument, SubmissionId,
+    SubmissionQuery, SubmissionRecord, TableCommitChange, TaskId, TaskQuery,
 };
 use pi_js::BoxFuture;
 use pretty_assertions::assert_eq;
@@ -125,16 +125,20 @@ impl DrivenTool {
             .lock()
             .expect("lock actions")
             .push_back(Box::new(move |api| {
+                let fut = action(api);
                 Box::pin(async move {
-                    action(api).await?;
+                    fut.await?;
                     Ok(true)
                 })
             }));
         self.notify.notify_one();
-        wait_for(|| {
-            let commits = Arc::clone(&self.commits);
-            async move { commits.lock().expect("lock commits").len() > before }
-        })
+        wait_for(
+            || {
+                let commits = Arc::clone(&self.commits);
+                async move { commits.lock().expect("lock commits").len() > before }
+            },
+            5_000,
+        )
         .await;
         self.commits
             .lock()
@@ -173,7 +177,7 @@ async fn drive(output_limits: Option<ToolOutputLimits>) -> DrivenTool {
         define_tool(ToolRegistration {
             name: "drive".to_owned(),
             description: "Driven by the test".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -232,13 +236,13 @@ async fn drive(output_limits: Option<ToolOutputLimits>) -> DrivenTool {
     let commits_cb = Arc::clone(&commits);
     let sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live" && !change.ops.is_empty() {
                     commits_cb.lock().expect("lock commits").push(change.ops);
                 }
             }
-        }))
+        })
         .expect("subscribe commits");
     let submission = opened
         .root
@@ -254,16 +258,19 @@ async fn drive(output_limits: Option<ToolOutputLimits>) -> DrivenTool {
         .expect("submit");
     let harness_wait = opened.harness.clone();
     let root_id = opened.root.id();
-    wait_for(|| {
-        let harness_wait = harness_wait.clone();
-        async move {
-            live_state(&harness_wait, root_id)
-                .await
-                .and_then(|s| s.tools)
-                .and_then(|t| t.into_iter().next())
-                .is_some_and(|slot| slot.status == ToolSlotStatus::Running)
-        }
-    })
+    wait_for(
+        || {
+            let harness_wait = harness_wait.clone();
+            async move {
+                live_state(&harness_wait, root_id)
+                    .await
+                    .and_then(|s| s.tools)
+                    .and_then(|t| t.into_iter().next())
+                    .is_some_and(|slot| slot.status == ToolSlotStatus::Running)
+            }
+        },
+        5_000,
+    )
     .await;
     DrivenTool {
         harness: opened.harness,
@@ -438,7 +445,7 @@ async fn hands_a_generation_over_to_its_tool_round_and_starts_a_tool_with_one_fi
         define_tool(ToolRegistration {
             name: "noop".to_owned(),
             description: "noop".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -481,13 +488,13 @@ async fn hands_a_generation_over_to_its_tool_round_and_starts_a_tool_with_one_fi
     let commits_cb = Arc::clone(&commits);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live" && !change.ops.is_empty() {
                     commits_cb.lock().expect("lock commits").push(change.ops);
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened
         .root
@@ -779,7 +786,7 @@ async fn diffs_details_leaf_by_leaf_and_appends_diagnostics() {
     assert_eq!(
         run.step(move |api| {
             let api = api.clone();
-            Box::pin(async move { api.details(json!({ "step": 1, "log": "a" }), context()).await })
+            Box::pin(async move { api.details(&json!({ "step": 1, "log": "a" }), context()).await })
         })
         .await,
         vec![op_s(details_path(), json!({ "step": 1, "log": "a" }))]
@@ -787,7 +794,7 @@ async fn diffs_details_leaf_by_leaf_and_appends_diagnostics() {
     let step2 = run
         .step(move |api| {
             let api = api.clone();
-            Box::pin(async move { api.details(json!({ "step": 2, "log": "ab" }), context()).await })
+            Box::pin(async move { api.details(&json!({ "step": 2, "log": "ab" }), context()).await })
         })
         .await;
     let mut expected_step = details_path();
@@ -800,7 +807,7 @@ async fn diffs_details_leaf_by_leaf_and_appends_diagnostics() {
     assert_eq!(
         run.step(move |api| {
             let api = api.clone();
-            Box::pin(async move { api.details(json!({ "step": 2 }), context()).await })
+            Box::pin(async move { api.details(&json!({ "step": 2 }), context()).await })
         })
         .await,
         vec![op_d(expected_log)]
@@ -851,7 +858,7 @@ async fn diffs_details_leaf_by_leaf_and_appends_diagnostics() {
 #[tokio::test]
 async fn streams_partial_text_as_appends() {
     let setup = chat_setup(Some(RegisterFauxProviderOptions {
-        tokens_per_second: Some(400),
+        tokens_per_second: Some(400.0),
         token_size: Some(FauxTokenSize {
             min: Some(4),
             max: Some(4),
@@ -871,13 +878,13 @@ async fn streams_partial_text_as_appends() {
     let commits_cb = Arc::clone(&commits);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live" && !change.ops.is_empty() {
                     commits_cb.lock().expect("lock commits").push(change.ops);
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened
         .root
@@ -938,7 +945,7 @@ async fn stores_a_complete_base_exactly_in_the_commits_where_nothing_runs() {
             define_tool(ToolRegistration {
                 name: name.to_owned(),
                 description: name.to_owned(),
-                parameters: Type::object([]).to_value(),
+                parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
                 replay: None,
                 execution_mode: None,
                 prepare_arguments: None,
@@ -947,7 +954,7 @@ async fn stores_a_complete_base_exactly_in_the_commits_where_nothing_runs() {
                     let name_owned = name_owned.clone();
                     Box::pin(async move {
                         api.output(&format!("{name_owned} output\n"))?;
-                        pi_js::time::sleep(Duration::from_millis(150)).await;
+                        pi_js::time::sleep(150, None).await?;
                         api.output(&format!("{name_owned} more\n"))?;
                         Ok(ToolExecutionResult::default())
                     })
@@ -994,7 +1001,7 @@ async fn stores_a_complete_base_exactly_in_the_commits_where_nothing_runs() {
     let live_id_cb = Arc::clone(&live_id);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind != "pi.live" {
                     continue;
@@ -1006,7 +1013,7 @@ async fn stores_a_complete_base_exactly_in_the_commits_where_nothing_runs() {
                     values_cb.lock().expect("lock values").insert(publication.seq, parsed);
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened
         .root
@@ -1058,7 +1065,7 @@ async fn starts_calls_the_request_did_not_offer_as_done_and_marks_a_faulted_tool
         define_tool(ToolRegistration {
             name: "bad".to_owned(),
             description: "bad".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1067,7 +1074,7 @@ async fn starts_calls_the_request_did_not_offer_as_done_and_marks_a_faulted_tool
                 let storage_cb = Arc::clone(&storage_cb);
                 Box::pin(async move {
                     // Reject the result commit so the scheduler faults the tool task.
-                    storage_cb.fail_next_commit(pi_js::Error::msg("not json"));
+                    storage_cb.fail_next_commit(pi_durable::errors::StorageRejected::new("not json").into_error());
                     Ok(ToolExecutionResult {
                         content: Some(Vec::new()),
                         ..Default::default()
@@ -1111,13 +1118,13 @@ async fn starts_calls_the_request_did_not_offer_as_done_and_marks_a_faulted_tool
     let commits_cb = Arc::clone(&commits);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live" && !change.ops.is_empty() {
                     commits_cb.lock().expect("lock commits").push(change.ops);
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened
         .root
@@ -1188,7 +1195,7 @@ async fn commits_the_tool_calling_answer_its_tool_tasks_the_generations_wait_and
         define_tool(ToolRegistration {
             name: "noop".to_owned(),
             description: "noop".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1240,7 +1247,7 @@ async fn commits_the_tool_calling_answer_its_tool_tasks_the_generations_wait_and
     let handover_cb = Arc::clone(&handover);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live"
                     && let Some(val) = change.value
@@ -1253,7 +1260,7 @@ async fn commits_the_tool_calling_answer_its_tool_tasks_the_generations_wait_and
                     }
                 }
             }
-        }))
+        })
         .expect("subscribe");
     opened
         .root
@@ -1295,7 +1302,7 @@ async fn writes_an_aborted_tool_s_slot_with_field_level_ops() {
     .await;
     run.step(|api| {
         let api = api.clone();
-        Box::pin(async move { api.details(json!({ "n": 1 }), context()).await })
+        Box::pin(async move { api.details(&json!({ "n": 1 }), context()).await })
     })
     .await;
     let task_id = live_state(&run.harness, run.root_id)
@@ -1318,14 +1325,17 @@ async fn writes_an_aborted_tool_s_slot_with_field_level_ops() {
             )
         })
     };
-    wait_for(|| {
-        let commits = Arc::clone(&run.commits);
-        async move {
-            commits.lock().expect("lock commits")[before..]
-                .iter()
-                .any(|ops| is_abort_commit(ops))
-        }
-    })
+    wait_for(
+        || {
+            let commits = Arc::clone(&run.commits);
+            async move {
+                commits.lock().expect("lock commits")[before..]
+                    .iter()
+                    .any(|ops| is_abort_commit(ops))
+            }
+        },
+        5_000,
+    )
     .await;
     let snapshot = run.commits_snapshot();
     let abort_commit = snapshot[before..]

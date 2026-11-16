@@ -6,26 +6,27 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
-use pi_ai::create_models;
-use pi_chord::Context;
+use pi_ai::{TSchema, Type, create_models};
+use pi_durable::AbortTaskResult;
+use pi_durable::define_tool;
 use pi_durable::documents::{DocDefinitionInput, TaskDocToken, define_task_doc};
 use pi_durable::harness::harness::Harness;
-use pi_durable::harness::registry::{Registry, RegistryImpl, create_registry};
-use pi_durable::harness::types::{HarnessOptions, ToolExecutionResult, ToolRegistration};
+use pi_durable::harness::registry::{RegistryImpl, create_registry};
+use pi_durable::harness::types::{HarnessOptions, RegistryReader, ToolExecutionResult, ToolRegistration};
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::storage::sqlite::node::{NodeSqliteStorage, NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::tasks::{Task, TaskDefinition, TypedMigrateFn, TypedPhaseHandler, define_task, define_tool};
+use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
+use pi_durable::tasks::{Task, TaskDefinition, TypedMigrateFn, TypedPhaseHandler, define_task};
 use pi_durable::types::{
     JsonValue, NextTaskState, Storage, StorageWrite, TaskId, TaskOptions, TaskOutcome, TaskOwnership, TaskQuery,
     TaskState, TaskStatus,
 };
-use pi_js::vendor::typebox::Type;
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::harness_support::{add_task, add_tool};
-use support::session_support::{ControlledStorage, context, flush};
+use support::session_support::{ControlledStorage, Gate, context, flush};
 use support::task_support::{
-    OpenTasksOptions, aborted, aborted_with, completed, counting_reader, deferred, eventually_sync, open_tasks, track,
+    Deferred, OpenTasksOptions, OpenedTasks, aborted, aborted_with, completed, counting_reader, deferred,
+    eventually_sync, open_tasks, track,
 };
 use tempfile::TempDir;
 
@@ -35,7 +36,7 @@ async fn sqlite_path() -> (TempDir, String) {
     (dir, path)
 }
 
-async fn open_sqlite(path: &str) -> Arc<NodeSqliteStorage> {
+async fn open_sqlite(path: &str) -> Arc<dyn Storage> {
     Arc::new(
         open_node_sqlite_storage(path, NodeSqliteStorageOptions::default())
             .await
@@ -134,7 +135,7 @@ fn transfer_task(
             let service = Arc::clone(&service);
             let interrupt_first = Arc::clone(&interrupt_first);
             Box::pin(async move {
-                let TransferState::Apply { key } = task.state.checkpoint else {
+                let TransferState::Apply { key } = task.checkpoint else {
                     return Err(pi_js::Error::msg("expected apply checkpoint"));
                 };
                 let receipt = service.apply(&key, task.input.amount).await;
@@ -236,7 +237,7 @@ async fn resumes_an_intent_effect_outcome_task_interrupted_after_its_intent_acro
 
     let first = open_tasks(
         open_sqlite(&path).await,
-        vec![transfer.clone().any()],
+        vec![transfer.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -267,7 +268,7 @@ async fn resumes_an_intent_effect_outcome_task_interrupted_after_its_intent_acro
 
     let second = open_tasks(
         open_sqlite(&path).await,
-        vec![transfer.clone().any()],
+        vec![transfer.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -303,7 +304,7 @@ async fn resumes_an_intent_effect_outcome_task_interrupted_after_its_intent_acro
 
     let third = open_tasks(
         open_sqlite(&path).await,
-        vec![transfer.any()],
+        vec![transfer.into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -378,7 +379,7 @@ async fn resumes_abort_work_after_close_at_every_direct_task_abort_stage() {
     let abortable = make_abortable();
     let mut opened = open_tasks(
         open_sqlite(&path).await,
-        vec![abortable.clone().any()],
+        vec![abortable.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -401,15 +402,12 @@ async fn resumes_abort_work_after_close_at_every_direct_task_abort_stage() {
     let closing = track(async move { h_close.close(context()).await });
     run_release.resolve(());
     closing.wait().await.expect("close 1");
-    assert_eq!(
-        aborting.wait().await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
-    );
+    assert_eq!(aborting.wait().await.expect("abort"), AbortTaskResult::Marked);
     assert_eq!(*log.lock().unwrap_or_else(|e| e.into_inner()), vec!["run"]);
 
     opened = open_tasks(
         open_sqlite(&path).await,
-        vec![make_abortable().any()],
+        vec![make_abortable().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -430,7 +428,7 @@ async fn resumes_abort_work_after_close_at_every_direct_task_abort_stage() {
     block_abort.store(false, Ordering::Release);
     opened = open_tasks(
         open_sqlite(&path).await,
-        vec![make_abortable().any()],
+        vec![make_abortable().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -451,7 +449,7 @@ async fn resumes_abort_work_after_close_at_every_direct_task_abort_stage() {
 
     opened = open_tasks(
         open_sqlite(&path).await,
-        vec![make_abortable().any()],
+        vec![make_abortable().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -464,7 +462,7 @@ async fn resumes_abort_work_after_close_at_every_direct_task_abort_stage() {
             .abort_task(id.erased(), context())
             .await
             .expect("abort 4"),
-        pi_durable::harness::types::AbortTaskResult::Terminal
+        AbortTaskResult::Terminal
     );
     opened.harness.close(context()).await.expect("close 4");
     assert_eq!(
@@ -512,9 +510,13 @@ fn crash_task(log: Arc<Mutex<Vec<String>>>, block_abort: bool) -> Task<(), StepC
 
 async fn recover_crash(storage: Arc<ControlledStorage>, log: Arc<Mutex<Vec<String>>>) -> (Harness, TaskId<()>) {
     storage.crash();
-    let opened = open_tasks(storage, vec![crash_task(log, false).any()], OpenTasksOptions::default())
-        .await
-        .expect("open recover");
+    let opened = open_tasks(
+        storage,
+        vec![crash_task(log, false).into_any()],
+        OpenTasksOptions::default(),
+    )
+    .await
+    .expect("open recover");
     let page = opened
         .harness
         .commit(
@@ -542,7 +544,7 @@ async fn crashed_run(log: Arc<Mutex<Vec<String>>>) -> (Arc<ControlledStorage>, H
     let task = crash_task(Arc::clone(&log), true);
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![task.clone().any()],
+        vec![task.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -562,7 +564,7 @@ async fn crash_while_the_mark_commit_is_in_storage_the_run_resumes() {
     tokio::spawn(async move {
         let _ = h_c.abort_task(id.erased(), context()).await;
     });
-    held.wait_entered().await;
+    held.entered().await;
     let (recovered, rec_id) = recover_crash(storage, Arc::clone(&log)).await;
     let rec = recovered
         .get_task(rec_id, context())
@@ -625,7 +627,7 @@ async fn crash_while_the_abort_handler_runs_a_fresh_abort_invocation_settles_the
     let task = crash_task(Arc::clone(&log), true);
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![task.clone().any()],
+        vec![task.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -694,7 +696,7 @@ async fn crash_while_the_abort_outcome_is_in_storage_the_abort_handler_runs_agai
 
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![crash.clone().any()],
+        vec![crash.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -705,7 +707,7 @@ async fn crash_while_the_abort_outcome_is_in_storage_the_abort_handler_runs_agai
     reached.wait().await.expect("reached");
     let held = storage.hold_commits();
     proceed.resolve(());
-    held.wait_entered().await;
+    held.entered().await;
     let (recovered, rec_id) = recover_crash(storage, Arc::clone(&log)).await;
     recovered.resume().expect("resume");
     assert_eq!(
@@ -726,7 +728,7 @@ async fn crash_after_the_terminal_outcome_nothing_runs_again() {
     let task = crash_task(Arc::clone(&log), false);
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![task.clone().any()],
+        vec![task.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -763,15 +765,15 @@ async fn crash_while_the_reservation_commit_is_in_storage_the_task_is_still_pend
     let task = crash_task(Arc::clone(&log), false);
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![task.clone().any()],
+        vec![task.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await
     .expect("open");
-    let id = create_in(&opened.harness, &task).await;
+    let _id = create_in(&opened.harness, &task).await;
     let held = storage.hold_commits();
     opened.harness.resume().expect("resume");
-    held.wait_entered().await;
+    held.entered().await;
     let (recovered, rec_id) = recover_crash(storage, Arc::clone(&log)).await;
     assert_eq!(
         recovered
@@ -816,7 +818,7 @@ async fn keeps_a_task_with_a_missing_definition_pending_and_live_for_idle_waits_
     let h_c = opened.harness.clone();
     let idle = track(async move { h_c.wait_for_idle(context()).await });
     flush().await;
-    add_task(&opened.registry, v1.any(), None).expect("add v1");
+    add_task(&opened.registry, v1.into_any(), None).expect("add v1");
     idle.wait().await.expect("idle");
     assert_eq!(
         opened
@@ -838,7 +840,7 @@ async fn keeps_a_task_with_a_missing_definition_pending_and_live_for_idle_waits_
 #[tokio::test]
 async fn keeps_a_task_stored_by_a_newer_version_pending_until_a_fitting_definition_is_registered() {
     let registry = create_registry();
-    add_task(&registry, versioned(1, "old", None).any(), None).expect("add v1");
+    add_task(&registry, versioned(1, "old", None).into_any(), None).expect("add v1");
     let opened = open_tasks(
         Arc::new(MemoryStorage::new()),
         vec![],
@@ -863,7 +865,7 @@ async fn keeps_a_task_stored_by_a_newer_version_pending_until_a_fitting_definiti
             .status(),
         TaskStatus::Pending
     );
-    add_task(&registry, versioned(2, "new", None).any(), None).expect("add v2");
+    add_task(&registry, versioned(2, "new", None).into_any(), None).expect("add v2");
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
         TaskOutcome::Completed {
@@ -896,7 +898,7 @@ async fn migrates_at_reservation_leaves_the_record_unchanged_when_migration_fail
                 Err(pi_js::Error::msg("cannot migrate"))
             })),
         )
-        .any(),
+        .into_any(),
         None,
     )
     .expect("add broken v2");
@@ -919,7 +921,7 @@ async fn migrates_at_reservation_leaves_the_record_unchanged_when_migration_fail
         define_tool(ToolRegistration {
             name: "unrelated".to_owned(),
             description: "unrelated".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -931,9 +933,15 @@ async fn migrates_at_reservation_leaves_the_record_unchanged_when_migration_fail
     .expect("add unrelated");
     flush().await;
     assert_eq!(failures.load(Ordering::SeqCst), 1);
-    let reports = opened.reports.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let reports: Vec<String> = opened
+        .reports
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(reports.len(), 1);
-    assert!(reports[0].to_string().contains("cannot migrate"));
+    assert!(reports[0].contains("cannot migrate"));
     let rec = opened
         .harness
         .get_task(id, context())
@@ -962,7 +970,7 @@ async fn migrates_at_reservation_leaves_the_record_unchanged_when_migration_fail
                 Ok(((), step))
             })),
         )
-        .any(),
+        .into_any(),
         None,
     )
     .expect("add working v2");
@@ -990,7 +998,7 @@ async fn blocks_an_older_record_whose_newer_definition_has_no_migration() {
 
     let opened = open_tasks(
         open_sqlite(&path).await,
-        vec![versioned(2, "v2", None).any()],
+        vec![versioned(2, "v2", None).into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -1045,9 +1053,8 @@ async fn settles_an_aborted_blocked_task_as_orphaned_and_retires_its_documents()
                         },
                     )
                     .await?;
-                tx.doc_task(&scratch_c, created.erased())?.update(|d| {
+                tx.doc_task(&scratch_c, created.erased()).await?.update(|d| {
                     d.n = 1;
-                    Ok(())
                 })?;
                 Ok(created)
             },
@@ -1057,7 +1064,7 @@ async fn settles_an_aborted_blocked_task_as_orphaned_and_retires_its_documents()
         .expect("create");
     assert_eq!(
         opened.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(
         opened
@@ -1110,7 +1117,7 @@ async fn orphans_a_marked_task_whose_definition_disappeared_while_its_run_was_ac
         _hooks: std::marker::PhantomData,
     });
     let registry = create_registry();
-    let reg_inst = add_task(&registry, running.clone().any(), None).expect("add running");
+    let reg_inst = add_task(&registry, running.clone().into_any(), None).expect("add running");
     let opened = open_tasks(
         Arc::new(MemoryStorage::new()),
         vec![],
@@ -1127,7 +1134,7 @@ async fn orphans_a_marked_task_whose_definition_disappeared_while_its_run_was_ac
     reg_inst.dispose();
     assert_eq!(
         opened.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
@@ -1143,7 +1150,7 @@ async fn orphans_a_reopened_abort_marked_task_without_a_definition_once_scheduli
     let (_dir, path) = sqlite_path().await;
     let first = open_tasks(
         open_sqlite(&path).await,
-        vec![versioned(1, "x", None).any()],
+        vec![versioned(1, "x", None).into_any()],
         OpenTasksOptions::default(),
     )
     .await
@@ -1151,7 +1158,7 @@ async fn orphans_a_reopened_abort_marked_task_without_a_definition_once_scheduli
     let id = create_in(&first.harness, &versioned(1, "x", None)).await;
     assert_eq!(
         first.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     first.harness.close(context()).await.expect("close 1");
 
@@ -1299,7 +1306,7 @@ async fn start_handover(
 ) -> (OpenedTasks, support::harness_support::Installed, TaskId<()>) {
     let registry = create_registry();
     let old_def = handover_task("old", 1, Arc::clone(&log), gates, None);
-    let old = add_task(&registry, old_def.clone().any(), None).expect("add old");
+    let old = add_task(&registry, old_def.clone().into_any(), None).expect("add old");
     let opened = open_tasks(
         storage,
         vec![],
@@ -1331,7 +1338,7 @@ async fn hands_over_at_the_next_phase_boundary_to_a_same_version_replacement_wit
     .await;
     add_task(
         &opened.registry,
-        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).any(),
+        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).into_any(),
         None,
     )
     .expect("add new");
@@ -1413,7 +1420,7 @@ async fn keeps_the_memos_across_a_handover() {
 
     let registry = create_registry();
     let old_def = make_memo_task("old");
-    add_task(&registry, old_def.clone().any(), None).expect("add old");
+    add_task(&registry, old_def.clone().into_any(), None).expect("add old");
     let opened = open_tasks(
         Arc::new(MemoryStorage::new()),
         vec![],
@@ -1427,7 +1434,7 @@ async fn keeps_the_memos_across_a_handover() {
     let id = create_in(&opened.harness, &old_def).await;
     opened.harness.resume().expect("resume");
     reached.wait().await.expect("reached");
-    add_task(&registry, make_memo_task("new").any(), None).expect("add new");
+    add_task(&registry, make_memo_task("new").into_any(), None).expect("add new");
     gate.resolve(());
     let receipt = opened.harness.wait_for_task(id, context()).await.expect("wait");
     assert_eq!(
@@ -1462,7 +1469,7 @@ async fn hands_over_to_a_newer_version_with_a_migration() {
             HandoverGates::default(),
             Some(Arc::new(|_, _, _| Ok(((), HandoverCheckpoint::C)))),
         )
-        .any(),
+        .into_any(),
         None,
     )
     .expect("add v2");
@@ -1498,7 +1505,7 @@ async fn hands_over_to_a_newer_version_whose_migration_fails_and_leaves_the_task
             HandoverGates::default(),
             Some(Arc::new(|_, _, _| Err(pi_js::Error::msg("broken migration")))),
         )
-        .any(),
+        .into_any(),
         None,
     )
     .expect("add broken");
@@ -1550,7 +1557,7 @@ async fn keeps_running_under_the_old_definition_when_the_replacement_is_missing_
     .await;
     add_task(
         &opened.registry,
-        handover_task("incompatible", 2, Arc::clone(&log), HandoverGates::default(), None).any(),
+        handover_task("incompatible", 2, Arc::clone(&log), HandoverGates::default(), None).into_any(),
         None,
     )
     .expect("add incompatible");
@@ -1582,7 +1589,7 @@ async fn rejects_a_runtime_commit_of_the_old_invocation_queued_behind_its_handov
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     let gate = deferred::<()>();
     let storage = Arc::new(ControlledStorage::new());
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<Gate>));
     let old_runtime = Arc::new(Mutex::new(
         None::<pi_durable::tasks::TaskRuntimeHandle<(), HandoverCheckpoint, (), ()>>,
     ));
@@ -1659,7 +1666,7 @@ async fn rejects_a_runtime_commit_of_the_old_invocation_queued_behind_its_handov
         migrate: None,
         _hooks: std::marker::PhantomData,
     });
-    add_task(&registry, old_def.clone().any(), None).expect("add old");
+    add_task(&registry, old_def.clone().into_any(), None).expect("add old");
     let opened = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
         vec![],
@@ -1676,7 +1683,7 @@ async fn rejects_a_runtime_commit_of_the_old_invocation_queued_behind_its_handov
     eventually_sync(|| old_runtime.lock().unwrap_or_else(|e| e.into_inner()).is_some()).await;
     add_task(
         &registry,
-        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).any(),
+        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).into_any(),
         None,
     )
     .expect("add new");
@@ -1687,7 +1694,7 @@ async fn rejects_a_runtime_commit_of_the_old_invocation_queued_behind_its_handov
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     flush().await;
     let rt_old = old_runtime
         .lock()
@@ -1720,7 +1727,7 @@ async fn preserves_an_abort_mark_that_races_the_handover_commit_the_new_definiti
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     let gate = deferred::<()>();
     let storage = Arc::new(ControlledStorage::new());
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<Gate>));
 
     let st_cb = Arc::clone(&storage);
     let held_cb = Arc::clone(&held_slot);
@@ -1741,7 +1748,7 @@ async fn preserves_an_abort_mark_that_races_the_handover_commit_the_new_definiti
     .await;
     add_task(
         &opened.registry,
-        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).any(),
+        handover_task("new", 1, Arc::clone(&log), HandoverGates::default(), None).into_any(),
         None,
     )
     .expect("add new");
@@ -1752,14 +1759,11 @@ async fn preserves_an_abort_mark_that_races_the_handover_commit_the_new_definiti
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     let h_c = opened.harness.clone();
     let aborting = track(async move { h_c.abort_task(id.erased(), context()).await });
     held.release();
-    assert_eq!(
-        aborting.wait().await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
-    );
+    assert_eq!(aborting.wait().await.expect("abort"), AbortTaskResult::Marked);
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
         TaskOutcome::Aborted {
@@ -1833,7 +1837,7 @@ async fn releases_its_registry_subscription_and_closes_the_session_when_open_fai
     });
     let first = open_tasks(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        vec![stuck.clone().any()],
+        vec![stuck.clone().into_any()],
         OpenTasksOptions::default(),
     )
     .await

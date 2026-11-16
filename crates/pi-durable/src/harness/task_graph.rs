@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use pi_chord::context::without_abort_signal;
 use pi_chord::delta::{DeleteVerb, Op, OpDelete, OpSet, Seg, SetVerb};
 use pi_chord::services::state::attach_replicated_state_source;
-use pi_chord::{AttachedReplicatedState, Context, JsonValue, ReplicatedStateSource, ReplicatedStateSourceAttachment};
+use pi_chord::{Context, JsonValue, ReplicatedStateSource, ReplicatedStateSourceAttachment};
 use pi_js::abort::AbortReason;
 
 pub use crate::harness::types::{TaskGraph, TaskGraphNode, TaskGraphState, TaskGraphWatch};
@@ -14,8 +14,8 @@ use crate::harness::util::{closed_error, scan_all};
 use crate::session::observation::{CommittedStateSource, CommittedWatch};
 use crate::session::session::SessionImpl;
 use crate::types::{
-    CommitChange, CommitPublication, ConversationId, ConversationQuery, ErasedTaskRecord, Storage, TableCommitChange,
-    TaskQuery, TaskState, TaskStatus,
+    AttachedState, CommitChange, CommitPublication, ConversationId, ConversationQuery, ErasedTaskRecord, Storage,
+    TableCommitChange, TaskQuery, TaskState, TaskStatus,
 };
 
 const LIVE_STATUSES: [TaskStatus; 4] = [
@@ -148,7 +148,7 @@ impl TaskGraphView {
     }
 
     /// A disposable read-only Chord state of the graph.
-    pub async fn state(&self, context: Context) -> pi_js::Result<AttachedReplicatedState<TaskGraph>> {
+    pub async fn state(&self, context: Context) -> pi_js::Result<AttachedState<TaskGraph>> {
         let (source, detach) = self
             .attach(
                 |value, release| {
@@ -161,7 +161,7 @@ impl TaskGraphView {
             .await?;
 
         match attach_replicated_state_source(ArcSource(source), None) {
-            Ok(impl_) => Ok(AttachedReplicatedState::from_impl(impl_)),
+            Ok(impl_) => Ok(AttachedState::from_impl(impl_)),
             Err(err) => {
                 detach();
                 Err(err)
@@ -320,7 +320,7 @@ async fn build_graph(storage: &dyn Storage, context: &Context) -> pi_js::Result<
         .await?;
         let mut conversations: Vec<ConversationId> = owned.into_iter().map(|c| c.id).collect();
         conversations.sort_unstable();
-        tasks.insert(record.id.raw().to_string(), node_of(&record, conversations));
+        tasks.insert(record.id.as_i64().to_string(), node_of(&record, conversations));
     }
 
     Ok(TaskGraph { tasks })
@@ -344,7 +344,7 @@ fn advance(mount: &mut Mount, publication: &CommitPublication) -> Option<(TaskGr
         let CommitChange::Table(TableCommitChange::Task(record)) = change else {
             continue;
         };
-        let key = record.id.raw().to_string();
+        let key = record.id.as_i64().to_string();
         let previous = node_of_key(&key, &changed, mount);
         if record.state.is_terminal() {
             if previous.is_none() {
@@ -384,7 +384,7 @@ fn advance(mount: &mut Mount, publication: &CommitPublication) -> Option<(TaskGr
         let Some(owner) = conversation.owner else {
             continue;
         };
-        let key = owner.task_id.raw().to_string();
+        let key = owner.task_id.as_i64().to_string();
         if node_of_key(&key, &changed, mount).is_some() {
             created.entry(key).or_default().push(conversation.id);
         }

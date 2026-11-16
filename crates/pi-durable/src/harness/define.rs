@@ -42,7 +42,7 @@ pub fn section_with_options(
 /// Hook handlers for tasks with `task`'s name.
 pub fn hook<I, S, R, H: Send + Sync + 'static>(task: &Task<I, S, R, H>, handlers: H) -> HookRegistration {
     HookRegistration {
-        task: task.definition.name.clone(),
+        task: task.name().to_owned(),
         handlers: Arc::new(handlers),
     }
 }

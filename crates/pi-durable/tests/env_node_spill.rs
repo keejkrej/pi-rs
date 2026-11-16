@@ -36,10 +36,7 @@ async fn keeps_inherited_stdio_open_past_exit_grace_period_while_spill_write_pen
                     after_lines: 10,
                 }),
                 on_output: Some(Arc::new(move |text, _| {
-                    output_clone
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push_str(text);
+                    output_clone.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
                     Ok(())
                 })),
                 ..Default::default()

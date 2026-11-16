@@ -435,9 +435,9 @@ impl Progress {
             true
         } else {
             let weak = Arc::downgrade(inner);
-            let wait_ms = wait as u64;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait as u64);
             state.timer_handle = Some(tokio::spawn(async move {
-                let _ = pi_js::time::sleep(wait_ms, None).await;
+                tokio::time::sleep_until(deadline).await;
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };

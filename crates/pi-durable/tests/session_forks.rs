@@ -15,8 +15,8 @@ use pi_durable::documents::{
 use pi_durable::errors::StorageRejected;
 use pi_durable::tasks::{TaskDefinition, define_task};
 use pi_durable::types::{
-    ConversationOwnership, DocumentAddress, DocumentContent, DocumentCreate, DocumentPoint, DocumentScope, EntryDraft,
-    EntryQuery, LatestFork, RewindableFork, Storage, StorageWrite, TaskOptions, TaskOwnership,
+    ConversationOwnership, DocumentAddress, DocumentCreate, DocumentPoint, DocumentScope, EntryDraft, EntryQuery,
+    LatestFork, RewindableFork, Storage, StorageWrite, TaskOptions, TaskOwnership,
 };
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
@@ -274,7 +274,7 @@ async fn copies_as_of_and_current_singleton_and_family_bases_while_leaving_initi
     let admitted = harness.storage.last_admitted_commit().expect("admitted");
     let copies = document_copies(&admitted);
     assert_eq!(copies.len(), 5);
-    assert!(copies.iter().all(|(rec, _)| rec.address.scope
+    assert!(copies.iter().all(|(rec, _)| rec.scope
         == DocumentScope::Conversation {
             conversation_id: child.id
         }));
@@ -466,7 +466,8 @@ async fn uses_final_document_state_from_fork_entry_commit_while_excluding_later_
                 tx.scan_entries(
                     EntryQuery {
                         conversation_id: child.id,
-                        ..Default::default()
+                        min_entry_id: None,
+                        max_entry_id: None,
                     },
                     10,
                     None,
@@ -1744,7 +1745,8 @@ async fn copies_only_conversation_documents_leaving_session_and_task_documents_i
     let mut phases = IndexMap::new();
     phases.insert(
         "start".to_owned(),
-        Arc::new(|_, _, _| Box::pin(async { Ok(()) })) as pi_durable::tasks::TypedPhaseHandler<(), PhaseStart, (), ()>,
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>)
+            as pi_durable::tasks::TypedPhaseHandler<(), PhaseStart, (), ()>,
     );
     let work = define_task(TaskDefinition {
         name: "fork.scope.work".to_owned(),
@@ -1794,7 +1796,7 @@ async fn copies_only_conversation_documents_leaving_session_and_task_documents_i
                     .await?;
                 tx.doc_conversation(&cp_c, parent_id).await?;
                 tx.doc_session(&so_c).await?;
-                tx.doc_task(&to_c, tid.erase()).await?;
+                tx.doc_task(&to_c, tid.erased()).await?;
                 Ok((e, tid))
             },
             context(),
@@ -1817,15 +1819,12 @@ async fn copies_only_conversation_documents_leaving_session_and_task_documents_i
 
     let copies = document_copies(&harness.storage.last_commit().expect("writes"));
     assert_eq!(
-        copies.iter().map(|(r, _)| r.address.kind.clone()).collect::<Vec<_>>(),
+        copies.iter().map(|(r, _)| r.kind.clone()).collect::<Vec<_>>(),
         vec![copied.definition.kind.clone()]
     );
     let copy_changes = document_copy_changes(&harness.last_publication().expect("pub"));
     assert_eq!(
-        copy_changes
-            .iter()
-            .map(|c| c.record.address.kind.clone())
-            .collect::<Vec<_>>(),
+        copy_changes.iter().map(|c| c.record.kind.clone()).collect::<Vec<_>>(),
         vec![copied.definition.kind.clone()]
     );
     assert_eq!(
@@ -1851,7 +1850,7 @@ async fn copies_only_conversation_documents_leaving_session_and_task_documents_i
     assert_eq!(
         harness
             .facade
-            .snapshot_task(&task_only, task_id.erase(), context())
+            .snapshot_task(&task_only, task_id.erased(), context())
             .await
             .expect("s3"),
         Some(StrDoc {

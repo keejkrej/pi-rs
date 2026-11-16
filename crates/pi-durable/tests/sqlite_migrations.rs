@@ -1,17 +1,20 @@
 //! Port of packages/durable/test/sqlite-migrations.test.ts
 
-use pi_chord::background_context;
-use pi_durable::ids::{EntryId, id_from_number};
+use pi_chord::Context;
+use pi_chord::context::BACKGROUND_CONTEXT;
+
+fn background_context() -> Context {
+    BACKGROUND_CONTEXT.clone()
+}
+use pi_durable::ids::EntryId;
 use pi_durable::storage::sqlite::node::{
     NodeSqliteStorageOptions, open_node_sqlite_database, open_node_sqlite_storage,
 };
 use pi_durable::storage::sqlite::{
-    CURRENT_SQLITE_SCHEMA_VERSION, SQLITE_MIGRATIONS, SqliteDatabase, SqliteMigration,
-    SqliteRowExt, SqliteValue, apply_sqlite_migrations,
+    CURRENT_SQLITE_SCHEMA_VERSION, SQLITE_MIGRATIONS, SqliteDatabase, SqliteExecutor, SqliteMigration, SqliteRowExt,
+    SqliteValue, apply_sqlite_migrations,
 };
-use pi_durable::types::{
-    ConversationRecord, EntryRecord, ROOT_CONVERSATION_ID, Storage, StorageWrite,
-};
+use pi_durable::types::{ConversationRecord, EntryRecord, ROOT_CONVERSATION_ID, Storage, StorageWrite};
 use serde_json::json;
 
 fn temp_database_path() -> (tempfile::TempDir, String) {
@@ -65,9 +68,7 @@ async fn rejects_database_newer_than_portable_core() {
     let database = open_node_sqlite_database(&path, NodeSqliteStorageOptions::default())
         .await
         .expect("open db");
-    apply_sqlite_migrations(database.as_ref(), None)
-        .await
-        .expect("migrate");
+    apply_sqlite_migrations(database.as_ref(), None).await.expect("migrate");
     database
         .run(
             "UPDATE durable_schema SET version = ? WHERE singleton = 1",
@@ -105,10 +106,7 @@ async fn rolls_initial_bootstrap_and_every_pending_migration_back_together() {
         first.clone(),
         SqliteMigration::borrowed(
             2,
-            &[
-                "CREATE TABLE migration_second (value TEXT) STRICT",
-                "THIS IS NOT SQL",
-            ],
+            &["CREATE TABLE migration_second (value TEXT) STRICT", "THIS IS NOT SQL"],
         ),
     ];
 
@@ -169,7 +167,7 @@ async fn rolls_failed_migration_back_and_preserves_stored_data_for_successful_re
                 },
                 StorageWrite::Entry {
                     value: EntryRecord {
-                        id: id_from_number::<EntryId>(2),
+                        id: EntryId::new_unchecked(2),
                         conversation_id: ROOT_CONVERSATION_ID,
                         kind: "retained".to_string(),
                         model: None,
@@ -194,10 +192,7 @@ async fn rolls_failed_migration_back_and_preserves_stored_data_for_successful_re
     let mut failed_migrations = SQLITE_MIGRATIONS.clone();
     failed_migrations.push(SqliteMigration::borrowed(
         next_version,
-        &[
-            "CREATE TABLE migration_probe (value TEXT) STRICT",
-            "THIS IS NOT SQL",
-        ],
+        &["CREATE TABLE migration_probe (value TEXT) STRICT", "THIS IS NOT SQL"],
     ));
     assert!(
         apply_sqlite_migrations(database.as_ref(), Some(&failed_migrations))
@@ -248,12 +243,11 @@ async fn rolls_failed_migration_back_and_preserves_stored_data_for_successful_re
         .expect("entry row");
     assert_eq!(entry_row.get_i64("commit_seq").expect("commit_seq"), 1);
     let parsed_entry: EntryRecord =
-        serde_json::from_str(entry_row.get_str("record").expect("record str"))
-            .expect("parse entry");
+        serde_json::from_str(entry_row.get_str("record").expect("record str")).expect("parse entry");
     assert_eq!(
         parsed_entry,
         EntryRecord {
-            id: id_from_number::<EntryId>(2),
+            id: EntryId::new_unchecked(2),
             conversation_id: ROOT_CONVERSATION_ID,
             kind: "retained".to_string(),
             model: None,

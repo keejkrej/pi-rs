@@ -20,9 +20,9 @@ use tokio::time::Sleep;
 use uuid::Uuid;
 
 use super::{
-    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionEnv, ExecutionError, ExecutionErrorCode, FileContent,
-    FileError, FileErrorCode, FileInfo, FileKind, FileSystem, ReadTextLinesOptions, RemoveOptions, Shell,
-    ShellExecOptions, ShellExecResult, TextLine, TextLineReader,
+    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionError, ExecutionErrorCode, FileContent, FileError,
+    FileErrorCode, FileInfo, FileKind, FileSystem, ReadTextLinesOptions, RemoveOptions, Shell, ShellExecOptions,
+    ShellExecResult, TextLine, TextLineReader,
 };
 
 const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
@@ -31,8 +31,8 @@ const EXIT_STDIO_GRACE_MS: u64 = 100;
 const SPILL_HIGH_WATER_MARK: usize = 1024 * 1024;
 const LINE_READER_CHUNK_SIZE: usize = 64 * 1024;
 
-static LEGACY_WSL_BASH_RE: LazyLock<regress::Regex> = LazyLock::new(|| {
-    pi_js::regex::ecma(r"^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$", "")
+static LEGACY_WSL_BASH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$")
         .unwrap_or_else(|e| panic!("invalid static legacy WSL regex: {e}"))
 });
 
@@ -203,7 +203,7 @@ async fn path_exists(path: &str) -> bool {
 
 pub fn is_legacy_wsl_bash_path(path: &str) -> bool {
     let normalized = path.replace('/', "\\").to_lowercase();
-    pi_js::regex::test(&LEGACY_WSL_BASH_RE, &normalized)
+    LEGACY_WSL_BASH_RE.is_match(&normalized)
 }
 
 fn get_bash_shell_config(shell: String) -> ShellConfig {
@@ -654,7 +654,7 @@ impl NodeExecutionEnv {
         let notify = Arc::new(Notify::new());
         let high_water_mark = self.spill_test_config.high_water_mark.unwrap_or(SPILL_HIGH_WATER_MARK);
         let write_delay_ms = self.spill_test_config.write_delay_ms;
-        let rejected_writes = self.spill_test_config.rejected_writes.clone();
+        let _rejected_writes = self.spill_test_config.rejected_writes.clone();
 
         let qb = Arc::clone(&queued_bytes);
         let inf = Arc::clone(&in_flight);

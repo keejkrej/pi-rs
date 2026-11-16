@@ -623,7 +623,7 @@ impl TaskScheduler {
                                 match &record.state {
                                     TaskState::Running { checkpoint } => {
                                         updates.push(with_state(
-                                            record,
+                                            record.clone(),
                                             TaskState::Pending {
                                                 checkpoint: checkpoint.clone(),
                                             },
@@ -691,7 +691,7 @@ impl TaskScheduler {
                             let st = lock(&this.state);
                             let owned = st.owned_live(None);
                             if owned.contains_key(&id) {
-                                false
+                                None
                             } else {
                                 let snapshot = this.registry.snapshot();
                                 let res = this.resolve(&st, &current, snapshot.as_ref()).0;
@@ -951,6 +951,7 @@ impl TaskScheduler {
                 updated.push(record.clone());
             }
 
+            let mut to_mark = Vec::new();
             for id in failed {
                 for record in st.live.values() {
                     if let TaskState::Waiting {
@@ -960,10 +961,13 @@ impl TaskScheduler {
                     } = &record.state
                         && on.contains(&id)
                     {
-                        st.fail_fast_checks.insert(record.id);
-                        schedule_reconcile = true;
+                        to_mark.push(record.id);
                     }
                 }
+            }
+            for id in to_mark {
+                st.fail_fast_checks.insert(id);
+                schedule_reconcile = true;
             }
 
             for change in &publication.changes {
@@ -1050,7 +1054,7 @@ impl TaskScheduler {
             st.reconcile_scheduled = false;
             let cascade = st.cascade_pending;
             st.cascade_pending = false;
-            let checks: Vec<TaskId> = st.fail_fast_checks.drain().collect();
+            let checks: Vec<TaskId> = st.fail_fast_checks.drain(..).collect();
             (cascade, checks)
         };
 
@@ -1397,13 +1401,12 @@ impl TaskScheduler {
                 st.invocations.values().map(|inv| Arc::clone(&inv.controller)).collect();
             (ctrls, closed_error())
         };
-        if let Some((_, _, Some(unsub))) = {
+        let (u0, u1, u2) = {
             let mut subs = lock(&self.subscriptions);
-            Some((subs.0.take(), subs.1.take(), subs.2.take()))
-        } {
-            if let Some(u) = unsub {
-                u();
-            }
+            (subs.0.take(), subs.1.take(), subs.2.take())
+        };
+        for u in [u0, u1, u2].into_iter().flatten() {
+            u.call();
         }
         self.task_waiters.reject_all(&done_error);
         self.idle_waiters.reject_all(&done_error);
@@ -1426,6 +1429,7 @@ impl TaskScheduler {
         if should_spawn && let Ok(handle) = tokio::runtime::Handle::try_current() {
             let this = Arc::clone(self);
             handle.spawn(async move {
+                tokio::task::yield_now().await;
                 this.drain().await;
             });
         }
@@ -1954,14 +1958,8 @@ impl TaskScheduler {
             let mut guard = lock(&invocation.watches);
             guard.drain(..).map(|(_, w)| w).collect()
         };
-        if !watches.is_empty()
-            && let Ok(handle) = tokio::runtime::Handle::try_current()
-        {
-            for w in watches {
-                handle.spawn(async move {
-                    let _ = w.stop().await;
-                });
-            }
+        for w in watches {
+            w.stop_now();
         }
         invocation
             .controller
@@ -2397,8 +2395,9 @@ impl TaskRuntimeBackend for SchedulerRuntime {
         .await
     }
 
-    fn now(&self) -> i64 {
-        (self.scheduler.now)()
+    fn now(&self) -> pi_js::Result<i64> {
+        self.check_active()?;
+        Ok((self.scheduler.now)())
     }
 
     fn report(&self, error: pi_js::Error) {

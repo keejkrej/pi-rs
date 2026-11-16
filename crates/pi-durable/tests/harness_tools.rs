@@ -7,15 +7,16 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
 
 use indexmap::IndexMap;
+use pi_ai::Type as t;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxDeferredOptions, FauxResponseStep,
     FauxToolCallOptions, RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_tool_call,
 };
 use pi_ai::types::{
-    AssistantMessage, ImageContent, Message, StopReason, TextContent, ToolCall, ToolResultMessage, UserContentBlock,
+    AssistantContentBlock, AssistantMessage, ImageContent, Message, StopReason, TextContent, ToolCall,
+    ToolResultMessage, UserContentBlock,
 };
 use pi_chord::Context;
 use pi_durable::entries::{TOOL_RESULT_ENTRY, ToolResultEntryData};
@@ -23,24 +24,23 @@ use pi_durable::env::ExecutionEnv;
 use pi_durable::env::node::NodeExecutionEnv;
 use pi_durable::harness::agent::AGENT_DOC;
 use pi_durable::harness::define::{define_extension, define_tool, hook, section};
-use pi_durable::harness::generation::{GENERATION_TASK, GenerationHooks};
+use pi_durable::harness::generation::GENERATION_TASK;
 use pi_durable::harness::harness::{Conversation, Harness};
 use pi_durable::harness::live::{LIVE_DOC, LiveState};
 use pi_durable::harness::registry::Registry;
-use pi_durable::harness::tool::{TOOL_TASK, ToolHooks};
+use pi_durable::harness::tool::TOOL_TASK;
 use pi_durable::harness::types::{
     AgentChange, AgentExtensionsChange, AgentToolsChange, AgentToolsFilter, BeforeToolDecision,
-    ConversationCreateOptions, ConversationOwnership, DiagnosticSeverity, DocumentReaderExt, Extension, FieldChange,
-    HarnessOptions, ModelRef, OutputRetainMode, StreamDeferredOption, SubmissionDraft, ToolControl, ToolDiagnostic,
-    ToolExecutionMode, ToolExecutionResult, ToolOutputLimits, ToolRegistration, UserInput,
+    ConversationCreateOptions, DiagnosticSeverity, Extension, FieldChange, GenerationHooks, ModelRef, OutputRetainMode,
+    RegistryReader, StreamDeferredOption, SubmissionDraft, ToolControl, ToolDiagnostic, ToolExecutionMode,
+    ToolExecutionResult, ToolHooks, ToolOutputLimits, ToolRegistration, UserInput,
 };
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::tasks::{TaskDefinition, TaskOwnership, define_task};
+use pi_durable::tasks::{TaskDefinition, define_task};
 use pi_durable::types::{
-    ConversationId, EntryRecord, JsonObject, JsonValue, SubmissionId, SubmissionState, SubmissionStatus, TaskId,
-    TaskOptions, TaskOutcome, TaskQuery, TaskState,
+    ConversationId, ConversationOwnership, EntryRecord, JsonObject, JsonValue, SubmissionId, SubmissionState,
+    SubmissionStatus, TaskOptions, TaskOutcome, TaskOwnership, TaskQuery, TaskState,
 };
-use pi_js::vendor::typebox::builder as t;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use support::chat_support::{ChatSetup, OpenChatEnv, all_entries, chat_setup, open_chat, text_of};
@@ -76,7 +76,7 @@ fn calls(list: &[(&str, JsonObject, &str)]) -> AssistantMessage {
         .map(|(name, args, id)| {
             FauxContentBlock::ToolCall(faux_tool_call(
                 name,
-                args.clone(),
+                args.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                 Some(FauxToolCallOptions {
                     id: Some((*id).to_owned()),
                 }),
@@ -165,7 +165,7 @@ async fn run_default(setup: &ChatSetup, responses: Vec<FauxResponseStep>) -> Run
 fn results(entries: &[EntryRecord]) -> Vec<ToolResultMessage> {
     entries
         .iter()
-        .filter(|entry| TOOL_RESULT_ENTRY.matches(entry))
+        .filter(|entry| TOOL_RESULT_ENTRY.matches(Some(*entry)))
         .filter_map(|entry| match entry.model.as_ref()?.first() {
             Some(Message::ToolResult(tr)) => Some(tr.clone()),
             _ => None,
@@ -235,7 +235,7 @@ async fn runs_input_tool_call_tool_result_and_answer_and_settles_the_input() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].name, "echo");
     assert_eq!(added[0].description, "The echo tool");
-    assert!(added[0].parameters.is_object());
+    assert!(serde_json::to_value(&added[0].parameters).expect("json").is_object());
 
     let res_msgs = results(&res.entries);
     assert_eq!(res_msgs.len(), 1);
@@ -301,7 +301,7 @@ async fn answers_calls_to_tools_the_request_did_not_offer_without_a_task() {
     let ghost_entry = res
         .entries
         .iter()
-        .find(|e| TOOL_RESULT_ENTRY.matches(e))
+        .find(|e| TOOL_RESULT_ENTRY.matches(Some(*e)))
         .expect("ghost entry");
     let typed = TOOL_RESULT_ENTRY
         .extract(Some(ghost_entry))
@@ -572,7 +572,7 @@ async fn reads_the_execution_mode_when_a_round_starts_and_keeps_it_for_the_round
             async move {
                 events.lock().unwrap().push(format!("start {name}"));
                 settings.update(|s| s.tool_execution = Some(ToolExecutionMode::Parallel));
-                pi_js::time::sleep(Duration::from_millis(20)).await;
+                pi_js::time::sleep(20, None).await?;
                 events.lock().unwrap().push(format!("end {name}"));
                 Ok(ToolExecutionResult {
                     content: Some(vec![]),
@@ -622,7 +622,7 @@ async fn runs_a_round_in_parallel_by_default_and_sequentially_when_configured_or
                         let events_cb = Arc::clone(&events_cb);
                         async move {
                             events_cb.lock().unwrap().push(format!("start {name}"));
-                            pi_js::time::sleep(Duration::from_millis(20)).await;
+                            pi_js::time::sleep(20, None).await?;
                             events_cb.lock().unwrap().push(format!("end {name}"));
                             Ok(ToolExecutionResult {
                                 content: Some(vec![]),
@@ -663,7 +663,7 @@ async fn runs_a_round_in_parallel_by_default_and_sequentially_when_configured_or
     let mut tool_a = tool("a", move |_, _, _| {
         let ev_a = Arc::clone(&ev_a);
         async move {
-            pi_js::time::sleep(Duration::from_millis(20)).await;
+            pi_js::time::sleep(20, None).await?;
             ev_a.lock().unwrap().push("a");
             Ok(ToolExecutionResult {
                 content: Some(vec![]),
@@ -783,7 +783,7 @@ async fn uses_retained_output_and_the_last_details_when_the_result_omits_them_wi
     let entry = res
         .entries
         .iter()
-        .find(|candidate| TOOL_RESULT_ENTRY.matches(candidate))
+        .find(|candidate| TOOL_RESULT_ENTRY.matches(Some(*candidate)))
         .expect("entry");
     let typed = TOOL_RESULT_ENTRY.extract(Some(entry)).expect("ext").expect("some");
     let codes: Vec<Option<String>> = typed.data.diagnostics.into_iter().map(|d| d.code).collect();
@@ -1023,7 +1023,7 @@ async fn repairs_arguments_with_prepare_arguments_before_validation_and_a_throwi
         .content
         .iter()
         .find_map(|block| match block {
-            pi_ai::types::ContentBlock::ToolCall(tc) => Some(tc),
+            AssistantContentBlock::ToolCall(tc) => Some(tc),
             _ => None,
         })
         .expect("tool call");
@@ -1194,7 +1194,7 @@ async fn chains_after_tool_replacements_and_observes_the_round_with_after_tools(
     let result_entry = res
         .entries
         .iter()
-        .find(|e| TOOL_RESULT_ENTRY.matches(e))
+        .find(|e| TOOL_RESULT_ENTRY.matches(Some(*e)))
         .expect("tool result entry");
     assert_eq!(
         *observed.lock().unwrap(),
@@ -1237,9 +1237,9 @@ async fn runs_the_hooks_of_the_selected_extensions_a_task_owned_child_copies_its
         ..Default::default()
     });
 
-    setup.registry.install(echo_ext).expect("install echo");
+    setup.registry.install(echo_ext.clone()).expect("install echo");
     setup.registry.install(audit_ext.clone()).expect("install audit");
-    setup.settings.update(|s| s.extensions = Some(vec!["echo".to_owned()]));
+    setup.settings.update(|s| s.extensions = Some(vec![echo_ext]));
 
     let first = run_default(&setup, vec![FauxResponseStep::Message(done_msg())]).await;
     first
@@ -1257,7 +1257,7 @@ async fn runs_the_hooks_of_the_selected_extensions_a_task_owned_child_copies_its
     let mut phases = IndexMap::new();
     phases.insert(
         "never".to_owned(),
-        Arc::new(|_, _, _| Box::pin(async { Ok(()) }))
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>)
             as pi_durable::tasks::TypedPhaseHandler<JsonValue, JsonObject, Option<JsonValue>, ()>,
     );
     let owner = define_task(TaskDefinition {
@@ -1287,11 +1287,8 @@ async fn runs_the_hooks_of_the_selected_extensions_a_task_owned_child_copies_its
                     )
                     .await?;
                 Ok(tx
-                    .create_conversation(ConversationCreateOptions {
-                        ownership: ConversationOwnership::Task {
-                            task_id: task_id.erased(),
-                        },
-                        ..Default::default()
+                    .create_conversation(ConversationOwnership::Task {
+                        task_id: task_id.erased(),
                     })
                     .await?
                     .id)
@@ -1319,7 +1316,7 @@ async fn runs_the_hooks_of_the_selected_extensions_a_task_owned_child_copies_its
                     }),
                     ..Default::default()
                 }),
-                ..Default::default()
+                init: None,
             },
             context(),
         )
@@ -1613,7 +1610,7 @@ async fn keeps_the_runs_input_open_across_an_on_yield_continuation_and_answers_i
         Box::pin(async move {
             let harness = h_step.lock().unwrap().clone().expect("harness");
             let live = harness
-                .snapshot_conversation(&*LIVE_DOC, ConversationId::from_i64(1), context())
+                .snapshot_conversation(&*LIVE_DOC, ConversationId::new_unchecked(1), context())
                 .await
                 .expect("live")
                 .expect("live some");
@@ -1696,6 +1693,8 @@ async fn observes_responses_that_arrive_by_polling_a_deferred_request() {
                         StopReason::ToolUse => "toolUse",
                         StopReason::Error => "error",
                         StopReason::Aborted => "aborted",
+                        StopReason::Pending => "pending",
+                        StopReason::Deferred => "deferred",
                     };
                     let wrapped = Message::Assistant(message);
                     observed_cb
@@ -1711,7 +1710,7 @@ async fn observes_responses_that_arrive_by_polling_a_deferred_request() {
     )
     .expect("add hook");
     setup.settings.update(|s| {
-        s.stream.deferred = Some(StreamDeferredOption::Enabled(true));
+        s.stream.get_or_insert_with(Default::default).deferred = Some(StreamDeferredOption::Bool(true));
     });
 
     let res = run_default(
@@ -1928,14 +1927,14 @@ async fn builds_the_environment_per_call_from_the_conversations_cwd_and_runs_com
                             call_ctx,
                         )
                         .await
-                })
+                }) as pi_js::BoxFuture<pi_js::Result<()>>
             },
         ) as pi_durable::tasks::TypedPhaseHandler<JsonValue, JsonObject, i64, ()>,
     );
     let child = define_task(TaskDefinition {
         name: "test.child".to_owned(),
         version: 1,
-        initial: Arc::new(|_| Ok(JsonObject::new())),
+        initial: Arc::new(|_| Ok(serde_json::json!({ "phase": "run" }).as_object().expect("obj").clone())),
         phases: child_phases,
         abort: Arc::new(|_, _, _| Box::pin(async { Ok(()) })),
         migrate: None,
@@ -2185,7 +2184,7 @@ async fn answers_a_failing_command_with_its_retained_tail_and_diagnostics_in_ord
     let entries = all_entries(&opened.root, None).await.expect("entries");
     let entry = entries
         .iter()
-        .find(|candidate| TOOL_RESULT_ENTRY.matches(candidate))
+        .find(|candidate| TOOL_RESULT_ENTRY.matches(Some(*candidate)))
         .expect("entry");
     let res_msgs = results(std::slice::from_ref(entry));
     let r = &res_msgs[0];
@@ -2211,7 +2210,7 @@ async fn answers_a_failing_command_with_its_retained_tail_and_diagnostics_in_ord
 async fn reads_edits_and_runs_a_command_in_one_run_then_answers() {
     let dir = TempDir::new().expect("tempdir");
     let notes_path = dir.path().join("notes.txt").to_string_lossy().into_owned();
-    pi_js::fs::write_file_str(&notes_path, "hello world\n")
+    pi_js::fs::promises::write_file(&notes_path, "hello world\n", None)
         .await
         .expect("write notes");
     let setup = chat_setup(None);
@@ -2282,7 +2281,7 @@ async fn reads_edits_and_runs_a_command_in_one_run_then_answers() {
         ]
     );
     assert_eq!(entries.last().map(|e| e.kind.as_str()), Some("pi.assistant"));
-    let disk = pi_js::fs::read_file_to_string(&notes_path).await.expect("read notes");
+    let disk = String::from_utf8(pi_js::fs::promises::read_file(&notes_path).await.expect("read notes")).expect("utf8");
     assert_eq!(disk, "hello durable\n");
     opened.harness.close(context()).await.expect("close");
 }
@@ -2342,9 +2341,10 @@ async fn sanitizes_running_output_but_keeps_explicit_result_content_as_the_tool_
                     .snapshot_conversation(&*LIVE_DOC, api.conversation_id(), context())
                     .await
                     .expect("snap");
+                let call_id = api.call_id().to_owned();
                 *slot_cb.lock().unwrap() = snap
                     .and_then(|s| s.tools)
-                    .and_then(|mut v| v.pop())
+                    .and_then(|v| v.into_iter().find(|slot| slot.call_id == call_id))
                     .and_then(|slot| slot.output);
                 Ok(ToolExecutionResult::default())
             }
@@ -2790,7 +2790,7 @@ async fn rejects_invocation_bound_waits_and_stops_watches_when_the_tools_invocat
     let mut never_phases = IndexMap::new();
     never_phases.insert(
         "never".to_owned(),
-        Arc::new(|_, _, _| Box::pin(async { Ok(()) }))
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>)
             as pi_durable::tasks::TypedPhaseHandler<JsonValue, JsonObject, Option<JsonValue>, ()>,
     );
     let never = define_task(TaskDefinition {
@@ -2885,6 +2885,7 @@ async fn rejects_details_still_waiting_when_the_call_is_aborted_during_after_too
             let pending_slot = Arc::clone(&pending_slot);
             async move {
                 api.output("first\n").expect("output");
+                tokio::task::yield_now().await;
                 let mut fut = Box::pin(async move { api.details(&json!({ "step": 1 }), context()).await });
                 let early = poll_once(&mut fut).await;
                 if let Some(res) = early {
@@ -2977,7 +2978,7 @@ async fn answers_an_aborted_tool_with_only_its_durable_output_discarding_buffere
             let aborted_seen_cb = Arc::clone(&aborted_seen_cb);
             async move {
                 api.output("durable\n").expect("durable");
-                pi_js::time::sleep(Duration::from_millis(20)).await;
+                pi_js::time::sleep(20, None).await?;
                 api.output("buffered\n").expect("buffered");
                 buffered_cb.resolve(());
                 let signal = call_ctx.abort_signal().expect("signal");

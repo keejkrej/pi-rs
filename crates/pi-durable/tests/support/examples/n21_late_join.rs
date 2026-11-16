@@ -41,7 +41,7 @@ pub async fn run() -> pi_js::Result<()> {
         tools: vec![define_tool(ToolRegistration {
             name: "count".to_owned(),
             description: "Counts to ten".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object::<_, &str>([]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,

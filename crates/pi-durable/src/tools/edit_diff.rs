@@ -145,7 +145,7 @@ fn apply_replacements(content: &str, replacements: &[TextReplacement<'_>], offse
 
 /// Apply replacements matched against `base_content` to `original_content` while preserving
 /// unchanged line blocks from the original.
-pub fn apply_replacements_preserving_unchanged_lines(
+fn apply_replacements_preserving_unchanged_lines(
     original_content: &str,
     base_content: &str,
     replacements: &[TextReplacement<'_>],

@@ -6,39 +6,38 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep, FauxTokenSize,
     FauxToolCallOptions, RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_tool_call,
 };
-use pi_ai::types::{
-    AssistantMessage, Message, StopReason, ToolResultMessage, Usage, UsageCost, UserMessage, UserMessageContent,
-};
+use pi_ai::types::{AssistantMessage, Message, StopReason, Usage, UsageCost, UserMessage, UserMessageContent};
+use pi_ai::{TSchema as Schema, Type as t};
 use pi_chord::Context;
 use pi_chord::delta::Op;
 use pi_durable::documents::{DocDefinitionInput, define_session_doc};
 use pi_durable::entries::RESET_ENTRY;
 use pi_durable::harness::define::define_tool;
-use pi_durable::harness::generation::{GENERATION_TASK, GenerationHooks};
+use pi_durable::harness::generation::GENERATION_TASK;
 use pi_durable::harness::harness::{Conversation, Harness};
 use pi_durable::harness::inbox::{INBOX_DOC, InboxItem, InboxState};
 use pi_durable::harness::live::{LIVE_DOC, ToolSlotStatus};
 use pi_durable::harness::submissions::SubmissionHandle;
-use pi_durable::harness::tool::{TOOL_TASK, ToolHooks};
+use pi_durable::harness::tool::TOOL_TASK;
 use pi_durable::harness::types::{
-    AbortSubmissionResult, ConversationCreateOptions, ConversationOwnership, DocumentReaderExt, PartialRetryPolicy,
-    QueueMode, SubmissionDraft, ToolControl, ToolExecutionResult, ToolRegistration, UserInput, WhenBusy,
+    AbortSubmissionResult, ConversationCreateOptions, GenerationHooks, PartialRetryPolicy, QueueMode, SubmissionDraft,
+    ToolControl, ToolExecutionResult, ToolHooks, ToolRegistration, UserInput, WhenBusy,
 };
 use pi_durable::harness::usage::{USAGE_DOC, UsageBucket, UsageState, record_usage};
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::storage::sqlite::node::{NodeSqliteStorage, NodeSqliteStorageOptions, open_node_sqlite_storage};
+use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::types::{
-    CheckpointInfo, ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent,
-    DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery,
-    EntryRecord, ErasedTaskRecord, InputSubmissionState, JsonObject, JsonValue, LatestFork, Page, Seq, Storage,
-    StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState, SubmissionStatus,
-    TaskId, TaskQuery,
+    CheckpointInfo, ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor,
+    DocumentAddress, DocumentContent, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId,
+    EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, InputSubmissionState, JsonValue, LatestFork, Page, Seq,
+    Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState,
+    SubmissionStatus, TaskId, TaskQuery,
 };
-use pi_js::vendor::typebox::{Schema, builder as t};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use support::chat_support::{ChatSetup, OpenChatEnv, all_entries, chat_setup, open_chat, text_of, wait_for};
@@ -65,10 +64,11 @@ fn gated(message: AssistantMessage) -> GatedResponse {
     let gate = deferred();
     let reached_cb = reached.clone();
     let gate_cb = gate.clone();
-    let step: FauxResponseStep = FauxResponseStep::Factory(Arc::new(move |_, _, signal, _| {
+    let step: FauxResponseStep = FauxResponseStep::Factory(Arc::new(move |_, opts, _, _| {
         let reached_cb = reached_cb.clone();
         let gate_cb = gate_cb.clone();
         let message = message.clone();
+        let signal = opts.and_then(|o| o.base.signal);
         Box::pin(async move {
             reached_cb.resolve(());
             let gate_fut = gate_cb.wait();
@@ -122,7 +122,7 @@ fn hold_call() -> AssistantMessage {
     faux_assistant_message(
         FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
             "hold",
-            JsonObject::new(),
+            IndexMap::new(),
             Some(FauxToolCallOptions {
                 id: Some("c1".to_owned()),
             }),
@@ -204,12 +204,12 @@ async fn open_mem(setup: &ChatSetup) -> support::chat_support::OpenedChat {
 }
 
 async fn open_sqlite(path: &str, setup: &ChatSetup) -> support::chat_support::OpenedChat {
-    let storage: Arc<NodeSqliteStorage> = Arc::new(
+    let storage: Arc<dyn Storage> = Arc::new(
         open_node_sqlite_storage(path, NodeSqliteStorageOptions::default())
             .await
             .expect("open sqlite"),
     );
-    let opened = open_chat(storage as Arc<dyn Storage>, setup, OpenChatEnv::None)
+    let opened = open_chat(storage, setup, OpenChatEnv::None)
         .await
         .expect("open sqlite chat");
     opened.harness.resume().expect("resume");
@@ -704,7 +704,7 @@ async fn ends_the_run_at_a_queued_reset_after_tools_and_runs_earlier_follow_ups_
     );
     let reset = entries
         .iter()
-        .find(|entry| RESET_ENTRY.matches(entry))
+        .find(|entry| RESET_ENTRY.matches(Some(*entry)))
         .expect("reset entry");
     assert_eq!(reset.head, Some(reset.id));
     assert_eq!(*requests.lock().unwrap(), vec![vec!["user:f", "system:"]]);
@@ -1311,13 +1311,13 @@ async fn commits_inbox_changes_as_positional_chord_operations_and_a_base_when_em
     let ops_cb = Arc::clone(&ops_log);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.inbox" && !change.ops.is_empty() {
                     ops_cb.lock().unwrap().push(change.ops);
                 }
             }
-        }))
+        })
         .expect("sub");
 
     let input = opened
@@ -1975,14 +1975,14 @@ async fn writes_the_last_handoff_in_call_order_and_then_runs_queued_follow_ups_i
         FauxAssistantMessageContent::Blocks(vec![
             FauxContentBlock::ToolCall(faux_tool_call(
                 "hold",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
             )),
             FauxContentBlock::ToolCall(faux_tool_call(
                 "later",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c2".to_owned()),
                 }),
@@ -2202,13 +2202,13 @@ async fn withdraws_a_middle_item_with_one_positional_removal() {
     let ops_cb = Arc::clone(&ops_log);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.inbox" && !change.ops.is_empty() {
                     ops_cb.lock().unwrap().push(change.ops);
                 }
             }
-        }))
+        })
         .expect("sub");
 
     items[1].abort(context()).await.expect("abort middle");
@@ -2401,13 +2401,13 @@ async fn stores_the_inbox_as_a_base_exactly_when_it_becomes_empty() {
     let inbox_cb = Arc::clone(&inbox_id);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.inbox" {
                     *inbox_cb.lock().unwrap() = Some(change.record.id);
                 }
             }
-        }))
+        })
         .expect("sub");
 
     let input = opened
@@ -2469,7 +2469,7 @@ fn keeps_a_complete_inbox_base_exactly_while_it_is_empty_and_a_usage_base_on_eve
         .clone();
     let nonempty_inbox = serde_json::to_value(InboxState {
         items: vec![InboxItem::FollowUp {
-            id: SubmissionId::from_i64(1),
+            id: SubmissionId::new_unchecked(1),
             content: UserInput::Text("x".to_owned()),
         }],
     })
@@ -2568,9 +2568,9 @@ async fn totals_assistant_usage_per_model_and_tool_usage_per_tool_and_sums_the_s
             _ => None,
         })
         .collect();
-    let expected_in: u64 = assistants.iter().map(|m| m.usage.input).sum();
-    let expected_out: u64 = assistants.iter().map(|m| m.usage.output).sum();
-    let expected_tok: u64 = assistants.iter().map(|m| m.usage.total_tokens).sum();
+    let expected_in: i64 = assistants.iter().map(|m| m.usage.input as i64).sum();
+    let expected_out: i64 = assistants.iter().map(|m| m.usage.output as i64).sum();
+    let expected_tok: i64 = assistants.iter().map(|m| m.usage.total_tokens as i64).sum();
 
     let usage = opened
         .harness
@@ -2602,7 +2602,8 @@ async fn totals_assistant_usage_per_model_and_tool_usage_per_tool_and_sums_the_s
             entries.last().unwrap().id,
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
-                ..Default::default()
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -2652,7 +2653,10 @@ async fn totals_assistant_usage_per_model_and_tool_usage_per_tool_and_sums_the_s
 async fn counts_failed_attempts_converted_partials_and_tool_usage_replaced_by_after_tool() {
     let setup = chat_setup(Some(RegisterFauxProviderOptions {
         tokens_per_second: Some(200.0),
-        token_size: Some(FauxTokenSize { min: 1, max: 1 }),
+        token_size: Some(FauxTokenSize {
+            min: Some(1),
+            max: Some(1),
+        }),
         ..Default::default()
     }));
     let spent = Usage {
@@ -2708,12 +2712,12 @@ async fn counts_failed_attempts_converted_partials_and_tool_usage_replaced_by_af
     ]);
     let opened = open_mem(&setup).await;
     setup.settings.update(|s| {
-        s.retry = PartialRetryPolicy {
+        s.retry = Some(PartialRetryPolicy {
             enabled: Some(true),
             max_retries: Some(1),
             base_delay_ms: Some(1),
-            max_delay_ms: None,
-        };
+            max_agent_delay_ms: None,
+        });
     });
     opened
         .root
@@ -2799,7 +2803,7 @@ async fn counts_failed_attempts_converted_partials_and_tool_usage_replaced_by_af
             StopReason::Aborted
         ]
     );
-    let output: u64 = assistants.iter().map(|m| m.usage.output).sum();
+    let output: i64 = assistants.iter().map(|m| m.usage.output as i64).sum();
     let usage_b = opened
         .harness
         .snapshot_conversation(&*USAGE_DOC, opened.root.id(), context())
@@ -2852,7 +2856,10 @@ async fn keeps_usage_totals_exact_across_reopen_counting_a_partial_converted_aft
     let path = dir.path().join("session.sqlite").to_string_lossy().into_owned();
     let setup = chat_setup(Some(RegisterFauxProviderOptions {
         tokens_per_second: Some(200.0),
-        token_size: Some(FauxTokenSize { min: 1, max: 1 }),
+        token_size: Some(FauxTokenSize {
+            min: Some(1),
+            max: Some(1),
+        }),
         ..Default::default()
     }));
     setup.faux.set_responses(vec![
@@ -2930,9 +2937,9 @@ async fn keeps_usage_totals_exact_across_reopen_counting_a_partial_converted_aft
         .get("faux/faux-1")
         .expect("model")
         .clone();
-    let sum_in: u64 = assistants.iter().map(|m| m.usage.input).sum();
-    let sum_out: u64 = assistants.iter().map(|m| m.usage.output).sum();
-    let sum_tok: u64 = assistants.iter().map(|m| m.usage.total_tokens).sum();
+    let sum_in: i64 = assistants.iter().map(|m| m.usage.input as i64).sum();
+    let sum_out: i64 = assistants.iter().map(|m| m.usage.output as i64).sum();
+    let sum_tok: i64 = assistants.iter().map(|m| m.usage.total_tokens as i64).sum();
     assert_eq!(
         [total.input, total.output, total.total_tokens],
         [sum_in, sum_out, sum_tok]
@@ -2952,7 +2959,7 @@ async fn records_usage_as_numeric_sets_on_the_ledger_in_the_entrys_commit() {
     let commits_cb = Arc::clone(&commits);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind != "pi.usage" {
                     continue;
@@ -2960,11 +2967,16 @@ async fn records_usage_as_numeric_sets_on_the_ledger_in_the_entrys_commit() {
                 let entries = publication
                     .changes
                     .iter()
-                    .filter(|c| matches!(c, pi_durable::types::CommitChange::Entry(_)))
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            pi_durable::types::CommitChange::Table(pi_durable::types::TableCommitChange::Entry(_))
+                        )
+                    })
                     .count();
                 commits_cb.lock().unwrap().push((entries, change.ops));
             }
-        }))
+        })
         .expect("sub");
 
     opened

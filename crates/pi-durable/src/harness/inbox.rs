@@ -6,11 +6,12 @@ use pi_ai::types::{Message, UserMessage};
 use serde::{Deserialize, Serialize};
 
 use crate::documents::{ConversationDocToken, DocDefinitionInput, define_conversation_doc};
-use crate::entries::{TypedEntryDraft, USER_ENTRY};
+use crate::entries::USER_ENTRY;
 use crate::harness::types::{QueueMode, Settings, UserInput};
 use crate::session::transaction::{DocDraft, Tx};
 use crate::types::{
     ConversationId, EntryDraft, EntryDraftHead, EntryId, LatestFork, SubmissionId, SubmissionSettlement,
+    TypedEntryDraft,
 };
 
 /// A queued submission: user input for a run, or a passive entry write.
@@ -208,13 +209,17 @@ pub async fn apply_boundary(
     let mut removed: Vec<usize> = writes.into_iter().chain(users).collect();
     removed.sort_unstable_by(|a, b| b.cmp(a));
     removed.dedup();
-    boundary.inbox.update(|state| {
-        for index in removed {
-            if index < state.items.len() {
-                state.items.remove(index);
+    if !removed.is_empty() {
+        let len = items.len();
+        let ov = boundary.inbox.overlay()?;
+        if let Some(items_ov) = ov.get("items")?.as_overlay() {
+            for index in removed {
+                if index < len {
+                    items_ov.splice(Some(index as i64), Some(1), &[])?;
+                }
             }
         }
-    })?;
+    }
 
     Ok(BoundaryResult { users: placed, reset })
 }
@@ -230,11 +235,14 @@ pub fn is_stale(boundary: &Boundary, entry: &EntryDraft) -> bool {
 /// Remove a withdrawn submission's item; the caller settles the submission.
 pub async fn remove_inbox_item(tx: &Tx, conversation_id: ConversationId, id: SubmissionId) -> pi_js::Result<()> {
     let draft = tx.doc_conversation(&*INBOX_DOC, conversation_id).await?;
-    draft.update(|state| {
-        if let Some(index) = state.items.iter().position(|item| item_id(item) == id) {
-            state.items.remove(index);
+    let index = draft.get()?.items.iter().position(|item| item_id(item) == id);
+    if let Some(index) = index {
+        let ov = draft.overlay()?;
+        if let Some(items_ov) = ov.get("items")?.as_overlay() {
+            items_ov.splice(Some(index as i64), Some(1), &[])?;
         }
-    })
+    }
+    Ok(())
 }
 
 /// Withdraw every queued input of a conversation, as `Conversation.abort()` and abort cascades do:
@@ -242,24 +250,32 @@ pub async fn remove_inbox_item(tx: &Tx, conversation_id: ConversationId, id: Sub
 pub async fn withdraw_queued_inputs(tx: &Tx, conversation_id: ConversationId) -> pi_js::Result<()> {
     let draft = tx.doc_conversation(&*INBOX_DOC, conversation_id).await?;
     let current = draft.get()?;
-    let mut keep = Vec::with_capacity(current.items.len());
-    for item in current.items {
+    let mut to_remove = Vec::new();
+    for (index, item) in current.items.iter().enumerate() {
         match item {
-            InboxItem::Write { .. } => keep.push(item),
+            InboxItem::Write { .. } => {}
             InboxItem::Steer { id, .. } | InboxItem::FollowUp { id, .. } => {
                 tx.settle_submission(
-                    id,
+                    *id,
                     SubmissionSettlement::Unanswered {
                         reason: "aborted".to_owned(),
                         detail: None,
                     },
                 )?;
+                to_remove.push(index);
             }
         }
     }
-    draft.update(|state| {
-        state.items = keep;
-    })
+    if !to_remove.is_empty() {
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        let ov = draft.overlay()?;
+        if let Some(items_ov) = ov.get("items")?.as_overlay() {
+            for index in to_remove {
+                items_ov.splice(Some(index as i64), Some(1), &[])?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn item_id(item: &InboxItem) -> SubmissionId {

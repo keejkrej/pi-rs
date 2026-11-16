@@ -16,17 +16,15 @@ use pi_durable::entries::{ASSISTANT_ENTRY, USER_ENTRY, define_entry};
 use pi_durable::errors::is_conversation_busy;
 use pi_durable::harness::generation::GENERATION_TASK;
 use pi_durable::harness::live::LIVE_DOC;
-use pi_durable::harness::types::{
-    ConversationCreateOptions, ConversationOwnership, DocumentReaderExt, SubmissionDraft, UserInput, WhenBusy,
-};
-use pi_durable::storage::sqlite::node::{NodeSqliteStorage, NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::tasks::{TaskOptions, TaskOwnership};
+use pi_durable::harness::types::{ConversationCreateOptions, SubmissionDraft, UserInput, WhenBusy};
+use pi_durable::storage::sqlite::SqliteStorage;
+use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord,
-    InputSubmissionState, JsonValue, Page, Seq, Storage, StorageWrite, StoredDocument, SubmissionCreate, SubmissionId,
-    SubmissionQuery, SubmissionRecord, SubmissionSettlement, SubmissionState, SubmissionStatus, TaskId, TaskQuery,
-    TaskState, WriteSubmissionState,
+    ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId,
+    DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, InputSubmissionState, JsonValue, Page, Seq, Storage, StorageWrite, StoredDocument,
+    SubmissionCreate, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionSettlement, SubmissionState,
+    SubmissionStatus, TaskId, TaskOptions, TaskOwnership, TaskQuery, TaskState, WriteSubmissionState,
 };
 use pi_js::abort::AbortController;
 use pretty_assertions::assert_eq;
@@ -44,7 +42,7 @@ async fn sqlite_path() -> (TempDir, String) {
     (dir, path)
 }
 
-async fn open_sqlite(path: &str) -> Arc<NodeSqliteStorage> {
+async fn open_sqlite(path: &str) -> Arc<SqliteStorage> {
     Arc::new(
         open_node_sqlite_storage(path, NodeSqliteStorageOptions::default())
             .await
@@ -309,7 +307,7 @@ async fn places_idle_input_and_rejects_busy_input_with_when_busy_reject_without_
     let entry = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*USER_ENTRY, entry_id).await },
+            move |tx| async move { tx.typed_entry(&USER_ENTRY, entry_id).await },
             context(),
         )
         .await
@@ -431,7 +429,8 @@ async fn deduplicates_request_ids_per_conversation_before_any_write() {
         .create_conversation(
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
-                ..Default::default()
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -523,7 +522,8 @@ async fn reports_abort_results_and_looks_submissions_up_by_conversation() {
         .create_conversation(
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
-                ..Default::default()
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -537,7 +537,7 @@ async fn reports_abort_results_and_looks_submissions_up_by_conversation() {
             .expect("abort wrong cid"),
         pi_durable::harness::types::AbortSubmissionResult::NotFound
     );
-    let missing_id = SubmissionId::from_i64(999_999);
+    let missing_id = SubmissionId::new_unchecked(999_999);
     assert_eq!(
         opened
             .harness
@@ -598,14 +598,16 @@ async fn cancels_only_a_wait_and_rejects_pending_waits_on_close() {
         .await
         .expect("submit");
     let controller = AbortController::new();
-    let cancelled_ctx = with_abort_signal(&context(), controller.signal());
+    let cancelled_ctx = with_abort_signal(controller.signal(), context());
     let sub_c = submission.clone();
     let cancelled_fut = tokio::spawn(async move { sub_c.wait(cancelled_ctx).await });
     let sub_p = submission.clone();
     let pending_fut = tokio::spawn(async move { sub_p.wait(context()).await });
     tokio::task::yield_now().await;
 
-    controller.abort(Some(pi_js::Error::msg("stop waiting")));
+    controller.abort(Some(pi_js::abort::AbortReason::from_error(&pi_js::Error::msg(
+        "stop waiting",
+    ))));
     let err = cancelled_fut
         .await
         .expect("join cancelled")
@@ -940,7 +942,7 @@ async fn settles_submissions_by_their_current_record_in_the_transaction() {
         .commit(
             |tx| async move {
                 tx.settle_submission(
-                    SubmissionId::from_i64(999_999),
+                    SubmissionId::new_unchecked(999_999),
                     SubmissionSettlement::Unanswered {
                         reason: "x".to_owned(),
                         detail: None,
@@ -1114,7 +1116,7 @@ async fn appends_and_reads_typed_entries_through_tokens() {
         .commit(
             {
                 let tok = counter_tok.clone();
-                move |tx| async move { tx.typed_entry(&tok, EntryId::from_i64(999_999)).await }
+                move |tx| async move { tx.typed_entry(&tok, EntryId::new_unchecked(999_999)).await }
             },
             context(),
         )
@@ -1122,8 +1124,8 @@ async fn appends_and_reads_typed_entries_through_tokens() {
         .expect("read missing");
     assert_eq!(missing, None);
 
-    assert!(counter_tok.matches(&counter.record));
-    assert!(!ASSISTANT_ENTRY.matches(&counter.record));
+    assert!(counter_tok.matches(Some(&counter.record)));
+    assert!(!ASSISTANT_ENTRY.matches(Some(&counter.record)));
     assert_eq!([USER_ENTRY.kind(), ASSISTANT_ENTRY.kind()], ["pi.user", "pi.assistant"]);
     opened.harness.close(context()).await.expect("close");
 }

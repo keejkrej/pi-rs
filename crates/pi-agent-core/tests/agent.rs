@@ -6,17 +6,18 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use indexmap::IndexMap;
 use pi_agent_core::{
     AfterToolCallResult, Agent, AgentContext, AgentEvent, AgentInitialState, AgentLoopTurnUpdate, AgentMessage,
     AgentOptions, AgentTool, AgentToolResult, BeforeToolCallResult, FinishTurnAction, FinishTurnDecision,
-    PrepareRequestResult, QueueMode, StreamFn, ThinkingBudgets, ThinkingLevel, ToolExecutionMode, Transport,
-    set_default_stream_fn,
+    PrepareRequestResult, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode, set_default_stream_fn,
 };
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, FauxAssistantMessageContent, FauxToolCallOptions,
-    JsonObject, Message, Model, StopReason, SystemMessage, SystemMessageContent, ToolReference, ToolResultMessage,
-    UserContentBlock, UserMessage, UserMessageContent, create_assistant_message_event_stream, faux_assistant_message,
-    faux_text, faux_tool_call, to_tool_declaration,
+    JsonObject, Message, Model, StopReason, SystemMessage, SystemMessageContent, ThinkingBudgets, ToolReference,
+    ToolResultMessage, Transport, UserContentBlock, UserMessage, UserMessageContent,
+    create_assistant_message_event_stream, faux_assistant_message, faux_text, faux_tool_call,
+    get_current_system_message, to_tool_declaration,
 };
 use pi_js::Error;
 use pi_js::abort::AbortSignal;
@@ -36,16 +37,17 @@ impl Drop for DefaultStreamReset {
 #[derive(Clone)]
 struct SignalGate {
     tx: tokio::sync::watch::Sender<bool>,
+    _rx: Arc<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl SignalGate {
     fn new() -> Self {
-        let (tx, _) = tokio::sync::watch::channel(false);
-        Self { tx }
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        Self { tx, _rx: Arc::new(rx) }
     }
 
     fn open(&self) {
-        let _ = self.tx.send(true);
+        self.tx.send_replace(true);
     }
 
     async fn wait(&self) {
@@ -183,7 +185,7 @@ fn spawn_abortable_stream(
             gate.open();
         }
         if let Some(sig) = signal {
-            while !sig.is_aborted() {
+            while !sig.aborted() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         } else {
@@ -417,20 +419,74 @@ async fn emits_delta_system_messages_when_tools_change_between_prompts() {
 }
 
 #[tokio::test]
-async fn merges_tool_changes_into_pending_system_message_created_by_set_system_prompt() {
-    let tool_a = make_noop_tool("tool_a");
-    let tool_b = make_noop_tool("tool_b");
+async fn merges_tool_changes_into_a_pending_system_message() {
+    let tool = make_noop_tool("echo");
+    let seen_sys_count = Arc::new(AtomicUsize::new(0));
+    let count_ref = Arc::clone(&seen_sys_count);
 
     let agent = Agent::new(AgentOptions {
         initial_state: Some(AgentInitialState {
-            system_prompt: Some("Prompt 1".to_string()),
-            tools: Some(vec![tool_a.clone()]),
+            system_prompt: Some("You are helpful.".to_string()),
+            ..Default::default()
+        }),
+        stream_fn: Some(Arc::new(move |_m, ctx, _opts| {
+            let sys_count = ctx.messages.iter().filter(|m| matches!(m, Message::System(_))).count();
+            count_ref.store(sys_count, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(spawn_done_stream(
+                    assistant_msg(vec![text_block("done")], StopReason::Stop),
+                    StopReason::Stop,
+                ))
+            })
+        })),
+        ..Default::default()
+    });
+
+    agent.set_tools(vec![tool.clone()]);
+    let mut sections = IndexMap::new();
+    sections.insert("skills".to_string(), Some("<skills>x</skills>".to_string()));
+    agent
+        .prompt_messages(vec![
+            AgentMessage::from(SystemMessage {
+                content: SystemMessageContent::Text(String::new()),
+                sections: Some(sections.clone()),
+                tools_added: None,
+                tools_removed: None,
+                timestamp: 1,
+            }),
+            user_msg("hi"),
+        ])
+        .await
+        .expect("prompt should succeed");
+
+    assert_eq!(seen_sys_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        agent.state().messages[1],
+        AgentMessage::from(SystemMessage {
+            content: SystemMessageContent::Text(String::new()),
+            sections: Some(sections),
+            tools_added: Some(vec![to_tool_declaration(&tool.to_tool())]),
+            tools_removed: None,
+            timestamp: 1,
+        })
+    );
+}
+
+#[tokio::test]
+async fn rewrites_pending_tool_declarations_to_match_the_executable_set() {
+    let first = make_noop_tool("first");
+    let second = make_noop_tool("second");
+
+    let agent = Agent::new(AgentOptions {
+        initial_state: Some(AgentInitialState {
+            system_prompt: Some("You are helpful.".to_string()),
+            tools: Some(vec![first]),
             ..Default::default()
         }),
         stream_fn: Some(Arc::new(|_m, _ctx, _opts| {
             Box::pin(async move {
                 Ok(spawn_done_stream(
-                    assistant_msg(vec![text_block("ok")], StopReason::Stop),
+                    assistant_msg(vec![text_block("done")], StopReason::Stop),
                     StopReason::Stop,
                 ))
             })
@@ -438,91 +494,45 @@ async fn merges_tool_changes_into_pending_system_message_created_by_set_system_p
         ..Default::default()
     });
 
-    agent.prompt("turn 1").await.expect("turn 1 should succeed");
+    let mut sections = IndexMap::new();
+    sections.insert("note".to_string(), Some("<note>x</note>".to_string()));
+    agent
+        .prompt_messages(vec![
+            AgentMessage::from(SystemMessage {
+                content: SystemMessageContent::Text(String::new()),
+                sections: Some(sections.clone()),
+                tools_added: Some(vec![to_tool_declaration(&second.to_tool())]),
+                tools_removed: Some(vec![ToolReference {
+                    name: "first".to_string(),
+                }]),
+                timestamp: 1,
+            }),
+            user_msg("hi"),
+        ])
+        .await
+        .expect("prompt should succeed");
 
-    agent.set_system_prompt("Prompt 2");
-    agent.set_tools(vec![tool_a, tool_b]);
-    agent.prompt("turn 2").await.expect("turn 2 should succeed");
-
-    let state = agent.state();
-    let sys_msgs = system_messages(&state.messages);
-    assert_eq!(sys_msgs.len(), 2);
-    assert_eq!(sys_msgs[1].content, SystemMessageContent::Text("Prompt 2".to_string()));
     assert_eq!(
-        sys_msgs[1]
-            .tools_added
-            .as_ref()
-            .map(|v| v.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()),
-        Some(vec!["tool_b"])
+        agent.state().messages[1],
+        AgentMessage::from(SystemMessage {
+            content: SystemMessageContent::Text(String::new()),
+            sections: Some(sections),
+            tools_added: None,
+            tools_removed: None,
+            timestamp: 1,
+        })
     );
-    assert!(sys_msgs[1].tools_removed.is_none());
-}
-
-#[tokio::test]
-async fn rewrites_mismatched_pending_system_message_tool_declarations() {
-    let tool_a = make_noop_tool("tool_a");
-    let tool_b = make_noop_tool("tool_b");
-    let stale_pending = SystemMessage {
-        content: SystemMessageContent::Text("Updated prompt".to_string()),
-        sections: None,
-        tools_added: Some(vec![to_tool_declaration(&tool_a.tool)]),
-        tools_removed: None,
-        timestamp: now_ms(),
-    };
-
-    let seen_sys = Arc::new(Mutex::new(Vec::<SystemMessage>::new()));
-    let seen_ref = Arc::clone(&seen_sys);
-
-    let agent = Agent::new(AgentOptions {
-        initial_state: Some(AgentInitialState {
-            tools: Some(vec![tool_a, tool_b]),
-            messages: Some(vec![
-                user_msg("earlier"),
-                AgentMessage::from(assistant_msg(vec![text_block("earlier reply")], StopReason::Stop)),
-                AgentMessage::from(stale_pending),
-            ]),
-            ..Default::default()
-        }),
-        stream_fn: Some(Arc::new(move |_m, ctx, _opts| {
-            let sys: Vec<SystemMessage> = ctx
-                .messages
-                .iter()
-                .filter_map(|m| match m {
-                    Message::System(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect();
-            *seen_ref.lock().unwrap() = sys;
-            Box::pin(async move {
-                Ok(spawn_done_stream(
-                    assistant_msg(vec![text_block("ok")], StopReason::Stop),
-                    StopReason::Stop,
-                ))
-            })
-        })),
-        ..Default::default()
-    });
-
-    agent.prompt("follow up").await.expect("prompt should succeed");
-
-    let state = agent.state();
-    let sys_msgs = system_messages(&state.messages);
-    assert_eq!(sys_msgs.len(), 1);
-    let declared: Vec<&str> = sys_msgs[0]
-        .tools_added
-        .as_ref()
-        .map(|tools| tools.iter().map(|t| t.name.as_str()).collect())
-        .unwrap_or_default();
-    assert_eq!(declared, vec!["tool_a", "tool_b"]);
-
-    let sent = seen_sys.lock().unwrap();
-    assert_eq!(sent.len(), 1);
+    let llm_messages: Vec<Message> = agent
+        .state()
+        .messages
+        .iter()
+        .filter_map(|m| m.as_message().cloned())
+        .collect();
     assert_eq!(
-        sent[0]
-            .tools_added
-            .as_ref()
-            .map(|tools| tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()),
-        Some(vec!["tool_a", "tool_b"])
+        get_current_system_message(&llm_messages)
+            .and_then(|s| s.tools_added)
+            .map(|tools| tools.into_iter().map(|t| t.name).collect::<Vec<_>>()),
+        Some(vec!["first".to_string()])
     );
 }
 
@@ -575,7 +585,7 @@ async fn rejects_reset_while_processing_without_corrupting_transcript() {
             ..Default::default()
         }),
         stream_fn: Some(Arc::new(move |_m, _ctx, opts| {
-            let signal = opts.and_then(|o| o.signal);
+            let signal = opts.and_then(|o| o.base.signal);
             let started_ref = started_ref.clone();
             Box::pin(async move { Ok(spawn_abortable_stream(Some(started_ref), signal)) })
         })),
@@ -592,7 +602,7 @@ async fn rejects_reset_while_processing_without_corrupting_transcript() {
     assert!(agent_ref.state().is_streaming);
 
     let err = agent_ref.reset().expect_err("reset while streaming must fail");
-    assert!(err.message().contains("Cannot reset while processing"));
+    assert!(err.message().contains("Agent is already processing"));
     assert!(agent_ref.state().is_streaming);
     assert_eq!(message_roles(&agent_ref.state().messages), vec!["system", "user"]);
 
@@ -625,7 +635,7 @@ async fn subscribes_and_unsubscribes_sync_listeners() {
     let first_count = count.load(Ordering::SeqCst);
     assert!(first_count > 0);
 
-    unsub();
+    unsub.call();
     agent.prompt("second").await.expect("second prompt succeeds");
     assert_eq!(count.load(Ordering::SeqCst), first_count);
 }
@@ -803,7 +813,7 @@ async fn passes_active_abort_signal_to_subscribers_and_exposes_signal() {
 
     let agent = Arc::new(Agent::new(AgentOptions {
         stream_fn: Some(Arc::new(move |_m, _ctx, opts| {
-            let signal = opts.and_then(|o| o.signal);
+            let signal = opts.and_then(|o| o.base.signal);
             let started_ref = started_ref.clone();
             Box::pin(async move { Ok(spawn_abortable_stream(Some(started_ref), signal)) })
         })),
@@ -826,13 +836,13 @@ async fn passes_active_abort_signal_to_subscribers_and_exposes_signal() {
 
     stream_started.wait().await;
     let active_sig = received_signal.lock().unwrap().clone().expect("signal captured");
-    assert!(!active_sig.is_aborted());
+    assert!(!active_sig.aborted());
     assert!(agent.signal().is_some());
 
     agent.abort();
     prompt_handle.await.unwrap().expect("prompt settles cleanly");
 
-    assert!(active_sig.is_aborted());
+    assert!(active_sig.aborted());
     assert!(agent.signal().is_none());
 }
 
@@ -1107,7 +1117,7 @@ async fn handles_abort_cleanly() {
 
     let agent = Arc::new(Agent::new(AgentOptions {
         stream_fn: Some(Arc::new(move |_m, _ctx, opts| {
-            let signal = opts.and_then(|o| o.signal);
+            let signal = opts.and_then(|o| o.base.signal);
             let started_ref = started_ref.clone();
             Box::pin(async move { Ok(spawn_abortable_stream(Some(started_ref), signal)) })
         })),
@@ -1133,7 +1143,7 @@ async fn throws_when_prompt_or_continue_called_while_streaming() {
 
     let agent = Arc::new(Agent::new(AgentOptions {
         stream_fn: Some(Arc::new(move |_m, _ctx, opts| {
-            let signal = opts.and_then(|o| o.signal);
+            let signal = opts.and_then(|o| o.base.signal);
             let started_ref = started_ref.clone();
             Box::pin(async move { Ok(spawn_abortable_stream(Some(started_ref), signal)) })
         })),
@@ -1606,7 +1616,7 @@ async fn forwards_finish_turn_through_agent_options_with_active_abort_signal() {
 async fn forwards_stream_options_hooks_and_metadata_through_agent_options() {
     let seen_session_id = Arc::new(Mutex::new(None::<String>));
     let seen_api_key = Arc::new(Mutex::new(None::<String>));
-    let seen_max_retry = Arc::new(Mutex::new(None::<i64>));
+    let seen_max_retry = Arc::new(Mutex::new(None::<u64>));
     let seen_has_budgets = Arc::new(AtomicBool::new(false));
     let seen_has_transport = Arc::new(AtomicBool::new(false));
 
@@ -1627,7 +1637,7 @@ async fn forwards_stream_options_hooks_and_metadata_through_agent_options() {
             Box::pin(async move { Ok(Some(format!("key-for-{provider}"))) })
         })),
         thinking_budgets: Some(ThinkingBudgets::default()),
-        transport: Some(Transport::default()),
+        transport: Some(Transport::Sse),
         max_retry_delay_ms: Some(1234),
         stream_fn: Some(Arc::new(move |_m, _ctx, opts| {
             let sid_ref = Arc::clone(&sid_ref);
@@ -1637,11 +1647,11 @@ async fn forwards_stream_options_hooks_and_metadata_through_agent_options() {
             let transport_ref = Arc::clone(&transport_ref);
             Box::pin(async move {
                 if let Some(o) = opts {
-                    *sid_ref.lock().unwrap() = o.session_id;
-                    *key_ref.lock().unwrap() = o.api_key;
-                    *retry_ref.lock().unwrap() = o.max_retry_delay_ms;
+                    *sid_ref.lock().unwrap() = o.base.session_id;
+                    *key_ref.lock().unwrap() = o.base.api_key;
+                    *retry_ref.lock().unwrap() = o.base.max_retry_delay_ms;
                     budget_ref.store(o.thinking_budgets.is_some(), Ordering::SeqCst);
-                    transport_ref.store(o.transport.is_some(), Ordering::SeqCst);
+                    transport_ref.store(o.base.transport.is_some(), Ordering::SeqCst);
                 }
                 Ok(spawn_done_stream(
                     assistant_msg(vec![text_block("ok")], StopReason::Stop),

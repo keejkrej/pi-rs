@@ -10,16 +10,16 @@ use pi_durable::documents::{
     DocDefinitionInput, DocFamilyDefinitionInput, RewindableConversationDocToken, TaskDocFamilyToken, TaskDocToken,
     define_rewindable_conversation_doc, define_task_doc, define_task_doc_family,
 };
-use pi_durable::entries::{TypedEntryDraft, define_entry};
+use pi_durable::entries::define_entry;
 use pi_durable::errors::is_read_after_write;
-use pi_durable::ids::{ConversationId, EntryId, TaskId, id_from_number};
-use pi_durable::session::SessionImpl;
+use pi_durable::ids::{ConversationId, TaskId, id_from_number};
+use pi_durable::session::{SessionImpl, TransactionScope};
 use pi_durable::tasks::{Task, TaskDefinition, define_task};
 use pi_durable::types::{
     CommitChange, ConversationOwnership, ConversationQuery, ConversationRecord, DocumentPoint, DocumentQuery,
-    DocumentScope, EntryDraft, EntryDraftHead, EntryQuery, EntryRecord, ErasedTaskRecord, NextTaskState,
-    RewindableFork, SelfHead, Storage, StorageWrite, TableCommitChange, TaskOptions, TaskOutcome, TaskOwnership,
-    TaskQuery, TaskState, TransactionScope,
+    DocumentScope, EntryDraft, EntryDraftHead, EntryQuery, EntryRecord, ErasedTaskRecord, RewindableFork, SelfHead,
+    Storage, StorageWrite, TableCommitChange, TaskOptions, TaskOutcome, TaskOwnership, TaskQuery, TaskState,
+    TypedEntryDraft,
 };
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
@@ -65,11 +65,7 @@ fn work_task() -> Task<WorkInput, Checkpoint, WorkResult> {
     let mut phases: IndexMap<String, pi_durable::tasks::TypedPhaseHandler<WorkInput, Checkpoint, WorkResult, ()>> =
         IndexMap::new();
     let noop: pi_durable::tasks::TypedPhaseHandler<WorkInput, Checkpoint, WorkResult, ()> =
-        Arc::new(|task, _runtime, _ctx| {
-            Box::pin(futures::future::ready(Ok(NextTaskState::Running {
-                checkpoint: task.checkpoint,
-            })))
-        });
+        Arc::new(|_task, _runtime, _ctx| Box::pin(futures::future::ready(Ok(()))));
     phases.insert("start".to_owned(), Arc::clone(&noop));
     phases.insert("next".to_owned(), noop);
     define_task(TaskDefinition {
@@ -77,12 +73,7 @@ fn work_task() -> Task<WorkInput, Checkpoint, WorkResult> {
         version: 1,
         initial: Arc::new(|_| Ok(Checkpoint::Start)),
         phases,
-        abort: Arc::new(|_task, _runtime, _ctx| {
-            Box::pin(futures::future::ready(Ok(TaskOutcome::Aborted {
-                reason: None,
-                result: None,
-            })))
-        }),
+        abort: Arc::new(|_task, _runtime, _ctx| Box::pin(futures::future::ready(Ok(())))),
         migrate: None,
         _hooks: std::marker::PhantomData,
     })
@@ -156,7 +147,7 @@ async fn create_work_task(
                     )
                     .await?;
                 if with_document {
-                    tx.doc_task(&progress, task_id)
+                    tx.doc_task(&progress, task_id.erased())
                         .await?
                         .update(|p| p.lines.push("started".to_owned()))?;
                 }
@@ -854,7 +845,7 @@ async fn takes_ownership_of_table_json_and_rejects_non_strict_values() {
 
     let commits = harness.storage.commit_count();
     let invalid_entry = define_entry::<NonStrictValue>("invalid").expect("entry def");
-    let err = harness
+    let err = match harness
         .session
         .commit(
             move |tx| async move {
@@ -873,7 +864,10 @@ async fn takes_ownership_of_table_json_and_rejects_non_strict_values() {
             context(),
         )
         .await
-        .expect_err("non-strict");
+    {
+        Ok(_) => panic!("non-strict"),
+        Err(err) => err,
+    };
     assert!(err.to_string().contains("strict JSON"));
     assert_eq!(harness.storage.commit_count(), commits);
 }
@@ -1028,15 +1022,15 @@ async fn rejects_task_documents_after_a_terminal_candidate() {
                 let task = tx.task(task_id.erased()).await?.expect("task");
                 let draft = tx.doc_task(&progress_c, task_id.erased()).await?;
                 tx.set_task(terminal_task(task.clone()))?;
-                let err = tx
-                    .doc_task(&progress_c, task_id.erased())
-                    .await
-                    .expect_err("terminal progress");
+                let err = match tx.doc_task(&progress_c, task_id.erased()).await {
+                    Ok(_) => panic!("terminal progress"),
+                    Err(err) => err,
+                };
                 assert!(err.to_string().contains(&format!("Task {task_id} is terminal")));
-                let err = tx
-                    .doc_task_family(&step_c, task_id.erased(), "late", ())
-                    .await
-                    .expect_err("terminal step");
+                let err = match tx.doc_task_family(&step_c, task_id.erased(), "late", ()).await {
+                    Ok(_) => panic!("terminal step"),
+                    Err(err) => err,
+                };
                 assert!(err.to_string().contains(&format!("Task {task_id} is terminal")));
                 let err = tx.set_task(task).expect_err("overwrite terminal candidate");
                 assert!(err.to_string().contains("terminal candidate"));

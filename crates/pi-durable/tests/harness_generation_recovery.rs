@@ -10,23 +10,20 @@ use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxDeferredOptions, FauxResponseStep, FauxTokenSize,
     RegisterFauxProviderOptions, faux_assistant_message,
 };
-use pi_ai::types::{DeferredHandle, Message, ModelThinkingLevel, StopReason};
+use pi_ai::types::{Message, ModelThinkingLevel, StopReason};
 use pi_durable::entries::ASSISTANT_ENTRY;
 use pi_durable::harness::define::SectionOptions;
 use pi_durable::harness::generation::{GenerationCheckpoint, GenerationResult};
 use pi_durable::harness::harness::Harness;
-use pi_durable::harness::live::{LIVE_DOC, LiveDeferred, LiveGeneration, LiveRetry, LiveRun, LiveState};
+use pi_durable::harness::live::{DurableRetryState, LIVE_DOC, LiveGeneration, LiveRun, LiveState};
 use pi_durable::harness::types::{
-    ConversationStreamOptions, DeferredOption, DocumentObserverBackend, DocumentObserverExt, DocumentReaderExt,
-    ModelRef, PartialRetryPolicy, ResolvedModelRef, StreamDeferredOption, SubmissionDraft, UserInput,
+    ConversationStreamOptions, PartialRetryPolicy, StreamDeferredOption, SubmissionDraft, UserInput,
 };
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::types::{
-    ConversationId, InputSubmissionState, SubmissionState, SubmissionStatus, TaskId, TaskState, WatchEnd,
-};
+use pi_durable::types::{ConversationId, InputSubmissionState, SubmissionState, SubmissionStatus, TaskId, TaskState};
 use pretty_assertions::assert_eq;
 use support::chat_support::{
-    ChatSetup, OpenChatEnv, OpenedChat, all_entries, chat_setup, open_chat, text_of, wait_for,
+    ChatSetup, OpenChatEnv, OpenedChat, all_entries, chat_setup, open_chat, text_of, unanswered, wait_for,
 };
 use support::harness_support::add_section;
 use support::session_support::context;
@@ -68,10 +65,10 @@ async fn generation_checkpoint(harness: &Harness, id: TaskId) -> Option<Generati
         .await
         .expect("get_task")?;
     match record.state {
-        TaskState::Pending { checkpoint, .. } | TaskState::Running { checkpoint, .. } => {
-            Some(serde_json::from_value(checkpoint).expect("decode checkpoint"))
-        }
-        TaskState::Terminal { .. } => None,
+        TaskState::Pending { checkpoint, .. }
+        | TaskState::Running { checkpoint, .. }
+        | TaskState::Waiting { checkpoint, .. } => Some(serde_json::from_value(checkpoint).expect("decode checkpoint")),
+        TaskState::Completing { .. } | TaskState::Terminal { .. } => None,
     }
 }
 
@@ -303,7 +300,7 @@ async fn resends_a_request_interrupted_before_any_partial_without_repeating_prep
 async fn converts_a_committed_partial_into_an_aborted_entry_and_resends_the_same_messages() {
     let (_dir, path) = sqlite_path().await;
     let slow = chat_setup(Some(RegisterFauxProviderOptions {
-        tokens_per_second: Some(20),
+        tokens_per_second: Some(20.0),
         token_size: Some(FauxTokenSize {
             min: Some(1),
             max: Some(1),
@@ -319,25 +316,25 @@ async fn converts_a_committed_partial_into_an_aborted_entry_and_resends_the_same
     opened.harness.resume().expect("resume");
     let watch = opened
         .harness
-        .watch_conversation_doc(&*LIVE_DOC, opened.root.id(), context())
+        .watch_doc_conversation(&*LIVE_DOC, opened.root.id(), context())
         .await
         .expect("watch")
         .expect("present");
     let watched = Arc::new(Mutex::new(None::<String>));
     let watched_cb = Arc::clone(&watched);
     watch
-        .start(move |value, _| {
+        .start(Arc::new(move |value, _, _| {
             let watched_cb = Arc::clone(&watched_cb);
             Box::pin(async move {
                 if let Some(live) = value
                     && let Some(msg) = live.generation.and_then(|g| g.message)
                     && let Some(text) = text_of(&Message::Assistant(msg))
                 {
-                    *watched_cb.lock().expect("lock") = Some(text);
+                    *watched_cb.lock().expect("lock") = Some(text.to_owned());
                 }
                 Ok(())
             })
-        })
+        }))
         .expect("start");
     let sub_id = opened
         .root
@@ -352,12 +349,15 @@ async fn converts_a_committed_partial_into_an_aborted_entry_and_resends_the_same
         .await
         .expect("submit")
         .id();
-    wait_for(|| {
-        let watched = Arc::clone(&watched);
-        async move { watched.lock().expect("lock").is_some() }
-    })
+    wait_for(
+        || {
+            let watched = Arc::clone(&watched);
+            async move { watched.lock().expect("lock").is_some() }
+        },
+        5_000,
+    )
     .await;
-    watch.stop(WatchEnd::Unsubscribe);
+    watch.stop().await;
     opened.harness.close(context()).await.expect("close");
 
     let setup = chat_setup(None);
@@ -394,7 +394,8 @@ async fn converts_a_committed_partial_into_an_aborted_entry_and_resends_the_same
     let partial = text_of(&Message::Assistant(
         stored.generation.expect("gen").message.expect("msg"),
     ))
-    .expect("text");
+    .expect("text")
+    .to_owned();
     // Everything observers saw before the crash is durable.
     let watched_text = watched.lock().expect("lock").clone().expect("watched");
     assert!(partial.starts_with(&watched_text));
@@ -471,18 +472,21 @@ async fn resumes_a_retry_backoff_after_reopen() {
         .await
         .expect("submit")
         .id();
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.retry.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.retry.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let task_id = run_task_id(&opened.harness, opened.root.id()).await;
     opened.harness.close(context()).await.expect("close");
@@ -510,7 +514,7 @@ async fn resumes_a_retry_backoff_after_reopen() {
             generation: Some(LiveGeneration {
                 attempt: 1,
                 message: None,
-                retry: Some(LiveRetry {
+                retry: Some(DurableRetryState {
                     at: 61_000,
                     error: "503 Service Unavailable".to_owned(),
                 }),
@@ -565,7 +569,7 @@ async fn resumes_polling_a_deferred_response_after_reopen() {
     opened.harness.resume().expect("resume");
     setup.settings.update(|s| {
         s.stream = Some(ConversationStreamOptions {
-            deferred: Some(StreamDeferredOption::Enabled(true)),
+            deferred: Some(StreamDeferredOption::Bool(true)),
             ..Default::default()
         });
     });
@@ -582,18 +586,21 @@ async fn resumes_polling_a_deferred_response_after_reopen() {
         .await
         .expect("submit")
         .id();
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.deferred.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.deferred.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let task_id = run_task_id(&opened.harness, opened.root.id()).await;
     opened.harness.close(context()).await.expect("close");
@@ -623,15 +630,15 @@ async fn resumes_polling_a_deferred_response_after_reopen() {
     let entry = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*ASSISTANT_ENTRY, answer).await },
+            move |tx| async move { tx.typed_entry(&ASSISTANT_ENTRY, answer).await },
             context(),
         )
         .await
         .expect("read")
         .expect("present");
     assert_eq!(
-        entry.model.as_ref().and_then(|m| m.first()).and_then(text_of),
-        Some("deferred answer".to_owned())
+        entry.record.model.as_ref().and_then(|m| m.first()).and_then(text_of),
+        Some("deferred answer")
     );
     assert_eq!(setup.faux.state().deferred_fetch_count(), 1);
     opened.harness.close(context()).await.expect("close");
@@ -696,7 +703,7 @@ async fn fails_no_model_when_the_pinned_model_is_gone_after_reopen_in_request_an
     opened = open_sqlite(&path, &setup).await;
     setup.settings.update(|s| {
         s.stream = Some(ConversationStreamOptions {
-            deferred: Some(StreamDeferredOption::Enabled(true)),
+            deferred: Some(StreamDeferredOption::Bool(true)),
             ..Default::default()
         });
     });
@@ -714,18 +721,21 @@ async fn fails_no_model_when_the_pinned_model_is_gone_after_reopen_in_request_an
         .await
         .expect("submit")
         .id();
-    wait_for(|| {
-        let harness = opened.harness.clone();
-        let root_id = opened.root.id();
-        async move {
-            harness
-                .snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .expect("live")
-                .and_then(|s| s.generation)
-                .is_some_and(|g| g.deferred.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let harness = opened.harness.clone();
+            let root_id = opened.root.id();
+            async move {
+                harness
+                    .snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .expect("live")
+                    .and_then(|s| s.generation)
+                    .is_some_and(|g| g.deferred.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     opened.harness.close(context()).await.expect("close");
 
@@ -786,15 +796,15 @@ async fn runs_a_print_style_turn_and_reads_the_durable_answer_after_reopen() {
     let answer = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*ASSISTANT_ENTRY, answer_id).await },
+            move |tx| async move { tx.typed_entry(&ASSISTANT_ENTRY, answer_id).await },
             context(),
         )
         .await
         .expect("read")
         .expect("present");
     assert_eq!(
-        answer.model.as_ref().and_then(|m| m.first()).and_then(text_of),
-        Some("42".to_owned())
+        answer.record.model.as_ref().and_then(|m| m.first()).and_then(text_of),
+        Some("42")
     );
     opened.harness.close(context()).await.expect("close");
 
@@ -812,7 +822,7 @@ async fn runs_a_print_style_turn_and_reads_the_durable_answer_after_reopen() {
     let after_answer = opened
         .root
         .commit(
-            move |tx| async move { tx.typed_entry(&*ASSISTANT_ENTRY, answer_id).await },
+            move |tx| async move { tx.typed_entry(&ASSISTANT_ENTRY, answer_id).await },
             context(),
         )
         .await

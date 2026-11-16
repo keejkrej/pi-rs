@@ -396,7 +396,8 @@ pub enum WriteSubmissionState {
 }
 
 /// Combined type + state of one durable submission.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum SubmissionState {
     Input(InputSubmissionState),
     Write(WriteSubmissionState),
@@ -626,7 +627,11 @@ pub struct TaskOutcomeError {
 
 /// Durable reason and optional result recorded when a task becomes terminal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    bound(serialize = "R: Serialize", deserialize = "R: serde::Deserialize<'de>")
+)]
 pub enum TaskOutcome<R = JsonValue> {
     Completed {
         result: R,
@@ -679,7 +684,14 @@ pub enum TaskStatus {
 
 /// Complete durable execution state of a task.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    bound(
+        serialize = "S: Serialize, R: Serialize",
+        deserialize = "S: serde::Deserialize<'de>, R: serde::Deserialize<'de>"
+    )
+)]
 pub enum TaskState<S = JsonValue, R = JsonValue> {
     /// Eligible for scheduling.
     Pending { checkpoint: S },
@@ -1048,6 +1060,7 @@ pub type WatchListener<T> =
 pub trait WatchHandleApi<T: Send + Sync + 'static>: Send + Sync {
     fn value(&self) -> T;
     fn start(&self, listener: WatchListener<T>) -> pi_js::Result<()>;
+    fn stop_now(&self);
     async fn stop(&self) -> WatchEnd;
     async fn closed(&self) -> WatchEnd;
 }
@@ -1069,6 +1082,10 @@ impl<T: Send + Sync + 'static> WatchHandle<T> {
 
     pub fn start(&self, listener: WatchListener<T>) -> pi_js::Result<()> {
         self.inner.start(listener)
+    }
+
+    pub fn stop_now(&self) {
+        self.inner.stop_now();
     }
 
     pub async fn stop(&self) -> WatchEnd {
@@ -1142,6 +1159,34 @@ impl<T> DocumentState<T> {
 
     pub fn dispose(&self) -> pi_js::Result<()> {
         self.raw.dispose()
+    }
+}
+
+/// Typed handle over an attached replicated state source (e.g., conversation view or task graph).
+#[derive(Clone)]
+pub struct AttachedState<T: Send + Sync + 'static> {
+    inner: pi_chord::services::state::AttachedReplicatedStateImpl<T>,
+}
+
+impl<T: Send + Sync + Clone + 'static> AttachedState<T> {
+    pub fn from_impl(inner: pi_chord::services::state::AttachedReplicatedStateImpl<T>) -> Self {
+        Self { inner }
+    }
+
+    pub fn value(&self) -> T {
+        self.inner.value()
+    }
+
+    pub fn subscribe(
+        &self,
+        listener: Arc<dyn Fn(T, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
+    ) -> pi_js::Unsubscribe {
+        self.inner
+            .subscribe(move |value, ctx, delivery| listener(value, ctx, delivery))
+    }
+
+    pub fn dispose(&self) -> pi_js::Result<()> {
+        self.inner.dispose()
     }
 }
 

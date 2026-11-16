@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use pi_ai::create_models;
+use pi_ai::types::ModelThinkingLevel;
+use pi_ai::{TSchema, Type, create_models};
 use pi_chord::Context;
 use pi_chord::context::with_abort_signal;
 use pi_durable::documents::{
@@ -19,24 +20,21 @@ use pi_durable::documents::{
 use pi_durable::entries::Entry;
 use pi_durable::errors::StorageRejected;
 use pi_durable::harness::harness::{Conversation, Harness};
-use pi_durable::harness::registry::{Registry, RegistryImpl, create_registry};
+use pi_durable::harness::registry::{RegistryImpl, create_registry};
 use pi_durable::harness::types::{
-    AgentChange, ConversationOwnership, FieldChange, HarnessOptions, RegistryReader, RegistrySnapshot,
-    TaskExecutionInfo, ToolExecutionResult, ToolRegistration,
+    AgentChange, FieldChange, HarnessOptions, RegistryReader, RegistrySnapshot, ToolExecutionResult, ToolRegistration,
 };
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::tasks::{
-    Task, TaskDefinition, TaskRuntimeHandle, TypedAbortHandler, TypedPhaseHandler, define_task, define_tool,
-};
+use pi_durable::tasks::{Task, TaskDefinition, TaskRuntimeHandle, TypedAbortHandler, TypedPhaseHandler, define_task};
 use pi_durable::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord,
-    JoinPolicy, JsonObject, JsonValue, ModelThinkingLevel, NextTaskState, Page, RewindableFork, Seq, Storage,
-    StorageWrite, StoredDocument, SubmissionQuery, SubmissionRecord, TaskId, TaskOptions, TaskOutcome,
+    ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId,
+    DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, JoinPolicy, JsonValue, NextTaskState, Page, RewindableFork, Seq, Storage, StorageWrite,
+    StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, TaskId, TaskOptions, TaskOutcome,
     TaskOutcomeError, TaskOwnership, TaskQuery, TaskState, TaskStatus, WatchEnd,
 };
+use pi_durable::{AbortTaskResult, define_tool};
 use pi_js::abort::{AbortController, AbortReason};
-use pi_js::vendor::typebox::Type;
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::harness_support::{add_hooks, add_task, add_tool, user};
@@ -173,10 +171,7 @@ async fn open_root(
     }
 }
 
-async fn mark_durably(
-    harness: &Harness,
-    id: TaskId,
-) -> Tracked<pi_js::Result<pi_durable::harness::types::AbortTaskResult>> {
+async fn mark_durably(harness: &Harness, id: TaskId) -> Tracked<pi_js::Result<AbortTaskResult>> {
     let harness_c = harness.clone();
     let aborting = track(async move { harness_c.abort_task(id, context()).await });
     loop {
@@ -379,7 +374,7 @@ async fn continues_one_invocation_through_checkpoint_progress_and_completes_with
             let seen_c = Arc::clone(&seen_c);
             let ids_c = Arc::clone(&ids_c);
             Box::pin(async move {
-                let CounterCheckpoint::Count { n } = task.state.checkpoint;
+                let CounterCheckpoint::Count { n } = task.checkpoint;
                 seen_c.lock().unwrap_or_else(|e| e.into_inner()).push(n);
                 let ptr = Arc::as_ptr(&runtime.erased) as *const () as usize;
                 ids_c.lock().unwrap_or_else(|e| e.into_inner()).insert(ptr);
@@ -415,7 +410,7 @@ async fn continues_one_invocation_through_checkpoint_progress_and_completes_with
         _hooks: std::marker::PhantomData,
     });
 
-    let opened = open_root(vec![counter.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![counter.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = opened
         .root
         .commit(
@@ -456,7 +451,11 @@ async fn faults_a_phase_without_durable_progress_and_a_throwing_phase() {
     let throws = one_step::<(), _, _>("test.throws", |_t, _rt, _ctx| async { Err(pi_js::Error::msg("boom")) });
 
     let opened = open_root(
-        vec![idle.clone().any(), doc_only.clone().any(), throws.clone().any()],
+        vec![
+            idle.clone().into_any(),
+            doc_only.clone().into_any(),
+            throws.clone().into_any(),
+        ],
         OpenTasksOptions::default(),
         None,
     )
@@ -518,7 +517,7 @@ async fn keeps_a_committed_terminal_outcome_when_the_handler_throws_afterwards()
         }
     });
 
-    let opened = open_root(vec![done.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![done.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &done, false).await;
     opened.harness.resume().expect("resume");
     let settled = opened.harness.wait_for_task(id, context()).await.expect("wait");
@@ -547,7 +546,7 @@ async fn compares_checkpoints_by_value_including_arrays() {
         "collect".to_owned(),
         Arc::new(|task, runtime, ctx| {
             Box::pin(async move {
-                let CollectCheckpoint::Collect { items } = task.state.checkpoint;
+                let CollectCheckpoint::Collect { items } = task.checkpoint;
                 let mut next = items.clone();
                 if items.len() < 2 {
                     next.push(format!("item{}", items.len()));
@@ -576,7 +575,7 @@ async fn compares_checkpoints_by_value_including_arrays() {
         migrate: None,
         _hooks: std::marker::PhantomData,
     });
-    let opened = open_root(vec![collect.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![collect.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = opened
         .root
         .commit(
@@ -661,9 +660,10 @@ async fn commits_results_with_entries_atomically_keeps_memos_until_terminal_and_
             let child_slot_w = Arc::clone(&child_slot_w);
             Box::pin(async move {
                 assert_eq!(runtime.memo_get::<String>("choice", ctx.clone()).await?, None);
+                let (choice_a, choice_b) = ("a".to_owned(), "b".to_owned());
                 let (w1, w2) = tokio::join!(
-                    runtime.memo_set("choice", &"a".to_owned(), ctx.clone()),
-                    runtime.memo_set("choice", &"b".to_owned(), ctx.clone()),
+                    runtime.memo_set("choice", &choice_a, ctx.clone()),
+                    runtime.memo_set("choice", &choice_b, ctx.clone()),
                 );
                 assert_eq!(vec![w1?, w2?], vec!["a".to_owned(), "a".to_owned()]);
                 assert_eq!(
@@ -684,9 +684,8 @@ async fn commits_results_with_entries_atomically_keeps_memos_until_terminal_and_
                             let child_w = child_w.clone();
                             let child_slot_w = Arc::clone(&child_slot_w);
                             Box::pin(async move {
-                                tx.doc_task(&progress_w, task_id)?.update(|d| {
+                                tx.doc_task(&progress_w, task_id).await?.update(|d| {
                                     d.lines.push("wrote".to_owned());
-                                    Ok(())
                                 })?;
                                 let created = tx
                                     .create_task(
@@ -728,7 +727,7 @@ async fn commits_results_with_entries_atomically_keeps_memos_until_terminal_and_
                             let progress_a = progress_a.clone();
                             let seen_a = Arc::clone(&seen_a);
                             Box::pin(async move {
-                                let lines = tx.doc_task(&progress_a, task_id)?.get()?.lines;
+                                let lines = tx.doc_task(&progress_a, task_id).await?.get()?.lines;
                                 *seen_a.lock().unwrap_or_else(|e| e.into_inner()) = Some(lines);
                                 Ok(None)
                             })
@@ -773,7 +772,7 @@ async fn commits_results_with_entries_atomically_keeps_memos_until_terminal_and_
     });
 
     let opened = open_root(
-        vec![writer.clone().any(), child.any()],
+        vec![writer.clone().into_any(), child.into_any()],
         OpenTasksOptions::default(),
         None,
     )
@@ -982,7 +981,11 @@ async fn resumes_a_waiting_task_once_every_task_in_on_is_terminal_whatever_the_o
     });
 
     let opened = open_root(
-        vec![first.clone().any(), faulting.clone().any(), waiter.clone().any()],
+        vec![
+            first.clone().into_any(),
+            faulting.clone().into_any(),
+            waiter.clone().into_any(),
+        ],
         OpenTasksOptions::default(),
         None,
     )
@@ -1132,7 +1135,7 @@ async fn keeps_one_registry_snapshot_per_phase_and_refreshes_it_at_the_phase_bou
         _hooks: std::marker::PhantomData,
     });
 
-    let opened = open_root(vec![snapshots.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![snapshots.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = opened
         .root
         .commit(
@@ -1159,7 +1162,7 @@ async fn keeps_one_registry_snapshot_per_phase_and_refreshes_it_at_the_phase_bou
         define_tool(ToolRegistration {
             name: "late".to_owned(),
             description: "late".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1250,9 +1253,10 @@ async fn resolves_the_agent_at_first_use_in_a_phase_from_its_snapshot_keeps_it_f
                 wait_before_a.resolve(());
                 before_a.wait().await?;
                 let first = runtime.agent(ctx.clone()).await?;
+                let first_pings = run_ping(&pings_a, &runtime).await?;
                 seen_a.lock().unwrap_or_else(|e| e.into_inner()).push(SeenPhase {
                     phase: "a",
-                    pings: run_ping(&pings_a, &runtime).await?,
+                    pings: first_pings,
                     thinking: first.thinking_level,
                     same: None,
                 });
@@ -1262,9 +1266,10 @@ async fn resolves_the_agent_at_first_use_in_a_phase_from_its_snapshot_keeps_it_f
                 let same = second.thinking_level == first.thinking_level
                     && second.extensions.iter().map(|e| &e.name).collect::<Vec<_>>()
                         == first.extensions.iter().map(|e| &e.name).collect::<Vec<_>>();
+                let second_pings = run_ping(&pings_a, &runtime).await?;
                 seen_a.lock().unwrap_or_else(|e| e.into_inner()).push(SeenPhase {
                     phase: "a",
-                    pings: run_ping(&pings_a, &runtime).await?,
+                    pings: second_pings,
                     thinking: second.thinking_level,
                     same: Some(same),
                 });
@@ -1290,9 +1295,10 @@ async fn resolves_the_agent_at_first_use_in_a_phase_from_its_snapshot_keeps_it_f
             let seen_b = Arc::clone(&seen_b);
             Box::pin(async move {
                 let agent = runtime.agent(ctx.clone()).await?;
+                let pings = run_ping(&pings_b, &runtime).await?;
                 seen_b.lock().unwrap_or_else(|e| e.into_inner()).push(SeenPhase {
                     phase: "b",
-                    pings: run_ping(&pings_b, &runtime).await?,
+                    pings,
                     thinking: agent.thinking_level,
                     same: None,
                 });
@@ -1313,7 +1319,7 @@ async fn resolves_the_agent_at_first_use_in_a_phase_from_its_snapshot_keeps_it_f
         _hooks: std::marker::PhantomData,
     });
 
-    let opened = open_root(vec![phases_task.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![phases_task.clone().into_any()], OpenTasksOptions::default(), None).await;
     let p_before = Arc::clone(&pings);
     add_hooks(
         &opened.registry,
@@ -1430,10 +1436,10 @@ async fn rejects_an_agent_wait_whose_caller_context_is_cancelled_without_affecti
         async move {
             let caller = AbortController::new();
             caller.abort(Some(AbortReason::error("Error", "caller gone")));
-            let err = rt
-                .agent(with_controller_abort(&caller))
-                .await
-                .expect_err("cancelled agent()");
+            let err = match rt.agent(with_controller_abort(&caller)).await {
+                Ok(_) => panic!("cancelled agent()"),
+                Err(err) => err,
+            };
             *cancelled_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
             let agent = rt.agent(ctx.clone()).await?;
             *resolved_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent.thinking_level);
@@ -1442,7 +1448,7 @@ async fn rejects_an_agent_wait_whose_caller_context_is_cancelled_without_affecti
         }
     });
 
-    let opened = open_root(vec![agent_task.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![agent_task.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &agent_task, false).await;
     opened.harness.resume().expect("resume");
     opened.harness.wait_for_task(id, context()).await.expect("wait");
@@ -1480,16 +1486,16 @@ async fn observes_a_failed_agent_resolution_whose_only_caller_stopped_waiting() 
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
                 .expect("harness stored");
-            harness_ref.unload_documents();
+            harness_ref.unload_documents().await.expect("unload documents");
             let caller = AbortController::new();
             caller.abort(Some(AbortReason::error("Error", "caller gone")));
             storage_c.set_fail(true);
             let _ = rt.agent(with_controller_abort(&caller)).await;
             flush().await;
-            let err = rt
-                .agent(ctx.clone())
-                .await
-                .expect_err("should observe failed resolution");
+            let err = match rt.agent(ctx.clone()).await {
+                Ok(_) => panic!("should observe failed resolution"),
+                Err(err) => err,
+            };
             *resolved_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
             rt.commit(|_tx, _c| Box::pin(async { Ok(Some(completed(()))) }), ctx)
                 .await
@@ -1497,7 +1503,7 @@ async fn observes_a_failed_agent_resolution_whose_only_caller_stopped_waiting() 
     });
 
     let opened = open_root(
-        vec![agent_task.clone().any()],
+        vec![agent_task.clone().into_any()],
         OpenTasksOptions::default(),
         Some(storage.clone() as Arc<dyn Storage>),
     )
@@ -1582,15 +1588,14 @@ async fn rejects_runtime_operations_after_the_invocation_ends_and_stops_its_watc
         }
     });
 
-    let opened = open_root(vec![watcher.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![watcher.clone().into_any()], OpenTasksOptions::default(), None).await;
     let notes_init = notes.clone();
     opened
         .harness
         .commit(
             move |tx| async move {
-                tx.doc_session(&notes_init)?.update(|d| {
+                tx.doc_session(&notes_init).await?.update(|d| {
                     d.text = "hello".to_owned();
-                    Ok(())
                 })
             },
             context(),
@@ -1613,9 +1618,8 @@ async fn rejects_runtime_operations_after_the_invocation_ends_and_stops_its_watc
         .harness
         .commit(
             move |tx| async move {
-                tx.doc_session(&notes_after)?.update(|d| {
+                tx.doc_session(&notes_after).await?.update(|d| {
                     d.text = "after".to_owned();
-                    Ok(())
                 })
             },
             context(),
@@ -1660,26 +1664,23 @@ async fn rejects_runtime_operations_after_the_invocation_ends_and_stops_its_watc
             .contains("invocation has ended")
     );
     assert!(
-        rt.watch_doc_session(&notes, context())
-            .await
-            .expect_err("watchDoc")
-            .to_string()
-            .contains("invocation has ended")
+        match rt.watch_doc_session(&notes, context()).await {
+            Ok(_) => panic!("watchDoc"),
+            Err(err) => err,
+        }
+        .to_string()
+        .contains("invocation has ended")
     );
     assert!(
-        rt.agent(hctx)
-            .await
-            .expect_err("agent")
-            .to_string()
-            .contains("invocation has ended")
+        match rt.agent(hctx).await {
+            Ok(_) => panic!("agent"),
+            Err(err) => err,
+        }
+        .to_string()
+        .contains("invocation has ended")
     );
     assert!(rt.now().expect_err("now").to_string().contains("invocation has ended"));
-    assert!(
-        rt.report(pi_js::Error::msg("late"))
-            .expect_err("report")
-            .to_string()
-            .contains("invocation has ended")
-    );
+    rt.report(pi_js::Error::msg("late"));
     opened.harness.close(context()).await.expect("close");
 }
 
@@ -1726,21 +1727,22 @@ async fn reads_committed_documents_and_context_through_the_runtime_and_forwards_
             let len1 = rt.context(cid, ctx.clone(), Some(first)).await?.entries.len();
             let len2 = rt.context(cid, ctx.clone(), Some(second)).await?.messages.len();
             let now = rt.now()?;
-            rt.report(pi_js::Error::msg("reported"))?;
-            let mut out = seen_r.lock().unwrap_or_else(|e| e.into_inner());
-            out.push(snap_now);
-            out.push(snap_as_of);
-            out.push(len1.to_string());
-            out.push(len2.to_string());
-            out.push(now.to_string());
-            drop(out);
+            rt.report(pi_js::Error::msg("reported"));
+            {
+                let mut out = seen_r.lock().unwrap_or_else(|e| e.into_inner());
+                out.push(snap_now);
+                out.push(snap_as_of);
+                out.push(len1.to_string());
+                out.push(len2.to_string());
+                out.push(now.to_string());
+            }
             rt.commit(|_tx, _c| Box::pin(async { Ok(Some(completed(()))) }), ctx)
                 .await
         }
     });
 
     let opened = open_root(
-        vec![reader.clone().any()],
+        vec![reader.clone().into_any()],
         OpenTasksOptions {
             now: Some(Arc::new(|| 1234)),
             ..Default::default()
@@ -1755,9 +1757,8 @@ async fn reads_committed_documents_and_context_through_the_runtime_and_forwards_
             .root
             .commit(
                 move |tx| async move {
-                    tx.doc_conversation(&notes_c, root_id)?.update(|d| {
+                    tx.doc_conversation(&notes_c, root_id).await?.update(|d| {
                         d.text = text.to_owned();
-                        Ok(())
                     })?;
                     tx.append_entry(
                         root_id,
@@ -1818,7 +1819,7 @@ async fn orders_runtime_commits_against_the_step_one_queued_before_it_lands_one_
     let storage = Arc::new(ControlledStorage::new());
     let before = Arc::new(Mutex::new(None::<Tracked<pi_js::Result<()>>>));
     let after = Arc::new(Mutex::new(None::<Tracked<pi_js::Result<()>>>));
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<support::session_support::Gate>));
     let harness_slot = Arc::new(Mutex::new(None::<Harness>));
 
     let st_d = Arc::clone(&storage);
@@ -1859,6 +1860,7 @@ async fn orders_runtime_commits_against_the_step_one_queued_before_it_lands_one_
                     )
                     .await;
             });
+            tokio::task::yield_now().await;
             let rt_before = rt.clone();
             *bef_d.lock().unwrap_or_else(|e| e.into_inner()) = Some(track(async move {
                 rt_before
@@ -1868,6 +1870,7 @@ async fn orders_runtime_commits_against_the_step_one_queued_before_it_lands_one_
                     )
                     .await
             }));
+            tokio::task::yield_now().await;
             let rt_after = rt.clone();
             let aft_cb = Arc::clone(&aft_d);
             tokio::spawn(async move {
@@ -1887,7 +1890,7 @@ async fn orders_runtime_commits_against_the_step_one_queued_before_it_lands_one_
     });
 
     let opened = open_root(
-        vec![detached.clone().any()],
+        vec![detached.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -1901,7 +1904,7 @@ async fn orders_runtime_commits_against_the_step_one_queued_before_it_lands_one_
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     eventually_sync(|| after.lock().unwrap_or_else(|e| e.into_inner()).is_some()).await;
     held.release();
     before
@@ -1946,7 +1949,7 @@ async fn stops_a_watch_whose_acquisition_finishes_after_the_invocation_ended() {
     .expect("notes");
     let storage = Arc::new(ControlledStorage::new());
     let watching = Arc::new(Mutex::new(None::<Tracked<String>>));
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<support::session_support::Gate>));
     let harness_slot = Arc::new(Mutex::new(None::<Harness>));
 
     let notes_l = notes.clone();
@@ -2005,7 +2008,7 @@ async fn stops_a_watch_whose_acquisition_finishes_after_the_invocation_ended() {
     });
 
     let opened = open_root(
-        vec![late.clone().any()],
+        vec![late.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -2016,9 +2019,8 @@ async fn stops_a_watch_whose_acquisition_finishes_after_the_invocation_ended() {
         .harness
         .commit(
             move |tx| async move {
-                tx.doc_session(&notes_init)?.update(|d| {
+                tx.doc_session(&notes_init).await?.update(|d| {
                     d.text = "x".to_owned();
-                    Ok(())
                 })
             },
             context(),
@@ -2033,7 +2035,7 @@ async fn stops_a_watch_whose_acquisition_finishes_after_the_invocation_ended() {
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     eventually_sync(|| watching.lock().unwrap_or_else(|e| e.into_inner()).is_some()).await;
     held.release();
     let msg = watching
@@ -2070,7 +2072,7 @@ async fn sleeps_until_the_harness_clock_reaches_the_deadline_rechecking_after_ea
 
     let clock_c = Arc::clone(&clock);
     let opened = open_root(
-        vec![sleeper.clone().any()],
+        vec![sleeper.clone().into_any()],
         OpenTasksOptions {
             now: Some(Arc::new(move || clock_c.load(Ordering::Acquire))),
             ..Default::default()
@@ -2135,7 +2137,7 @@ async fn rejects_a_sleep_when_the_invocation_is_signalled_or_the_sleeps_own_cont
     });
 
     let opened = open_root(
-        vec![signalled.clone().any(), cancelled.clone().any()],
+        vec![signalled.clone().into_any(), cancelled.clone().into_any()],
         OpenTasksOptions::default(),
         None,
     )
@@ -2189,7 +2191,7 @@ async fn retries_reservation_on_the_next_wakeup_after_a_rejected_reservation_com
     });
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![once.clone().any()],
+        vec![once.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -2214,7 +2216,7 @@ async fn retries_reservation_on_the_next_wakeup_after_a_rejected_reservation_com
         define_tool(ToolRegistration {
             name: "wake".to_owned(),
             description: "wake".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -2241,7 +2243,7 @@ async fn keeps_a_wakeup_that_arrives_while_a_rejected_reservation_commit_is_in_s
     });
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![first.clone().any()],
+        vec![first.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -2251,8 +2253,8 @@ async fn keeps_a_wakeup_that_arrives_while_a_rejected_reservation_commit_is_in_s
     let held = storage.hold_commits();
     storage.fail_next_commit(StorageRejected::new("busy").into_error());
     opened.harness.resume().expect("resume");
-    held.wait_entered().await;
-    add_task(&opened.registry, late.any(), None).expect("add late");
+    held.entered().await;
+    add_task(&opened.registry, late.into_any(), None).expect("add late");
     held.release();
     opened.harness.wait_for_task(first_id, context()).await.expect("wait 1");
     opened.harness.wait_for_task(late_id, context()).await.expect("wait 2");
@@ -2277,7 +2279,7 @@ async fn reruns_a_task_whose_fault_write_was_rejected() {
         }
     });
     let opened = open_root(
-        vec![throws.clone().any()],
+        vec![throws.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -2323,7 +2325,7 @@ async fn waits_for_harness_and_conversation_idleness_counting_blocked_work_and_i
         }
     });
 
-    let opened = open_root(vec![gated.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![gated.clone().into_any()], OpenTasksOptions::default(), None).await;
     opened.harness.wait_for_idle(context()).await.expect("initial idle");
     let other = opened
         .harness
@@ -2437,7 +2439,7 @@ async fn rejects_unknown_tasks_and_reports_terminal_tasks() {
         rt.commit(|_tx, _c| Box::pin(async { Ok(Some(completed(()))) }), ctx)
             .await
     });
-    let opened = open_root(vec![done.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![done.clone().into_any()], OpenTasksOptions::default(), None).await;
     let unknown = TaskId::<()>::new_unchecked(999_999);
     assert_eq!(opened.harness.get_task(unknown, context()).await.expect("get"), None);
     assert!(
@@ -2474,7 +2476,7 @@ async fn rejects_unknown_tasks_and_reports_terminal_tasks() {
             .abort_task(id.erased(), context())
             .await
             .expect("abort terminal"),
-        pi_durable::harness::types::AbortTaskResult::Terminal
+        AbortTaskResult::Terminal
     );
     opened.harness.close(context()).await.expect("close");
     assert!(
@@ -2493,7 +2495,7 @@ async fn rejects_task_waits_cancelled_or_closed_while_queued_on_the_line_and_pen
     let blocking = gated_task("test.wait-close", gate.clone());
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![blocking.clone().any()],
+        vec![blocking.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -2523,7 +2525,7 @@ async fn rejects_task_waits_cancelled_or_closed_while_queued_on_the_line_and_pen
         )
         .await
     });
-    held.wait_entered().await;
+    held.entered().await;
     let controller = AbortController::new();
     let h_w = opened.harness.clone();
     let sig = controller.signal();
@@ -2570,7 +2572,7 @@ async fn rejects_task_waits_cancelled_or_closed_while_queued_on_the_line_and_pen
         )
         .await
     });
-    held_again.wait_entered().await;
+    held_again.entered().await;
     let h3 = opened.harness.clone();
     let closed_while_queued = track(async move { h3.wait_for_task(id, context()).await });
     let h4 = opened.harness.clone();
@@ -2678,13 +2680,13 @@ async fn rejects_the_runs_commits_and_memo_writes_after_the_mark_and_settles_thr
         },
     );
 
-    let opened = open_root(vec![marked.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![marked.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &marked, false).await;
     opened.harness.resume().expect("resume");
     reached.wait().await.expect("reached");
     assert_eq!(
         opened.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
@@ -2780,7 +2782,7 @@ async fn starts_no_further_phase_after_a_mark_that_lands_during_a_phase_with_pro
         _hooks: std::marker::PhantomData,
     });
 
-    let opened = open_root(vec![two.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![two.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = opened
         .root
         .commit(
@@ -2804,10 +2806,7 @@ async fn starts_no_further_phase_after_a_mark_that_lands_during_a_phase_with_pro
     reached.wait().await.expect("reached");
     let aborting = mark_durably(&opened.harness, id.erased()).await;
     proceed.resolve(());
-    assert_eq!(
-        aborting.wait().await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
-    );
+    assert_eq!(aborting.wait().await.expect("abort"), AbortTaskResult::Marked);
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
         TaskOutcome::Aborted {
@@ -2840,13 +2839,13 @@ async fn signals_and_joins_the_run_before_returning_then_runs_the_abort_handler(
         }
     });
 
-    let opened = open_root(vec![signalled.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![signalled.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &signalled, false).await;
     opened.harness.resume().expect("resume");
     reached.wait().await.expect("reached");
     assert_eq!(
         opened.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert!(run_ended.load(Ordering::Acquire));
     assert_eq!(
@@ -2855,7 +2854,7 @@ async fn signals_and_joins_the_run_before_returning_then_runs_the_abort_handler(
             .abort_task(id.erased(), context())
             .await
             .expect("abort again"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
@@ -2924,7 +2923,11 @@ async fn aborts_waiting_work_before_its_wait_ends_and_faults_abort_handlers_that
     );
 
     let opened = open_root(
-        vec![first.clone().any(), lazy.clone().any(), throwing.clone().any()],
+        vec![
+            first.clone().into_any(),
+            lazy.clone().into_any(),
+            throwing.clone().into_any(),
+        ],
         OpenTasksOptions::default(),
         None,
     )
@@ -3049,7 +3052,7 @@ async fn does_not_signal_a_running_abort_handler_when_aborted_again_and_a_cancel
         },
     );
 
-    let opened = open_root(vec![run.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![run.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &run, false).await;
     opened.harness.resume().expect("resume");
     flush().await;
@@ -3084,7 +3087,7 @@ async fn does_not_signal_a_running_abort_handler_when_aborted_again_and_a_cancel
             .abort_task(id.erased(), context())
             .await
             .expect("abort again"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     proceed.resolve(());
     assert_eq!(
@@ -3113,7 +3116,7 @@ async fn keeps_a_terminal_outcome_committed_by_an_abort_handler_that_throws_afte
             Err(pi_js::Error::msg("after terminal"))
         },
     );
-    let opened = open_root(vec![run.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![run.clone().into_any()], OpenTasksOptions::default(), None).await;
     let id = start(&opened.root, &run, false).await;
     opened.harness.resume().expect("resume");
     flush().await;
@@ -3142,7 +3145,7 @@ async fn never_starts_phase_one_when_the_abort_lands_while_the_reservation_settl
     });
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![reserved.clone().any()],
+        vec![reserved.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3150,14 +3153,11 @@ async fn never_starts_phase_one_when_the_abort_lands_while_the_reservation_settl
     let id = start(&opened.root, &reserved, false).await;
     let held = storage.hold_commits();
     opened.harness.resume().expect("resume");
-    held.wait_entered().await;
+    held.entered().await;
     let h_c = opened.harness.clone();
     let aborting = track(async move { h_c.abort_task(id.erased(), context()).await });
     held.release();
-    assert_eq!(
-        aborting.wait().await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
-    );
+    assert_eq!(aborting.wait().await.expect("abort"), AbortTaskResult::Marked);
     assert_eq!(
         opened.harness.wait_for_task(id, context()).await.expect("wait").outcome,
         TaskOutcome::Aborted {
@@ -3172,10 +3172,8 @@ async fn never_starts_phase_one_when_the_abort_lands_while_the_reservation_settl
 #[tokio::test]
 async fn lets_an_abort_mark_win_over_a_fault_that_races_it() {
     let storage = Arc::new(ControlledStorage::new());
-    let marking = Arc::new(Mutex::new(
-        None::<Tracked<pi_js::Result<pi_durable::harness::types::AbortTaskResult>>>,
-    ));
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let marking = Arc::new(Mutex::new(None::<Tracked<pi_js::Result<AbortTaskResult>>>));
+    let held_slot = Arc::new(Mutex::new(None::<support::session_support::Gate>));
     let harness_slot = Arc::new(Mutex::new(None::<Harness>));
 
     let st_c = Arc::clone(&storage);
@@ -3190,19 +3188,20 @@ async fn lets_an_abort_mark_win_over_a_fault_that_races_it() {
         let h_c = Arc::clone(&h_c);
         async move {
             let held = st_c.hold_commits();
-            let entered = held.wait_entered_handle();
+            let held_enter = held.clone();
+            let entered = tokio::spawn(async move { held_enter.entered().await });
             *held_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(held);
             let h = h_c.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("h");
             let tid = task.id.erased();
             *mark_c.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(track(async move { h.abort_task(tid, context()).await }));
-            entered.await;
+            let _ = entered.await;
             Err(pi_js::Error::msg("would fault"))
         }
     });
 
     let opened = open_root(
-        vec![racing.clone().any()],
+        vec![racing.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3216,7 +3215,7 @@ async fn lets_an_abort_mark_win_over_a_fault_that_races_it() {
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     flush().await;
     held.release();
     assert_eq!(
@@ -3235,7 +3234,7 @@ async fn lets_an_abort_mark_win_over_a_fault_that_races_it() {
             .wait()
             .await
             .expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     opened.harness.close(context()).await.expect("close");
 }
@@ -3310,7 +3309,7 @@ async fn stops_without_outcomes_and_starts_no_fresh_phase_or_abort_invocation_wh
 
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![two.clone().any()],
+        vec![two.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3346,13 +3345,10 @@ async fn stops_without_outcomes_and_starts_no_fresh_phase_or_abort_invocation_wh
         .expect("present");
     let commits = storage.commits_snapshot().len();
     let h_c = opened.harness.clone();
-    let closing = track(async move { h_c.close(context()).await });
+    let closing = track(h_c.close(context()));
     proceed.resolve(());
     closing.wait().await.expect("close");
-    assert_eq!(
-        aborting.wait().await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
-    );
+    assert_eq!(aborting.wait().await.expect("abort"), AbortTaskResult::Marked);
     assert_eq!(storage.commits_snapshot().len(), commits);
     assert_eq!(*phases_seen.lock().unwrap_or_else(|e| e.into_inner()), vec!["one"]);
     assert!(!abort_ran.load(Ordering::Acquire));
@@ -3416,16 +3412,15 @@ async fn seals_admission_before_signalling_handlers_and_stops_watches_before_joi
         }
     });
 
-    let opened = open_root(vec![stubborn.clone().any()], OpenTasksOptions::default(), None).await;
+    let opened = open_root(vec![stubborn.clone().into_any()], OpenTasksOptions::default(), None).await;
     *harness_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(opened.harness.clone());
     let notes_c = notes.clone();
     opened
         .harness
         .commit(
             move |tx| async move {
-                tx.doc_session(&notes_c)?.update(|d| {
+                tx.doc_session(&notes_c).await?.update(|d| {
                     d.text = "x".to_owned();
-                    Ok(())
                 })
             },
             context(),
@@ -3457,7 +3452,7 @@ async fn seals_admission_before_signalling_handlers_and_stops_watches_before_joi
 #[tokio::test]
 async fn writes_no_fault_when_close_seals_while_the_step_after_a_failed_phase_is_queued() {
     let storage = Arc::new(ControlledStorage::new());
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<support::session_support::Gate>));
     let harness_slot = Arc::new(Mutex::new(None::<Harness>));
 
     let st_t = Arc::clone(&storage);
@@ -3494,12 +3489,13 @@ async fn writes_no_fault_when_close_seals_while_the_step_after_a_failed_phase_is
                     )
                     .await;
             });
+            tokio::task::yield_now().await;
             Err(pi_js::Error::msg("would fault"))
         }
     });
 
     let opened = open_root(
-        vec![throws.clone().any()],
+        vec![throws.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3513,10 +3509,10 @@ async fn writes_no_fault_when_close_seals_while_the_step_after_a_failed_phase_is
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     flush().await;
     let h_c = opened.harness.clone();
-    let closing = track(async move { h_c.close(context()).await });
+    let closing = track(h_c.close(context()));
     held.release();
     closing.wait().await.expect("closing");
     let statuses: Vec<TaskStatus> = storage
@@ -3548,7 +3544,7 @@ async fn starts_no_abort_handler_whose_reservation_settles_while_closing() {
     );
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![marked.clone().any()],
+        vec![marked.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3556,13 +3552,13 @@ async fn starts_no_abort_handler_whose_reservation_settles_while_closing() {
     let id = start(&opened.root, &marked, false).await;
     assert_eq!(
         opened.harness.abort_task(id.erased(), context()).await.expect("abort"),
-        pi_durable::harness::types::AbortTaskResult::Marked
+        AbortTaskResult::Marked
     );
     let held = storage.hold_commits();
     opened.harness.resume().expect("resume");
-    held.wait_entered().await;
+    held.entered().await;
     let h_c = opened.harness.clone();
-    let closing = track(async move { h_c.close(context()).await });
+    let closing = track(h_c.close(context()));
     held.release();
     closing.wait().await.expect("closing");
     assert!(!ran.load(Ordering::Acquire));
@@ -3584,7 +3580,7 @@ async fn starts_no_abort_handler_whose_reservation_settles_while_closing() {
 async fn rejects_a_runtime_commit_that_was_queued_on_the_line_when_close_sealed_it() {
     let storage = Arc::new(ControlledStorage::new());
     let queued = Arc::new(Mutex::new(None::<Tracked<pi_js::Result<()>>>));
-    let held_slot = Arc::new(Mutex::new(None::<support::session_support::HeldCommit>));
+    let held_slot = Arc::new(Mutex::new(None::<support::session_support::Gate>));
     let harness_slot = Arc::new(Mutex::new(None::<Harness>));
     let proceed = deferred::<()>();
 
@@ -3637,7 +3633,7 @@ async fn rejects_a_runtime_commit_that_was_queued_on_the_line_when_close_sealed_
     });
 
     let opened = open_root(
-        vec![queued_task.clone().any()],
+        vec![queued_task.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3651,10 +3647,10 @@ async fn rejects_a_runtime_commit_that_was_queued_on_the_line_when_close_sealed_
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .expect("held");
-    held.wait_entered().await;
+    held.entered().await;
     flush().await;
     let h_c = opened.harness.clone();
-    let closing = track(async move { h_c.close(context()).await });
+    let closing = track(h_c.close(context()));
     held.release();
     let err = queued
         .lock()
@@ -3687,7 +3683,7 @@ impl RegistryReader for CloseOnSnapshotReader {
     fn snapshot(&self) -> Arc<dyn RegistrySnapshot> {
         if self.close_on_snapshot.swap(false, Ordering::AcqRel) {
             if let Some(h) = self.harness.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-                let fut = track(async move { h.close(context()).await });
+                let fut = track(h.close(context()));
                 *self.closing.lock().unwrap_or_else(|e| e.into_inner()) = Some(fut);
             }
         }
@@ -3762,7 +3758,7 @@ async fn starts_no_next_phase_when_close_seals_during_a_step_that_decided_to_con
         migrate: None,
         _hooks: std::marker::PhantomData,
     });
-    add_task(&registry, two.clone().any(), None).expect("add two");
+    add_task(&registry, two.clone().into_any(), None).expect("add two");
 
     let harness = Harness::open(
         Arc::new(MemoryStorage::new()),
@@ -3825,7 +3821,7 @@ async fn joins_a_reservation_that_settles_while_closing_without_starting_its_han
     });
     let storage = Arc::new(ControlledStorage::new());
     let opened = open_root(
-        vec![never.clone().any()],
+        vec![never.clone().into_any()],
         OpenTasksOptions::default(),
         Some(Arc::clone(&storage) as Arc<dyn Storage>),
     )
@@ -3833,9 +3829,9 @@ async fn joins_a_reservation_that_settles_while_closing_without_starting_its_han
     let id = start(&opened.root, &never, false).await;
     let held = storage.hold_commits();
     opened.harness.resume().expect("resume");
-    held.wait_entered().await;
+    held.entered().await;
     let h_c = opened.harness.clone();
-    let closing = track(async move { h_c.close(context()).await });
+    let closing = track(h_c.close(context()));
     held.release();
     closing.wait().await.expect("close");
     assert!(!ran.load(Ordering::Acquire));

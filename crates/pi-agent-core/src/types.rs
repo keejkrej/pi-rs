@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::{
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, ConstrainedSamplingConfig, Context,
-    JsonObject, Message, Model, ModelThinkingLevel, Schema, SimpleStreamOptions, StopReason, SystemMessage, Tool,
-    ToolCall, ToolResultMessage, Transport, Usage, UserContentBlock, UserMessage,
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, ConstrainedSampling,
+    ConstrainedSamplingConfig, Context, JsonObject, Message, Model, ModelThinkingLevel, ProviderHeaders,
+    SimpleStreamOptions, StopReason, SystemMessage, TSchema as Schema, Tool, ToolCall, ToolResultMessage, Transport,
+    Usage, UserContentBlock, UserMessage,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result};
@@ -47,7 +48,7 @@ impl ThinkingLevel {
             Self::Low => Some(pi_ai::ThinkingLevel::Low),
             Self::Medium => Some(pi_ai::ThinkingLevel::Medium),
             Self::High => Some(pi_ai::ThinkingLevel::High),
-            Self::Xhigh => Some(pi_ai::ThinkingLevel::Xhigh),
+            Self::Xhigh => Some(pi_ai::ThinkingLevel::XHigh),
         }
     }
 
@@ -59,7 +60,8 @@ impl ThinkingLevel {
             Some(pi_ai::ThinkingLevel::Low) => Self::Low,
             Some(pi_ai::ThinkingLevel::Medium) => Self::Medium,
             Some(pi_ai::ThinkingLevel::High) => Self::High,
-            Some(pi_ai::ThinkingLevel::Xhigh) => Self::Xhigh,
+            Some(pi_ai::ThinkingLevel::XHigh) => Self::Xhigh,
+            Some(pi_ai::ThinkingLevel::Max) => Self::Xhigh,
         }
     }
 
@@ -71,7 +73,7 @@ impl ThinkingLevel {
             Self::Low => ModelThinkingLevel::Low,
             Self::Medium => ModelThinkingLevel::Medium,
             Self::High => ModelThinkingLevel::High,
-            Self::Xhigh => ModelThinkingLevel::Xhigh,
+            Self::Xhigh => ModelThinkingLevel::XHigh,
         }
     }
 }
@@ -300,6 +302,7 @@ impl From<&ToolCall> for AgentToolCall {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCallOutcome {
+    pub tool_call: AgentToolCall,
     pub result: AgentToolResult,
     pub is_error: bool,
 }
@@ -342,7 +345,7 @@ impl AgentTool {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
-            constrained_sampling: self.constrained_sampling.clone(),
+            constrained_sampling: self.constrained_sampling.clone().map(ConstrainedSampling::Config),
         }
     }
 }
@@ -528,7 +531,7 @@ pub type PrepareRequestFn = Arc<
 >;
 
 /// Optional stream-level payload inspector matching `SimpleStreamOptions::on_payload`.
-pub type OnPayloadFn = pi_ai::OnPayloadFn;
+pub type OnPayloadFn = pi_ai::OnPayloadFn<Model>;
 
 /// Configuration for [`agent_loop`](crate::agent_loop::agent_loop) and [`run_agent_loop`](crate::agent_loop::run_agent_loop).
 #[derive(Clone)]
@@ -542,9 +545,9 @@ pub struct AgentLoopConfig {
     pub session_id: Option<String>,
     pub transport: Option<Transport>,
     pub thinking_budgets: Option<pi_ai::ThinkingBudgets>,
-    pub max_retry_delay_ms: Option<i64>,
+    pub max_retry_delay_ms: Option<u64>,
     pub metadata: Option<IndexMap<String, Value>>,
-    pub headers: Option<IndexMap<String, String>>,
+    pub headers: Option<ProviderHeaders>,
     pub on_payload: Option<OnPayloadFn>,
     pub tool_execution: Option<ToolExecutionMode>,
     pub convert_to_llm: ConvertToLlmFn,

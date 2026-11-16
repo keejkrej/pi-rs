@@ -5,10 +5,8 @@ mod support;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use indexmap::IndexMap;
-use pi_ai::models::Models;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxModelDefinition,
     FauxResponseFactory, FauxResponseStep, FauxToolCallOptions, RegisterFauxProviderOptions, faux_assistant_message,
@@ -16,30 +14,29 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::{
     AssistantMessage, CacheRetention, Message, SimpleStreamOptions, StopReason, SystemMessage, SystemMessageContent,
-    ToolCall, ToolResultMessage, Usage, UserContentBlock, UserMessage, UserMessageContent,
+    ToolResultMessage, UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_ai::{TextContent, Type};
 use pi_chord::Context;
-use pi_durable::entries::COMPACTION_ENTRY;
 use pi_durable::errors::StorageRejected;
 use pi_durable::harness::compaction::{COMPACTION_TASK, CompactionInput, select_cut, serialize_conversation};
 use pi_durable::harness::context::order_tool_results;
 use pi_durable::harness::define::define_tool;
 use pi_durable::harness::events::AgentEvent;
-use pi_durable::harness::harness::{Conversation, ConversationEntriesQuery, Harness};
+use pi_durable::harness::harness::{Conversation, Harness};
 use pi_durable::harness::live::{CompactionStatus, LIVE_DOC, LiveState};
 use pi_durable::harness::types::{
-    AgentChange, BeforeCompactDecision, CompactionHooks, CompactionPolicy, CompactionReason, CompactionResult,
-    ContextView, ConversationCreateOptions, ConversationOwnership, FieldChange, ModelRef, PartialCompactionPolicy,
-    PartialRetryPolicy, ResolvedModelRef, StreamDeferredOption, SubmissionDraft, TaskBlockedReason,
-    TaskInspectionState, ToolExecutionResult, UserInput,
+    AgentChange, AgentToolsChange, BeforeCompactDecision, CompactionHooks, CompactionPolicy, CompactionReason,
+    CompactionResult, ContextView, ConversationCreateOptions, FieldChange, ModelRef, PartialCompactionPolicy,
+    PartialRetryPolicy, StreamDeferredOption, SubmissionDraft, TaskBlockedReason, TaskInspectionState,
+    ToolExecutionResult, UserInput,
 };
 use pi_durable::harness::usage::USAGE_DOC;
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::tasks::{AnyTask, Task, TaskDefinition, define_task};
+use pi_durable::tasks::{Task, TaskDefinition, define_task};
 use pi_durable::types::{
-    ContextEdit, EntryDraft, EntryDraftHead, EntryId, EntryRecord, InputSubmissionState, JsonObject, JsonValue,
+    ContextEdit, ConversationOwnership, EntryDraft, EntryDraftHead, EntryId, EntryRecord, InputSubmissionState,
     NextTaskState, Storage, SubmissionId, SubmissionState, TaskId, TaskOptions, TaskOutcome, TaskOwnership, TaskState,
     WriteSubmissionState,
 };
@@ -321,7 +318,7 @@ async fn task_result(chat: &Chat, id: TaskId<CompactionResult>) -> TaskOutcome<C
 }
 
 async fn entry_kinds(conversation: &Conversation) -> Vec<String> {
-    all_entries(conversation)
+    all_entries(conversation, None)
         .await
         .expect("all_entries")
         .into_iter()
@@ -371,6 +368,7 @@ fn make_entry(id_counter: &mut i64, kind: &str, model: Vec<Message>, head: Optio
         data: None,
         head: head.map(EntryId::new_unchecked),
         edits: None,
+        by_task_id: None,
     }
 }
 
@@ -386,7 +384,7 @@ fn assistant_msg(content: &str, calls: &[&str], stop_reason: StopReason) -> Mess
     for id in calls {
         blocks.push(FauxContentBlock::ToolCall(faux_tool_call(
             "read",
-            JsonObject::new(),
+            IndexMap::new(),
             Some(FauxToolCallOptions {
                 id: Some((*id).to_owned()),
             }),
@@ -706,7 +704,7 @@ async fn summarizes_an_earlier_summary_marker_first() {
 
 #[tokio::test]
 async fn writes_a_transcript_truncates_tool_results_and_omits_system_messages() {
-    let mut args = JsonObject::new();
+    let mut args = IndexMap::new();
     args.insert("path".to_owned(), serde_json::json!("a.ts"));
     let call = faux_tool_call(
         "read",
@@ -754,7 +752,7 @@ async fn writes_a_transcript_truncates_tool_results_and_omits_system_messages() 
 async fn places_the_summary_at_once_when_idle_and_keeps_raw_history() {
     let chat = open_chat_env(None, None, None, None).await;
     history(&chat).await;
-    let before = all_entries(&chat.root).await.expect("entries");
+    let before = all_entries(&chat.root, None).await.expect("entries");
     let usage_before = chat
         .harness
         .snapshot_conversation(&*USAGE_DOC, chat.root.id(), context())
@@ -786,7 +784,7 @@ async fn places_the_summary_at_once_when_idle_and_keeps_raw_history() {
         other => panic!("Expected Write Done, got {other:?}"),
     };
 
-    let after = all_entries(&chat.root).await.expect("entries after");
+    let after = all_entries(&chat.root, None).await.expect("entries after");
     assert_eq!(&after[..before.len()], before.as_slice());
     let marker = after.last().expect("marker");
     let u3 = before
@@ -921,7 +919,7 @@ async fn places_a_queued_summary_at_post_tools_and_the_run_continues_in_the_comp
         define_tool(pi_durable::harness::types::ToolRegistration {
             name: "wait".to_owned(),
             description: "wait".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, pi_ai::TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -941,7 +939,7 @@ async fn places_a_queued_summary_at_post_tools_and_the_run_continues_in_the_comp
     chat.root
         .configure(
             AgentChange {
-                tools: pi_durable::harness::types::AgentToolsChange::Replace(tools_named(&chat.setup, &["wait"])),
+                tools: FieldChange::Set(AgentToolsChange::replace(&tools_named(&chat.setup, &["wait"]))),
                 ..Default::default()
             },
             context(),
@@ -956,7 +954,7 @@ async fn places_a_queued_summary_at_post_tools_and_the_run_continues_in_the_comp
         faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                JsonObject::new(),
+                IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -1346,7 +1344,7 @@ async fn is_aborted_by_conversation_abort_an_already_queued_summary_survives_it(
     reached.wait().await.expect("reached");
     assert_eq!(live_doc(&chat).await.compactions.as_ref().map(|v| v.len()), Some(1));
     chat.root.abort(context(), None).await.expect("abort");
-    assert!(matches!(task_result(&chat, id).await, TaskOutcome::Aborted));
+    assert!(matches!(task_result(&chat, id).await, TaskOutcome::Aborted { .. }));
     assert!(live_doc(&chat).await.compactions.is_none());
     assert!(!entry_kinds(&chat.root).await.iter().any(|k| k == "pi.compaction"));
 
@@ -1409,7 +1407,7 @@ async fn is_ordinary_work_idle_waits_include_it() {
         root_clone.wait_for_idle(context()).await.expect("wait idle");
         idle_flag.store(true, Ordering::Release);
     });
-    pi_js::time::sleep(Duration::from_millis(20)).await;
+    let _ = pi_js::time::sleep(20, None).await;
     assert!(!idle.load(Ordering::Acquire));
     gate.resolve(());
     wait.await.expect("join");
@@ -1436,16 +1434,19 @@ async fn enables_scheduling_right_after_open() {
         s.compaction = Some(partial_from(pol));
     });
     let id = opened.root.compact(None, context()).await.expect("compact");
-    wait_for(|| {
-        let h = opened.harness.clone();
-        async move {
-            h.get_task(id, context())
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|t| t.state.status() == pi_durable::types::TaskStatus::Terminal)
-        }
-    })
+    wait_for(
+        || {
+            let h = opened.harness.clone();
+            async move {
+                h.get_task(id, context())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| t.state.status() == pi_durable::types::TaskStatus::Terminal)
+            }
+        },
+        5_000,
+    )
     .await;
     let task = opened
         .harness
@@ -1545,9 +1546,16 @@ async fn asks_before_compact_the_first_decision_wins_a_throw_is_reported_and_ski
         user_text(chat.root.context(context()).await.expect("ctx").messages.first())
             .contains("<summary>\nFROM HOOK\n</summary>")
     );
-    let reports = chat.setup.reports.lock().expect("lock reports").clone();
+    let reports: Vec<String> = chat
+        .setup
+        .reports
+        .lock()
+        .expect("lock reports")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(reports.len(), 1);
-    assert!(reports[0].to_string().contains("hook broke"));
+    assert!(reports[0].contains("hook broke"));
     let seen_list = seen.lock().expect("lock seen");
     let compaction = &seen_list[0];
     assert_eq!(compaction.reason, CompactionReason::Manual);
@@ -1620,7 +1628,7 @@ async fn fails_with_no_model_without_a_configured_model() {
         .expect("clear model");
     let outcome = task_result(&chat, chat.root.compact(None, context()).await.expect("compact")).await;
     match outcome {
-        TaskOutcome::Failed { error } => {
+        TaskOutcome::Failed { error, .. } => {
             assert_eq!(
                 error
                     .detail
@@ -1764,7 +1772,7 @@ async fn caps_max_tokens_at_the_models_output_limit_and_sends_no_tools() {
         define_tool(pi_durable::harness::types::ToolRegistration {
             name: "read".to_owned(),
             description: "read".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, pi_ai::TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1777,7 +1785,7 @@ async fn caps_max_tokens_at_the_models_output_limit_and_sends_no_tools() {
     chat.root
         .configure(
             AgentChange {
-                tools: pi_durable::harness::types::AgentToolsChange::Replace(tools_named(&chat.setup, &["read"])),
+                tools: FieldChange::Set(AgentToolsChange::replace(&tools_named(&chat.setup, &["read"]))),
                 ..Default::default()
             },
             context(),
@@ -1811,7 +1819,7 @@ async fn fail_model_error_case(response: AssistantMessage, expected_msg: &str, e
     }
     let outcome = task_result(&chat, chat.root.compact(None, context()).await.expect("compact")).await;
     match outcome {
-        TaskOutcome::Failed { error } => {
+        TaskOutcome::Failed { error, .. } => {
             assert_eq!(error.message, expected_msg);
             assert_eq!(
                 error
@@ -1862,7 +1870,7 @@ async fn fails_with_model_error_on_a_tool_call() {
         faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "read",
-                JsonObject::new(),
+                IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -2039,7 +2047,7 @@ async fn stops_through_abort_task_and_conversation_abort_with_background() {
         }
         assert!(matches!(
             task_result(&chat, TaskId::new_unchecked(task.id.as_i64())).await,
-            TaskOutcome::Aborted
+            TaskOutcome::Aborted { .. }
         ));
         assert!(live_doc(&chat).await.compactions.is_none());
         chat.harness.close(context()).await.expect("close");
@@ -2297,17 +2305,20 @@ async fn is_aborted_with_its_generation_by_esc_before_the_generations_abort_hand
         .await
         .expect("get task")
         .expect("exists");
-    assert_eq!(child_after.state.outcome(), Some(&TaskOutcome::Aborted));
-    wait_for(|| {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|e| matches!(e, AgentEvent::RunEnd { .. }))
-        }
-    })
+    assert!(matches!(child_after.state.outcome(), Some(TaskOutcome::Aborted { .. })));
+    wait_for(
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::RunEnd { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     let ev_guard = events.lock().expect("lock");
     let end_idx = ev_guard
@@ -2411,7 +2422,7 @@ async fn compacts_and_retries_with_the_same_attempt_leaving_the_error_out_of_the
         &k[k.len() - 5..],
         &["pi.user", "pi.assistant", "pi.compaction", "pi.system", "pi.assistant"]
     );
-    let entries = all_entries(&chat.root).await.expect("entries");
+    let entries = all_entries(&chat.root, None).await.expect("entries");
     let compaction = entries
         .into_iter()
         .find(|e| e.kind == "pi.compaction")
@@ -2661,7 +2672,7 @@ async fn ignores_usage_measured_before_a_summary_placed_mid_run_real_and_fixed_c
             define_tool(pi_durable::harness::types::ToolRegistration {
                 name: "slow".to_owned(),
                 description: "slow".to_owned(),
-                parameters: Type::object([]).to_value(),
+                parameters: Type::object([] as [(&str, pi_ai::TSchema); 0]).to_value(),
                 replay: None,
                 execution_mode: None,
                 prepare_arguments: None,
@@ -2687,7 +2698,7 @@ async fn ignores_usage_measured_before_a_summary_placed_mid_run_real_and_fixed_c
         chat.root
             .configure(
                 AgentChange {
-                    tools: pi_durable::harness::types::AgentToolsChange::Replace(tools_named(&chat.setup, &["slow"])),
+                    tools: FieldChange::Set(AgentToolsChange::replace(&tools_named(&chat.setup, &["slow"]))),
                     ..Default::default()
                 },
                 context(),
@@ -2703,7 +2714,7 @@ async fn ignores_usage_measured_before_a_summary_placed_mid_run_real_and_fixed_c
         chat.faux.push_agent(ScriptStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "slow",
-                JsonObject::new(),
+                IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -2817,7 +2828,7 @@ async fn rebaselines_the_system_prompt_over_kept_system_deltas() {
 async fn summarizes_a_replaced_entrys_replacement_and_shows_it_to_the_hook() {
     let chat = open_chat_env(None, None, None, None).await;
     history(&chat).await;
-    let u1 = all_entries(&chat.root)
+    let u1 = all_entries(&chat.root, None)
         .await
         .expect("entries")
         .into_iter()
@@ -2870,7 +2881,7 @@ async fn summarizes_a_replaced_entrys_replacement_and_shows_it_to_the_hook() {
 async fn compacts_a_fork_whose_cut_falls_on_a_parent_entry() {
     let chat = open_chat_env(None, None, None, None).await;
     history(&chat).await;
-    let entries = all_entries(&chat.root).await.expect("entries");
+    let entries = all_entries(&chat.root, None).await.expect("entries");
     let last_id = entries.last().expect("last").id;
     let fork = chat
         .root
@@ -2878,6 +2889,8 @@ async fn compacts_a_fork_whose_cut_falls_on_a_parent_entry() {
             last_id,
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -2920,13 +2933,15 @@ async fn compacts_a_fork_whose_cut_falls_on_a_parent_entry() {
 async fn settles_stale_in_a_fork_reset_while_it_summarizes() {
     let chat = open_chat_env(None, None, None, None).await;
     history(&chat).await;
-    let entries = all_entries(&chat.root).await.expect("entries");
+    let entries = all_entries(&chat.root, None).await.expect("entries");
     let fork = chat
         .root
         .fork(
             entries.last().expect("last").id,
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -3025,15 +3040,17 @@ fn define_child_task(gate: Deferred<()>) -> Task<(), serde_json::Value, Option<(
                     gate_run.wait().await?;
                     runtime
                         .commit(
-                            |_| {
-                                Ok(NextTaskState::Terminal {
-                                    outcome: TaskOutcome::Completed { result: None },
+                            |_tx, _current| {
+                                Box::pin(async {
+                                    Ok(Some(NextTaskState::Terminal {
+                                        outcome: TaskOutcome::Completed { result: None },
+                                    }))
                                 })
                             },
                             task_ctx,
                         )
                         .await
-                })
+                }) as pi_js::BoxFuture<_>
             },
         ) as pi_durable::tasks::TypedPhaseHandler<(), serde_json::Value, Option<()>, ()>,
     );
@@ -3046,9 +3063,14 @@ fn define_child_task(gate: Deferred<()>) -> Task<(), serde_json::Value, Option<(
             Box::pin(async move {
                 runtime
                     .commit(
-                        |_| {
-                            Ok(NextTaskState::Terminal {
-                                outcome: TaskOutcome::Aborted,
+                        |_tx, _current| {
+                            Box::pin(async {
+                                Ok(Some(NextTaskState::Terminal {
+                                    outcome: TaskOutcome::Aborted {
+                                        reason: None,
+                                        result: None,
+                                    },
+                                }))
                             })
                         },
                         task_ctx,
@@ -3067,7 +3089,7 @@ async fn places_a_hooks_summary_and_holds_while_work_the_hook_created_runs() {
     let child_gate = deferred::<()>();
     let child = define_child_task(child_gate.clone());
     let child_ref = child.clone();
-    add_task(&chat.setup.registry, AnyTask::from_typed(child), None).expect("add child task");
+    add_task(&chat.setup.registry, child.into_any(), None).expect("add child task");
     let harness_cb = chat.harness.clone();
     let root_id = chat.root.id();
     add_hooks(
@@ -3107,16 +3129,19 @@ async fn places_a_hooks_summary_and_holds_while_work_the_hook_created_runs() {
     .expect("hook");
     history(&chat).await;
     let id = chat.root.compact(None, context()).await.expect("compact");
-    wait_for(|| {
-        let h = chat.harness.clone();
-        async move {
-            h.get_task(id, context())
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|t| t.state.status() == pi_durable::types::TaskStatus::Completing)
-        }
-    })
+    wait_for(
+        || {
+            let h = chat.harness.clone();
+            async move {
+                h.get_task(id, context())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| t.state.status() == pi_durable::types::TaskStatus::Completing)
+            }
+        },
+        5_000,
+    )
     .await;
     assert_eq!(
         entry_kinds(&chat.root).await.last().map(String::as_str),
@@ -3140,7 +3165,7 @@ async fn removes_the_status_of_a_faulted_compaction() {
         &COMPACTION_TASK,
         CompactionHooks {
             before_compact: Some(Arc::new(move |_, _, _| {
-                storage_cb.fail_next_commit(pi_js::Error::msg("models broke"));
+                storage_cb.fail_next_commit(StorageRejected::new("models broke").into_error());
                 Box::pin(async { Ok(None) })
             })),
         },
@@ -3184,19 +3209,22 @@ async fn reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_snapshot(
         .expect("start");
     chat.faux.push_summary(ScriptStep::Message(failure("overloaded")));
     let id = chat.root.compact(None, context()).await.expect("compact");
-    wait_for(|| {
-        let h = chat.harness.clone();
-        let root_id = chat.root.id();
-        async move {
-            h.snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .ok()
-                .flatten()
-                .and_then(|l| l.compactions)
-                .and_then(|c| c.into_iter().next())
-                .is_some_and(|c| c.retry.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let h = chat.harness.clone();
+            let root_id = chat.root.id();
+            async move {
+                h.snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|l| l.compactions)
+                    .and_then(|c| c.into_iter().next())
+                    .is_some_and(|c| c.retry.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let late = chat.root.watch_events(context()).await.expect("late watch");
     assert_eq!(late.snapshot.compactions.len(), 1);
@@ -3208,16 +3236,19 @@ async fn reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_snapshot(
     assert_eq!(snap_c.retry.as_ref().map(|r| r.error.as_str()), Some("overloaded"));
     late.stop().await;
     chat.harness.abort_task(id.erased(), context()).await.expect("abort");
-    wait_for(|| {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
-        }
-    })
+    wait_for(
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     let comp_events: Vec<AgentEvent> = events
         .lock()
@@ -3328,7 +3359,7 @@ async fn repeats_nothing_after_reopen_once_the_summary_is_placed() {
     let mut chat = first_sqlite(&path).await;
     chat.faux.push_summary(ScriptStep::Message(summary_msg("SUMMARY")));
     task_result(&chat, chat.root.compact(None, context()).await.expect("compact")).await;
-    let entries = all_entries(&chat.root).await.expect("entries");
+    let entries = all_entries(&chat.root, None).await.expect("entries");
     let usage = chat
         .harness
         .snapshot_conversation(&*USAGE_DOC, chat.root.id(), context())
@@ -3338,7 +3369,7 @@ async fn repeats_nothing_after_reopen_once_the_summary_is_placed() {
     chat = reopen_sqlite(&path, &chat.setup, &chat.faux).await;
     chat.harness.wait_for_idle(context()).await.expect("idle");
     assert_eq!(chat.faux.summary_reqs().len(), 1);
-    assert_eq!(all_entries(&chat.root).await.expect("entries"), entries);
+    assert_eq!(all_entries(&chat.root, None).await.expect("entries"), entries);
     assert_eq!(
         chat.harness
             .snapshot_conversation(&*USAGE_DOC, chat.root.id(), context())
@@ -3474,12 +3505,13 @@ async fn resends_an_interrupted_summarization_once_and_counts_only_the_answered_
         .await
         .expect("get_task")
         .expect("exists");
-    assert!(matches!(
-        &task.state,
-        TaskState::Running {
-            checkpoint: pi_durable::harness::compaction::CompactionCheckpoint::Summarize { .. }
-        }
-    ));
+    assert!(match &task.state {
+        TaskState::Running { checkpoint } => matches!(
+            serde_json::from_value::<pi_durable::harness::compaction::CompactionCheckpoint>(checkpoint.clone()),
+            Ok(pi_durable::harness::compaction::CompactionCheckpoint::Summarize { .. })
+        ),
+        _ => false,
+    });
     chat.harness.close(context()).await.expect("close");
     chat = reopen_sqlite(&path, &chat.setup, &chat.faux).await;
     chat.faux.push_summary(ScriptStep::Message(summary_msg("SUMMARY")));
@@ -3537,19 +3569,22 @@ async fn resumes_a_retry_backoff_after_reopen() {
     });
     chat.faux.push_summary(ScriptStep::Message(failure("overloaded")));
     let id = chat.root.compact(None, context()).await.expect("compact");
-    wait_for(|| {
-        let h = chat.harness.clone();
-        let root_id = chat.root.id();
-        async move {
-            h.snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .ok()
-                .flatten()
-                .and_then(|l| l.compactions)
-                .and_then(|c| c.into_iter().next())
-                .is_some_and(|c| c.retry.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let h = chat.harness.clone();
+            let root_id = chat.root.id();
+            async move {
+                h.snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|l| l.compactions)
+                    .and_then(|c| c.into_iter().next())
+                    .is_some_and(|c| c.retry.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let task = chat
         .harness
@@ -3557,10 +3592,15 @@ async fn resumes_a_retry_backoff_after_reopen() {
         .await
         .expect("get_task")
         .expect("exists");
-    match task.state {
-        TaskState::Running {
-            checkpoint: pi_durable::harness::compaction::CompactionCheckpoint::Retry { request, .. },
-        } => assert_eq!(request.attempt, 1),
+    match &task.state {
+        TaskState::Running { checkpoint } => {
+            match serde_json::from_value::<pi_durable::harness::compaction::CompactionCheckpoint>(checkpoint.clone()) {
+                Ok(pi_durable::harness::compaction::CompactionCheckpoint::Retry { request, .. }) => {
+                    assert_eq!(request.attempt, 1);
+                }
+                other => panic!("Expected Retry checkpoint, got {other:?}"),
+            }
+        }
         other => panic!("Expected Retry checkpoint, got {other:?}"),
     }
     chat.harness.close(context()).await.expect("close");
@@ -3813,7 +3853,7 @@ async fn keeps_the_full_retry_budget_after_an_overflow_compaction() {
 async fn loses_an_application_edit_placed_while_a_compaction_summarizes() {
     let chat = open_chat_env(None, None, None, None).await;
     history(&chat).await;
-    let u1 = all_entries(&chat.root)
+    let u1 = all_entries(&chat.root, None)
         .await
         .expect("entries")
         .into_iter()
@@ -3868,10 +3908,13 @@ async fn keeps_the_kept_entries_mounted_in_the_conversation_view() {
     let state = chat.root.view_state(context()).await.expect("viewState");
     chat.faux.push_summary(ScriptStep::Message(summary_msg("SUMMARY")));
     task_result(&chat, chat.root.compact(None, context()).await.expect("compact")).await;
-    wait_for(|| {
-        let st = state.clone();
-        async move { st.value().entries.first().is_some_and(|e| e.kind == "pi.compaction") }
-    })
+    wait_for(
+        || {
+            let st = state.clone();
+            async move { st.value().entries.first().is_some_and(|e| e.kind == "pi.compaction") }
+        },
+        5_000,
+    )
     .await;
     assert_eq!(
         state.value().entries,
@@ -3993,16 +4036,13 @@ async fn starts_no_background_compaction_after_a_blocking_one_in_the_same_genera
 
 #[tokio::test]
 async fn sends_the_request_anyway_when_its_blocking_compaction_faults() {
-    let storage = Arc::new(ControlledStorage::new());
-    let chat = open_chat_env(None, Some(1000), Some(storage.clone() as Arc<dyn Storage>), None).await;
+    let chat = open_chat_env(None, Some(1000), None, None).await;
     history(&chat).await;
     chat.setup
         .settings
         .update(|s| s.compaction = Some(partial_from(blocking_policy())));
-    let storage_cb = Arc::clone(&storage);
     chat.faux.push_summary(ScriptStep::Factory(Arc::new(move |_| {
-        storage_cb.fail_next_commit(pi_js::Error::msg("no credentials"));
-        Box::pin(async { Ok(summary_msg("SUMMARY")) })
+        Box::pin(async { Err(pi_js::Error::msg("no credentials")) })
     })));
     turn(&chat, &tok_text("u4", 200), "a4").await;
     assert!(!entry_kinds(&chat.root).await.iter().any(|k| k == "pi.compaction"));
@@ -4109,16 +4149,19 @@ async fn orders_the_events_of_a_summary_placed_at_once() {
         .expect("start");
     chat.faux.push_summary(ScriptStep::Message(summary_msg("SUMMARY")));
     task_result(&chat, chat.root.compact(None, context()).await.expect("compact")).await;
-    wait_for(|| {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
-        }
-    })
+    wait_for(
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     let list = events.lock().expect("lock");
     let end = list
@@ -4180,16 +4223,19 @@ async fn puts_compaction_start_last_in_the_batch_of_the_preparation_commit() {
     .expect("extra");
     chat.faux.push_summary(gated(deferred(), summary_msg("SUMMARY"), None));
     turn(&chat, &tok_text("u4", 100), "a4").await;
-    wait_for(|| {
-        let batches = Arc::clone(&batches);
-        async move {
-            batches
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|b| b.iter().any(|e| matches!(e, AgentEvent::CompactionStart { .. })))
-        }
-    })
+    wait_for(
+        || {
+            let batches = Arc::clone(&batches);
+            async move {
+                batches
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|b| b.iter().any(|e| matches!(e, AgentEvent::CompactionStart { .. })))
+            }
+        },
+        5_000,
+    )
     .await;
     let found = batches
         .lock()
@@ -4253,18 +4299,21 @@ async fn keeps_a_background_summary_queued_through_a_retry_backoff_while_a_block
         .await
         .expect("submit");
     tokio::try_join!(failed.wait(), summary_reached.wait()).expect("both");
-    wait_for(|| {
-        let h = chat.harness.clone();
-        let root_id = chat.root.id();
-        async move {
-            h.snapshot_conversation(&*LIVE_DOC, root_id, context())
-                .await
-                .ok()
-                .flatten()
-                .and_then(|l| l.generation)
-                .is_some_and(|g| g.retry.is_some())
-        }
-    })
+    wait_for(
+        || {
+            let h = chat.harness.clone();
+            let root_id = chat.root.id();
+            async move {
+                h.snapshot_conversation(&*LIVE_DOC, root_id, context())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|l| l.generation)
+                    .is_some_and(|g| g.retry.is_some())
+            }
+        },
+        5_000,
+    )
     .await;
     let background = compaction_tasks(&chat).await.into_iter().next().expect("bg");
     summary_gate.resolve(());
@@ -4423,7 +4472,7 @@ async fn places_a_manual_summary_selected_before_the_blocking_one_landed_its_equ
         sub.wait(context()).await.expect("wait sub").record.status(),
         pi_durable::types::SubmissionStatus::Done
     );
-    let markers: Vec<EntryRecord> = all_entries(&chat.root)
+    let markers: Vec<EntryRecord> = all_entries(&chat.root, None)
         .await
         .expect("entries")
         .into_iter()
@@ -4485,8 +4534,11 @@ async fn aborts_the_run_and_both_compactions_on_esc_and_appends_nothing() {
         SubmissionState::Input(InputSubmissionState::Unanswered { reason, .. }) => assert_eq!(reason, "aborted"),
         other => panic!("Expected aborted, got {other:?}"),
     }
-    assert!(matches!(task_result(&chat, blocking).await, TaskOutcome::Aborted));
-    assert!(matches!(task_result(&chat, manual).await, TaskOutcome::Aborted));
+    assert!(matches!(
+        task_result(&chat, blocking).await,
+        TaskOutcome::Aborted { .. }
+    ));
+    assert!(matches!(task_result(&chat, manual).await, TaskOutcome::Aborted { .. }));
     let l = live_doc(&chat).await;
     assert!(l.compactions.is_none());
     assert!(l.run.is_none());
@@ -4595,10 +4647,10 @@ async fn keeps_the_pinned_model_through_a_retry_and_advances_the_live_attempt() 
             root_cb
                 .configure(
                     AgentChange {
-                        model: FieldChange::Set(ModelRef::Resolved(ResolvedModelRef {
+                        model: FieldChange::Set(ModelRef {
                             provider: "faux".to_owned(),
                             model_id: "faux-2".to_owned(),
-                        })),
+                        }),
                         ..Default::default()
                     },
                     context(),
@@ -4704,7 +4756,11 @@ async fn treats_silent_overflow_as_an_ordinary_answer() {
             input.wait(context()).await.expect("wait").record.status(),
             pi_durable::types::SubmissionStatus::Done
         );
-        let last = all_entries(&chat.root).await.expect("entries").pop().expect("last");
+        let last = all_entries(&chat.root, None)
+            .await
+            .expect("entries")
+            .pop()
+            .expect("last");
         let Some(Message::Assistant(msg)) = last.model.as_ref().and_then(|m| m.first()) else {
             panic!("Expected assistant entry");
         };
@@ -4769,9 +4825,14 @@ async fn survives_reopen_blocked_and_is_orphaned_on_abort_with_its_status_remove
                 Box::pin(async move {
                     runtime
                         .commit(
-                            |_| {
-                                Ok(NextTaskState::Terminal {
-                                    outcome: TaskOutcome::Aborted,
+                            |_tx, _current| {
+                                Box::pin(async {
+                                    Ok(Some(NextTaskState::Terminal {
+                                        outcome: TaskOutcome::Aborted {
+                                            reason: None,
+                                            result: None,
+                                        },
+                                    }))
                                 })
                             },
                             ctx,
@@ -4861,16 +4922,19 @@ async fn survives_reopen_blocked_and_is_orphaned_on_abort_with_its_status_remove
         other => panic!("Expected Orphaned, got {other:?}"),
     }
     assert!(live_doc(&chat).await.compactions.is_none());
-    wait_for(|| {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .expect("lock")
-                .iter()
-                .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
-        }
-    })
+    wait_for(
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::CompactionEnd { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     stream.stop().await;
     chat.harness.close(context()).await.expect("close");

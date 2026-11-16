@@ -4,10 +4,9 @@ use indexmap::IndexSet;
 use pi_chord::Context;
 
 use crate::documents::address_id;
-use crate::ids::mint_typed_id;
 use crate::types::{
     ConversationId, Cursor, DocumentCopySource, DocumentCreate, DocumentFork, DocumentKind, DocumentPoint,
-    DocumentQuery, DocumentScope, EntryId, Storage,
+    DocumentQuery, DocumentScope, EntryId, Storage, mint_typed_id,
 };
 
 const SCAN_PAGE_SIZE: usize = 256;

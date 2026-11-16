@@ -16,7 +16,7 @@ pub async fn open_node_jsonl_storage(
     context: Context,
     options: JsonlStorageOptions,
 ) -> pi_js::Result<JsonlStorage> {
-    let env = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let env = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: pi_js::env::cwd(),
         ..Default::default()
     }));

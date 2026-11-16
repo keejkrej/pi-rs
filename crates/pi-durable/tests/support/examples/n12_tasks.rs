@@ -140,7 +140,7 @@ pub async fn run() -> pi_js::Result<()> {
     let registry = create_registry();
     registry.install(define_extension(Extension {
         name: "payments".to_owned(),
-        tasks: vec![payment.clone().erase()],
+        tasks: vec![pi_durable::AnyTask::from(payment.clone())],
         ..Default::default()
     }))?;
     let harness = Harness::open(
@@ -183,9 +183,8 @@ pub async fn run() -> pi_js::Result<()> {
 
     // The finished task record is the durable receipt; wait_for_task() knows its result type.
     let paid = harness.wait_for_task(payment_id, context.clone()).await?;
-    if let TaskState::Terminal { outcome } = &paid.state {
-        pi_js::console::log(&format!("payment outcome: {outcome:?}"));
-    }
+    let outcome = &paid.outcome;
+    pi_js::console::log(&format!("payment outcome: {outcome:?}"));
 
     harness.close(context).await?;
     Ok(())

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use pi_agent_core::{ProxyAssistantMessageEvent, ProxyStreamOptions, stream_proxy};
-use pi_ai::{AssistantContentBlock, AssistantMessageEvent, Context, Model, StopReason, TranscriptContext, Usage};
+use pi_ai::{AssistantContentBlock, AssistantMessageEvent, Context, Model, StopReason, Usage};
 use pi_js::abort::AbortController;
 use pi_js::fetch::testing::{chunked_response, mock_fetch, response};
 use pi_js::time::performance_now;
@@ -41,7 +41,11 @@ fn empty_usage() -> Usage {
 }
 
 fn empty_context() -> Context {
-    Context::Transcript(TranscriptContext { messages: Vec::new() })
+    Context {
+        system_prompt: None,
+        messages: Vec::new(),
+        tools: None,
+    }
 }
 
 fn sse_body(events: &[Value]) -> String {
@@ -311,9 +315,9 @@ async fn streams_text_and_thinking_with_signatures_and_handles_http_errors() {
     ];
 
     let _guard = mock_fetch(move |req| {
-        let auth = req.headers().get("authorization").map(str::to_string);
+        let auth = req.headers.get("authorization");
         let parsed = req.body_json();
-        *captured_ref.lock().expect("lock") = Some((req.method().to_string(), req.url().to_string(), auth, parsed));
+        *captured_ref.lock().expect("lock") = Some((req.method.clone(), req.url.clone(), auth, parsed));
         let chunks = sse_chunks.clone();
         Box::pin(async move { Ok(chunked_response(200, &[("content-type", "text/event-stream")], chunks)) })
     });

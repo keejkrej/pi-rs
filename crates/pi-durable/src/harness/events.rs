@@ -18,7 +18,7 @@ use crate::harness::view::{ConversationView, ConversationViews, ViewObserver};
 use crate::session::observation::CommittedWatch;
 use crate::types::{
     CommitChange, CommitPublication, ConversationId, EntryRecord, ErasedTaskRecord, JsonObject, SubmissionId,
-    SubmissionRecord, TableCommitChange, TaskId, TaskOutcome, TaskQuery, TaskStatus, WatchEnd,
+    SubmissionRecord, TableCommitChange, TaskId, TaskOutcome, TaskQuery, TaskState, TaskStatus, WatchEnd,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

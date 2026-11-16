@@ -71,6 +71,7 @@ impl TestClock {
 }
 
 /// Models and registry that survive a close/reopen, like a host process's own objects.
+#[derive(Clone)]
 pub struct ChatSetup {
     pub faux: FauxProviderHandle,
     pub models: Models,
@@ -198,7 +199,7 @@ where
         if tokio::time::Instant::now() > deadline {
             panic!("Condition was not reached");
         }
-        pi_js::time::sleep(Duration::from_millis(5)).await;
+        let _ = pi_js::time::sleep(5, None).await;
     }
 }
 

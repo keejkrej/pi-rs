@@ -717,11 +717,11 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> pi_js::Result<T> {
 }
 
 fn encode_json<T: Serialize>(value: &T) -> pi_js::Result<String> {
-    pi_js::json::stringify(value)
+    pi_js::json::try_stringify(value)
 }
 
 fn encode_indexed_string(value: &str) -> pi_js::Result<String> {
-    pi_js::json::stringify(&value)
+    pi_js::json::try_stringify(&value)
 }
 
 fn cursor_id(cursor: Option<&Cursor>) -> pi_js::Result<Option<i64>> {
@@ -789,7 +789,7 @@ fn address_parts(kind: &str, scope: &DocumentScope, key: Option<&str>) -> pi_js:
 
 fn address_key(kind: &str, scope: &DocumentScope, key: Option<&str>) -> pi_js::Result<String> {
     let parts = address_parts(kind, scope, key)?;
-    pi_js::json::stringify(&(
+    pi_js::json::try_stringify(&(
         parts.kind,
         parts.scope_kind,
         parts.owner_id,
@@ -917,7 +917,19 @@ async fn materialize_document(
                 "Document {id} crosses a stored version boundary without a base"
             )));
         }
-        ops_batches.push(parse_json(rev.get_str("content")?)?);
+        let raw_ops = rev.get_str("content")?;
+        let ops: Vec<Op> = serde_json::from_str(raw_ops).map_err(|err| {
+            if let Ok(items) = serde_json::from_str::<Vec<JsonValue>>(raw_ops)
+                && let Some(bad) = items
+                    .iter()
+                    .find(|item| serde_json::from_value::<Op>((*item).clone()).is_err())
+                && let Some(verb) = bad.as_array().and_then(|arr| arr.first()).and_then(|v| v.as_str())
+            {
+                return pi_js::Error::msg(format!("Unknown document op {verb:?}: {err}"));
+            }
+            pi_js::Error::msg(format!("Failed to parse stored JSON: {err}"))
+        })?;
+        ops_batches.push(ops);
     }
 
     let deltas_since_base = ops_batches.len();

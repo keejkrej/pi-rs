@@ -48,6 +48,7 @@ pub fn create_write_tool() -> ToolRegistration {
                 let WriteToolInput { path, content } = args;
                 let env = require_env(&api)?;
                 let absolute_path = resolve_tool_path(env.as_ref(), &path, &context).await?;
+                let absolute_path_task = absolute_path.clone();
                 let env_for_queue = Arc::clone(&env);
                 let queue_ctx = context.clone();
                 with_file_mutation_queue(
@@ -61,7 +62,7 @@ pub fn create_write_tool() -> ToolRegistration {
                                 return Err(pi_js::Error::msg("Operation aborted"));
                             }
                             get_or_throw(
-                                env.write_file(&absolute_path, FileContent::Text(&content), &context)
+                                env.write_file(&absolute_path_task, FileContent::Text(&content), &context)
                                     .await,
                             )?;
                             if context.abort_signal().is_some_and(|s| s.aborted()) {

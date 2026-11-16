@@ -158,7 +158,9 @@ pub async fn create_mcp_tools(client: McpClient, prefix: &str) -> Result<Vec<Age
                         Ok(AgentToolResult {
                             content,
                             details: None,
-                            structured_content: result.structured_content,
+                            structured_content: result
+                                .structured_content
+                                .map(|m| Value::Object(m.into_iter().collect())),
                             usage: None,
                             is_error: Some(failed),
                             terminate: None,
@@ -318,9 +320,8 @@ pub fn create_codemode_tool(tools: &[AgentTool], run_tool: NestedToolRunner) -> 
                         }),
                     )
                     .await;
-                let close_res = sandbox.close().await;
+                let _ = sandbox.close().await;
                 let result = exec_res?;
-                close_res?;
 
                 let (ok, output, calls, returned_value, script_error) = match result {
                     CodemodeResult::Success {

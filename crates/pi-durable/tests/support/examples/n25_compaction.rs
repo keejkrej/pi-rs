@@ -289,10 +289,8 @@ pub async fn run() -> pi_js::Result<()> {
         .compact(Some("Keep the hotel shortlist".to_owned()), context.clone())
         .await?;
     let settled = harness.wait_for_task(manual, context.clone()).await?;
-    let placement = match settled.state {
-        TaskState::Terminal {
-            outcome: TaskOutcome::Completed { result },
-        } => result.submission_id,
+    let placement = match settled.outcome {
+        TaskOutcome::Completed { result } => result.submission_id,
         _ => None,
     };
     let summary = harness

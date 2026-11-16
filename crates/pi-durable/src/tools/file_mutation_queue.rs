@@ -51,7 +51,7 @@ fn canonical<'a>(
 struct QueueSlot {
     // Dropped first so the mutex is released before map pruning runs.
     _guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    cleanup: QueueCleanup,
+    _cleanup: QueueCleanup,
 }
 
 struct QueueCleanup {
@@ -100,7 +100,7 @@ where
     let guard = mutex.lock_owned().await;
     let _slot = QueueSlot {
         _guard: Some(guard),
-        cleanup,
+        _cleanup: cleanup,
     };
     fn_call().await
 }

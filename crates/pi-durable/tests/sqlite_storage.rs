@@ -3,18 +3,22 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_chord::delta::Op;
-use pi_chord::{Context, background_context};
+use pi_chord::Context;
+use pi_chord::context::BACKGROUND_CONTEXT;
+
+fn background_context() -> Context {
+    BACKGROUND_CONTEXT.clone()
+}
+use pi_chord::delta::{MoveVerb, Op, OpMove, OpReplace, OpSet, OpSplice, ReplaceVerb, Seg, SetVerb, SpliceVerb};
 use pi_durable::ids::{ConversationId, DocumentId, EntryId, Seq, TaskId, id_from_number, seq_from_number};
 use pi_durable::storage::sqlite::SqliteStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::testing::{make_storage_provider, run_storage_conformance};
 use pi_durable::types::{
-    ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate,
-    DocumentFork, DocumentHistory, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope,
-    EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject, Page, ROOT_CONVERSATION_ID,
-    Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord,
-    TaskQuery, TaskState,
+    ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate, DocumentFork,
+    DocumentHistory, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, JsonObject, Page, ROOT_CONVERSATION_ID, Storage, StorageWrite, StoredDocument, SubmissionId,
+    SubmissionQuery, SubmissionRecord, TaskQuery, TaskState,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value as JsonValue, json};
@@ -66,11 +70,7 @@ impl Storage for ReopeningStorage {
         storage.mint_id().await
     }
 
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<Option<ConversationRecord>> {
+    async fn conversation(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<ConversationRecord>> {
         let guard = self.current.lock().await;
         guard
             .as_ref()
@@ -170,11 +170,7 @@ impl Storage for ReopeningStorage {
             .await
     }
 
-    async fn submission(
-        &self,
-        id: SubmissionId,
-        context: Context,
-    ) -> pi_js::Result<Option<SubmissionRecord>> {
+    async fn submission(&self, id: SubmissionId, context: Context) -> pi_js::Result<Option<SubmissionRecord>> {
         let guard = self.current.lock().await;
         guard
             .as_ref()
@@ -265,9 +261,7 @@ impl Storage for ReopeningStorage {
     }
 }
 
-async fn create_sqlite_storage(
-    options: NodeSqliteStorageOptions,
-) -> (tempfile::TempDir, SqliteStorage, String) {
+async fn create_sqlite_storage(options: NodeSqliteStorageOptions) -> (tempfile::TempDir, SqliteStorage, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("storage.sqlite").to_string_lossy().into_owned();
     let storage = open_node_sqlite_storage(&path, options)
@@ -327,13 +321,11 @@ fn obj(value: JsonValue) -> JsonObject {
 }
 
 fn scalar(db: &Connection, sql: &str) -> i64 {
-    db.query_row(sql, [], |row| row.get::<_, i64>(0))
-        .expect("scalar query")
+    db.query_row(sql, [], |row| row.get::<_, i64>(0)).expect("scalar query")
 }
 
 fn revision_count(path: &str, document_id: DocumentId) -> i64 {
-    let db =
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro db");
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro db");
     db.query_row(
         "SELECT count(*) FROM document_revisions WHERE document_id = ?",
         [document_id.as_i64()],
@@ -347,8 +339,7 @@ async fn sqlite_storage_conformance() {
     run_storage_conformance(
         "SqliteStorage",
         make_storage_provider(|callback| async move {
-            let (_dir, storage, _path) =
-                create_sqlite_storage(NodeSqliteStorageOptions::default()).await;
+            let (_dir, storage, _path) = create_sqlite_storage(NodeSqliteStorageOptions::default()).await;
             let s: Arc<dyn Storage> = Arc::new(storage);
             callback(Arc::clone(&s)).await;
             let _ = s.close(background_context()).await;
@@ -474,20 +465,18 @@ async fn rejects_document_whose_required_base_is_missing() {
         .expect("create doc");
 
     let db = Connection::open(&path).expect("open raw db");
-    db.execute(
-        "DELETE FROM document_revisions WHERE document_id = ?",
-        [id.as_i64()],
-    )
-    .expect("delete base");
+    db.execute("DELETE FROM document_revisions WHERE document_id = ?", [id.as_i64()])
+        .expect("delete base");
     db.close().expect("close raw db");
 
     let err = storage
         .document(id, DocumentPoint::Current, context.clone())
         .await
         .expect_err("expected missing base");
-    assert!(err
-        .to_string()
-        .contains(&format!("Document {id} is missing a required base")));
+    assert!(
+        err.to_string()
+            .contains(&format!("Document {id} is missing a required base"))
+    );
     storage.close(context).await.expect("close");
 }
 
@@ -521,9 +510,10 @@ async fn replays_detached_root_replacements_and_follow_up_edits_while_rejecting_
                 id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::ReplaceRoot {
-                        value: obj(json!({ "nested": { "value": 2 }, "rows": [{ "id": 1 }] })),
-                    }],
+                    ops: vec![Op::Replace(OpReplace(
+                        ReplaceVerb::R,
+                        JsonValue::Object(obj(json!({ "nested": { "value": 2 }, "rows": [{ "id": 1 }] }))),
+                    ))],
                 },
             }],
             context.clone(),
@@ -537,21 +527,19 @@ async fn replays_detached_root_replacements_and_follow_up_edits_while_rejecting_
                 content: DocumentContent::Delta {
                     version: 1,
                     ops: vec![
-                        Op::Set {
-                            path: vec!["nested".into(), "value".into()],
-                            value: json!(3),
-                        },
-                        Op::Splice {
-                            path: vec!["rows".into()],
-                            index: 1,
-                            delete_count: 0,
-                            items: vec![json!({ "id": 2 })],
-                        },
-                        Op::Move {
-                            path: vec!["rows".into()],
-                            from_index: 1,
-                            to_index: 0,
-                        },
+                        Op::Set(OpSet(
+                            SetVerb::S,
+                            vec![Seg::String("nested".to_owned()), Seg::String("value".to_owned())],
+                            json!(3),
+                        )),
+                        Op::Splice(OpSplice(
+                            SpliceVerb::P,
+                            vec![Seg::String("rows".to_owned())],
+                            1,
+                            0,
+                            vec![json!({ "id": 2 })],
+                        )),
+                        Op::Move(OpMove(MoveVerb::M, vec![Seg::String("rows".to_owned())], vec![1, 0])),
                     ],
                 },
             }],
@@ -565,10 +553,11 @@ async fn replays_detached_root_replacements_and_follow_up_edits_while_rejecting_
                 id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::Set {
-                        path: vec!["nested".into(), "value".into()],
-                        value: json!(4),
-                    }],
+                    ops: vec![Op::Set(OpSet(
+                        SetVerb::S,
+                        vec![Seg::String("nested".to_owned()), Seg::String("value".to_owned())],
+                        json!(4),
+                    ))],
                 },
             }],
             context.clone(),
@@ -621,11 +610,14 @@ async fn rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() {
     let transient_id: EntryId = id_from_number(storage.mint_id().await.expect("mint entry"));
     let transient_task_id: TaskId = id_from_number(storage.mint_id().await.expect("mint task"));
 
-    // Second write fails (duplicate ID / missing conversation), rolling back the first write & seq allocation.
-    let bad_write = StorageWrite::Task {
+    // Second write fails (duplicate ID), rolling back the first write & seq allocation.
+    let dup_entry = StorageWrite::Entry {
+        value: entry(transient_id, ROOT_CONVERSATION_ID, None),
+    };
+    let transient_task = StorageWrite::Task {
         value: ErasedTaskRecord {
             id: transient_task_id,
-            conversation_id: id_from_number(999),
+            conversation_id: ROOT_CONVERSATION_ID,
             kind: "test.task".to_string(),
             version: 1,
             input: JsonValue::Null,
@@ -645,15 +637,28 @@ async fn rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() {
                     StorageWrite::Entry {
                         value: entry(transient_id, ROOT_CONVERSATION_ID, None),
                     },
-                    bad_write,
+                    transient_task,
+                    dup_entry,
                 ],
                 context.clone(),
             )
             .await
             .is_err()
     );
-    assert!(storage.entry(transient_id, context.clone()).await.expect("entry").is_none());
-    assert!(storage.task(transient_task_id, context.clone()).await.expect("task").is_none());
+    assert!(
+        storage
+            .entry(transient_id, context.clone())
+            .await
+            .expect("entry")
+            .is_none()
+    );
+    assert!(
+        storage
+            .task(transient_task_id, context.clone())
+            .await
+            .expect("task")
+            .is_none()
+    );
 
     let committed_id: EntryId = id_from_number(storage.mint_id().await.expect("mint committed"));
     assert_eq!(
@@ -670,8 +675,7 @@ async fn rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() {
     );
     storage.close(context).await.expect("close");
 
-    let db =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
     assert_eq!(scalar(&db, "SELECT count(*) FROM entries"), 1);
     assert_eq!(
         scalar(&db, "SELECT next_seq FROM durable_metadata WHERE singleton = 1"),
@@ -717,10 +721,11 @@ async fn reconstructs_recent_and_ancient_rewindable_points_after_reopen() {
         } else {
             DocumentContent::Delta {
                 version: 1,
-                ops: vec![Op::Set {
-                    path: vec!["count".into()],
-                    value: json!(count),
-                }],
+                ops: vec![Op::Set(OpSet(
+                    SetVerb::S,
+                    vec![Seg::String("count".to_owned())],
+                    json!(count),
+                ))],
             }
         };
         recent_at = storage
@@ -763,8 +768,7 @@ async fn uses_indexes_for_exact_addresses_exact_scopes_entry_history_and_revisio
     let (_dir, storage, path) = create_sqlite_storage(NodeSqliteStorageOptions::default()).await;
     storage.close(context).await.expect("close");
 
-    let db =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
     let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> String {
         let mut stmt = db.prepare(sql).expect("prepare explain");
         let rows = stmt
@@ -865,10 +869,11 @@ async fn reclaims_current_only_revisions_only_after_base_or_retirement() {
                     id,
                     content: DocumentContent::Delta {
                         version: 1,
-                        ops: vec![Op::Set {
-                            path: vec!["count".into()],
-                            value: json!(count),
-                        }],
+                        ops: vec![Op::Set(OpSet(
+                            SetVerb::S,
+                            vec![Seg::String("count".to_owned())],
+                            json!(count),
+                        ))],
                     },
                 }],
                 context.clone(),
@@ -878,8 +883,7 @@ async fn reclaims_current_only_revisions_only_after_base_or_retirement() {
     }
     assert_eq!(revision_count(&path, id), 11);
 
-    let db =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
     let content: String = db
         .query_row(
             "SELECT content FROM document_revisions WHERE document_id = ? AND kind = 'delta' ORDER BY seq DESC LIMIT 1",
@@ -914,9 +918,10 @@ async fn reclaims_current_only_revisions_only_after_base_or_retirement() {
                 id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::ReplaceRoot {
-                        value: obj(json!({ "count": 12 })),
-                    }],
+                    ops: vec![Op::Replace(OpReplace(
+                        ReplaceVerb::R,
+                        JsonValue::Object(obj(json!({ "count": 12 }))),
+                    ))],
                 },
             }],
             context.clone(),
@@ -964,8 +969,7 @@ async fn auto_checkpoints_wal_frames_and_truncates_wal_on_close() {
     let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
     assert!(wal_size < 512 * 1024, "unexpected WAL size {wal_size}");
 
-    let observer =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open observer");
+    let observer = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open observer");
     assert_eq!(scalar(&observer, "SELECT count(*) FROM entries"), 20);
     storage.close(context).await.expect("close");
     let wal_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
@@ -1017,8 +1021,7 @@ async fn reuses_pages_released_by_current_only_checkpoints() {
         .await
         .expect("shrink base");
 
-    let before =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+    let before = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
     let pages_after_delete = scalar(&before, "SELECT page_count FROM pragma_page_count()");
     let free_after_delete = scalar(&before, "SELECT freelist_count FROM pragma_freelist_count()");
     before.close().expect("close before");
@@ -1038,8 +1041,7 @@ async fn reuses_pages_released_by_current_only_checkpoints() {
         .await
         .expect("grow again");
 
-    let after =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+    let after = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
     let pages_after_reuse = scalar(&after, "SELECT page_count FROM pragma_page_count()");
     let free_after_reuse = scalar(&after, "SELECT freelist_count FROM pragma_freelist_count()");
     assert!(pages_after_reuse <= pages_after_delete + 2);
@@ -1097,10 +1099,11 @@ async fn keeps_representative_row_and_document_storage_bounded() {
                     id: doc_id,
                     content: DocumentContent::Delta {
                         version: 1,
-                        ops: vec![Op::Set {
-                            path: vec!["count".into()],
-                            value: json!(count),
-                        }],
+                        ops: vec![Op::Set(OpSet(
+                            SetVerb::S,
+                            vec![Seg::String("count".to_owned())],
+                            json!(count),
+                        ))],
                     },
                 }],
                 context.clone(),

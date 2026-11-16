@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 use pi_ai::create_models;
 use pi_ai::types::{Message, ModelThinkingLevel};
+use pi_durable::LiveState;
 use pi_durable::documents::{DocDefinitionInput, define_rewindable_conversation_doc};
 use pi_durable::entries::define_entry;
 use pi_durable::harness::agent::{AGENT_DOC, configure};
@@ -16,16 +17,16 @@ use pi_durable::harness::harness::{Conversation, Harness, RootConversationOption
 use pi_durable::harness::live::LIVE_DOC;
 use pi_durable::harness::registry::{Registry, create_registry};
 use pi_durable::harness::types::{
-    AgentChange, AgentState, AgentToolsChange, AgentToolsFilter, Extension, FieldChange, HarnessOptions, LiveState,
-    ModelRef,
+    AgentChange, AgentState, AgentToolsChange, AgentToolsFilter, ConversationCreateOptions, Extension, FieldChange,
+    HarnessOptions, ModelRef,
 };
 use pi_durable::session::create_session;
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::tasks::{TaskDefinition, define_task};
 use pi_durable::types::{
-    ConversationCreateOptions, ConversationId, ConversationOwnership, EntryDraft, EntryRecord, ROOT_CONVERSATION_ID,
-    RewindableFork, StorageWrite, TaskOptions, TaskOwnership,
+    ConversationId, ConversationOwnership, EntryDraft, EntryId, EntryRecord, ROOT_CONVERSATION_ID, RewindableFork,
+    StorageWrite, TaskOptions, TaskOwnership,
 };
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
@@ -109,10 +110,8 @@ fn write_kind(write: &StorageWrite) -> &'static str {
         StorageWrite::Submission { .. } => "submission",
         StorageWrite::DocumentCreate { .. } => "document.create",
         StorageWrite::DocumentCopy { .. } => "document.copy",
-        StorageWrite::DocumentWrite { .. } => "document.write",
+        StorageWrite::DocumentChange { .. } => "document.change",
         StorageWrite::DocumentRetire { .. } => "document.retire",
-        StorageWrite::TablePut { .. } => "table.put",
-        StorageWrite::TableDelete { .. } => "table.delete",
     }
 }
 
@@ -673,7 +672,10 @@ async fn binds_commits_and_task_creation_to_the_conversation() {
         .await
         .expect("conv");
     let mut phases = IndexMap::new();
-    phases.insert("run".to_owned(), Arc::new(|_, _, _| Box::pin(async { Ok(()) })) as _);
+    phases.insert(
+        "run".to_owned(),
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>) as _,
+    );
     let task = define_task::<i64, String, (), ()>(TaskDefinition {
         name: "test.work".to_owned(),
         version: 1,
@@ -704,7 +706,7 @@ async fn binds_commits_and_task_creation_to_the_conversation() {
         .expect("create task");
     let record = opened
         .harness
-        .commit(move |tx| async move { tx.task(task_id).await }, context())
+        .commit(move |tx| async move { tx.task(task_id.erased()).await }, context())
         .await
         .expect("read task")
         .expect("task present");
@@ -1103,7 +1105,10 @@ async fn gives_conversations_created_through_tx_their_documents_empty_owner_copy
         .await
         .expect("root");
     let mut phases = IndexMap::new();
-    phases.insert("never".to_owned(), Arc::new(|_, _, _| Box::pin(async { Ok(()) })) as _);
+    phases.insert(
+        "never".to_owned(),
+        Arc::new(|_, _, _| Box::pin(async { Ok(()) }) as pi_js::BoxFuture<pi_js::Result<()>>) as _,
+    );
     let owner = define_task::<serde_json::Value, String, (), ()>(TaskDefinition {
         name: "test.owner".to_owned(),
         version: 1,
@@ -1128,7 +1133,11 @@ async fn gives_conversations_created_through_tx_their_documents_empty_owner_copy
                     )
                     .await?;
                 let plain = tx.create_conversation(ConversationOwnership::Ownerless).await?;
-                let owned = tx.create_conversation(ConversationOwnership::Task { task_id }).await?;
+                let owned = tx
+                    .create_conversation(ConversationOwnership::Task {
+                        task_id: task_id.erased(),
+                    })
+                    .await?;
                 assert_eq!(
                     tx.doc_conversation(&*AGENT_DOC, owned.id).await?.get()?.cwd.as_deref(),
                     Some("/repo")
@@ -1228,7 +1237,13 @@ async fn gives_conversations_created_through_tx_their_documents_empty_owner_copy
         .commit(
             move |tx| async move {
                 Ok(tx
-                    .fork_conversation(plain_id, at, ConversationOwnership::Task { task_id })
+                    .fork_conversation(
+                        plain_id,
+                        at,
+                        ConversationOwnership::Task {
+                            task_id: task_id.erased(),
+                        },
+                    )
                     .await?
                     .id)
             },

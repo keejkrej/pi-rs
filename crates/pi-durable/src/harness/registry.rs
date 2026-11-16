@@ -187,7 +187,7 @@ impl RegistryImpl {
 
 impl RegistryReader for RegistryImpl {
     fn snapshot(&self) -> Arc<dyn RegistrySnapshot> {
-        Arc::clone(&lock(&self.current))
+        Arc::clone(&*lock(&self.current)) as Arc<dyn RegistrySnapshot>
     }
 
     fn subscribe(&self, listener: Arc<dyn Fn() + Send + Sync>) -> pi_js::Unsubscribe {
@@ -199,7 +199,7 @@ impl RegistryReader for RegistryImpl {
             id
         };
         let listeners = Arc::clone(&self.listeners);
-        Arc::new(move || {
+        pi_js::Unsubscribe::new(move || {
             lock(&listeners).map.shift_remove(&id);
         })
     }

@@ -5,7 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pi_chord::{Context, background_context};
+use pi_chord::Context;
+use pi_chord::context::BACKGROUND_CONTEXT;
+
+fn background_context() -> Context {
+    BACKGROUND_CONTEXT.clone()
+}
 use pi_durable::session::{CommitListener, Session, SessionImpl};
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::types::{
@@ -465,7 +470,7 @@ pub async fn flush() {
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
-    pi_js::time::sleep(Duration::from_millis(0)).await;
+    let _ = pi_js::time::sleep(0, None).await;
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }

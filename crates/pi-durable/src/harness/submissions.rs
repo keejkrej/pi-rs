@@ -7,7 +7,7 @@ use pi_ai::types::{Message, UserMessage};
 use pi_chord::Context;
 use pi_chord::json::{copy_json, is_json_value};
 
-use crate::entries::{TypedEntryDraft, USER_ENTRY};
+use crate::entries::USER_ENTRY;
 use crate::errors::ConversationBusy;
 use crate::harness::generation::start_run;
 use crate::harness::inbox::{
@@ -24,7 +24,7 @@ use crate::session::transaction::Tx;
 use crate::types::{
     CommitChange, CommitPublication, ConversationId, EntryDraft, InputSubmissionState, Storage, SubmissionCreate,
     SubmissionId, SubmissionRecord, SubmissionSettlement, SubmissionState, SubmissionStatus, SubmissionType,
-    TableCommitChange, WriteSubmissionState,
+    TableCommitChange, TypedEntryDraft, WriteSubmissionState,
 };
 
 pub type QueueModesFn = Arc<dyn Fn() -> QueueModes + Send + Sync>;
@@ -89,11 +89,14 @@ impl Submissions {
     ) -> pi_js::Result<SubmissionHandle> {
         (self.resume)();
         let now = (self.now)();
-        let modes = (self.queue_modes)();
+        let queue_modes = Arc::clone(&self.queue_modes);
         let id = self
             .session
             .commit(
-                move |tx| async move { admit_submission(&tx, conversation_id, draft, now, modes).await },
+                move |tx| async move {
+                    let modes = (queue_modes)();
+                    admit_submission(&tx, conversation_id, draft, now, modes).await
+                },
                 context,
             )
             .await?;
@@ -363,7 +366,11 @@ pub async fn admit_submission(
                 }
             }
         };
-        inbox_draft.update(|inbox| inbox.items.push(item))?;
+        let ov = inbox_draft.overlay()?;
+        if let Some(items_ov) = ov.get("items")?.as_overlay() {
+            let val = serde_json::to_value(&item).map_err(|e| pi_js::Error::js("TypeError", e.to_string()))?;
+            items_ov.push(&[pi_chord::delta::tracker::DraftInput::Json(val)])?;
+        }
 
         if let Some(ref mut b) = boundary {
             let res = apply_boundary(tx, b, BoundaryAt::Final, now).await?;

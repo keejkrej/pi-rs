@@ -12,13 +12,13 @@ use pi_chord::Context;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_durable::env::ExecutionEnv;
 use pi_durable::env::node::NodeExecutionEnv;
-use pi_durable::harness::types::{EnvTarget, PromptSection, SectionOptions};
+use pi_durable::harness::types::{EnvTarget, PromptSection};
 use pi_durable::types::ConversationOwnership;
 use pi_durable::{
     AgentChange, AgentExtensionsChange, Conversation, ConversationCreateOptions, ConversationEntriesQuery, Extension,
     FieldChange, Harness, HarnessOptions, MemoryStorage, ModelRef, Registry, RegistryReader, RootConversationOptions,
-    SYSTEM_ENTRY, SubmissionDraft, UserInput, create_registry, define_extension, section, section_with_options,
-    wrap_section,
+    SYSTEM_ENTRY, SectionOptions, SubmissionDraft, UserInput, create_registry, define_extension, section,
+    section_with_options, wrap_section,
 };
 
 async fn system_entries(conversation: &Conversation, context: Context) -> pi_js::Result<Vec<Message>> {

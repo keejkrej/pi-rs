@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
-use pi_chord::delta::{Change, DraftOverlay, Op, Prepared, Tracker, track};
+use pi_chord::delta::tracker::DraftOverlay;
+use pi_chord::delta::{Change, Prepared, Tracker, track};
 use pi_chord::json::{copy_json, is_json_value};
 use pi_chord::{Context, JsonValue};
 use serde::Serialize;
@@ -15,14 +16,13 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{Notify, OnceCell};
 
 use crate::documents::{
-    ConversationDoc, ConversationDocFamily, ErasedDocDefinition, ResolvedAddress, RewindableConversationDocFamilyToken,
-    SessionDocFamilyToken, SessionDocToken, TaskDocFamilyToken, TaskDocToken, address_id, check_create_scope,
-    check_record_scope, check_record_version, document_create, json_object_to_value, materialize_create_value,
-    resolve_address, value_to_json_object,
+    ConversationDoc, ConversationDocFamily, ErasedDocDefinition, ResolvedAddress, SessionDocFamilyToken,
+    SessionDocToken, TaskDocFamilyToken, TaskDocToken, address_id, check_create_scope, check_record_scope,
+    check_record_version, document_create, json_object_to_value, materialize_create_value, resolve_address,
+    value_to_json_object,
 };
-use crate::entries::{Entry, TypedEntryDraft};
+use crate::entries::Entry;
 use crate::errors::{ConversationBusy, ReadAfterWrite, StorageRejected};
-use crate::ids::mint_typed_id;
 use crate::session::forks::prepare_fork_document_copies;
 use crate::tasks::{AnyTask, Task};
 use crate::types::{
@@ -32,7 +32,7 @@ use crate::types::{
     EntryDraftHead, EntryId, EntryKind, EntryQuery, EntryRecord, ErasedTaskRecord, InputSubmissionState, JsonObject,
     Page, ROOT_CONVERSATION_ID, Seq, Storage, StorageWrite, SubmissionCreate, SubmissionId, SubmissionKind,
     SubmissionRecord, SubmissionSettlement, SubmissionState, TaskId, TaskKind, TaskOptions, TaskOwnership, TaskQuery,
-    TaskRecord, TaskState, TypedEntry, WriteSubmissionState,
+    TaskRecord, TaskState, TypedEntry, TypedEntryDraft, WriteSubmissionState, mint_typed_id,
 };
 
 const INTERNAL_SCAN_PAGE_SIZE: usize = 256;
@@ -512,6 +512,10 @@ impl Tx {
         cursor: Option<Cursor>,
     ) -> pi_js::Result<Page<ErasedTaskRecord, Cursor>> {
         self.inner.scan_tasks(query, limit, cursor).await
+    }
+
+    pub async fn submission(&self, id: SubmissionId) -> pi_js::Result<Option<SubmissionRecord>> {
+        self.inner.submission(id).await
     }
 
     pub async fn submission_by_request(
@@ -1005,7 +1009,11 @@ impl Transaction {
         let draft = EntryDraft {
             kind: token.kind().to_owned(),
             model: value.model,
-            data: Some(encoded_data),
+            data: if encoded_data.is_null() {
+                None
+            } else {
+                Some(encoded_data)
+            },
             head: value.head,
             edits: value.edits,
         };

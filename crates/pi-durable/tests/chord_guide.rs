@@ -19,11 +19,11 @@ use pi_chord::{
     create_facet_host, create_remote_service_binding, define_facet, define_service,
 };
 use pi_durable::documents::{
-    ConversationDocFamilyToken, DocDefinitionInput, DocFamilyDefinitionInput, DocumentState, SessionDocToken,
-    TaskDocToken, define_conversation_doc_family, define_session_doc, define_task_doc,
+    ConversationDocFamilyToken, DocDefinitionInput, DocFamilyDefinitionInput, SessionDocToken, TaskDocToken,
+    define_conversation_doc_family, define_session_doc, define_task_doc,
 };
 use pi_durable::tasks::{AnyTask, TaskDefinition, TaskRuntimeHandle, TypedPhaseHandler, define_task};
-use pi_durable::types::{ConversationId, ConversationOwnership, LatestFork, TaskId, TaskOptions, TaskOwnership};
+use pi_durable::types::{ConversationId, DocumentState, LatestFork, TaskId, TaskOptions, TaskOwnership};
 use pi_durable::{Harness, MemoryStorage, Session};
 use pi_js::Unsubscribe;
 use pretty_assertions::assert_eq;
@@ -284,7 +284,7 @@ fn create_canvas_consumer(canvas_svc: &Service, logged: Arc<Mutex<Vec<LogRecord>
             let stop_slot: Arc<Mutex<Option<ServiceObject>>> = Arc::new(Mutex::new(None));
             let stop_own = Arc::clone(&stop_slot);
             env.own(
-                Arc::new(move || {
+                (move || {
                     if let Some(unsub) = stop_own.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         stop_unsubscribe_obj(&unsub)?;
                     }
@@ -294,7 +294,7 @@ fn create_canvas_consumer(canvas_svc: &Service, logged: Arc<Mutex<Vec<LogRecord>
             )?;
             let logged_cb = Arc::clone(&logged);
             env.on_activate(Arc::new(move || {
-                let stop = subscribe_state_with_delivery(&canvas, "state", {
+                let stop = match subscribe_state_with_delivery(&canvas, "state", {
                     let logged = Arc::clone(&logged_cb);
                     move |value, delivery| {
                         let count = value
@@ -313,7 +313,10 @@ fn create_canvas_consumer(canvas_svc: &Service, logged: Arc<Mutex<Vec<LogRecord>
                             count,
                         ));
                     }
-                })?;
+                }) {
+                    Ok(stop) => stop,
+                    Err(err) => return Box::pin(async move { Err(err) }),
+                };
                 *stop_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop);
                 Box::pin(async { Ok(()) })
             }))
@@ -345,7 +348,7 @@ async fn run_canvas_example(
 ) -> pi_js::Result<()> {
     let context = BACKGROUND_CONTEXT.clone();
     let provider = create_canvas_facet(session, doc, canvas_svc, context.clone()).await?;
-    let consumer = create_canvas_consumer(canvas_svc, logged);
+    let consumer = create_canvas_consumer(canvas_svc, Arc::clone(&logged));
     let host = create_facet_host(FacetOptions {
         facets: vec![provider, consumer],
         service_sources: None,
@@ -369,6 +372,9 @@ async fn run_canvas_example(
         ],
     )
     .await;
+    if res.is_ok() {
+        eventually_sync(|| logged.lock().unwrap_or_else(|e| e.into_inner()).len() >= 2).await;
+    }
     let dispose_res = host.dispose().await;
     res?;
     dispose_res?;
@@ -525,7 +531,7 @@ fn review_facet(
             let states_own = Arc::clone(&owned_states);
             let stops_own = Arc::clone(&owned_stops);
             env.own(
-                Arc::new(move || {
+                (move || {
                     let stops: Vec<Unsubscribe> = {
                         let mut guard = stops_own.lock().unwrap_or_else(|e| e.into_inner());
                         std::mem::take(&mut *guard)
@@ -845,10 +851,10 @@ async fn runs_the_canvas_facet_host_a_remote_client_withdrawal_and_detach_before
         ]
     );
 
-    let err_disposed = host
-        .services()
-        .use_::<ServiceObject>(&canvas_svc)
-        .expect_err("use after dispose must fail");
+    let err_disposed = match host.services().use_::<ServiceObject>(&canvas_svc) {
+        Ok(_) => panic!("use after dispose must fail"),
+        Err(err) => err,
+    };
     assert!(err_disposed.message().contains("disposed"), "got {err_disposed}");
 
     let err_closed = harness
@@ -892,7 +898,7 @@ async fn runs_the_diff_reviews_with_a_keyed_consumer() {
             let stops: Arc<Mutex<Vec<ServiceObject>>> = Arc::new(Mutex::new(Vec::new()));
             let stops_own = Arc::clone(&stops);
             env.own(
-                Arc::new(move || {
+                (move || {
                     let list: Vec<ServiceObject> = {
                         let mut guard = stops_own.lock().unwrap_or_else(|e| e.into_inner());
                         std::mem::take(&mut *guard)

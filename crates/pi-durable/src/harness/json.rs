@@ -1,7 +1,7 @@
 //! Port of packages/durable/src/harness/json.ts
 
 use pi_chord::JsonValue;
-use pi_chord::delta::{DraftInput, DraftOverlay};
+use pi_chord::delta::tracker::{DraftInput, DraftOverlay};
 
 /// Target key when mutating a [`DraftOverlay`] leaf-by-leaf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

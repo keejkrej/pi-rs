@@ -4,9 +4,10 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context,
-    FauxAssistantMessageContent, FauxToolCallOptions, JsonObject, Model, OnPayloadFn, SimpleStreamOptions, StopReason,
-    ThinkingBudgets, Transport, Usage, create_assistant_message_event_stream, faux_assistant_message, faux_text,
-    faux_thinking, faux_tool_call, parse_streaming_json,
+    FauxAssistantMessageContent, FauxToolCallOptions, JsonObject, Model, OnPayloadFn, ProviderHeaders,
+    SimpleStreamOptions, StopReason, ThinkingBudgets, ToolCall, Transport, Usage,
+    create_assistant_message_event_stream, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
+    parse_streaming_json,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Request, fetch};
@@ -115,7 +116,7 @@ struct ProxyRequestOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    headers: Option<IndexMap<String, String>>,
+    headers: Option<ProviderHeaders>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<IndexMap<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +124,7 @@ struct ProxyRequestOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thinking_budgets: Option<ThinkingBudgets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_retry_delay_ms: Option<i64>,
+    max_retry_delay_ms: Option<u64>,
 }
 
 /// Request body posted to `<proxy_url>/api/stream`.
@@ -145,10 +146,10 @@ pub struct ProxyStreamOptions {
     pub session_id: Option<String>,
     pub transport: Option<Transport>,
     pub thinking_budgets: Option<ThinkingBudgets>,
-    pub max_retry_delay_ms: Option<i64>,
+    pub max_retry_delay_ms: Option<u64>,
     pub metadata: Option<IndexMap<String, Value>>,
-    pub headers: Option<IndexMap<String, String>>,
-    pub on_payload: Option<OnPayloadFn>,
+    pub headers: Option<ProviderHeaders>,
+    pub on_payload: Option<OnPayloadFn<Model>>,
     pub auth_token: String,
     pub proxy_url: String,
 }
@@ -181,18 +182,18 @@ impl ProxyStreamOptions {
         proxy_url: impl Into<String>,
     ) -> Self {
         Self {
-            temperature: simple.temperature,
-            max_tokens: simple.max_tokens,
-            signal: simple.signal,
-            cache_retention: simple.cache_retention,
+            temperature: simple.base.temperature,
+            max_tokens: simple.base.max_tokens,
+            signal: simple.base.signal,
+            cache_retention: simple.base.cache_retention,
             reasoning: simple.reasoning,
-            session_id: simple.session_id,
-            transport: simple.transport,
+            session_id: simple.base.session_id,
+            transport: simple.base.transport,
             thinking_budgets: simple.thinking_budgets,
-            max_retry_delay_ms: simple.max_retry_delay_ms,
-            metadata: simple.metadata,
-            headers: simple.headers,
-            on_payload: simple.on_payload,
+            max_retry_delay_ms: simple.base.max_retry_delay_ms,
+            metadata: simple.base.metadata,
+            headers: simple.base.headers,
+            on_payload: simple.base.on_payload,
             auth_token: auth_token.into(),
             proxy_url: proxy_url.into(),
         }
@@ -485,7 +486,7 @@ pub fn process_proxy_event(
             let buf = tool_call_json_buffers.entry(content_index).or_default();
             buf.push_str(&delta);
             let parsed = parse_streaming_json(Some(buf.as_str()));
-            call.arguments = value_to_json_object(parsed);
+            call.arguments = parsed;
             Ok(Some(AssistantMessageEvent::ToolCallDelta {
                 content_index,
                 delta,
@@ -568,12 +569,5 @@ fn set_content_slot(partial: &mut AssistantMessage, index: usize, block: Assista
             "Invalid contentIndex {index} for partial content of length {}",
             partial.content.len()
         )))
-    }
-}
-
-fn value_to_json_object(value: Value) -> JsonObject {
-    match value {
-        Value::Object(map) => map.into_iter().collect(),
-        _ => JsonObject::new(),
     }
 }

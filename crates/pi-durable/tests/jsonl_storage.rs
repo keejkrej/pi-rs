@@ -4,23 +4,27 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_chord::delta::Op;
-use pi_chord::{Context, background_context};
+use pi_chord::Context;
+use pi_chord::context::BACKGROUND_CONTEXT;
+
+fn background_context() -> Context {
+    BACKGROUND_CONTEXT.clone()
+}
+use pi_chord::delta::{Op, OpSet, Seg, SetVerb};
 use pi_durable::env::node::{NodeExecutionEnv, NodeExecutionEnvOptions};
 use pi_durable::env::{
-    CreateDirOptions, CreateTempFileOptions, EnvCleanup, FileContent, FileError, FileErrorCode,
-    FileInfo, FileSystem, ReadTextLinesOptions, RemoveOptions, TextLineReader,
+    CreateDirOptions, CreateTempFileOptions, EnvCleanup, FileContent, FileError, FileErrorCode, FileInfo, FileSystem,
+    ReadTextLinesOptions, RemoveOptions, TextLineReader,
 };
 use pi_durable::ids::{ConversationId, DocumentId, EntryId, Seq, TaskId, id_from_number, seq_from_number};
 use pi_durable::storage::jsonl::node::open_node_jsonl_storage;
 use pi_durable::storage::jsonl::{JsonlStorage, JsonlStorageOptions};
 use pi_durable::testing::{make_storage_provider, run_storage_conformance};
 use pi_durable::types::{
-    ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate,
-    DocumentFork, DocumentHistory, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope,
-    EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject, Page, ROOT_CONVERSATION_ID,
-    Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord,
-    TaskOutcome, TaskQuery, TaskState,
+    ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate, DocumentFork,
+    DocumentHistory, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, JsonObject, Page, ROOT_CONVERSATION_ID, Storage, StorageWrite, StoredDocument, SubmissionId,
+    SubmissionQuery, SubmissionRecord, TaskOutcome, TaskQuery, TaskState,
 };
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -55,7 +59,7 @@ impl Storage for ReopeningStorage {
         }
         let result = storage.commit(writes, commit_context).await;
         let _ = storage.close(background_context()).await;
-        let fs = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+        let fs = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
             cwd: self.directory.clone(),
             ..Default::default()
         }));
@@ -80,11 +84,7 @@ impl Storage for ReopeningStorage {
             .await
     }
 
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<Option<ConversationRecord>> {
+    async fn conversation(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<ConversationRecord>> {
         self.current
             .lock()
             .await
@@ -192,11 +192,7 @@ impl Storage for ReopeningStorage {
             .await
     }
 
-    async fn submission(
-        &self,
-        id: SubmissionId,
-        context: Context,
-    ) -> pi_js::Result<Option<SubmissionRecord>> {
+    async fn submission(&self, id: SubmissionId, context: Context) -> pi_js::Result<Option<SubmissionRecord>> {
         self.current
             .lock()
             .await
@@ -345,7 +341,7 @@ struct InstrumentedEnv {
 impl InstrumentedEnv {
     fn new(cwd: &str) -> Self {
         Self {
-            inner: NodeExecutionEnv::new(NodeExecutionEnvOptions {
+            inner: NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
                 cwd: cwd.to_string(),
                 ..Default::default()
             }),
@@ -406,11 +402,7 @@ impl FileSystem for InstrumentedEnv {
         self.inner.read_text_file(path, context).await
     }
 
-    async fn open_text_line_reader(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> Result<Box<dyn TextLineReader>, FileError> {
+    async fn open_text_line_reader(&self, path: &str, context: &Context) -> Result<Box<dyn TextLineReader>, FileError> {
         self.inner.open_text_line_reader(path, context).await
     }
 
@@ -427,12 +419,7 @@ impl FileSystem for InstrumentedEnv {
         self.inner.read_binary_file(path, context).await
     }
 
-    async fn write_file(
-        &self,
-        path: &str,
-        content: FileContent<'_>,
-        context: &Context,
-    ) -> Result<(), FileError> {
+    async fn write_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
         let failure = {
             let mut guard = self.tracker.lock().expect("lock");
             guard.write_calls += 1;
@@ -477,12 +464,7 @@ impl FileSystem for InstrumentedEnv {
         }
     }
 
-    async fn append_file(
-        &self,
-        path: &str,
-        content: FileContent<'_>,
-        context: &Context,
-    ) -> Result<(), FileError> {
+    async fn append_file(&self, path: &str, content: FileContent<'_>, context: &Context) -> Result<(), FileError> {
         let failure = {
             let mut guard = self.tracker.lock().expect("lock");
             guard.append_calls += 1;
@@ -527,12 +509,7 @@ impl FileSystem for InstrumentedEnv {
         }
     }
 
-    async fn truncate_file(
-        &self,
-        path: &str,
-        size: u64,
-        context: &Context,
-    ) -> Result<(), FileError> {
+    async fn truncate_file(&self, path: &str, size: u64, context: &Context) -> Result<(), FileError> {
         self.inner.truncate_file(path, size, context).await
     }
 
@@ -559,12 +536,7 @@ impl FileSystem for InstrumentedEnv {
         ))
     }
 
-    async fn rename_file(
-        &self,
-        source_path: &str,
-        destination_path: &str,
-        context: &Context,
-    ) -> Result<(), FileError> {
+    async fn rename_file(&self, source_path: &str, destination_path: &str, context: &Context) -> Result<(), FileError> {
         let failure = {
             let mut guard = self.tracker.lock().expect("lock");
             guard.rename_calls += 1;
@@ -579,14 +551,10 @@ impl FileSystem for InstrumentedEnv {
                 .filter(|f| f.operation == FailureOp::Rename && f.call == call)
         };
         let Some(f) = failure else {
-            return self.inner
-                .rename_file(source_path, destination_path, context)
-                .await;
+            return self.inner.rename_file(source_path, destination_path, context).await;
         };
         if f.mode == FailureMode::After {
-            self.inner
-                .rename_file(source_path, destination_path, context)
-                .await?;
+            self.inner.rename_file(source_path, destination_path, context).await?;
         }
         Err(FileError::new(
             FileErrorCode::Unknown,
@@ -620,12 +588,7 @@ impl FileSystem for InstrumentedEnv {
         self.inner.create_dir(path, options, context).await
     }
 
-    async fn remove(
-        &self,
-        path: &str,
-        options: Option<RemoveOptions>,
-        context: &Context,
-    ) -> Result<(), FileError> {
+    async fn remove(&self, path: &str, options: Option<RemoveOptions>, context: &Context) -> Result<(), FileError> {
         let failure = {
             let mut guard = self.tracker.lock().expect("lock");
             guard.remove_calls += 1;
@@ -648,11 +611,7 @@ impl FileSystem for InstrumentedEnv {
         ))
     }
 
-    async fn create_temp_dir(
-        &self,
-        prefix: Option<&str>,
-        context: &Context,
-    ) -> Result<String, FileError> {
+    async fn create_temp_dir(&self, prefix: Option<&str>, context: &Context) -> Result<String, FileError> {
         self.inner.create_temp_dir(prefix, context).await
     }
 
@@ -672,7 +631,7 @@ fn temp_directory() -> (tempfile::TempDir, String) {
 }
 
 async fn open_storage(dir: &str) -> JsonlStorage {
-    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: dir.to_string(),
         ..Default::default()
     }));
@@ -901,8 +860,7 @@ async fn publishes_every_commit_before_reclaiming_current_only_document_and_term
     let marker_types: Vec<String> = main_lines
         .iter()
         .map(|line| {
-            serde_json::from_str::<JsonValue>(line)
-                .expect("json")["type"]
+            serde_json::from_str::<JsonValue>(line).expect("json")["type"]
                 .as_str()
                 .expect("type str")
                 .to_string()
@@ -933,10 +891,7 @@ async fn orders_multiple_live_task_replacements_in_one_sidecar_by_commit_ordinal
         )
         .await
         .expect("commit tasks");
-    assert_eq!(
-        read_lines(&dir.path().join(format!("task-{task_id}.jsonl"))).len(),
-        2
-    );
+    assert_eq!(read_lines(&dir.path().join(format!("task-{task_id}.jsonl"))).len(), 2);
     storage.close(context.clone()).await.expect("close");
 
     let reopened = open_storage(&dir_path).await;
@@ -1066,14 +1021,46 @@ async fn prepares_before_io_and_leaves_preparation_failures_usable() {
 async fn poisons_after_append_failures_and_recovers_only_confirmed_state() {
     let context = background_context();
     let cases = [
-        Failure { operation: FailureOp::Append, call: 1, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Append, call: 1, mode: FailureMode::After },
-        Failure { operation: FailureOp::Append, call: 1, mode: FailureMode::Short },
-        Failure { operation: FailureOp::Append, call: 2, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Append, call: 2, mode: FailureMode::After },
-        Failure { operation: FailureOp::Append, call: 3, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Append, call: 3, mode: FailureMode::Short },
-        Failure { operation: FailureOp::Append, call: 3, mode: FailureMode::After },
+        Failure {
+            operation: FailureOp::Append,
+            call: 1,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 1,
+            mode: FailureMode::After,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 1,
+            mode: FailureMode::Short,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 2,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 2,
+            mode: FailureMode::After,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 3,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 3,
+            mode: FailureMode::Short,
+        },
+        Failure {
+            operation: FailureOp::Append,
+            call: 3,
+            mode: FailureMode::After,
+        },
     ];
 
     for failure in cases {
@@ -1137,10 +1124,26 @@ async fn poisons_after_append_failures_and_recovers_only_confirmed_state() {
 async fn poisons_after_flush_failures_and_never_writes_a_marker() {
     let context = background_context();
     let cases = [
-        Failure { operation: FailureOp::Flush, call: 1, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Flush, call: 1, mode: FailureMode::After },
-        Failure { operation: FailureOp::Flush, call: 2, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Flush, call: 2, mode: FailureMode::After },
+        Failure {
+            operation: FailureOp::Flush,
+            call: 1,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Flush,
+            call: 1,
+            mode: FailureMode::After,
+        },
+        Failure {
+            operation: FailureOp::Flush,
+            call: 2,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Flush,
+            call: 2,
+            mode: FailureMode::After,
+        },
     ];
     for failure in cases {
         let (_dir, dir_path) = temp_directory();
@@ -1259,9 +1262,7 @@ async fn orders_publication_flushes_exactly_and_flushes_main_only_to_authorize_r
         if fsync {
             expected_reclaim.push(format!("flush:doc-{first_id}.jsonl.reclaim"));
         }
-        expected_reclaim.push(format!(
-            "rename:doc-{first_id}.jsonl.reclaim->doc-{first_id}.jsonl"
-        ));
+        expected_reclaim.push(format!("rename:doc-{first_id}.jsonl.reclaim->doc-{first_id}.jsonl"));
         assert_eq!(env.operations(), expected_reclaim);
 
         env.clear();
@@ -1321,11 +1322,31 @@ async fn orders_publication_flushes_exactly_and_flushes_main_only_to_authorize_r
 async fn recovers_committed_base_across_reclaim_write_and_rename_failures() {
     let context = background_context();
     let cases = [
-        Failure { operation: FailureOp::Write, call: 1, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Write, call: 1, mode: FailureMode::Short },
-        Failure { operation: FailureOp::Write, call: 1, mode: FailureMode::After },
-        Failure { operation: FailureOp::Rename, call: 1, mode: FailureMode::Before },
-        Failure { operation: FailureOp::Rename, call: 1, mode: FailureMode::After },
+        Failure {
+            operation: FailureOp::Write,
+            call: 1,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Write,
+            call: 1,
+            mode: FailureMode::Short,
+        },
+        Failure {
+            operation: FailureOp::Write,
+            call: 1,
+            mode: FailureMode::After,
+        },
+        Failure {
+            operation: FailureOp::Rename,
+            call: 1,
+            mode: FailureMode::Before,
+        },
+        Failure {
+            operation: FailureOp::Rename,
+            call: 1,
+            mode: FailureMode::After,
+        },
     ];
     for failure in cases {
         let (dir, dir_path) = temp_directory();
@@ -1350,10 +1371,11 @@ async fn recovers_committed_base_across_reclaim_write_and_rename_failures() {
                     id,
                     content: DocumentContent::Delta {
                         version: 1,
-                        ops: vec![Op::Set {
-                            path: vec!["count".into()],
-                            value: json!(1),
-                        }],
+                        ops: vec![Op::Set(OpSet(
+                            SetVerb::S,
+                            vec![Seg::String("count".to_owned())],
+                            json!(1),
+                        ))],
                     },
                 }],
                 context.clone(),
@@ -1633,10 +1655,11 @@ async fn keeps_a_committed_base_usable_after_reclaim_temp_flush_failure() {
                     id,
                     content: DocumentContent::Delta {
                         version: 1,
-                        ops: vec![Op::Set {
-                            path: vec!["count".into()],
-                            value: json!(3),
-                        }],
+                        ops: vec![Op::Set(OpSet(
+                            SetVerb::S,
+                            vec![Seg::String("count".to_owned())],
+                            json!(3),
+                        ))],
                     },
                 }],
                 context.clone(),
@@ -1645,12 +1668,7 @@ async fn keeps_a_committed_base_usable_after_reclaim_temp_flush_failure() {
             .expect("commit delta");
         storage.close(context.clone()).await.expect("close");
 
-        let reopened = open_with_env(
-            &dir_path,
-            Arc::new(InstrumentedEnv::new(&dir_path)),
-            true,
-        )
-        .await;
+        let reopened = open_with_env(&dir_path, Arc::new(InstrumentedEnv::new(&dir_path)), true).await;
         assert_eq!(
             reopened
                 .document(id, DocumentPoint::Current, context.clone())
@@ -1759,10 +1777,11 @@ async fn appends_later_deltas_to_replacement_sidecar_after_current_only_base() {
                 id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::Set {
-                        path: vec!["count".into()],
-                        value: json!(11),
-                    }],
+                    ops: vec![Op::Set(OpSet(
+                        SetVerb::S,
+                        vec![Seg::String("count".to_owned())],
+                        json!(11),
+                    ))],
                 },
             }],
             context.clone(),
@@ -1818,10 +1837,11 @@ async fn never_reclaims_rewindable_document_history_including_after_base_and_ret
                 id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::Set {
-                        path: vec!["count".into()],
-                        value: json!(1),
-                    }],
+                    ops: vec![Op::Set(OpSet(
+                        SetVerb::S,
+                        vec![Seg::String("count".to_owned())],
+                        json!(1),
+                    ))],
                 },
             }],
             context.clone(),
@@ -2111,7 +2131,7 @@ async fn removes_complete_unconfirmed_sidecar_tails_without_resurrecting_termina
 
     let sidecar_path = dir.path().join(format!("task-{task_id}.jsonl"));
     assert!(!sidecar_path.exists());
-    let stale_line = serde_json::to_string(&json!({
+    let stale_line = pi_js::json::try_stringify(&json!({
         "format": 1,
         "type": "record",
         "seq": 4,
@@ -2155,7 +2175,7 @@ async fn fails_open_when_confirmed_sidecar_data_is_missing() {
     storage.close(context.clone()).await.expect("close");
 
     std::fs::write(dir.path().join(format!("doc-{doc_id}.jsonl")), "").expect("truncate sidecar");
-    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: dir_path.clone(),
         ..Default::default()
     }));
@@ -2163,10 +2183,7 @@ async fn fails_open_when_confirmed_sidecar_data_is_missing() {
         Ok(_) => panic!("expected missing sidecar record error"),
         Err(err) => err,
     };
-    assert!(
-        err.to_string().contains("Missing confirmed sidecar record"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("Missing confirmed sidecar record"), "{err}");
 }
 
 #[tokio::test]
@@ -2193,10 +2210,11 @@ async fn rejects_confirmed_record_after_unconfirmed_sidecar_record() {
                 id: doc_id,
                 content: DocumentContent::Delta {
                     version: 1,
-                    ops: vec![Op::Set {
-                        path: vec!["count".into()],
-                        value: json!(1),
-                    }],
+                    ops: vec![Op::Set(OpSet(
+                        SetVerb::S,
+                        vec![Seg::String("count".to_owned())],
+                        json!(1),
+                    ))],
                 },
             }],
             context.clone(),
@@ -2207,7 +2225,7 @@ async fn rejects_confirmed_record_after_unconfirmed_sidecar_record() {
 
     let path = dir.path().join(format!("doc-{doc_id}.jsonl"));
     let lines = read_lines(&path);
-    let unconfirmed = serde_json::to_string(&json!({
+    let unconfirmed = pi_js::json::try_stringify(&json!({
         "format": 1,
         "type": "record",
         "seq": 2,
@@ -2219,10 +2237,9 @@ async fn rejects_confirmed_record_after_unconfirmed_sidecar_record() {
         }
     }))
     .expect("json");
-    std::fs::write(&path, format!("{}\n{unconfirmed}\n{}\n", lines[0], lines[1]))
-        .expect("rewrite sidecar");
+    std::fs::write(&path, format!("{}\n{unconfirmed}\n{}\n", lines[0], lines[1])).expect("rewrite sidecar");
 
-    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: dir_path.clone(),
         ..Default::default()
     }));
@@ -2231,8 +2248,7 @@ async fn rejects_confirmed_record_after_unconfirmed_sidecar_record() {
         Err(err) => err,
     };
     assert!(
-        err.to_string()
-            .contains("Confirmed record follows an unconfirmed tail"),
+        err.to_string().contains("Confirmed record follows an unconfirmed tail"),
         "{err}"
     );
 }
@@ -2255,7 +2271,7 @@ async fn rejects_non_increasing_main_commit_sequences() {
         .write_all(&content)
         .expect("duplicate main line");
 
-    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: dir_path.clone(),
         ..Default::default()
     }));
@@ -2290,16 +2306,18 @@ async fn rejects_structurally_invalid_confirmed_document_content() {
     storage.close(context.clone()).await.expect("close");
 
     let path = dir.path().join(format!("doc-{doc_id}.jsonl"));
-    let mut rec: JsonValue =
-        serde_json::from_str(std::fs::read_to_string(&path).expect("read").trim()).expect("json");
+    let mut rec: JsonValue = serde_json::from_str(std::fs::read_to_string(&path).expect("read").trim()).expect("json");
     rec["payload"]["content"]
         .as_object_mut()
         .expect("content obj")
         .remove("value");
-    std::fs::write(&path, format!("{}\n", serde_json::to_string(&rec).expect("encode")))
-        .expect("write");
+    std::fs::write(
+        &path,
+        format!("{}\n", pi_js::json::try_stringify(&rec).expect("encode")),
+    )
+    .expect("write");
 
-    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: dir_path.clone(),
         ..Default::default()
     }));
@@ -2326,21 +2344,15 @@ async fn rejects_malformed_complete_main_and_sidecar_lines() {
         .write_all(b"{bad}\n")
         .expect("write bad line");
 
-    let main_fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let main_fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: main_dir_path.clone(),
         ..Default::default()
     }));
-    let main_err = match JsonlStorage::open(
-        &main_dir_path,
-        main_fs,
-        context.clone(),
-        JsonlStorageOptions::default(),
-    )
-    .await
-    {
-        Ok(_) => panic!("expected malformed main"),
-        Err(err) => err,
-    };
+    let main_err =
+        match JsonlStorage::open(&main_dir_path, main_fs, context.clone(), JsonlStorageOptions::default()).await {
+            Ok(_) => panic!("expected malformed main"),
+            Err(err) => err,
+        };
     assert!(
         main_err.to_string().contains("Malformed complete main.jsonl"),
         "{main_err}"
@@ -2352,25 +2364,17 @@ async fn rejects_malformed_complete_main_and_sidecar_lines() {
     sidecar_storage.close(context.clone()).await.expect("close");
     std::fs::write(sidecar_dir.path().join("doc-99.jsonl"), "{bad}\n").expect("write bad sidecar");
 
-    let sidecar_fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::new(NodeExecutionEnvOptions {
+    let sidecar_fs: Arc<dyn FileSystem> = Arc::new(NodeExecutionEnv::with_options(NodeExecutionEnvOptions {
         cwd: sidecar_dir_path.clone(),
         ..Default::default()
     }));
-    let sidecar_err = match JsonlStorage::open(
-        &sidecar_dir_path,
-        sidecar_fs,
-        context,
-        JsonlStorageOptions::default(),
-    )
-    .await
-    {
-        Ok(_) => panic!("expected malformed sidecar"),
-        Err(err) => err,
-    };
+    let sidecar_err =
+        match JsonlStorage::open(&sidecar_dir_path, sidecar_fs, context, JsonlStorageOptions::default()).await {
+            Ok(_) => panic!("expected malformed sidecar"),
+            Err(err) => err,
+        };
     assert!(
-        sidecar_err
-            .to_string()
-            .contains("Malformed complete doc-99.jsonl"),
+        sidecar_err.to_string().contains("Malformed complete doc-99.jsonl"),
         "{sidecar_err}"
     );
 }

@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use async_trait::async_trait;
 use pi_ai::types::{Message, UserMessage};
 use pi_chord::context::{with_abort_signal, without_abort_signal};
-use pi_chord::{AttachedReplicatedState, Context, JsonValue};
+use pi_chord::{Context, JsonValue};
 use serde::de::DeserializeOwned;
 
 use crate::documents::ErasedDocDefinition;
 use crate::entries::RESET_ENTRY;
 use crate::env::ExecutionEnv;
 use crate::harness::agent::{AGENT_DOC, configure, create_agent, resolve_agent, resolve_settings};
-use crate::harness::compaction::create_compaction;
+use crate::harness::compaction::{CompactionInput, create_compaction};
 use crate::harness::context::read_context;
 use crate::harness::events::{AgentEventStream, watch_events_on_views};
 use crate::harness::inbox::{INBOX_DOC, QueueModes, withdraw_queued_inputs};
@@ -25,11 +25,11 @@ use crate::harness::scheduler::{AbortTaskResult, InvocationBinding, TaskSchedule
 use crate::harness::submissions::{SubmissionHandle, Submissions};
 use crate::harness::task_graph::{TaskGraph, TaskGraphView, TaskGraphWatch};
 use crate::harness::types::{
-    AbortSubmissionResult, Agent, AgentChange, CompactionInput, CompactionReason, CompactionResult, ContextView,
+    AbortSubmissionResult, Agent, AgentChange, CompactionReason, CompactionResult, ContextView,
     ConversationAbortOptions, ConversationCreateOptions, ConversationHandle, ConversationHandleBackend,
     ConversationInitFn, ConversationView, ConversationWatch, DocumentObserverBackend, DocumentReader,
     DocumentReaderBackend, EnvTarget, HarnessInspection, HarnessOptions, InputSubmissionDraft, RegistrySnapshot,
-    SettledTask, SubmissionDraft, TaskInspection, UsageState, UserInput,
+    SettledTask, SubmissionDraft, UsageState, UserInput,
 };
 use crate::harness::usage::{USAGE_DOC, add_usage_state};
 use crate::harness::util::{closed_error, scan_all};
@@ -150,26 +150,6 @@ impl HarnessHost {
             &resolve_settings(self.options.settings.as_deref()),
             self.report.as_ref(),
         ))
-    }
-
-    async fn build_env(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<Arc<dyn ExecutionEnv>>> {
-        let Some(ref build) = self.options.env else {
-            return Ok(None);
-        };
-        let cwd = Session::from_impl(Arc::clone(&self.session))
-            .snapshot_conversation(&*AGENT_DOC, id, context.clone())
-            .await?
-            .and_then(|s| s.cwd);
-        let read = DocumentReader::from_backend(Arc::clone(&self.session) as Arc<dyn DocumentReaderBackend>);
-        build(
-            EnvTarget {
-                conversation_id: id,
-                cwd,
-                read,
-            },
-            context,
-        )
-        .await
     }
 
     async fn create(
@@ -371,7 +351,7 @@ impl Conversation {
         self.host.tasks.wait_for_idle(Some(self.id), context).await
     }
 
-    pub async fn view_state(&self, context: Context) -> pi_js::Result<AttachedReplicatedState<ConversationView>> {
+    pub async fn view_state(&self, context: Context) -> pi_js::Result<crate::types::AttachedState<ConversationView>> {
         self.host.views.state(self.id, context).await
     }
 
@@ -855,7 +835,7 @@ impl Harness {
         Ok(total)
     }
 
-    pub async fn task_graph(&self, context: Context) -> pi_js::Result<AttachedReplicatedState<TaskGraph>> {
+    pub async fn task_graph(&self, context: Context) -> pi_js::Result<crate::types::AttachedState<TaskGraph>> {
         self.host.task_graph.state(context).await
     }
 
@@ -863,9 +843,9 @@ impl Harness {
         self.host.task_graph.watch(context).await
     }
 
-    pub async fn close(&self, context: Context) -> pi_js::Result<()> {
+    pub fn close(&self, context: Context) -> pi_js::BoxFuture<pi_js::Result<()>> {
         self.host.closed.store(true, Ordering::Release);
-        self.session.close(context).await
+        self.session.close(context)
     }
 }
 

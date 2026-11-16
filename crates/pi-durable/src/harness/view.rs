@@ -10,7 +10,7 @@ use pi_chord::delta::{
     apply_immutable,
 };
 use pi_chord::services::state::attach_replicated_state_source;
-use pi_chord::{AttachedReplicatedState, Context, JsonValue, ReplicatedStateSource, ReplicatedStateSourceAttachment};
+use pi_chord::{Context, JsonValue, ReplicatedStateSource, ReplicatedStateSourceAttachment};
 use pi_js::abort::AbortReason;
 
 use crate::harness::agent::AGENT_DOC;
@@ -23,8 +23,8 @@ use crate::harness::util::closed_error;
 use crate::session::observation::{CommittedStateSource, CommittedWatch};
 use crate::session::session::SessionImpl;
 use crate::types::{
-    CommitChange, CommitPublication, ConversationId, DocumentCommitChange, DocumentId, EntryRecord, JsonObject,
-    Storage, TableCommitChange, WatchHandle,
+    AttachedState, CommitChange, CommitPublication, ConversationId, DocumentCommitChange, DocumentId, EntryRecord,
+    JsonObject, Storage, TableCommitChange, WatchHandle,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -182,11 +182,7 @@ impl ConversationViews {
     }
 
     /// A disposable read-only Chord state of the view.
-    pub async fn state(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<AttachedReplicatedState<ConversationView>> {
+    pub async fn state(&self, id: ConversationId, context: Context) -> pi_js::Result<AttachedState<ConversationView>> {
         let (source, detach) = self
             .attach(
                 id,
@@ -200,7 +196,7 @@ impl ConversationViews {
             .await?;
 
         match attach_replicated_state_source(ArcSource(source), None) {
-            Ok(impl_) => Ok(AttachedReplicatedState::from_impl(impl_)),
+            Ok(impl_) => Ok(AttachedState::from_impl(impl_)),
             Err(err) => {
                 detach();
                 Err(err)

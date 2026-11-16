@@ -3,32 +3,32 @@
 mod support;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseFactory, FauxResponseStep,
     FauxTokenSize, FauxToolCallOptions, RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking,
     faux_tool_call,
 };
-use pi_ai::types::{AssistantContentBlock, AssistantMessage, Message, StopReason, UserContentBlock, UserMessage};
-use pi_ai::{TextContent, Type};
+use pi_ai::types::{AssistantContentBlock, AssistantMessage, Message, StopReason};
+use pi_ai::{TSchema, Type};
 use pi_chord::context::with_abort_signal;
 use pi_chord::delta::Seg;
 use pi_durable::harness::agent::AGENT_DOC;
 use pi_durable::harness::define::define_tool;
-use pi_durable::harness::events::{AgentEvent, AgentEventStream, MessageChange, SnapshotEvent, ToolOutputUpdate};
+use pi_durable::harness::events::{
+    AgentEvent, AgentEventStream, InboxItemMode, MessageChange, SnapshotEvent, ToolOutputUpdate,
+};
 use pi_durable::harness::harness::{Conversation, Harness};
 use pi_durable::harness::json::{JsonKey, assign_json};
 use pi_durable::harness::live::{LIVE_DOC, LiveDeferred, LiveGeneration, LiveState, ToolSlot, ToolSlotStatus};
 use pi_durable::harness::types::{
-    AgentState, ConversationCreateOptions, ConversationOwnership, OutputRetainMode, PartialRetryPolicy,
-    SubmissionDraft, ToolDiagnostic, ToolExecutionResult, ToolOutputLimits, UsageState, UserInput,
+    AgentState, ConversationCreateOptions, OutputRetainMode, PartialRetryPolicy, SubmissionDraft, ToolExecutionResult,
+    ToolOutputLimits, UsageState, UserInput,
 };
 use pi_durable::harness::usage::USAGE_DOC;
-use pi_durable::session::CommitListener;
 use pi_durable::storage::memory::MemoryStorage;
-use pi_durable::types::{EntryDraft, InboxItemMode, JsonObject, JsonValue, SubmissionStatus, WatchEnd};
+use pi_durable::types::{ConversationOwnership, EntryDraft, JsonObject, JsonValue, SubmissionStatus, WatchEnd};
 use pi_js::abort::AbortController;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -157,7 +157,8 @@ fn apply_changes(message: &AssistantMessage, changes: &[MessageChange]) -> Assis
                 delta,
             } => {
                 if let Some(AssistantContentBlock::ToolCall(tc)) = next.content.get_mut(*content_index) {
-                    let mut current = JsonValue::Object(tc.arguments.clone());
+                    let mut current =
+                        JsonValue::Object(tc.arguments.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
                     if let Some((last, prefix)) = path.split_last() {
                         let mut node: &mut JsonValue = &mut current;
                         for seg in prefix {
@@ -185,7 +186,7 @@ fn apply_changes(message: &AssistantMessage, changes: &[MessageChange]) -> Assis
                         }
                     }
                     if let JsonValue::Object(map) = current {
-                        tc.arguments = map;
+                        tc.arguments = map.into_iter().collect();
                     }
                 }
             }
@@ -197,18 +198,19 @@ fn apply_changes(message: &AssistantMessage, changes: &[MessageChange]) -> Assis
 fn partials_of(harness: &Harness) -> (Arc<Mutex<Vec<AssistantMessage>>>, pi_js::Unsubscribe) {
     let partials = Arc::new(Mutex::new(Vec::new()));
     let partials_cb = Arc::clone(&partials);
-    let listener: CommitListener = Arc::new(move |publication, _| {
-        for change in document_changes(publication) {
-            if change.record.kind == "pi.live"
-                && let Some(val) = change.value
-                && let Ok(live) = serde_json::from_value::<LiveState>(JsonValue::Object(val))
-                && let Some(msg) = live.generation.and_then(|g| g.message)
-            {
-                partials_cb.lock().expect("lock partials").push(msg);
+    let sub = harness
+        .subscribe_commits(move |publication, _| {
+            for change in document_changes(publication) {
+                if change.record.kind == "pi.live"
+                    && let Some(val) = change.value
+                    && let Ok(live) = serde_json::from_value::<LiveState>(JsonValue::Object(val))
+                    && let Some(msg) = live.generation.and_then(|g| g.message)
+                {
+                    partials_cb.lock().expect("lock partials").push(msg);
+                }
             }
-        }
-    });
-    let sub = harness.subscribe_commits(listener).expect("subscribe commits");
+        })
+        .expect("subscribe commits");
     (partials, sub)
 }
 
@@ -261,7 +263,7 @@ async fn streams_a_run_as_lifecycle_events_and_text_deltas_that_rebuild_the_answ
     let partials_cb = Arc::clone(&partials);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live"
                     && let Some(val) = change.value
@@ -275,7 +277,7 @@ async fn streams_a_run_as_lifecycle_events_and_text_deltas_that_rebuild_the_answ
                         .push(text_of(&wrapped).unwrap_or("").to_owned());
                 }
             }
-        }))
+        })
         .expect("subscribe");
 
     let submission = opened
@@ -374,7 +376,7 @@ async fn reports_tool_start_output_appends_and_the_result_entry() {
                 let gate_cb = gate_cb.clone();
                 Box::pin(async move {
                     api.output("one\n")?;
-                    pi_js::time::sleep(Duration::from_millis(150)).await;
+                    pi_js::time::sleep(150, None).await?;
                     api.output("two\n")?;
                     gate_cb.wait().await?;
                     Ok(ToolExecutionResult::default())
@@ -388,7 +390,7 @@ async fn reports_tool_start_output_appends_and_the_result_entry() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "print",
-                json!({ "n": 1 }).as_object().expect("obj").clone(),
+                IndexMap::from([("n".to_owned(), json!(1))]),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -435,13 +437,16 @@ async fn reports_tool_start_output_appends_and_the_result_entry() {
         }
         text
     };
-    wait_for(|| {
-        let batches = Arc::clone(&listener.batches);
-        async move {
-            let evs: Vec<AgentEvent> = batches.lock().expect("lock").iter().flatten().cloned().collect();
-            rebuild_output(&evs) == "one\ntwo\n"
-        }
-    })
+    wait_for(
+        || {
+            let batches = Arc::clone(&listener.batches);
+            async move {
+                let evs: Vec<AgentEvent> = batches.lock().expect("lock").iter().flatten().cloned().collect();
+                rebuild_output(&evs) == "one\ntwo\n"
+            }
+        },
+        5_000,
+    )
     .await;
     gate.resolve(());
     submission.wait(context()).await.expect("wait");
@@ -674,10 +679,10 @@ async fn rebuilds_every_committed_partial_of_thinking_text_and_tool_call_argumen
             FauxContentBlock::Text(faux_text(&"some text ".repeat(10))),
             FauxContentBlock::ToolCall(faux_tool_call(
                 "missing",
-                json!({ "path": "a/long/path/".repeat(10), "note": "x".repeat(60) })
-                    .as_object()
-                    .expect("obj")
-                    .clone(),
+                IndexMap::from([
+                    ("path".to_owned(), json!("a/long/path/".repeat(10))),
+                    ("note".to_owned(), json!("x".repeat(60))),
+                ]),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -768,7 +773,7 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
         define_tool(pi_durable::harness::types::ToolRegistration {
             name: "tail".to_owned(),
             description: "Prints lines".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -782,7 +787,7 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
                 Box::pin(async move {
                     for line in 0..6 {
                         api.output(&format!("line {line}\n"))?;
-                        pi_js::time::sleep(Duration::from_millis(120)).await;
+                        pi_js::time::sleep(120, None).await?;
                     }
                     gate_cb.wait().await?;
                     Ok(ToolExecutionResult::default())
@@ -796,7 +801,7 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "tail",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -818,7 +823,7 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
     let outputs_cb = Arc::clone(&outputs);
     let _sub = opened
         .harness
-        .subscribe_commits(Arc::new(move |publication, _| {
+        .subscribe_commits(move |publication, _| {
             for change in document_changes(publication) {
                 if change.record.kind == "pi.live"
                     && let Some(val) = change.value
@@ -831,7 +836,7 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
                     }
                 }
             }
-        }))
+        })
         .expect("subscribe");
     let listener = listen(&opened.root).await;
     let submission = opened
@@ -846,16 +851,19 @@ async fn rebuilds_a_sliding_tail_window_from_output_trims_and_appends() {
         )
         .await
         .expect("submit");
-    wait_for(|| {
-        let outputs = Arc::clone(&outputs);
-        async move {
-            outputs
-                .lock()
-                .expect("lock")
-                .last()
-                .is_some_and(|s| s.ends_with("line 5\n"))
-        }
-    })
+    wait_for(
+        || {
+            let outputs = Arc::clone(&outputs);
+            async move {
+                outputs
+                    .lock()
+                    .expect("lock")
+                    .last()
+                    .is_some_and(|s| s.ends_with("line 5\n"))
+            }
+        },
+        5_000,
+    )
     .await;
     gate.resolve(());
     submission.wait(context()).await.expect("wait");
@@ -994,7 +1002,7 @@ async fn ends_a_call_that_never_runs_and_a_tool_aborted_with_its_generation() {
         define_tool(pi_durable::harness::types::ToolRegistration {
             name: "wait".to_owned(),
             description: "Waits until aborted".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1012,14 +1020,14 @@ async fn ends_a_call_that_never_runs_and_a_tool_aborted_with_its_generation() {
             FauxAssistantMessageContent::Blocks(vec![
                 FauxContentBlock::ToolCall(faux_tool_call(
                     "ghost",
-                    JsonObject::new(),
+                    IndexMap::new(),
                     Some(FauxToolCallOptions {
                         id: Some("c1".to_owned()),
                     }),
                 )),
                 FauxContentBlock::ToolCall(faux_tool_call(
                     "wait",
-                    JsonObject::new(),
+                    IndexMap::new(),
                     Some(FauxToolCallOptions {
                         id: Some("c2".to_owned()),
                     }),
@@ -1046,17 +1054,20 @@ async fn ends_a_call_that_never_runs_and_a_tool_aborted_with_its_generation() {
         )
         .await
         .expect("submit");
-    wait_for(|| {
-        let batches = Arc::clone(&listener.batches);
-        async move {
-            batches
-                .lock()
-                .expect("lock")
-                .iter()
-                .flatten()
-                .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
-        }
-    })
+    wait_for(
+        || {
+            let batches = Arc::clone(&listener.batches);
+            async move {
+                batches
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .flatten()
+                    .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     let live = opened
         .harness
@@ -1132,7 +1143,7 @@ async fn reports_a_steer_without_run_events_a_reset_as_an_appended_entry_and_not
         define_tool(pi_durable::harness::types::ToolRegistration {
             name: "hold".to_owned(),
             description: "Waits".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object([] as [(&str, TSchema); 0]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,
@@ -1152,7 +1163,7 @@ async fn reports_a_steer_without_run_events_a_reset_as_an_appended_entry_and_not
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "hold",
-                JsonObject::new(),
+                IndexMap::new(),
                 Some(FauxToolCallOptions {
                     id: Some("c1".to_owned()),
                 }),
@@ -1175,6 +1186,8 @@ async fn reports_a_steer_without_run_events_a_reset_as_an_appended_entry_and_not
         .create_conversation(
             ConversationCreateOptions {
                 ownership: ConversationOwnership::Ownerless,
+                agent: None,
+                init: None,
             },
             context(),
         )
@@ -1193,17 +1206,20 @@ async fn reports_a_steer_without_run_events_a_reset_as_an_appended_entry_and_not
         )
         .await
         .expect("submit a");
-    wait_for(|| {
-        let batches = Arc::clone(&listener.batches);
-        async move {
-            batches
-                .lock()
-                .expect("lock")
-                .iter()
-                .flatten()
-                .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
-        }
-    })
+    wait_for(
+        || {
+            let batches = Arc::clone(&listener.batches);
+            async move {
+                batches
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .flatten()
+                    .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+            }
+        },
+        5_000,
+    )
     .await;
     opened
         .root
@@ -1217,6 +1233,7 @@ async fn reports_a_steer_without_run_events_a_reset_as_an_appended_entry_and_not
         )
         .await
         .expect("submit s");
+    drained().await;
     let before = listener.batches_snapshot().len();
     let other_id = other.id();
     other
@@ -1280,10 +1297,14 @@ async fn rejects_an_attachment_cancelled_while_it_waits_for_the_session_line() {
     let root_for_watch = opened.root.clone();
     let attaching = tokio::spawn(async move { root_for_watch.watch_events(cancelled_ctx).await });
     flush().await;
-    controller.abort(Some(pi_js::Error::msg("cancelled").into()));
+    controller.abort(Some(pi_js::abort::AbortReason::from_error(&pi_js::Error::msg(
+        "cancelled",
+    ))));
     release.resolve(());
     blocking.await.expect("join blocking").expect("commit ok");
-    let err = attaching.await.expect("join attach").expect_err("expected abort error");
+    let Err(err) = attaching.await.expect("join attach") else {
+        panic!("expected abort error");
+    };
     assert!(err.to_string().contains("cancelled"));
     opened.harness.close(context()).await.expect("close");
 }
@@ -1314,7 +1335,8 @@ async fn applies_deltas_after_an_overflow_snapshot_that_holds_an_in_flight_parti
                         message: Some(partial_cb),
                         retry: None,
                         deferred: None,
-                    })?,
+                    })
+                    .map_err(|e| pi_js::Error::msg(e.to_string()))?,
                 )?;
                 Ok(())
             },
@@ -1376,7 +1398,8 @@ async fn applies_deltas_after_an_overflow_snapshot_that_holds_an_in_flight_parti
                         message: Some(updated_partial),
                         retry: None,
                         deferred: None,
-                    })?,
+                    })
+                    .map_err(|e| pi_js::Error::msg(e.to_string()))?,
                 )?;
                 Ok(())
             },
@@ -1431,13 +1454,21 @@ async fn reports_usage_only_updates_cleared_tool_progress_tools_ending_without_e
                     let draft = tx.doc_conversation(&*LIVE_DOC, root_id).await?;
                     let overlay = draft.overlay()?;
                     match generation {
-                        Some(g) => assign_json(&overlay, JsonKey::Prop("generation"), &serde_json::to_value(g)?)?,
+                        Some(g) => assign_json(
+                            &overlay,
+                            JsonKey::Prop("generation"),
+                            &serde_json::to_value(g).map_err(|e| pi_js::Error::msg(e.to_string()))?,
+                        )?,
                         None => {
                             overlay.delete("generation")?;
                         }
                     }
                     match tools {
-                        Some(t) => assign_json(&overlay, JsonKey::Prop("tools"), &serde_json::to_value(t)?)?,
+                        Some(t) => assign_json(
+                            &overlay,
+                            JsonKey::Prop("tools"),
+                            &serde_json::to_value(t).map_err(|e| pi_js::Error::msg(e.to_string()))?,
+                        )?,
                         None => {
                             overlay.delete("tools")?;
                         }
@@ -1681,19 +1712,22 @@ async fn starts_a_message_at_the_first_committed_partial_and_ends_it_with_the_co
         )
         .await
         .expect("submit");
-    wait_for(|| {
-        let batches = Arc::clone(&listener.batches);
-        async move {
-            batches.lock().expect("lock").iter().flatten().any(|e| {
-                matches!(
-                    e,
-                    AgentEvent::MessageStart {
-                        message: Message::Assistant(_)
-                    }
-                )
-            })
-        }
-    })
+    wait_for(
+        || {
+            let batches = Arc::clone(&listener.batches);
+            async move {
+                batches.lock().expect("lock").iter().flatten().any(|e| {
+                    matches!(
+                        e,
+                        AgentEvent::MessageStart {
+                            message: Message::Assistant(_)
+                        }
+                    )
+                })
+            }
+        },
+        5_000,
+    )
     .await;
     let live = opened
         .harness

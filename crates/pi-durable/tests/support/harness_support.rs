@@ -28,7 +28,7 @@ pub fn tool(name: &str, description: Option<&str>) -> ToolRegistration {
         description: description
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{name} tool")),
-        parameters: Type::object([]).to_value(),
+        parameters: Type::object::<_, &str>([]).to_value(),
         replay: None,
         execution_mode: None,
         prepare_arguments: None,

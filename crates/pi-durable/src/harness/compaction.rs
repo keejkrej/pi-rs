@@ -18,7 +18,7 @@ use crate::harness::context::order_tool_results;
 use crate::harness::generation::to_simple_stream_options;
 use crate::harness::inbox::QueueModes;
 use crate::harness::live::{
-    DurableRetryState, LIVE_DOC, add_compaction_status, compaction_status_mut, remove_compaction_status,
+    DurableRetryState, LIVE_DOC, LiveState, add_compaction_status, compaction_status_mut, remove_compaction_status,
 };
 use crate::harness::submissions::admit_submission;
 use crate::harness::types::{
@@ -26,7 +26,7 @@ use crate::harness::types::{
     ConversationStreamOptions, ModelRef, SubmissionDraft,
 };
 use crate::harness::usage::{UsageBucket, record_usage};
-use crate::session::transaction::Tx;
+use crate::session::transaction::{DocDraft, Tx};
 use crate::tasks::{Task, TaskDefinition, TaskRuntimeHandle, define_task};
 use crate::types::{
     ConversationId, EntryDraft, EntryDraftHead, EntryId, JsonValue, NextTaskState, RunningTask, TaskId, TaskOptions,
@@ -120,7 +120,10 @@ type Runtime = TaskRuntimeHandle<CompactionInput, CompactionCheckpoint, Compacti
 /// directly; a conversation-owned one places its summary through a write submission.
 pub static COMPACTION_TASK: LazyLock<Task<CompactionInput, CompactionCheckpoint, CompactionResult, CompactionHooks>> =
     LazyLock::new(|| {
-        let mut phases = IndexMap::new();
+        let mut phases: IndexMap<
+            String,
+            crate::tasks::TypedPhaseHandler<CompactionInput, CompactionCheckpoint, CompactionResult, CompactionHooks>,
+        > = IndexMap::new();
         phases.insert(
             "select".to_owned(),
             Arc::new(
@@ -128,6 +131,7 @@ pub static COMPACTION_TASK: LazyLock<Task<CompactionInput, CompactionCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_select(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
             )
                 as crate::tasks::TypedPhaseHandler<
@@ -144,8 +148,15 @@ pub static COMPACTION_TASK: LazyLock<Task<CompactionInput, CompactionCheckpoint,
                  runtime: Runtime,
                  context: Context| {
                     Box::pin(async move { phase_summarize(task, runtime, context).await })
+                        as pi_js::BoxFuture<pi_js::Result<()>>
                 },
-            ),
+            )
+                as crate::tasks::TypedPhaseHandler<
+                    CompactionInput,
+                    CompactionCheckpoint,
+                    CompactionResult,
+                    CompactionHooks,
+                >,
         );
         phases.insert(
             "retry".to_owned(),
@@ -182,8 +193,9 @@ async fn phase_select(
     let model = ref_model
         .as_ref()
         .and_then(|r| models.get_model(&r.provider, &r.model_id));
-    let (Some(ref_model), Some(model)) = (ref_model, model) else {
-        return fail_no_model(&runtime, ref_model.as_ref(), context).await;
+    let (ref_model, model) = match (ref_model.as_ref(), model) {
+        (Some(rm), Some(m)) => (rm.clone(), m),
+        (maybe_rm, _) => return fail_no_model(&runtime, maybe_rm, context).await,
     };
 
     let policy = settings.compaction;
@@ -351,31 +363,32 @@ async fn phase_summarize(
 
     let task_id = runtime.task_id()?.erased();
     let now_commit = runtime.now()?;
-    let queue_modes = QueueModes::from(&settings);
+    let rt_settings = runtime.clone();
     runtime
         .commit(
             move |tx, current| {
+                let rt_settings = rt_settings.clone();
                 Box::pin(async move {
+                    let queue_modes = QueueModes::from(&rt_settings.settings()?);
                     let usage_key = format!("{}/{}", message.provider, message.model);
                     record_usage(&tx, conversation_id, UsageBucket::Models, &usage_key, &message.usage).await?;
                     let live_draft = tx.doc_conversation(&*LIVE_DOC, conversation_id).await?;
-                    let mut live = live_draft.get()?;
                     if let Some(text) = summary {
                         let next = place_summary(
                             &tx,
                             conversation_id,
                             task_id,
                             &current,
-                            &mut live,
+                            &live_draft,
                             request.first_kept,
                             text,
                             now_commit,
                             queue_modes,
                         )
                         .await?;
-                        live_draft.replace(live)?;
                         return Ok(Some(next));
                     }
+                    let mut live = live_draft.get()?;
                     if should_retry {
                         if let Some(status) = compaction_status_mut(&mut live, task_id) {
                             status.retry = Some(DurableRetryState {
@@ -775,26 +788,26 @@ async fn place(runtime: &Runtime, first_kept: EntryId, summary: String, context:
     let conversation_id = runtime.conversation_id()?;
     let task_id = runtime.task_id()?.erased();
     let now = runtime.now()?;
-    let queue_modes = QueueModes::from(&runtime.settings()?);
+    let rt_settings = runtime.clone();
     runtime
         .commit(
             move |tx, current| {
+                let rt_settings = rt_settings.clone();
                 Box::pin(async move {
+                    let queue_modes = QueueModes::from(&rt_settings.settings()?);
                     let live_draft = tx.doc_conversation(&*LIVE_DOC, conversation_id).await?;
-                    let mut live = live_draft.get()?;
                     let next = place_summary(
                         &tx,
                         conversation_id,
                         task_id,
                         &current,
-                        &mut live,
+                        &live_draft,
                         first_kept,
                         summary,
                         now,
                         queue_modes,
                     )
                     .await?;
-                    live_draft.replace(live)?;
                     Ok(Some(next))
                 })
             },
@@ -809,13 +822,13 @@ async fn place_summary(
     conversation_id: ConversationId,
     task_id: TaskId,
     current: &RunningTask<CompactionInput, CompactionCheckpoint, CompactionResult>,
-    live: &mut crate::harness::live::LiveState,
+    live_draft: &DocDraft<LiveState>,
     first_kept: EntryId,
     summary: String,
     now: i64,
     queue_modes: QueueModes,
 ) -> pi_js::Result<NextTaskState<CompactionCheckpoint, CompactionResult>> {
-    remove_compaction_status(live, task_id);
+    live_draft.update(|live| remove_compaction_status(live, task_id))?;
     let text = format!("{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}");
     let message = Message::User(UserMessage {
         content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(text))]),

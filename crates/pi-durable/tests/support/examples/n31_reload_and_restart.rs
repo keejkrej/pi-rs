@@ -32,7 +32,7 @@ fn load_versioned(version: &'static str, started: Arc<Notify>, gate: Arc<Mutex<w
         tools: vec![define_tool(ToolRegistration {
             name: "version".to_owned(),
             description: "Report the tool's code version".to_owned(),
-            parameters: Type::object([]).to_value(),
+            parameters: Type::object::<_, &str>([]).to_value(),
             replay: None,
             execution_mode: None,
             prepare_arguments: None,

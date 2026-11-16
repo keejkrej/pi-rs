@@ -55,6 +55,7 @@ fn outcome_status<R>(outcome: &TaskOutcome<R>) -> &'static str {
         TaskOutcome::Completed { .. } => "completed",
         TaskOutcome::Failed { .. } => "failed",
         TaskOutcome::Aborted { .. } => "aborted",
+        TaskOutcome::Orphaned { .. } => "orphaned",
         TaskOutcome::Faulted { .. } => "faulted",
     }
 }
@@ -69,8 +70,7 @@ fn print_graph(graph: &TaskGraph) {
                 let ids: Vec<String> = on.iter().map(ToString::to_string).collect();
                 format!("waiting on {}", ids.join(", "))
             }
-            TaskGraphState::Completing => "completing".to_owned(),
-            TaskGraphState::Terminal => "terminal".to_owned(),
+            TaskGraphState::Completing { outcome } => format!("completing ({outcome})"),
         };
         let indent = "  ".repeat(depth);
         pi_js::console::log(&format!("  {indent}{} {}: {status}", node.kind, node.id));
@@ -368,9 +368,7 @@ pub async fn run() -> pi_js::Result<()> {
     pi_js::console::log("One card is declined:");
     let id = start_checkout(&root, vec!["visa-1", "expired-2", "visa-3", "visa-4"]).await?;
     let settled = harness.wait_for_task(id, context.clone()).await?;
-    if let TaskState::Terminal { outcome } = &settled.state {
-        pi_js::console::log(&format!("  checkout: {}", outcome_status(outcome)));
-    }
+    pi_js::console::log(&format!("  checkout: {}", outcome_status(&settled.outcome)));
 
     pi_js::console::log("The customer cancels:");
     let id = start_checkout(&root, vec!["visa-5", "visa-6", "visa-7", "visa-8"]).await?;
@@ -381,9 +379,7 @@ pub async fn run() -> pi_js::Result<()> {
     graph.dispose()?;
     harness.abort_task(id.erased(), context.clone()).await?;
     let settled = harness.wait_for_task(id, context.clone()).await?;
-    if let TaskState::Terminal { outcome } = &settled.state {
-        pi_js::console::log(&format!("  checkout: {}", outcome_status(outcome)));
-    }
+    pi_js::console::log(&format!("  checkout: {}", outcome_status(&settled.outcome)));
 
     pi_js::console::log("The process stops while the payments run, and a new one continues:");
     let id = start_checkout(&root, vec!["visa-9", "visa-10", "visa-11", "visa-12"]).await?;
@@ -393,9 +389,7 @@ pub async fn run() -> pi_js::Result<()> {
     let harness = open().await?;
     let _root = harness.root(context.clone(), None).await?;
     let settled = harness.wait_for_task(id, context.clone()).await?;
-    if let TaskState::Terminal { outcome } = &settled.state {
-        pi_js::console::log(&format!("  checkout: {}", outcome_status(outcome)));
-    }
+    pi_js::console::log(&format!("  checkout: {}", outcome_status(&settled.outcome)));
     harness.close(context).await?;
     Ok(())
 }

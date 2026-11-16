@@ -10,7 +10,8 @@ use pi_chord::Context;
 use pi_chord::context::with_abort_signal;
 use pi_chord::delta::{DeleteVerb, Op, OpDelete, OpSet, Seg, SetVerb, apply_immutable};
 use pi_chord::types::ReplicatedStateDeliveryKind;
-use pi_durable::harness::types::{AbortTaskResult, TaskGraph, TaskGraphState, TaskInspectionState};
+use pi_durable::AbortTaskResult;
+use pi_durable::harness::types::{TaskGraph, TaskGraphState, TaskInspectionState};
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
 use pi_durable::tasks::{Task, TaskDefinition, define_task};
@@ -24,7 +25,7 @@ use pi_js::abort::AbortController;
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::session_support::{ControlledStorage, context, flush};
-use support::task_support::{OpenTasksOptions, aborted, completed, deferred, eventually, open_tasks};
+use support::task_support::{OpenTasksOptions, aborted, completed, deferred, eventually, eventually_sync, open_tasks};
 
 struct CountingScanStorage {
     inner: ControlledStorage,
@@ -387,7 +388,7 @@ async fn follows_every_live_task_through_its_statuses_owner_edges_and_owned_conv
     .await
     .expect("open tasks");
     let harness = opened.harness;
-    let root = harness.root(context()).await.expect("root");
+    let root = harness.root(context(), None).await.expect("root");
     let seen = Arc::new(Mutex::new(Vec::<TaskGraph>::new()));
 
     let observe = |harness: &pi_durable::harness::harness::Harness, seen: &Arc<Mutex<Vec<TaskGraph>>>| {
@@ -455,7 +456,7 @@ async fn follows_every_live_task_through_its_statuses_owner_edges_and_owned_conv
     );
 
     harness.resume().expect("resume");
-    eventually(|| {
+    eventually_sync(|| {
         let current = graph.value();
         current.tasks.len() == 2
             && current
@@ -502,7 +503,7 @@ async fn follows_every_live_task_through_its_statuses_owner_edges_and_owned_conv
     assert_eq!(graph.value(), advanced);
 
     child_gate.resolve(());
-    eventually(|| {
+    eventually_sync(|| {
         matches!(
             graph.value().tasks.get(&parent_key).map(|node| &node.state),
             Some(TaskGraphState::Completing { .. })
@@ -601,7 +602,7 @@ async fn builds_from_committed_tasks_shows_surviving_tasks_as_pending_after_reop
         _hooks: std::marker::PhantomData,
     });
 
-    let sqlite1 = open_node_sqlite_storage(&path, NodeSqliteStorageOptions::default())
+    let sqlite1 = open_node_sqlite_storage(&path.to_string_lossy(), NodeSqliteStorageOptions::default())
         .await
         .expect("sqlite1");
     let first = open_tasks(
@@ -611,7 +612,7 @@ async fn builds_from_committed_tasks_shows_surviving_tasks_as_pending_after_reop
     )
     .await
     .expect("open1");
-    let first_root = first.harness.root(context()).await.expect("root1");
+    let first_root = first.harness.root(context(), None).await.expect("root1");
     let work_c = work_task.clone();
     let (foreground, background, owned) = first_root
         .commit(
@@ -671,7 +672,7 @@ async fn builds_from_committed_tasks_shows_surviving_tasks_as_pending_after_reop
     running.dispose().expect("dispose1");
     first.harness.close(context()).await.expect("close1");
 
-    let sqlite2 = open_node_sqlite_storage(&path, NodeSqliteStorageOptions::default())
+    let sqlite2 = open_node_sqlite_storage(&path.to_string_lossy(), NodeSqliteStorageOptions::default())
         .await
         .expect("sqlite2");
     let second = open_tasks(
@@ -708,7 +709,7 @@ async fn builds_from_committed_tasks_shows_surviving_tasks_as_pending_after_reop
             Box::pin(async move {
                 let next = {
                     let guard = replica_cb.lock().expect("lock replica");
-                    apply_immutable(guard.clone(), &ops)?
+                    apply_immutable(Some(guard.clone()), &ops)?
                 };
                 assert_eq!(next, serde_json::to_value(&value).expect("json"));
                 *replica_cb.lock().expect("lock replica") = next;
@@ -719,7 +720,7 @@ async fn builds_from_committed_tasks_shows_surviving_tasks_as_pending_after_reop
         .expect("start watch");
 
     second.harness.resume().expect("resume2");
-    eventually(|| {
+    eventually_sync(|| {
         matches!(
             watch.value().tasks.get(&background.to_string()).map(|n| &n.state),
             Some(TaskGraphState::Running { .. })
@@ -849,7 +850,7 @@ async fn lists_owned_conversations_in_id_order_whatever_order_one_commit_creates
     .await
     .expect("open");
     let harness = opened.harness;
-    let root = harness.root(context()).await.expect("root");
+    let root = harness.root(context(), None).await.expect("root");
     let graph = harness.task_graph(context()).await.expect("graph");
     let root_id = root.id();
     let spawner_c = spawner.clone();
@@ -885,7 +886,7 @@ async fn lists_owned_conversations_in_id_order_whatever_order_one_commit_creates
         .expect("seed");
     harness.resume().expect("resume");
     let key = id.to_string();
-    eventually(|| {
+    eventually_sync(|| {
         graph
             .value()
             .tasks
@@ -917,7 +918,7 @@ async fn registers_nothing_for_an_acquisition_cancelled_while_it_waits_for_the_l
     .await
     .expect("open");
     let harness = opened.harness;
-    let root = harness.root(context()).await.expect("root");
+    let root = harness.root(context(), None).await.expect("root");
     let child_gate = deferred::<()>();
     let late_gate = deferred::<()>();
     let (_parent, child_task) = family(child_gate, late_gate);
@@ -967,7 +968,9 @@ async fn registers_nothing_for_an_acquisition_cancelled_while_it_waits_for_the_l
     let cancel_ctx = with_abort_signal(controller.signal(), context());
     let harness_watch = harness.clone();
     let cancelled = tokio::spawn(async move { harness_watch.watch_task_graph(cancel_ctx).await });
-    controller.abort(Some(pi_js::Error::msg("cancelled").into()));
+    controller.abort(Some(pi_js::abort::AbortReason::from_error(&pi_js::Error::msg(
+        "cancelled",
+    ))));
     held.release();
     blocking.await.expect("join blocking").expect("blocking ok");
     let err = match cancelled.await.expect("join cancelled") {
@@ -1036,7 +1039,7 @@ async fn publishes_no_revision_for_a_commit_that_changes_no_node_and_shares_one_
     .await
     .expect("open");
     let harness = opened.harness;
-    let root = harness.root(context()).await.expect("root");
+    let root = harness.root(context(), None).await.expect("root");
     let memo_c = memo_task.clone();
     let id = root
         .commit(

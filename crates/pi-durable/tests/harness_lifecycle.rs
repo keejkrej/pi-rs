@@ -6,43 +6,43 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_ai::Type;
 use pi_ai::models::Models;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep, FauxToolCallOptions,
     faux_assistant_message, faux_text, faux_tool_call,
 };
-use pi_ai::types::StopReason;
+use pi_ai::types::{ModelThinkingLevel, StopReason};
 use pi_chord::Context;
 use pi_chord::context::with_abort_signal;
 use pi_chord::types::ReplicatedStateDeliveryKind;
+use pi_durable::define_tool;
 use pi_durable::documents::{DocDefinitionInput, SessionDocToken, define_session_doc};
 use pi_durable::harness::generation::GENERATION_TASK;
 use pi_durable::harness::harness::{ConversationEntriesQuery, Harness};
 use pi_durable::harness::registry::create_registry;
 use pi_durable::harness::types::{
-    AbortTaskResult, AgentChange, ConversationCreateOptions, ConversationOwnership, FieldChange, GenerationHooks,
-    HarnessOptions, SchedulingStatus, SubmissionDraft, TaskInspectionState, ToolExecutionResult, ToolRegistration,
-    UserInput,
+    AgentChange, ConversationCreateOptions, FieldChange, GenerationHooks, HarnessOptions, SchedulingStatus,
+    SubmissionDraft, TaskInspectionState, ToolExecutionResult, ToolRegistration, UserInput,
 };
 use pi_durable::storage::memory::MemoryStorage;
 use pi_durable::storage::sqlite::node::{NodeSqliteStorageOptions, open_node_sqlite_storage};
-use pi_durable::tasks::{Task, TaskDefinition, define_task, define_tool};
+use pi_durable::tasks::{Task, TaskDefinition, define_task};
 use pi_durable::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId, DocumentPoint,
-    DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord,
-    JsonObject, JsonValue, ModelThinkingLevel, Page, Seq, Storage, StorageWrite, StoredDocument, SubmissionCreate,
-    SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionState, TaskId, TaskOptions, TaskOwnership, TaskState,
-    TaskStatus, WatchEnd, WriteSubmissionState,
+    ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentId,
+    DocumentPoint, DocumentQuery, DocumentRecord, EntryDraft, EntryId, EntryLookup, EntryQuery, EntryRecord,
+    ErasedTaskRecord, JsonValue, Page, Seq, Storage, StorageWrite, StoredDocument, SubmissionCreate, SubmissionId,
+    SubmissionQuery, SubmissionRecord, SubmissionState, TaskId, TaskOptions, TaskOwnership, TaskQuery, TaskState,
+    WatchEnd, WriteSubmissionState,
 };
-use pi_js::abort::AbortController;
-use pi_js::vendor::typebox::Type;
+use pi_js::abort::{AbortController, AbortReason};
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use support::chat_support::{OpenChatEnv, chat_setup, open_chat};
 use support::harness_support::{add_hooks, add_task, add_tool};
 use support::session_support::{ControlledStorage, context, flush};
 use support::task_support::{
-    OpenTasksOptions, completed, counting_reader, deferred, eventually, open_tasks, settled, track,
+    OpenTasksOptions, completed, counting_reader, deferred, eventually_sync, open_tasks, settled, track,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ fn notes_doc(kind: &'static str) -> SessionDocToken<NotesDoc> {
 
 fn one_step(
     name: &str,
-    run: impl Fn() -> pi_js::BoxFuture<'static, pi_js::Result<()>> + Send + Sync + 'static,
+    run: impl Fn() -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync + 'static,
 ) -> Task<(), JsonValue, (), ()> {
     let run = Arc::new(run);
     let mut phases = indexmap::IndexMap::new();
@@ -321,7 +321,7 @@ async fn closes_without_a_cancelled_caller_context_and_rethrows_the_original_err
         Harness::open(
             storage_open_ref,
             HarnessOptions {
-                models: Models::new(),
+                models: Models::new(None),
                 registry: reader,
                 settings: None,
                 env: None,
@@ -334,7 +334,7 @@ async fn closes_without_a_cancelled_caller_context_and_rethrows_the_original_err
         .await
     });
     held.entered().await;
-    controller.abort(Some(pi_js::Error::msg("caller gave up").into()));
+    controller.abort(Some(AbortReason::from_error(&pi_js::Error::msg("caller gave up"))));
     held.release();
     let err = match opening.await.expect("join open") {
         Ok(_) => panic!("expected open failure"),
@@ -354,7 +354,7 @@ async fn reports_a_failing_close_and_still_rethrows_the_open_error() {
     let err = match Harness::open(
         storage,
         HarnessOptions {
-            models: Models::new(),
+            models: Models::new(None),
             registry: create_registry(),
             settings: None,
             env: None,
@@ -409,7 +409,7 @@ async fn joins_a_task_handler_that_ignores_its_signal_before_closing_storage() {
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     start_task(&root, &stubborn, false).await;
     opened.harness.resume().expect("resume");
     reached.wait().await.expect("reached");
@@ -455,7 +455,7 @@ async fn joins_a_tool_execute_and_a_hook_that_ignore_their_signal_before_closing
             define_tool(ToolRegistration {
                 name: "wait".to_owned(),
                 description: "wait".to_owned(),
-                parameters: Type::object([]).to_value(),
+                parameters: Type::object([] as [(&str, pi_ai::TSchema); 0]).to_value(),
                 replay: None,
                 execution_mode: None,
                 prepare_arguments: None,
@@ -510,7 +510,7 @@ async fn joins_a_tool_execute_and_a_hook_that_ignore_their_signal_before_closing
             FauxResponseStep::Message(faux_assistant_message(
                 FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                     "wait",
-                    JsonObject::new(),
+                    indexmap::IndexMap::new(),
                     Some(FauxToolCallOptions {
                         id: Some("c1".to_owned()),
                     }),
@@ -521,7 +521,7 @@ async fn joins_a_tool_execute_and_a_hook_that_ignore_their_signal_before_closing
                 }),
             )),
             FauxResponseStep::Message(faux_assistant_message(
-                FauxAssistantMessageContent::Block(faux_text("done")),
+                FauxAssistantMessageContent::Block(FauxContentBlock::Text(faux_text("done"))),
                 None,
             )),
         ]);
@@ -581,7 +581,7 @@ async fn lets_a_new_harness_open_the_same_storage_once_close_resolved_no_old_inv
         })
     });
 
-    let sqlite1 = open_node_sqlite_storage(&path, NodeSqliteStorageOptions::default())
+    let sqlite1 = open_node_sqlite_storage(&path.to_string_lossy(), NodeSqliteStorageOptions::default())
         .await
         .expect("sqlite1");
     let first = open_tasks(
@@ -591,10 +591,10 @@ async fn lets_a_new_harness_open_the_same_storage_once_close_resolved_no_old_inv
     )
     .await
     .expect("open1");
-    let root = first.harness.root(context()).await.expect("root");
+    let root = first.harness.root(context(), None).await.expect("root");
     let id = start_task(&root, &stubborn, false).await;
     first.harness.resume().expect("resume1");
-    eventually(|| log.lock().expect("lock log").len() == 1).await;
+    eventually_sync(|| log.lock().expect("lock log").len() == 1).await;
 
     let harness_close = first.harness.clone();
     let log_close = Arc::clone(&log);
@@ -613,7 +613,7 @@ async fn lets_a_new_harness_open_the_same_storage_once_close_resolved_no_old_inv
     );
 
     generation.store(2, Ordering::Release);
-    let sqlite2 = open_node_sqlite_storage(&path, NodeSqliteStorageOptions::default())
+    let sqlite2 = open_node_sqlite_storage(&path.to_string_lossy(), NodeSqliteStorageOptions::default())
         .await
         .expect("sqlite2");
     let second = open_tasks(
@@ -656,7 +656,7 @@ async fn keeps_shutting_down_after_a_cancelled_close_and_a_second_close_awaits_t
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     start_task(&root, &stubborn, false).await;
     opened.harness.resume().expect("resume");
     reached.wait().await.expect("reached");
@@ -666,7 +666,7 @@ async fn keeps_shutting_down_after_a_cancelled_close_and_a_second_close_awaits_t
     let harness_close1 = opened.harness.clone();
     let cancelled = tokio::spawn(async move { harness_close1.close(cancel_ctx).await });
     flush().await;
-    controller.abort(Some(pi_js::Error::msg("stop waiting").into()));
+    controller.abort(Some(AbortReason::from_error(&pi_js::Error::msg("stop waiting"))));
     let err = cancelled.await.expect("join").expect_err("cancelled close");
     assert!(err.to_string().contains("stop waiting"));
 
@@ -693,7 +693,7 @@ async fn settles_durably_a_commit_whose_committer_was_cancelled_while_it_was_in_
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let held = storage.hold_commits();
     let controller = AbortController::new();
     let cancel_ctx = with_abort_signal(controller.signal(), context());
@@ -722,7 +722,7 @@ async fn settles_durably_a_commit_whose_committer_was_cancelled_while_it_was_in_
             .await
     });
     held.entered().await;
-    controller.abort(Some(pi_js::Error::msg("committer gave up").into()));
+    controller.abort(Some(AbortReason::from_error(&pi_js::Error::msg("committer gave up"))));
     held.release();
     let id = committing.await.expect("join").expect("commit settled");
     let page = root
@@ -744,7 +744,7 @@ async fn publishes_no_frame_to_states_and_watches_from_a_commit_that_settles_dur
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let notes_c = notes.clone();
     opened
         .harness
@@ -796,12 +796,12 @@ async fn publishes_no_frame_to_states_and_watches_from_a_commit_that_settles_dur
         }))
         .expect("start graphWatch");
     let f3 = push("docState");
-    let _d_sub = doc_state.subscribe(Arc::new(move |_, _, d| {
+    let _d_sub = doc_state.subscribe(move |_, _, d| {
         if d.kind == ReplicatedStateDeliveryKind::Update {
             f3();
         }
         Box::pin(async { Ok(()) })
-    }));
+    });
     let f4 = push("viewState");
     let _v_sub = view_state.subscribe(Arc::new(move |_, _, d| {
         if d.kind == ReplicatedStateDeliveryKind::Update {
@@ -900,7 +900,7 @@ async fn leaves_no_subscription_behind_a_watch_acquisition_cancelled_on_the_line
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let notes_c = notes.clone();
     opened
         .harness
@@ -925,7 +925,7 @@ async fn leaves_no_subscription_behind_a_watch_acquisition_cancelled_on_the_line
     let notes_w = notes.clone();
     let doc_watch = tokio::spawn(async move { harness_watch.watch_doc_session(&notes_w, cancel_ctx).await });
     find.entered().await;
-    controller.abort(Some(pi_js::Error::msg("cancelled").into()));
+    controller.abort(Some(AbortReason::from_error(&pi_js::Error::msg("cancelled"))));
     find.release();
     let err = match doc_watch.await.expect("join docWatch") {
         Ok(_) => panic!("expected cancelled"),
@@ -942,7 +942,7 @@ async fn leaves_no_subscription_behind_a_watch_acquisition_cancelled_on_the_line
     let root_w = root.clone();
     let view_watch = tokio::spawn(async move { root_w.watch(cancel_ctx2).await });
     find2.entered().await;
-    controller2.abort(Some(pi_js::Error::msg("cancelled").into()));
+    controller2.abort(Some(AbortReason::from_error(&pi_js::Error::msg("cancelled"))));
     find2.release();
     let err2 = match view_watch.await.expect("join viewWatch") {
         Ok(_) => panic!("expected cancelled"),
@@ -973,7 +973,7 @@ async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_q
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let root_id = root.id();
     let entry = root
         .commit(
@@ -1049,18 +1049,28 @@ async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_q
     };
     check_closed(
         "submit",
-        root.submit(
-            SubmissionDraft::Input {
-                request_id: None,
-                content: UserInput::Text("x".to_owned()),
-                when_busy: None,
-            },
-            context(),
-        )
-        .await
-        .expect_err("submit"),
+        match root
+            .submit(
+                SubmissionDraft::Input {
+                    request_id: None,
+                    content: UserInput::Text("x".to_owned()),
+                    when_busy: None,
+                },
+                context(),
+            )
+            .await
+        {
+            Ok(_) => panic!("submit should fail"),
+            Err(err) => err,
+        },
     );
-    check_closed("agent", root.agent(context()).await.expect_err("agent"));
+    check_closed(
+        "agent",
+        match root.agent(context()).await {
+            Ok(_) => panic!("agent should fail"),
+            Err(err) => err,
+        },
+    );
     check_closed(
         "configure",
         root.configure(
@@ -1111,7 +1121,13 @@ async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_q
         "conversationIdle",
         root.wait_for_idle(context()).await.expect_err("conversationIdle"),
     );
-    check_closed("viewState", root.view_state(context()).await.expect_err("viewState"));
+    check_closed(
+        "viewState",
+        match root.view_state(context()).await {
+            Ok(_) => panic!("viewState should fail"),
+            Err(err) => err,
+        },
+    );
     check_closed(
         "watch",
         match root.watch(context()).await {
@@ -1121,7 +1137,10 @@ async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_q
     );
     check_closed(
         "taskGraph",
-        opened.harness.task_graph(context()).await.expect_err("taskGraph"),
+        match opened.harness.task_graph(context()).await {
+            Ok(_) => panic!("taskGraph should fail"),
+            Err(err) => err,
+        },
     );
     check_closed(
         "watchTaskGraph",
@@ -1138,7 +1157,7 @@ async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_q
     );
     check_closed(
         "root",
-        match opened.harness.root(context()).await {
+        match opened.harness.root(context(), None).await {
             Ok(_) => panic!("root should fail"),
             Err(err) => err,
         },
@@ -1233,7 +1252,7 @@ async fn completes_reads_queued_at_the_seal_and_rejects_queued_waits_and_acquisi
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let notes_c = notes.clone();
     opened
         .harness
@@ -1380,7 +1399,7 @@ async fn open_paused() -> PausedFixture {
     )
     .await
     .expect("open");
-    let root = opened.harness.root(context()).await.expect("root");
+    let root = opened.harness.root(context(), None).await.expect("root");
     let id = start_task(&root, &marker, true).await;
     let root_id = root.id();
     let submission_id = opened
@@ -1545,7 +1564,7 @@ async fn schedules_from_every_progress_call() {
                 _ => unreachable!(),
             }
         });
-        eventually(|| fx.ran.load(Ordering::Acquire)).await;
+        eventually_sync(|| fx.ran.load(Ordering::Acquire)).await;
         fx.harness.close(context()).await.expect("close");
         let _ = pending.await;
     }
@@ -1568,7 +1587,7 @@ async fn runs_what_the_registry_holds_at_resume_a_definition_installed_or_replac
     let first = open_tasks(Arc::new(MemoryStorage::new()), Vec::new(), OpenTasksOptions::default())
         .await
         .expect("open");
-    let root = first.harness.root(context()).await.expect("root");
+    let root = first.harness.root(context(), None).await.expect("root");
     let missing = start_task(&root, &make("unused"), false).await;
     let inspected1 = first.harness.inspect(context()).await.expect("inspect1");
     assert_eq!(inspected1.tasks.len(), 1);
