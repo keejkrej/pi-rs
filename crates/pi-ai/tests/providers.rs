@@ -220,7 +220,7 @@ fn returns_empty_results_for_unknown_provider_ids() {
     assert!(get_builtin_classifier_models(unknown_provider).is_empty());
     assert!(get_all_builtin_models(unknown_provider).is_empty());
     assert!(get_compat_model(unknown_provider, unknown_model).is_none());
-    assert!(get_compat_models(unknown_provider).is_empty());
+    assert!(get_compat_models(Some(unknown_provider)).is_empty());
 }
 
 #[test]
@@ -572,7 +572,7 @@ async fn resolves_anthropic_bearer_auth_from_env_with_auth_token_precedence() {
             &[],
         )),
     }));
-    models.set_provider(anthropic_provider());
+    models.set_provider(anthropic_provider().expect("anthropic_provider ok"));
 
     let result = models
         .get_auth_provider_id("anthropic", None)
@@ -603,7 +603,7 @@ async fn preserves_anthropic_oauth_token_precedence_over_the_api_key() {
             &[],
         )),
     }));
-    models.set_provider(anthropic_provider());
+    models.set_provider(anthropic_provider().expect("anthropic_provider ok"));
 
     let result = models
         .get_auth_provider_id("anthropic", None)

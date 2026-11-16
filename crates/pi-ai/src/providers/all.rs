@@ -145,6 +145,23 @@ pub(crate) fn build_provider(options: CreateProviderOptions) -> Arc<dyn Provider
     }
 }
 
+fn unwrap_provider_result(
+    id: &str,
+    result: pi_js::Result<Arc<dyn Provider + Send + Sync>>,
+) -> Arc<dyn Provider + Send + Sync> {
+    match result {
+        Ok(provider) => provider,
+        Err(err) => Arc::new(FallbackStaticProvider {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            base_url: None,
+            auth: ProviderAuth::default(),
+            models: Vec::new(),
+            error_message: err.to_string(),
+        }),
+    }
+}
+
 pub(crate) fn build_env_provider(
     id: &str,
     name: &str,
@@ -237,8 +254,8 @@ pub fn builtin_providers() -> Vec<Arc<dyn Provider + Send + Sync>> {
     vec![
         amazon_bedrock_provider(),
         ant_ling_provider(),
-        anthropic_provider(),
-        azure_openai_responses_provider(),
+        unwrap_provider_result("anthropic", anthropic_provider()),
+        unwrap_provider_result("azure-openai-responses", azure_openai_responses_provider()),
         baseten_provider(),
         cerebras_provider(),
         cloudflare_ai_gateway_provider(),
@@ -258,8 +275,8 @@ pub fn builtin_providers() -> Vec<Arc<dyn Provider + Send + Sync>> {
         moonshotai_provider(),
         moonshotai_cn_provider(),
         nvidia_provider(),
-        openai_provider(),
-        openai_codex_provider(),
+        unwrap_provider_result("openai", openai_provider()),
+        unwrap_provider_result("openai-codex", openai_codex_provider()),
         opencode_provider(),
         opencode_go_provider(),
         openrouter_provider(),
