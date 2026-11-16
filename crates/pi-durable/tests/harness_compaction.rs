@@ -3526,7 +3526,7 @@ async fn resumes_a_retry_backoff_after_reopen() {
     let mut chat = first_sqlite(&path).await;
     let now_val = Arc::new(AtomicI64::new(pi_js::time::now_ms()));
     let now_cb = Arc::clone(&now_val);
-    chat.setup.now.set(Arc::new(move || now_cb.load(Ordering::Acquire)));
+    chat.setup.now.set(move || now_cb.load(Ordering::Acquire));
     chat.setup.settings.update(|s| {
         s.retry = Some(PartialRetryPolicy {
             enabled: Some(true),

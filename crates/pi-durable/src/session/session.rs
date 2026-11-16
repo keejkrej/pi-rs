@@ -407,6 +407,10 @@ impl Session {
     pub async fn unload_documents(&self) -> pi_js::Result<()> {
         self.inner.unload_documents().await
     }
+
+    pub fn commit_listener_count(&self) -> usize {
+        self.inner.commit_listener_count()
+    }
 }
 
 /// Session kernel: one mutation line, the loaded document tracker cache, and committed publication.
@@ -743,6 +747,10 @@ impl SessionImpl {
         let _permit = self.line_lock.lock().await;
         lock(&self.documents).clear();
         Ok(())
+    }
+
+    pub fn commit_listener_count(&self) -> usize {
+        lock(&self.listeners).commit_listeners.len()
     }
 
     async fn run_commit<T, F, Fut>(

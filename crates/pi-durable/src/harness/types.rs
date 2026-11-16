@@ -1629,6 +1629,103 @@ where
         self.rt()?.context_view(conversation_id, context, at).await
     }
 
+    pub async fn watch_doc_session<T: DeserializeOwned + Send + Sync + 'static>(
+        &self,
+        token: &SessionDocToken<T>,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(&token.definition, None, None, None, context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
+    pub async fn watch_doc_conversation<T: DeserializeOwned + Send + Sync + 'static>(
+        &self,
+        token: &impl ConversationDoc<T>,
+        conversation_id: ConversationId,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(token.definition(), Some(conversation_id), None, None, context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
+    pub async fn watch_doc_task<T: DeserializeOwned + Send + Sync + 'static>(
+        &self,
+        token: &TaskDocToken<T>,
+        task_id: TaskId,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(&token.definition, None, Some(task_id), None, context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
+    pub async fn watch_doc_session_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+        &self,
+        token: &SessionDocFamilyToken<T, I>,
+        key: &str,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(&token.definition, None, None, Some(key), context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
+    pub async fn watch_doc_conversation_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+        &self,
+        token: &impl ConversationDocFamily<T, I>,
+        conversation_id: ConversationId,
+        key: &str,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(token.definition(), Some(conversation_id), None, Some(key), context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
+    pub async fn watch_doc_task_family<T: DeserializeOwned + Send + Sync + 'static, I>(
+        &self,
+        token: &TaskDocFamilyToken<T, I>,
+        task_id: TaskId,
+        key: &str,
+        context: Context,
+    ) -> pi_js::Result<Option<DocumentWatch<T>>> {
+        let Some(watch) = self
+            .rt()?
+            .watch_erased(&token.definition, None, Some(task_id), Some(key), context)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(wrap_typed_watch(watch)))
+    }
+
     pub fn now(&self) -> pi_js::Result<i64> {
         Ok(self.rt()?.now())
     }
