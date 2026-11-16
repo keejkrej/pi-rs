@@ -20,10 +20,9 @@ use tokio::time::Sleep;
 use uuid::Uuid;
 
 use super::{
-    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionEnv, ExecutionError,
-    ExecutionErrorCode, FileContent, FileError, FileErrorCode, FileInfo, FileKind, FileSystem,
-    ReadTextLinesOptions, RemoveOptions, Shell, ShellExecOptions, ShellExecResult, TextLine,
-    TextLineReader,
+    CreateDirOptions, CreateTempFileOptions, EnvCleanup, ExecutionEnv, ExecutionError, ExecutionErrorCode, FileContent,
+    FileError, FileErrorCode, FileInfo, FileKind, FileSystem, ReadTextLinesOptions, RemoveOptions, Shell,
+    ShellExecOptions, ShellExecResult, TextLine, TextLineReader,
 };
 
 const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
@@ -37,11 +36,8 @@ static LEGACY_WSL_BASH_RE: LazyLock<regress::Regex> = LazyLock::new(|| {
         .unwrap_or_else(|e| panic!("invalid static legacy WSL regex: {e}"))
 });
 
-pub type TempFileHook = Arc<
-    dyn Fn(Option<&CreateTempFileOptions>) -> Option<std::result::Result<String, FileError>>
-        + Send
-        + Sync,
->;
+pub type TempFileHook =
+    Arc<dyn Fn(Option<&CreateTempFileOptions>) -> Option<std::result::Result<String, FileError>> + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct SpillTestConfig {
@@ -94,9 +90,7 @@ fn resolve_path(cwd: &str, path: &str) -> String {
     let mut normalized = path.to_string();
     if normalized == "~" {
         normalized = pi_js::env::home_dir();
-    } else if normalized.starts_with("~/")
-        || (pi_js::env::platform() == "win32" && normalized.starts_with("~\\"))
-    {
+    } else if normalized.starts_with("~/") || (pi_js::env::platform() == "win32" && normalized.starts_with("~\\")) {
         normalized = pi_js::path::join(&[&pi_js::env::home_dir(), &normalized[2..]]);
     } else if normalized.starts_with("file://") {
         if let Ok(parsed) = url::Url::parse(&normalized)
@@ -124,10 +118,7 @@ fn file_kind_from_stats(stats: &pi_js::fs::Stats) -> Option<FileKind> {
     }
 }
 
-fn file_info_from_stats(
-    path: String,
-    stats: &pi_js::fs::Stats,
-) -> std::result::Result<FileInfo, FileError> {
+fn file_info_from_stats(path: String, stats: &pi_js::fs::Stats) -> std::result::Result<FileInfo, FileError> {
     let Some(kind) = file_kind_from_stats(stats) else {
         return Err(FileError::new(
             FileErrorCode::Invalid,
@@ -146,9 +137,11 @@ fn file_info_from_stats(
 
 fn to_file_error(error: JsError, fallback_path: Option<&str>) -> FileError {
     match error {
-        JsError::Abort(reason) => {
-            FileError::new(FileErrorCode::Aborted, reason.message, fallback_path.map(str::to_string))
-        }
+        JsError::Abort(reason) => FileError::new(
+            FileErrorCode::Aborted,
+            reason.message,
+            fallback_path.map(str::to_string),
+        ),
         JsError::Node(node) => {
             let path = node.path.or_else(|| fallback_path.map(str::to_string));
             let code = match node.code.as_str() {
@@ -192,10 +185,7 @@ fn to_file_error(error: JsError, fallback_path: Option<&str>) -> FileError {
     }
 }
 
-fn abort_result<T>(
-    signal: Option<&AbortSignal>,
-    path: Option<&str>,
-) -> Option<std::result::Result<T, FileError>> {
+fn abort_result<T>(signal: Option<&AbortSignal>, path: Option<&str>) -> Option<std::result::Result<T, FileError>> {
     signal.filter(|s| s.aborted()).map(|_| {
         Err(FileError::new(
             FileErrorCode::Aborted,
@@ -287,9 +277,7 @@ async fn find_bash_on_path() -> Option<String> {
     }
 }
 
-async fn get_shell_config(
-    custom_shell_path: Option<&str>,
-) -> std::result::Result<ShellConfig, ExecutionError> {
+async fn get_shell_config(custom_shell_path: Option<&str>) -> std::result::Result<ShellConfig, ExecutionError> {
     if let Some(custom) = custom_shell_path {
         if path_exists(custom).await {
             return Ok(get_bash_shell_config(custom.to_string()));
@@ -461,10 +449,7 @@ impl NodeTextLineReader {
 
 #[async_trait]
 impl TextLineReader for NodeTextLineReader {
-    async fn read_line(
-        &mut self,
-        context: &Context,
-    ) -> std::result::Result<Option<TextLine>, FileError> {
+    async fn read_line(&mut self, context: &Context) -> std::result::Result<Option<TextLine>, FileError> {
         let signal = context.abort_signal();
         if let Some(aborted) = abort_result(signal.as_ref(), Some(&self.path)) {
             return aborted;
@@ -481,10 +466,7 @@ impl TextLineReader for NodeTextLineReader {
             if let Some(newline) = self.buffered.find('\n') {
                 let text = self.buffered[..newline].to_string();
                 self.buffered.drain(..=newline);
-                return Ok(Some(TextLine {
-                    text,
-                    terminated: true,
-                }));
+                return Ok(Some(TextLine { text, terminated: true }));
             }
             if self.ended {
                 if self.buffered.is_empty() {
@@ -562,9 +544,7 @@ impl SpillState {
     }
 
     fn is_draining(&self) -> bool {
-        self.opening.load(Ordering::SeqCst)
-            || self.in_flight.load(Ordering::SeqCst) > 0
-            || self.backpressured
+        self.opening.load(Ordering::SeqCst) || self.in_flight.load(Ordering::SeqCst) > 0 || self.backpressured
     }
 
     fn update_backpressure(&mut self) {
@@ -662,11 +642,7 @@ impl NodeExecutionEnv {
         Ok(NodeTextLineReader::new(handle, resolved))
     }
 
-    fn spawn_spill_task(
-        &self,
-        initial_prefix: VecDeque<Vec<u8>>,
-        context: &Context,
-    ) -> SpillState {
+    fn spawn_spill_task(&self, initial_prefix: VecDeque<Vec<u8>>, context: &Context) -> SpillState {
         let env = self.clone();
         let ctx = context.clone();
         let (path_tx, path_rx) = oneshot::channel();
@@ -676,10 +652,7 @@ impl NodeExecutionEnv {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let opening = Arc::new(AtomicBool::new(true));
         let notify = Arc::new(Notify::new());
-        let high_water_mark = self
-            .spill_test_config
-            .high_water_mark
-            .unwrap_or(SPILL_HIGH_WATER_MARK);
+        let high_water_mark = self.spill_test_config.high_water_mark.unwrap_or(SPILL_HIGH_WATER_MARK);
         let write_delay_ms = self.spill_test_config.write_delay_ms;
         let rejected_writes = self.spill_test_config.rejected_writes.clone();
 
@@ -794,10 +767,7 @@ impl NodeExecutionEnv {
 impl EnvCleanup for NodeExecutionEnv {
     async fn cleanup(&self, _context: &Context) {
         let pids: Vec<u32> = {
-            let mut guard = self
-                .active_child_pids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.active_child_pids.lock().unwrap_or_else(|e| e.into_inner());
             guard.drain(..).collect()
         };
         for pid in pids {
@@ -816,19 +786,11 @@ impl FileSystem for NodeExecutionEnv {
         &self.cwd
     }
 
-    async fn absolute_path(
-        &self,
-        path: &str,
-        _context: &Context,
-    ) -> std::result::Result<String, FileError> {
+    async fn absolute_path(&self, path: &str, _context: &Context) -> std::result::Result<String, FileError> {
         Ok(resolve_path(&self.cwd, path))
     }
 
-    async fn join_path(
-        &self,
-        parts: &[&str],
-        _context: &Context,
-    ) -> std::result::Result<String, FileError> {
+    async fn join_path(&self, parts: &[&str], _context: &Context) -> std::result::Result<String, FileError> {
         Ok(pi_js::path::join(parts))
     }
 
@@ -851,11 +813,7 @@ impl FileSystem for NodeExecutionEnv {
         }
     }
 
-    async fn read_text_file(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<String, FileError> {
+    async fn read_text_file(&self, path: &str, context: &Context) -> std::result::Result<String, FileError> {
         let resolved = resolve_path(&self.cwd, path);
         let signal = context.abort_signal();
         run_cancellable(
@@ -892,11 +850,7 @@ impl FileSystem for NodeExecutionEnv {
         res
     }
 
-    async fn read_binary_file(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<Vec<u8>, FileError> {
+    async fn read_binary_file(&self, path: &str, context: &Context) -> std::result::Result<Vec<u8>, FileError> {
         let resolved = resolve_path(&self.cwd, path);
         let signal = context.abort_signal();
         run_cancellable(
@@ -961,12 +915,7 @@ impl FileSystem for NodeExecutionEnv {
         .await
     }
 
-    async fn truncate_file(
-        &self,
-        path: &str,
-        size: u64,
-        context: &Context,
-    ) -> std::result::Result<(), FileError> {
+    async fn truncate_file(&self, path: &str, size: u64, context: &Context) -> std::result::Result<(), FileError> {
         let resolved = resolve_path(&self.cwd, path);
         let signal = context.abort_signal();
         if let Some(aborted) = abort_result(signal.as_ref(), Some(&resolved)) {
@@ -994,11 +943,7 @@ impl FileSystem for NodeExecutionEnv {
         Ok(())
     }
 
-    async fn flush_file(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<(), FileError> {
+    async fn flush_file(&self, path: &str, context: &Context) -> std::result::Result<(), FileError> {
         let resolved = resolve_path(&self.cwd, path);
         let signal = context.abort_signal();
         if let Some(aborted) = abort_result(signal.as_ref(), Some(&resolved)) {
@@ -1007,10 +952,7 @@ impl FileSystem for NodeExecutionEnv {
         let handle = pi_js::fs::promises::open(&resolved, "r+", None)
             .await
             .map_err(|e| to_file_error(e, Some(&resolved)))?;
-        let res = handle
-            .sync()
-            .await
-            .map_err(|e| to_file_error(e, Some(&resolved)));
+        let res = handle.sync().await.map_err(|e| to_file_error(e, Some(&resolved)));
         let _ = handle.close().await;
         res?;
         if let Some(aborted) = abort_result(signal.as_ref(), Some(&resolved)) {
@@ -1035,11 +977,7 @@ impl FileSystem for NodeExecutionEnv {
             .map_err(|e| to_file_error(e, Some(&source)))
     }
 
-    async fn file_info(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<FileInfo, FileError> {
+    async fn file_info(&self, path: &str, context: &Context) -> std::result::Result<FileInfo, FileError> {
         let resolved = resolve_path(&self.cwd, path);
         if let Some(aborted) = abort_result(context.abort_signal().as_ref(), Some(&resolved)) {
             return aborted;
@@ -1050,11 +988,7 @@ impl FileSystem for NodeExecutionEnv {
         file_info_from_stats(resolved, &stats)
     }
 
-    async fn list_dir(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<Vec<FileInfo>, FileError> {
+    async fn list_dir(&self, path: &str, context: &Context) -> std::result::Result<Vec<FileInfo>, FileError> {
         let resolved = resolve_path(&self.cwd, path);
         let signal = context.abort_signal();
         if let Some(aborted) = abort_result(signal.as_ref(), Some(&resolved)) {
@@ -1079,11 +1013,7 @@ impl FileSystem for NodeExecutionEnv {
         Ok(infos)
     }
 
-    async fn canonical_path(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<String, FileError> {
+    async fn canonical_path(&self, path: &str, context: &Context) -> std::result::Result<String, FileError> {
         let resolved = resolve_path(&self.cwd, path);
         if let Some(aborted) = abort_result(context.abort_signal().as_ref(), Some(&resolved)) {
             return aborted;
@@ -1093,11 +1023,7 @@ impl FileSystem for NodeExecutionEnv {
             .map_err(|e| to_file_error(e, Some(&resolved)))
     }
 
-    async fn exists(
-        &self,
-        path: &str,
-        context: &Context,
-    ) -> std::result::Result<bool, FileError> {
+    async fn exists(&self, path: &str, context: &Context) -> std::result::Result<bool, FileError> {
         match self.file_info(path, context).await {
             Ok(_) => Ok(true),
             Err(error) if error.code == FileErrorCode::NotFound => Ok(false),
@@ -1138,11 +1064,7 @@ impl FileSystem for NodeExecutionEnv {
             .map_err(|e| to_file_error(e, Some(&resolved)))
     }
 
-    async fn create_temp_dir(
-        &self,
-        prefix: Option<&str>,
-        context: &Context,
-    ) -> std::result::Result<String, FileError> {
+    async fn create_temp_dir(&self, prefix: Option<&str>, context: &Context) -> std::result::Result<String, FileError> {
         if let Some(aborted) = abort_result(context.abort_signal().as_ref(), None) {
             return aborted;
         }
@@ -1164,14 +1086,8 @@ impl FileSystem for NodeExecutionEnv {
             return override_result;
         }
         let dir = self.create_temp_dir(Some("tmp-"), context).await?;
-        let prefix = options
-            .as_ref()
-            .and_then(|o| o.prefix.as_deref())
-            .unwrap_or("");
-        let suffix = options
-            .as_ref()
-            .and_then(|o| o.suffix.as_deref())
-            .unwrap_or("");
+        let prefix = options.as_ref().and_then(|o| o.prefix.as_deref()).unwrap_or("");
+        let suffix = options.as_ref().and_then(|o| o.suffix.as_deref()).unwrap_or("");
         let filename = format!("{prefix}{}{suffix}", Uuid::new_v4());
         let file_path = pi_js::path::join(&[&dir, &filename]);
         pi_js::fs::promises::write_file(&file_path, b"", None)
@@ -1216,10 +1132,7 @@ impl Shell for NodeExecutionEnv {
         let env_map = get_shell_env(
             self.shell_env.as_ref(),
             options.as_ref().and_then(|o| o.env.as_ref()),
-            options
-                .as_ref()
-                .and_then(|o| o.inherit_env)
-                .unwrap_or(true),
+            options.as_ref().and_then(|o| o.inherit_env).unwrap_or(true),
         );
 
         let stdin_transport = shell_config.command_transport == CommandTransport::Stdin;
@@ -1231,11 +1144,7 @@ impl Shell for NodeExecutionEnv {
         cmd.current_dir(&cwd)
             .env_clear()
             .envs(env_map)
-            .stdin(if stdin_transport {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(if stdin_transport { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -1461,9 +1370,7 @@ impl Shell for NodeExecutionEnv {
 
             if let Some((is_stdout, chunk)) = chunk_to_process {
                 if exited && !settled {
-                    grace_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                        EXIT_STDIO_GRACE_MS,
-                    ))));
+                    grace_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(EXIT_STDIO_GRACE_MS))));
                 }
                 let text = if is_stdout {
                     stdout_decoder.decode(chunk, true)
@@ -1490,10 +1397,8 @@ impl Shell for NodeExecutionEnv {
                         state.send_chunk(chunk.to_vec());
                     } else {
                         seen_bytes = seen_bytes.saturating_add(chunk.len());
-                        seen_newlines = seen_newlines
-                            .saturating_add(chunk.iter().filter(|&&b| b == b'\n').count());
-                        let lines = seen_newlines
-                            .saturating_add(if chunk.last() == Some(&b'\n') { 0 } else { 1 });
+                        seen_newlines = seen_newlines.saturating_add(chunk.iter().filter(|&&b| b == b'\n').count());
+                        let lines = seen_newlines.saturating_add(if chunk.last() == Some(&b'\n') { 0 } else { 1 });
                         if seen_bytes <= spill.after_bytes && lines <= spill.after_lines {
                             spill_prefix.push_back(chunk.to_vec());
                         } else {
@@ -1534,10 +1439,8 @@ impl Shell for NodeExecutionEnv {
             && let Some(cb) = &on_output
             && let Err(err) = cb(&tail_out, context)
         {
-            callback_error = Some(
-                ExecutionError::new(ExecutionErrorCode::CallbackError, err.message())
-                    .with_cause(err.to_string()),
-            );
+            callback_error =
+                Some(ExecutionError::new(ExecutionErrorCode::CallbackError, err.message()).with_cause(err.to_string()));
         }
         let tail_err = stderr_decoder.decode(&[], false);
         if !settled
@@ -1546,10 +1449,8 @@ impl Shell for NodeExecutionEnv {
             && let Some(cb) = &on_output
             && let Err(err) = cb(&tail_err, context)
         {
-            callback_error = Some(
-                ExecutionError::new(ExecutionErrorCode::CallbackError, err.message())
-                    .with_cause(err.to_string()),
-            );
+            callback_error =
+                Some(ExecutionError::new(ExecutionErrorCode::CallbackError, err.message()).with_cause(err.to_string()));
         }
 
         if let Some(err) = callback_error {
@@ -1559,25 +1460,16 @@ impl Shell for NodeExecutionEnv {
             let timeout_msg = timeout_opt
                 .map(|t| format!("timeout:{t}"))
                 .unwrap_or_else(|| "timeout".to_string());
-            return Err(
-                ExecutionError::new(ExecutionErrorCode::Timeout, timeout_msg)
-                    .with_spill_path(spill_path),
-            );
+            return Err(ExecutionError::new(ExecutionErrorCode::Timeout, timeout_msg).with_spill_path(spill_path));
         }
         if aborted || signal.as_ref().is_some_and(|s| s.aborted()) {
-            return Err(
-                ExecutionError::new(ExecutionErrorCode::Aborted, "aborted")
-                    .with_spill_path(spill_path),
-            );
+            return Err(ExecutionError::new(ExecutionErrorCode::Aborted, "aborted").with_spill_path(spill_path));
         }
         if let Some(err) = spill_error {
             return Err(err);
         }
         if let Some(err) = spawn_wait_err {
-            return Err(ExecutionError::new(
-                ExecutionErrorCode::SpawnError,
-                err.to_string(),
-            ));
+            return Err(ExecutionError::new(ExecutionErrorCode::SpawnError, err.to_string()));
         }
 
         let exit_code = exit_status
@@ -1598,9 +1490,6 @@ impl Shell for NodeExecutionEnv {
             })
             .unwrap_or(1);
 
-        Ok(ShellExecResult {
-            exit_code,
-            spill_path,
-        })
+        Ok(ShellExecResult { exit_code, spill_path })
     }
 }

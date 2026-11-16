@@ -21,11 +21,9 @@ pub trait StorageConformanceAssertions: Send + Sync {
     fn rejects_error_name(&self, result: Result<(), pi_js::Error>, expected_name: &str);
 }
 
-pub type StorageConformanceCallback =
-    Box<dyn FnOnce(Arc<dyn Storage>) -> BoxFuture<'static, ()> + Send>;
+pub type StorageConformanceCallback = Box<dyn FnOnce(Arc<dyn Storage>) -> BoxFuture<'static, ()> + Send>;
 
-pub type StorageConformanceProvider =
-    Arc<dyn Fn(StorageConformanceCallback) -> BoxFuture<'static, ()> + Send + Sync>;
+pub type StorageConformanceProvider = Arc<dyn Fn(StorageConformanceCallback) -> BoxFuture<'static, ()> + Send + Sync>;
 
 pub struct StorageConformanceOptions {
     pub assertions: Arc<dyn StorageConformanceAssertions>,

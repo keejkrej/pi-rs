@@ -21,9 +21,7 @@ use crate::documents::{
 use crate::errors::is_storage_rejected;
 use crate::harness::types::{DocumentObserverBackend, DocumentReaderBackend};
 use crate::session::observation::{CommittedStateSource, CommittedWatch, ObservedDocumentValue, RETIREMENT_OPERATIONS};
-use crate::session::transaction::{
-    LoadedDocument, Transaction, TransactionHost, TransactionScope, Tx, clone_pi_error,
-};
+use crate::session::transaction::{LoadedDocument, Transaction, TransactionHost, TransactionScope, Tx, clone_pi_error};
 use crate::types::{
     CommitChange, CommitPublication, ConversationId, ConversationRecord, DocumentAddress, DocumentCommitChange,
     DocumentPoint, DocumentScope, DocumentState, DocumentWatch, EntryId, JsonObject, Seq, Storage, StorageWrite,
@@ -528,7 +526,12 @@ impl SessionImpl {
             return Ok(None);
         };
         check_record_scope(definition, &loaded.record)?;
-        check_record_version(definition, loaded.record.id, &loaded.record.kind, loaded.stored_version())?;
+        check_record_version(
+            definition,
+            loaded.record.id,
+            &loaded.record.kind,
+            loaded.stored_version(),
+        )?;
         Ok(Some((
             loaded.record.clone(),
             loaded.value_version,
@@ -702,10 +705,7 @@ impl SessionImpl {
         .await
     }
 
-    pub fn subscribe_commits(
-        self: &Arc<Self>,
-        listener: CommitListener,
-    ) -> pi_js::Result<pi_js::Unsubscribe> {
+    pub fn subscribe_commits(self: &Arc<Self>, listener: CommitListener) -> pi_js::Result<pi_js::Unsubscribe> {
         self.assert_usable()?;
         let id = {
             let mut guard = lock(&self.listeners);
@@ -759,7 +759,11 @@ impl SessionImpl {
         if let Some(signal) = context.abort_signal() {
             signal.throw_if_aborted()?;
         }
-        let tx = Transaction::new(Arc::clone(&self.host) as Arc<dyn TransactionHost>, context.clone(), scope);
+        let tx = Transaction::new(
+            Arc::clone(&self.host) as Arc<dyn TransactionHost>,
+            context.clone(),
+            scope,
+        );
         let result = match change(Arc::clone(&tx)).await {
             Ok(res) => res,
             Err(err) => {
@@ -846,7 +850,12 @@ impl SessionImpl {
         close_observer: fn(&Arc<O>),
     ) -> pi_js::Result<(Arc<O>, Box<dyn FnOnce() + Send + Sync>)> {
         check_record_scope(definition, &loaded.record)?;
-        check_record_version(definition, loaded.record.id, &loaded.record.kind, loaded.stored_version())?;
+        check_record_version(
+            definition,
+            loaded.record.id,
+            &loaded.record.kind,
+            loaded.stored_version(),
+        )?;
         let unsub_commit: Arc<Mutex<Option<pi_js::Unsubscribe>>> = Arc::new(Mutex::new(None));
         let unsub_close: Arc<Mutex<Option<pi_js::Unsubscribe>>> = Arc::new(Mutex::new(None));
         let unsub_commit_detach = Arc::clone(&unsub_commit);
@@ -1216,10 +1225,7 @@ fn observed_operations(
         change_ops.to_vec()
     } else {
         *guard = version;
-        vec![Op::Replace(OpReplace(
-            ReplaceVerb::R,
-            JsonValue::Object(value.clone()),
-        ))]
+        vec![Op::Replace(OpReplace(ReplaceVerb::R, JsonValue::Object(value.clone())))]
     }
 }
 

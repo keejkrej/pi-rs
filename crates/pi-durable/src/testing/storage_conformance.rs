@@ -5,21 +5,19 @@ use std::sync::Arc;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::delta::{Op, OpReplace, OpSet, OpSplice, ReplaceVerb, Seg, SetVerb, SpliceVerb};
 use serde::Serialize;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::ids::Seq;
 use crate::testing::types::{
-    StorageConformanceAssertions, StorageConformanceCase, StorageConformanceOptions,
-    StorageConformanceProvider,
+    StorageConformanceAssertions, StorageConformanceCase, StorageConformanceOptions, StorageConformanceProvider,
 };
 use crate::types::{
-    ConversationId, ConversationOwner, ConversationParent, ConversationQuery, ConversationRecord,
-    DocumentAddress, DocumentContent, DocumentCopySource, DocumentCreate, DocumentFork,
-    DocumentHistory, DocumentId, DocumentPoint, DocumentQuery, DocumentScope, EntryId,
-    EntryQuery, EntryRecord, ErasedTaskRecord, InputSubmissionState, JoinPolicy, JsonObject,
-    ROOT_CONVERSATION_ID, Storage, StorageWrite, SubmissionId, SubmissionQuery, SubmissionRecord,
-    SubmissionState, SubmissionStatus, TaskId, TaskOutcome, TaskOutcomeError, TaskQuery, TaskState,
-    TaskStatus, WriteSubmissionState,
+    ConversationId, ConversationOwner, ConversationParent, ConversationQuery, ConversationRecord, DocumentAddress,
+    DocumentContent, DocumentCopySource, DocumentCreate, DocumentFork, DocumentHistory, DocumentId, DocumentPoint,
+    DocumentQuery, DocumentScope, EntryId, EntryQuery, EntryRecord, ErasedTaskRecord, InputSubmissionState, JoinPolicy,
+    JsonObject, ROOT_CONVERSATION_ID, Storage, StorageWrite, SubmissionId, SubmissionQuery, SubmissionRecord,
+    SubmissionState, SubmissionStatus, TaskId, TaskOutcome, TaskOutcomeError, TaskQuery, TaskState, TaskStatus,
+    WriteSubmissionState,
 };
 
 fn to_val<T: Serialize>(value: &T) -> JsonValue {
@@ -215,12 +213,8 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                 StorageWrite::Entry {
                                     value: user_entry.clone(),
                                 },
-                                StorageWrite::Task {
-                                    value: task.clone(),
-                                },
-                                StorageWrite::Submission {
-                                    value: input.clone(),
-                                },
+                                StorageWrite::Task { value: task.clone() },
+                                StorageWrite::Submission { value: input.clone() },
                             ],
                             ctx.clone(),
                         )
@@ -264,9 +258,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 let failed = storage
                     .commit(
                         vec![
-                            StorageWrite::Task {
-                                value: running_task,
-                            },
+                            StorageWrite::Task { value: running_task },
                             StorageWrite::Submission { value: done_input },
                             StorageWrite::Entry {
                                 value: make_entry(transient_entry_id, root_id, "assistant"),
@@ -283,10 +275,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     )
                     .await
                     .map(|_| ());
-                expect.rejects_containing(
-                    failed,
-                    &format!("ID {root_id} already belongs to conversation"),
-                );
+                expect.rejects_containing(failed, &format!("ID {root_id} already belongs to conversation"));
 
                 expect.deep_equal(
                     &to_val(&ok_val(storage.task(task_id, ctx.clone()).await)),
@@ -379,10 +368,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 }
 
                 expect.deep_equal(
-                    &to_val(
-                        &ok_val(storage.entry(entry_id, ctx.clone()).await)
-                            .and_then(|l| l.entry.data),
-                    ),
+                    &to_val(&ok_val(storage.entry(entry_id, ctx.clone()).await).and_then(|l| l.entry.data)),
                     &json!({ "nested": [1, 2] }),
                 );
                 expect.deep_equal(
@@ -390,9 +376,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &json!({ "status": "pending", "checkpoint": { "phase": "ready", "nested": { "count": 1 } } }),
                 );
                 expect.deep_equal(
-                    &to_val(
-                        &ok_val(storage.submission(submission_id, ctx).await).map(|s| s.state),
-                    ),
+                    &to_val(&ok_val(storage.submission(submission_id, ctx).await).map(|s| s.state)),
                     &json!({ "status": "unanswered", "reason": "failed", "detail": { "codes": ["initial"] } }),
                 );
             },
@@ -419,10 +403,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .await,
                 );
                 let first_read = ok_val(storage.entry(entry_id, ctx).await);
-                expect.deep_equal(
-                    &to_val(&first_read.and_then(|l| l.entry.data)),
-                    &data,
-                );
+                expect.deep_equal(&to_val(&first_read.and_then(|l| l.entry.data)), &data);
             },
         ),
         create_case(
@@ -766,11 +747,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                 },
                                 StorageWrite::Entry { value: fork_marker },
                                 StorageWrite::Entry {
-                                    value: make_entry(
-                                        root_excluded_same_commit,
-                                        root_id,
-                                        "message",
-                                    ),
+                                    value: make_entry(root_excluded_same_commit, root_id, "message"),
                                 },
                             ],
                             ctx.clone(),
@@ -934,18 +911,29 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 );
                 expect.ok(third.next.is_none(), "expected third page next to be None");
 
-                let current_marker =
-                    ok_val(storage.find_latest_head_marker(grandchild_id, None, ctx.clone()).await);
-                expect.strict_equal(&to_val(&current_marker.as_ref().map(|m| m.id)), &to_val(&Some(grandchild_head)));
-                expect.strict_equal(&to_val(&current_marker.as_ref().and_then(|m| m.head)), &to_val(&Some(grandchild_head)));
+                let current_marker = ok_val(storage.find_latest_head_marker(grandchild_id, None, ctx.clone()).await);
+                expect.strict_equal(
+                    &to_val(&current_marker.as_ref().map(|m| m.id)),
+                    &to_val(&Some(grandchild_head)),
+                );
+                expect.strict_equal(
+                    &to_val(&current_marker.as_ref().and_then(|m| m.head)),
+                    &to_val(&Some(grandchild_head)),
+                );
 
                 let historical_marker = ok_val(
                     storage
                         .find_latest_head_marker(grandchild_id, Some(child_fork_point), ctx.clone())
                         .await,
                 );
-                expect.strict_equal(&to_val(&historical_marker.as_ref().map(|m| m.id)), &to_val(&Some(root_fork_point)));
-                expect.strict_equal(&to_val(&historical_marker.as_ref().and_then(|m| m.head)), &to_val(&Some(root_first)));
+                expect.strict_equal(
+                    &to_val(&historical_marker.as_ref().map(|m| m.id)),
+                    &to_val(&Some(root_fork_point)),
+                );
+                expect.strict_equal(
+                    &to_val(&historical_marker.as_ref().and_then(|m| m.head)),
+                    &to_val(&Some(root_first)),
+                );
                 expect.ok(
                     ok_val(
                         storage
@@ -1059,15 +1047,23 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 );
                 expect.strict_equal(
                     &to_val(
-                        &ok_val(storage.entry_in_conversation(grandchild_id, child_fork_point, ctx.clone()).await)
-                            .map(|l| l.entry.conversation_id),
+                        &ok_val(
+                            storage
+                                .entry_in_conversation(grandchild_id, child_fork_point, ctx.clone())
+                                .await,
+                        )
+                        .map(|l| l.entry.conversation_id),
                     ),
                     &to_val(&Some(child_id)),
                 );
                 expect.strict_equal(
                     &to_val(
-                        &ok_val(storage.entry_in_conversation(grandchild_id, grandchild_tail, ctx.clone()).await)
-                            .map(|l| l.commit_seq),
+                        &ok_val(
+                            storage
+                                .entry_in_conversation(grandchild_id, grandchild_tail, ctx.clone())
+                                .await,
+                        )
+                        .map(|l| l.commit_seq),
                     ),
                     &to_val(&Some(grandchild_entries_seq)),
                 );
@@ -1079,12 +1075,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     child_excluded_later,
                 ] {
                     expect.ok(
-                        ok_val(
-                            storage
-                                .entry_in_conversation(grandchild_id, hidden, ctx.clone())
-                                .await,
-                        )
-                        .is_none(),
+                        ok_val(storage.entry_in_conversation(grandchild_id, hidden, ctx.clone()).await).is_none(),
                         "fork-excluded entry must not be visible",
                     );
                 }
@@ -1109,11 +1100,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
 
                 expect.rejects_containing(
                     storage
-                        .entry_in_conversation(
-                            ConversationId::new_unchecked(999_999),
-                            root_first,
-                            ctx.clone(),
-                        )
+                        .entry_in_conversation(ConversationId::new_unchecked(999_999), root_first, ctx.clone())
                         .await
                         .map(|_| ()),
                     "Unknown conversation",
@@ -1162,15 +1149,9 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     storage
                         .commit(
                             vec![
-                                StorageWrite::Task {
-                                    value: first.clone(),
-                                },
-                                StorageWrite::Task {
-                                    value: second.clone(),
-                                },
-                                StorageWrite::Task {
-                                    value: third.clone(),
-                                },
+                                StorageWrite::Task { value: first.clone() },
+                                StorageWrite::Task { value: second.clone() },
+                                StorageWrite::Task { value: third.clone() },
                             ],
                             ctx.clone(),
                         )
@@ -1184,12 +1165,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 running.abort_requested = true;
                 ok_val(
                     storage
-                        .commit(
-                            vec![StorageWrite::Task {
-                                value: running.clone(),
-                            }],
-                            ctx.clone(),
-                        )
+                        .commit(vec![StorageWrite::Task { value: running.clone() }], ctx.clone())
                         .await,
                 );
                 expect.deep_equal(
@@ -1337,9 +1313,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .commit(
                             vec![
                                 StorageWrite::Task { value: owner },
-                                StorageWrite::Task {
-                                    value: waiting.clone(),
-                                },
+                                StorageWrite::Task { value: waiting.clone() },
                                 StorageWrite::Task {
                                     value: completing.clone(),
                                 },
@@ -1527,12 +1501,8 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     storage
                         .commit(
                             vec![
-                                StorageWrite::Submission {
-                                    value: first.clone(),
-                                },
-                                StorageWrite::Submission {
-                                    value: second.clone(),
-                                },
+                                StorageWrite::Submission { value: first.clone() },
+                                StorageWrite::Submission { value: second.clone() },
                                 StorageWrite::Submission {
                                     value: other_conversation.clone(),
                                 },
@@ -1542,17 +1512,15 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .await,
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.submission_by_request(root_id, "same", ctx.clone()).await)),
+                    &to_val(&ok_val(
+                        storage.submission_by_request(root_id, "same", ctx.clone()).await,
+                    )),
                     &to_val(&Some(&first)),
                 );
                 expect.deep_equal(
-                    &to_val(
-                        &ok_val(
-                            storage
-                                .submission_by_request(second_conv_id, "same", ctx.clone())
-                                .await,
-                        ),
-                    ),
+                    &to_val(&ok_val(
+                        storage.submission_by_request(second_conv_id, "same", ctx.clone()).await,
+                    )),
                     &to_val(&Some(&other_conversation)),
                 );
 
@@ -1579,7 +1547,9 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &to_val(&Some(&placed_second)),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.submission_by_request(root_id, "other", ctx.clone()).await)),
+                    &to_val(&ok_val(
+                        storage.submission_by_request(root_id, "other", ctx.clone()).await,
+                    )),
                     &to_val(&Some(&placed_second)),
                 );
 
@@ -1678,9 +1648,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .commit(
                             vec![
                                 StorageWrite::Submission { value: queued_done },
-                                StorageWrite::Submission {
-                                    value: queued_failed,
-                                },
+                                StorageWrite::Submission { value: queued_failed },
                             ],
                             ctx.clone(),
                         )
@@ -1708,9 +1676,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     storage
                         .commit(
                             vec![
-                                StorageWrite::Submission {
-                                    value: done.clone(),
-                                },
+                                StorageWrite::Submission { value: done.clone() },
                                 StorageWrite::Submission {
                                     value: unanswered.clone(),
                                 },
@@ -1724,7 +1690,11 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &to_val(&Some(&done)),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.submission_by_request(root_id, "passive-done", ctx.clone()).await)),
+                    &to_val(&ok_val(
+                        storage
+                            .submission_by_request(root_id, "passive-done", ctx.clone())
+                            .await,
+                    )),
                     &to_val(&Some(&done)),
                 );
                 expect.deep_equal(
@@ -1732,7 +1702,9 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &to_val(&Some(&unanswered)),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.submission_by_request(root_id, "passive-failed", ctx).await)),
+                    &to_val(&ok_val(
+                        storage.submission_by_request(root_id, "passive-failed", ctx).await,
+                    )),
                     &to_val(&Some(&unanswered)),
                 );
             },
@@ -1777,10 +1749,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     )),
                     Op::Set(OpSet(
                         SetVerb::S,
-                        vec![
-                            Seg::String("nested".to_string()),
-                            Seg::String("count".to_string()),
-                        ],
+                        vec![Seg::String("nested".to_string()), Seg::String("count".to_string())],
                         json!(2),
                     )),
                 ];
@@ -1822,9 +1791,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                 id: first_id,
                                 content: DocumentContent::Base {
                                     version: 2,
-                                    value: json_obj(
-                                        json!({ "items": ["checkpoint"], "nested": { "count": 3 } }),
-                                    ),
+                                    value: json_obj(json!({ "items": ["checkpoint"], "nested": { "count": 3 } })),
                                 },
                             }],
                             ctx.clone(),
@@ -1849,7 +1816,11 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .await,
                 );
                 expect.partial_deep_equal(
-                    &doc_summary(&ok_val(storage.document(first_id, DocumentPoint::At(changed_at), ctx.clone()).await)),
+                    &doc_summary(&ok_val(
+                        storage
+                            .document(first_id, DocumentPoint::At(changed_at), ctx.clone())
+                            .await,
+                    )),
                     &json!({ "version": 1, "value": { "items": ["a", "b"], "nested": { "count": 2 } } }),
                 );
                 expect.partial_deep_equal(
@@ -1857,7 +1828,11 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &json!({ "version": 2, "value": { "items": ["checkpoint"], "nested": { "count": 3 } }, "deltasSinceBase": 0 }),
                 );
                 expect.partial_deep_equal(
-                    &doc_summary(&ok_val(storage.document(first_id, DocumentPoint::At(replaced_at), ctx.clone()).await)),
+                    &doc_summary(&ok_val(
+                        storage
+                            .document(first_id, DocumentPoint::At(replaced_at), ctx.clone())
+                            .await,
+                    )),
                     &json!({ "value": { "items": ["replacement"], "nested": { "count": 4 } }, "deltasSinceBase": 1 }),
                 );
                 expect.strict_equal(
@@ -1969,15 +1944,16 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &to_val(&vec![second_id]),
                 );
                 expect.ok(
-                    ok_val(storage.document(first_id, DocumentPoint::At(retired_at), ctx.clone()).await)
-                        .is_none(),
+                    ok_val(
+                        storage
+                            .document(first_id, DocumentPoint::At(retired_at), ctx.clone())
+                            .await,
+                    )
+                    .is_none(),
                     "retired doc must not be visible at retired_at",
                 );
                 expect.deep_equal(
-                    &to_val(
-                        &ok_val(storage.document(second_id, DocumentPoint::Current, ctx).await)
-                            .map(|d| d.value),
-                    ),
+                    &to_val(&ok_val(storage.document(second_id, DocumentPoint::Current, ctx).await).map(|d| d.value)),
                     &json!({ "items": ["new"] }),
                 );
             },
@@ -2070,10 +2046,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                 id,
                                 content: DocumentContent::Delta {
                                     version: 1,
-                                    ops: vec![Op::Replace(OpReplace(
-                                        ReplaceVerb::R,
-                                        JsonValue::Object(replacement),
-                                    ))],
+                                    ops: vec![Op::Replace(OpReplace(ReplaceVerb::R, JsonValue::Object(replacement)))],
                                 },
                             }],
                             ctx.clone(),
@@ -2122,15 +2095,32 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 }
 
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(id, DocumentPoint::At(created_at), ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(storage.document(id, DocumentPoint::At(created_at), ctx.clone()).await)
+                            .map(|d| d.value),
+                    ),
                     &to_val(&Some(initial)),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(id, DocumentPoint::At(before_replacement_at), ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(
+                            storage
+                                .document(id, DocumentPoint::At(before_replacement_at), ctx.clone())
+                                .await,
+                        )
+                        .map(|d| d.value),
+                    ),
                     &to_val(&Some(before_replacement)),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(id, DocumentPoint::At(replacement_at), ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(
+                            storage
+                                .document(id, DocumentPoint::At(replacement_at), ctx.clone())
+                                .await,
+                        )
+                        .map(|d| d.value),
+                    ),
                     &to_val(&Some(replacement_snapshot)),
                 );
                 expect.deep_equal(
@@ -2189,9 +2179,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                             vec![StorageWrite::DocumentCreate {
                                 record: source_record.clone(),
                                 version: 2,
-                                value: json_obj(
-                                    json!({ "count": 1, "rows": [{ "value": "base" }] }),
-                                ),
+                                value: json_obj(json!({ "count": 1, "rows": [{ "value": "base" }] })),
                             }],
                             ctx.clone(),
                         )
@@ -2205,11 +2193,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                 content: DocumentContent::Delta {
                                     version: 2,
                                     ops: vec![
-                                        Op::Set(OpSet(
-                                            SetVerb::S,
-                                            vec![Seg::String("count".to_string())],
-                                            json!(2),
-                                        )),
+                                        Op::Set(OpSet(SetVerb::S, vec![Seg::String("count".to_string())], json!(2))),
                                         Op::Splice(OpSplice(
                                             SpliceVerb::P,
                                             vec![Seg::String("rows".to_string())],
@@ -2232,9 +2216,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     id,
                     kind: "copy.source".to_string(),
                     key: None,
-                    scope: DocumentScope::Conversation {
-                        conversation_id: conv,
-                    },
+                    scope: DocumentScope::Conversation { conversation_id: conv },
                     history: Some(DocumentHistory::Rewindable),
                     fork: Some(DocumentFork::AsOf),
                 };
@@ -2263,16 +2245,18 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                         at: DocumentPoint::Current,
                                     },
                                 },
-                                StorageWrite::DocumentRetire {
-                                    id: retired_copy_id,
-                                },
+                                StorageWrite::DocumentRetire { id: retired_copy_id },
                             ],
                             ctx.clone(),
                         )
                         .await,
                 );
                 expect.partial_deep_equal(
-                    &doc_summary(&ok_val(storage.document(historical_copy_id, DocumentPoint::Current, ctx.clone()).await)),
+                    &doc_summary(&ok_val(
+                        storage
+                            .document(historical_copy_id, DocumentPoint::Current, ctx.clone())
+                            .await,
+                    )),
                     &json!({ "version": 2, "value": { "count": 1, "rows": [{ "value": "base" }] } }),
                 );
                 expect.partial_deep_equal(
@@ -2280,8 +2264,12 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &json!({ "version": 2, "value": { "count": 2, "rows": [{ "value": "base" }, { "value": "current" }] } }),
                 );
                 expect.ok(
-                    ok_val(storage.document(retired_copy_id, DocumentPoint::Current, ctx.clone()).await)
-                        .is_none(),
+                    ok_val(
+                        storage
+                            .document(retired_copy_id, DocumentPoint::Current, ctx.clone())
+                            .await,
+                    )
+                    .is_none(),
                     "retired copy should be None",
                 );
 
@@ -2303,7 +2291,14 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .await,
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(current_copy_id, DocumentPoint::Current, ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(
+                            storage
+                                .document(current_copy_id, DocumentPoint::Current, ctx.clone())
+                                .await,
+                        )
+                        .map(|d| d.value),
+                    ),
                     &json!({ "count": 2, "rows": [{ "value": "base" }, { "value": "current" }] }),
                 );
 
@@ -2361,16 +2356,18 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                         value: json_obj(json!({ "retained": "source-only" })),
                                     },
                                 },
-                                StorageWrite::DocumentRetire {
-                                    id: latest_source_id,
-                                },
+                                StorageWrite::DocumentRetire { id: latest_source_id },
                             ],
                             ctx.clone(),
                         )
                         .await,
                 );
                 expect.partial_deep_equal(
-                    &doc_summary(&ok_val(storage.document(latest_copy_id, DocumentPoint::Current, ctx.clone()).await)),
+                    &doc_summary(&ok_val(
+                        storage
+                            .document(latest_copy_id, DocumentPoint::Current, ctx.clone())
+                            .await,
+                    )),
                     &json!({ "version": 4, "value": { "retained": "copy" } }),
                 );
 
@@ -2385,9 +2382,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                                     at: DocumentPoint::Current,
                                 },
                             },
-                            StorageWrite::DocumentRetire {
-                                id: current_copy_id,
-                            },
+                            StorageWrite::DocumentRetire { id: current_copy_id },
                         ],
                         ctx.clone(),
                     )
@@ -2395,12 +2390,18 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     .map(|_| ());
                 expect.rejects_error_name(conflict_res, "StorageRejected");
                 expect.ok(
-                    ok_val(storage.document(conflict_id, DocumentPoint::Current, ctx.clone()).await)
-                        .is_none(),
+                    ok_val(storage.document(conflict_id, DocumentPoint::Current, ctx.clone()).await).is_none(),
                     "conflict copy must not persist",
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(current_copy_id, DocumentPoint::Current, ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(
+                            storage
+                                .document(current_copy_id, DocumentPoint::Current, ctx.clone())
+                                .await,
+                        )
+                        .map(|d| d.value),
+                    ),
                     &json!({ "count": 2, "rows": [{ "value": "base" }, { "value": "current" }] }),
                 );
 
@@ -2683,8 +2684,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         )
                         .await,
                 );
-                let combined: Vec<DocumentId> =
-                    first.items.into_iter().chain(second.items).map(|d| d.id).collect();
+                let combined: Vec<DocumentId> = first.items.into_iter().chain(second.items).map(|d| d.id).collect();
                 expect.deep_equal(&to_val(&combined), &to_val(&vec![first_id, second_id]));
 
                 let conv_docs = ok_val(
@@ -2834,12 +2834,13 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     "already has a current incarnation",
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.document(first_id, DocumentPoint::Current, ctx.clone()).await).map(|d| d.value)),
+                    &to_val(
+                        &ok_val(storage.document(first_id, DocumentPoint::Current, ctx.clone()).await).map(|d| d.value),
+                    ),
                     &json!({ "value": 1 }),
                 );
                 expect.ok(
-                    ok_val(storage.document(second_id, DocumentPoint::Current, ctx.clone()).await)
-                        .is_none(),
+                    ok_val(storage.document(second_id, DocumentPoint::Current, ctx.clone()).await).is_none(),
                     "conflicting doc must not be created",
                 );
 
@@ -2869,8 +2870,7 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                         .await,
                 );
                 expect.ok(
-                    ok_val(storage.document(empty_id, DocumentPoint::Current, ctx.clone()).await)
-                        .is_none(),
+                    ok_val(storage.document(empty_id, DocumentPoint::Current, ctx.clone()).await).is_none(),
                     "retired on creation doc should not be visible",
                 );
                 expect.ok(
@@ -2969,12 +2969,8 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     storage
                         .commit(
                             vec![
-                                StorageWrite::Task {
-                                    value: running_task,
-                                },
-                                StorageWrite::Submission {
-                                    value: unanswered_sub,
-                                },
+                                StorageWrite::Task { value: running_task },
+                                StorageWrite::Submission { value: unanswered_sub },
                                 StorageWrite::Entry {
                                     value: make_entry(entry_id, root_id, "transient"),
                                 },
@@ -3015,7 +3011,9 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     &to_val(&vec![task]),
                 );
                 expect.deep_equal(
-                    &to_val(&ok_val(storage.submission_by_request(root_id, "atomic", ctx.clone()).await)),
+                    &to_val(&ok_val(
+                        storage.submission_by_request(root_id, "atomic", ctx.clone()).await,
+                    )),
                     &to_val(&Some(submission)),
                 );
                 expect.ok(
@@ -3023,8 +3021,12 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                     "transient entry rolled back",
                 );
                 expect.ok(
-                    ok_val(storage.document(conflicting_id, DocumentPoint::Current, ctx.clone()).await)
-                        .is_none(),
+                    ok_val(
+                        storage
+                            .document(conflicting_id, DocumentPoint::Current, ctx.clone())
+                            .await,
+                    )
+                    .is_none(),
                     "conflicting doc rolled back",
                 );
                 expect.strict_equal(
@@ -3360,7 +3362,10 @@ pub fn create_storage_conformance(options: StorageConformanceOptions) -> Vec<Sto
                 create_root(storage.as_ref()).await;
                 ok_val(storage.close(ctx.clone()).await);
                 expect.rejects_containing(
-                    storage.conversation(ROOT_CONVERSATION_ID, ctx.clone()).await.map(|_| ()),
+                    storage
+                        .conversation(ROOT_CONVERSATION_ID, ctx.clone())
+                        .await
+                        .map(|_| ()),
                     "closed",
                 );
                 expect.rejects_containing(storage.commit(vec![], ctx).await.map(|_| ()), "closed");
@@ -3375,11 +3380,7 @@ async fn scan_submission_ids(storage: &dyn Storage, query: SubmissionQuery) -> V
     let mut found = Vec::new();
     let mut cursor = None;
     loop {
-        let page = ok_val(
-            storage
-                .scan_submissions(query, 1, cursor, ctx.clone())
-                .await,
-        );
+        let page = ok_val(storage.scan_submissions(query, 1, cursor, ctx.clone()).await);
         for item in page.items {
             found.push(item.id);
         }

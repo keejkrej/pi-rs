@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use rusqlite::types::{Value as RusqliteValue, ValueRef};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::storage::sqlite::database::{
-    BoxedSqliteTxCallback, SqliteDatabase, SqliteExecutor, SqliteRow, SqliteValue,
-};
+use crate::storage::sqlite::database::{BoxedSqliteTxCallback, SqliteDatabase, SqliteExecutor, SqliteRow, SqliteValue};
 use crate::storage::sqlite::storage::SqliteStorage;
 
 const DEFAULT_WAL_AUTO_CHECKPOINT_PAGES: i64 = 1_000;
@@ -57,9 +55,7 @@ fn from_rusqlite_value(value: ValueRef<'_>) -> pi_js::Result<SqliteValue> {
 fn row_from_rusqlite(row: &rusqlite::Row<'_>, column_names: &[String]) -> pi_js::Result<SqliteRow> {
     let mut map = SqliteRow::with_capacity(column_names.len());
     for (idx, name) in column_names.iter().enumerate() {
-        let val_ref = row
-            .get_ref(idx)
-            .map_err(|err| pi_js::Error::msg(err.to_string()))?;
+        let val_ref = row.get_ref(idx).map_err(|err| pi_js::Error::msg(err.to_string()))?;
         map.insert(name.clone(), from_rusqlite_value(val_ref)?);
     }
     Ok(map)
@@ -80,54 +76,32 @@ fn run_on_conn(conn: &rusqlite::Connection, sql: &str, params: &[SqliteValue]) -
     Ok(())
 }
 
-fn get_on_conn(
-    conn: &rusqlite::Connection,
-    sql: &str,
-    params: &[SqliteValue],
-) -> pi_js::Result<Option<SqliteRow>> {
+fn get_on_conn(conn: &rusqlite::Connection, sql: &str, params: &[SqliteValue]) -> pi_js::Result<Option<SqliteRow>> {
     let mut stmt = conn
         .prepare_cached(sql)
         .map_err(|err| pi_js::Error::msg(err.to_string()))?;
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .into_iter()
-        .map(ToString::to_string)
-        .collect();
+    let column_names: Vec<String> = stmt.column_names().into_iter().map(ToString::to_string).collect();
     let bound: Vec<RusqliteValue> = params.iter().map(to_rusqlite_value).collect();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(bound))
         .map_err(|err| pi_js::Error::msg(err.to_string()))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|err| pi_js::Error::msg(err.to_string()))?
-    else {
+    let Some(row) = rows.next().map_err(|err| pi_js::Error::msg(err.to_string()))? else {
         return Ok(None);
     };
     Ok(Some(row_from_rusqlite(row, &column_names)?))
 }
 
-fn all_on_conn(
-    conn: &rusqlite::Connection,
-    sql: &str,
-    params: &[SqliteValue],
-) -> pi_js::Result<Vec<SqliteRow>> {
+fn all_on_conn(conn: &rusqlite::Connection, sql: &str, params: &[SqliteValue]) -> pi_js::Result<Vec<SqliteRow>> {
     let mut stmt = conn
         .prepare_cached(sql)
         .map_err(|err| pi_js::Error::msg(err.to_string()))?;
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .into_iter()
-        .map(ToString::to_string)
-        .collect();
+    let column_names: Vec<String> = stmt.column_names().into_iter().map(ToString::to_string).collect();
     let bound: Vec<RusqliteValue> = params.iter().map(to_rusqlite_value).collect();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(bound))
         .map_err(|err| pi_js::Error::msg(err.to_string()))?;
     let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| pi_js::Error::msg(err.to_string()))?
-    {
+    while let Some(row) = rows.next().map_err(|err| pi_js::Error::msg(err.to_string()))? {
         out.push(row_from_rusqlite(row, &column_names)?);
     }
     Ok(out)
@@ -141,9 +115,7 @@ struct NodeSqliteTransaction {
 impl NodeSqliteTransaction {
     fn with_conn<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> pi_js::Result<T>) -> pi_js::Result<T> {
         if !self.active.load(Ordering::SeqCst) {
-            return Err(pi_js::Error::msg(
-                "SQLite transaction handle is no longer active",
-            ));
+            return Err(pi_js::Error::msg("SQLite transaction handle is no longer active"));
         }
         let guard = self.conn_state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ref conn) = guard.conn else {
@@ -190,10 +162,7 @@ impl NodeSqliteDatabase {
         }
     }
 
-    fn with_conn_sync<T>(
-        &self,
-        f: impl FnOnce(&rusqlite::Connection) -> pi_js::Result<T>,
-    ) -> pi_js::Result<T> {
+    fn with_conn_sync<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> pi_js::Result<T>) -> pi_js::Result<T> {
         let guard = self.conn_state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ref conn) = guard.conn else {
             return Err(pi_js::Error::msg("SQLite database is closed"));
@@ -249,8 +218,7 @@ impl SqliteDatabase for NodeSqliteDatabase {
                 Ok(value)
             }
             Err(err) => {
-                if let Err(rollback_err) = self.with_conn_sync(|conn| exec_on_conn(conn, "ROLLBACK"))
-                {
+                if let Err(rollback_err) = self.with_conn_sync(|conn| exec_on_conn(conn, "ROLLBACK")) {
                     let msg = format!(
                         "SQLite transaction failed and rollback failed: {}; rollback: {}",
                         err.message(),
@@ -275,8 +243,7 @@ impl SqliteDatabase for NodeSqliteDatabase {
         };
         if let Some(conn) = conn {
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
-            conn.close()
-                .map_err(|(_, err)| pi_js::Error::msg(err.to_string()))?;
+            conn.close().map_err(|(_, err)| pi_js::Error::msg(err.to_string()))?;
         }
         Ok(())
     }
@@ -332,10 +299,7 @@ pub async fn open_node_sqlite_database(
 }
 
 /// Open or create file-backed durable storage using SQLite.
-pub async fn open_node_sqlite_storage(
-    path: &str,
-    options: NodeSqliteStorageOptions,
-) -> pi_js::Result<SqliteStorage> {
+pub async fn open_node_sqlite_storage(path: &str, options: NodeSqliteStorageOptions) -> pi_js::Result<SqliteStorage> {
     let db = open_node_sqlite_database(path, options).await?;
     SqliteStorage::open(db).await
 }

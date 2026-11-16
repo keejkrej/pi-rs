@@ -74,8 +74,7 @@ impl<D> Entry<D> {
             return Ok(None);
         }
         let raw = record.data.clone().unwrap_or(crate::types::JsonValue::Null);
-        let data: D =
-            serde_json::from_value(raw).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+        let data: D = serde_json::from_value(raw).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
         Ok(Some(TypedEntry {
             record: record.clone(),
             data,
@@ -87,10 +86,7 @@ impl<D> Entry<D> {
 pub fn define_entry<D>(kind: impl Into<Cow<'static, str>>) -> pi_js::Result<Entry<D>> {
     let kind = kind.into();
     if kind.is_empty() {
-        return Err(pi_js::Error::js(
-            "TypeError",
-            "Entry kind must be a non-empty string",
-        ));
+        return Err(pi_js::Error::js("TypeError", "Entry kind must be a non-empty string"));
     }
     Ok(Entry {
         kind,

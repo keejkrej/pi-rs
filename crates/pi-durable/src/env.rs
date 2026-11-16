@@ -340,12 +340,7 @@ pub trait FileSystem: EnvCleanup {
         context: &Context,
     ) -> std::result::Result<(), FileError>;
     /// Truncate or extend a file to exactly `size` bytes.
-    async fn truncate_file(
-        &self,
-        path: &str,
-        size: u64,
-        context: &Context,
-    ) -> std::result::Result<(), FileError>;
+    async fn truncate_file(&self, path: &str, size: u64, context: &Context) -> std::result::Result<(), FileError>;
     /// Validate a floating-point byte size from JS-shaped callers before truncating.
     async fn truncate_file_number(
         &self,
@@ -390,11 +385,7 @@ pub trait FileSystem: EnvCleanup {
         options: Option<RemoveOptions>,
         context: &Context,
     ) -> std::result::Result<(), FileError>;
-    async fn create_temp_dir(
-        &self,
-        prefix: Option<&str>,
-        context: &Context,
-    ) -> std::result::Result<String, FileError>;
+    async fn create_temp_dir(&self, prefix: Option<&str>, context: &Context) -> std::result::Result<String, FileError>;
     async fn create_temp_file(
         &self,
         options: Option<CreateTempFileOptions>,

@@ -7,15 +7,14 @@ use std::sync::LazyLock;
 use indexmap::IndexMap;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::delta::{Op, OpReplace, OpSet, ReplaceVerb, Seg, SetVerb};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::ids::Seq;
 use crate::types::{
-    ConversationId, ConversationParent, ConversationRecord, DocumentContent, DocumentCreate,
-    DocumentFork, DocumentHistory, DocumentId, DocumentPoint, DocumentScope, EntryId,
-    EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject, ROOT_CONVERSATION_ID, Storage,
-    StorageWrite, SubmissionId, SubmissionRecord, SubmissionState, TaskId, TaskOutcome,
-    TaskQuery, TaskState, TaskStatus, WriteSubmissionState,
+    ConversationId, ConversationParent, ConversationRecord, DocumentContent, DocumentCreate, DocumentFork,
+    DocumentHistory, DocumentId, DocumentPoint, DocumentScope, EntryId, EntryQuery, EntryRecord, ErasedTaskRecord,
+    JsonObject, ROOT_CONVERSATION_ID, Storage, StorageWrite, SubmissionId, SubmissionRecord, SubmissionState, TaskId,
+    TaskOutcome, TaskQuery, TaskState, TaskStatus, WriteSubmissionState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,8 +303,7 @@ pub async fn seed_storage_benchmark(
             ctx.clone(),
         )
         .await?;
-    let ancient_at = ancient_at
-        .ok_or_else(|| pi_js::Error::msg("Benchmark history seed produced no commits"))?;
+    let ancient_at = ancient_at.ok_or_else(|| pi_js::Error::msg("Benchmark history seed produced no commits"))?;
 
     let mut recent_at = ancient_at;
     for count in (HISTORY_SEGMENT_LENGTH + 1)..=(HISTORY_SEGMENT_LENGTH * 2) {
@@ -327,8 +325,7 @@ pub async fn seed_storage_benchmark(
             .await?;
     }
 
-    let first_entry_id = first_entry_id
-        .ok_or_else(|| pi_js::Error::msg("Benchmark scale must create entries"))?;
+    let first_entry_id = first_entry_id.ok_or_else(|| pi_js::Error::msg("Benchmark scale must create entries"))?;
     let mut parent_conversation_id = ROOT_CONVERSATION_ID;
     let mut parent_at = first_entry_id;
     let mut deepest_conversation_id = ROOT_CONVERSATION_ID;
@@ -598,11 +595,7 @@ pub static STORAGE_READ_BENCHMARKS: LazyLock<Vec<StorageReadBenchmark>> = LazyLo
             run: |storage, dataset| {
                 Box::pin(async move {
                     let marker = storage
-                        .find_latest_head_marker(
-                            dataset.deepest_conversation_id,
-                            None,
-                            BACKGROUND_CONTEXT.clone(),
-                        )
+                        .find_latest_head_marker(dataset.deepest_conversation_id, None, BACKGROUND_CONTEXT.clone())
                         .await?;
                     Ok(marker.map_or(-1, |rec| rec.id.as_i64()))
                 })
@@ -743,9 +736,7 @@ pub static STORAGE_WRITE_BENCHMARKS: LazyLock<Vec<StorageWriteBenchmark>> = Lazy
                                 id: submission_id,
                                 conversation_id: ROOT_CONVERSATION_ID,
                                 request_id: Some(format!("benchmark-{submission_id}")),
-                                state: SubmissionState::Write(WriteSubmissionState::Done {
-                                    entry: entry_id,
-                                }),
+                                state: SubmissionState::Write(WriteSubmissionState::Done { entry: entry_id }),
                             },
                         },
                         StorageWrite::DocumentCreate {

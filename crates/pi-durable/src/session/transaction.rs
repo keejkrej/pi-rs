@@ -24,7 +24,7 @@ use crate::entries::{Entry, TypedEntryDraft};
 use crate::errors::{ConversationBusy, ReadAfterWrite, StorageRejected};
 use crate::ids::mint_typed_id;
 use crate::session::forks::prepare_fork_document_copies;
-use crate::tasks::Task;
+use crate::tasks::{AnyTask, Task};
 use crate::types::{
     CheckpointInfo, ConversationId, ConversationOwner, ConversationOwnership, ConversationParent, ConversationQuery,
     ConversationRecord, Cursor, DocumentAddress, DocumentCommitChange, DocumentContent, DocumentCopySource,
@@ -153,7 +153,10 @@ enum SubmissionChange {
     Placed { entry: EntryId },
 }
 
-fn apply_submission_change(current: &SubmissionRecord, change: SubmissionChange) -> pi_js::Result<Option<SubmissionRecord>> {
+fn apply_submission_change(
+    current: &SubmissionRecord,
+    change: SubmissionChange,
+) -> pi_js::Result<Option<SubmissionRecord>> {
     if current.is_settled() {
         return Ok(None);
     }
@@ -529,7 +532,9 @@ impl Tx {
         at: EntryId,
         ownership: ConversationOwnership,
     ) -> pi_js::Result<ConversationRecord> {
-        self.inner.fork_conversation(parent_conversation_id, at, ownership).await
+        self.inner
+            .fork_conversation(parent_conversation_id, at, ownership)
+            .await
     }
 
     pub async fn append_entry(&self, conversation_id: ConversationId, value: EntryDraft) -> pi_js::Result<EntryRecord> {
@@ -552,6 +557,15 @@ impl Tx {
         options: TaskOptions,
     ) -> pi_js::Result<TaskId<R>> {
         self.inner.create_task(task, input, options).await
+    }
+
+    pub async fn create_task_erased(
+        &self,
+        task: &AnyTask,
+        raw_input: JsonValue,
+        options: TaskOptions,
+    ) -> pi_js::Result<TaskId> {
+        self.inner.create_task_erased(task, raw_input, options).await
     }
 
     pub async fn create_submission(&self, create: SubmissionCreate) -> pi_js::Result<SubmissionRecord> {
@@ -716,7 +730,12 @@ impl Transaction {
 
     pub async fn entry(&self, id: EntryId) -> pi_js::Result<Option<EntryRecord>> {
         self.run_read("entry", || async {
-            Ok(self.host.storage().entry(id, self.context.clone()).await?.map(|e| e.entry))
+            Ok(self
+                .host
+                .storage()
+                .entry(id, self.context.clone())
+                .await?
+                .map(|e| e.entry))
         })
         .await
     }
@@ -727,7 +746,12 @@ impl Transaction {
         id: EntryId,
     ) -> pi_js::Result<Option<TypedEntry<D>>> {
         self.run_read("entry", || async {
-            let record = self.host.storage().entry(id, self.context.clone()).await?.map(|e| e.entry);
+            let record = self
+                .host
+                .storage()
+                .entry(id, self.context.clone())
+                .await?
+                .map(|e| e.entry);
             token.extract(record.as_ref())
         })
         .await
@@ -816,16 +840,17 @@ impl Transaction {
 
     // ─── Table writes ───────────────────────────────────────────────────────
 
-    pub async fn create_conversation(self: &Arc<Self>, ownership: ConversationOwnership) -> pi_js::Result<ConversationRecord> {
+    pub async fn create_conversation(
+        self: &Arc<Self>,
+        ownership: ConversationOwnership,
+    ) -> pi_js::Result<ConversationRecord> {
         self.run_write(|| self.stage_conversation(None, ownership, None)).await
     }
 
     /// Internal final-form bootstrap path for the reserved root identity.
     pub async fn create_root_conversation(self: &Arc<Self>) -> pi_js::Result<ConversationRecord> {
-        self.run_write(|| {
-            self.stage_conversation(None, ConversationOwnership::Ownerless, Some(ROOT_CONVERSATION_ID))
-        })
-        .await
+        self.run_write(|| self.stage_conversation(None, ConversationOwnership::Ownerless, Some(ROOT_CONVERSATION_ID)))
+            .await
     }
 
     pub async fn fork_conversation(
@@ -997,6 +1022,17 @@ impl Transaction {
         input: &I,
         options: TaskOptions,
     ) -> pi_js::Result<TaskId<R>> {
+        let raw_input = serde_json::to_value(input).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+        let id = self.create_task_erased(&task.erased, raw_input, options).await?;
+        Ok(id.cast::<R>())
+    }
+
+    pub async fn create_task_erased(
+        &self,
+        task: &AnyTask,
+        raw_input: JsonValue,
+        options: TaskOptions,
+    ) -> pi_js::Result<TaskId> {
         self.run_write(|| async move {
             let owner = match options.ownership {
                 TaskOwnership::Conversation => None,
@@ -1029,23 +1065,22 @@ impl Transaction {
             self.require_conversation(conversation_id).await?;
             self.assert_open()?;
 
-            let raw_input = serde_json::to_value(input).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
             let raw_input = copy_json(&raw_input, None)?;
             if !is_json_value(&raw_input) {
                 return Err(pi_js::Error::js("TypeError", "Task input must be strict JSON"));
             }
 
-            let definition = &task.erased.definition;
+            let definition = &task.definition;
             let checkpoint = (definition.initial)(raw_input.clone())?;
             let checkpoint = copy_json(&checkpoint, None)?;
             if !is_json_value(&checkpoint) {
                 return Err(pi_js::Error::js("TypeError", "Task checkpoint must be strict JSON"));
             }
 
-            let id = mint_typed_id::<TaskKind, R>(self.host.storage().as_ref()).await?;
+            let id = mint_typed_id::<TaskKind, JsonValue>(self.host.storage().as_ref()).await?;
             self.assert_open()?;
             let record = TaskRecord {
-                id: id.erased(),
+                id,
                 conversation_id,
                 kind: definition.name.clone(),
                 version: definition.version,
@@ -1057,7 +1092,7 @@ impl Transaction {
                 memos: None,
             };
             let mut guard = lock(&self.state);
-            let entry = guard.tasks_by_id.entry(id.erased()).or_default();
+            let entry = guard.tasks_by_id.entry(id).or_default();
             entry.write = Some(TaskWrite {
                 kind: TaskWriteKind::Create,
                 record,
@@ -1236,7 +1271,8 @@ impl Transaction {
         token: &TaskDocToken<T>,
         task_id: TaskId,
     ) -> pi_js::Result<DocDraft<T>> {
-        self.doc_erased(&token.definition, None, Some(task_id), None, None).await
+        self.doc_erased(&token.definition, None, Some(task_id), None, None)
+            .await
     }
 
     pub async fn doc_session_family<T: DeserializeOwned + Serialize, I: Serialize>(
@@ -1276,8 +1312,14 @@ impl Transaction {
         seed: I,
     ) -> pi_js::Result<DocDraft<T>> {
         let raw_seed = serde_json::to_value(seed).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
-        self.doc_erased(&token.definition, None, Some(task_id), Some(key.to_owned()), Some(raw_seed))
-            .await
+        self.doc_erased(
+            &token.definition,
+            None,
+            Some(task_id),
+            Some(key.to_owned()),
+            Some(raw_seed),
+        )
+        .await
     }
 
     pub async fn doc_erased<T>(
@@ -1348,7 +1390,9 @@ impl Transaction {
                             }),
                         });
                         guard.documents.push(Arc::clone(&entry));
-                        guard.latest_document_by_address.insert(resolved.id.clone(), Arc::clone(&entry));
+                        guard
+                            .latest_document_by_address
+                            .insert(resolved.id.clone(), Arc::clone(&entry));
                         (entry, AcquireMode::AcquireFresh(copied_seed, false))
                     }
                 }
@@ -1369,7 +1413,9 @@ impl Transaction {
                     }),
                 });
                 guard.documents.push(Arc::clone(&entry));
-                guard.latest_document_by_address.insert(resolved.id.clone(), Arc::clone(&entry));
+                guard
+                    .latest_document_by_address
+                    .insert(resolved.id.clone(), Arc::clone(&entry));
                 (entry, AcquireMode::AcquireFresh(copied_seed, skip_load))
             }
         };
@@ -1419,7 +1465,8 @@ impl Transaction {
     }
 
     pub async fn retire_doc_task<T>(&self, token: &TaskDocToken<T>, task_id: TaskId) -> pi_js::Result<()> {
-        self.retire_doc_erased(&token.definition, None, Some(task_id), None).await
+        self.retire_doc_erased(&token.definition, None, Some(task_id), None)
+            .await
     }
 
     pub async fn retire_doc_session_family<T, I>(
@@ -1547,11 +1594,7 @@ impl Transaction {
                 // If initialization is currently running concurrently, wait for it cleanly via get_or_init no-op:
                 let joined = latest
                     .init
-                    .get_or_init(|| async {
-                        Err(Arc::new(pi_js::Error::msg(
-                            "Document acquisition did not start",
-                        )))
-                    })
+                    .get_or_init(|| async { Err(Arc::new(pi_js::Error::msg("Document acquisition did not start"))) })
                     .await;
                 if let Err(err) = joined {
                     return Err(clone_pi_error(err));
@@ -1562,12 +1605,7 @@ impl Transaction {
         }
     }
 
-    async fn acquire(
-        &self,
-        entry: &Arc<DocumentEntry>,
-        seed: Option<JsonValue>,
-        skip_load: bool,
-    ) -> pi_js::Result<()> {
+    async fn acquire(&self, entry: &Arc<DocumentEntry>, seed: Option<JsonValue>, skip_load: bool) -> pi_js::Result<()> {
         let definition = lock(&entry.inner)
             .definition
             .clone()
@@ -1582,7 +1620,12 @@ impl Transaction {
         self.assert_open()?;
         if let Some(loaded) = loaded {
             check_record_scope(&definition, &loaded.record)?;
-            check_record_version(&definition, loaded.record.id, &loaded.record.kind, loaded.stored_version())?;
+            check_record_version(
+                &definition,
+                loaded.record.id,
+                &loaded.record.kind,
+                loaded.stored_version(),
+            )?;
             let change = loaded.tracker.begin_change();
             let mut inner = lock(&entry.inner);
             inner.target = Some(DocumentTarget::Loaded { document: loaded });
@@ -1802,8 +1845,8 @@ impl Transaction {
                     ops: Vec::new(),
                 });
             } else if let Some(StorageWrite::DocumentCopy { source, .. }) = &plan.content {
-                let cid = conversation_id
-                    .ok_or_else(|| pi_js::Error::msg("DocumentCopy missing resolved conversationId"))?;
+                let cid =
+                    conversation_id.ok_or_else(|| pi_js::Error::msg("DocumentCopy missing resolved conversationId"))?;
                 publications.push(DocumentCommitChange::DocumentCopy {
                     record,
                     conversation_id: cid,

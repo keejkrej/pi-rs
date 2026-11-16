@@ -106,9 +106,7 @@ impl SqliteRowExt for SqliteRow {
             Some(other) => Err(pi_js::Error::msg(format!(
                 "SQLite column '{column}' expected integer, got {other:?}"
             ))),
-            None => Err(pi_js::Error::msg(format!(
-                "SQLite row missing column '{column}'"
-            ))),
+            None => Err(pi_js::Error::msg(format!("SQLite row missing column '{column}'"))),
         }
     }
 
@@ -118,9 +116,7 @@ impl SqliteRowExt for SqliteRow {
             Some(other) => Err(pi_js::Error::msg(format!(
                 "SQLite column '{column}' expected text, got {other:?}"
             ))),
-            None => Err(pi_js::Error::msg(format!(
-                "SQLite row missing column '{column}'"
-            ))),
+            None => Err(pi_js::Error::msg(format!("SQLite row missing column '{column}'"))),
         }
     }
 
@@ -137,9 +133,8 @@ impl SqliteRowExt for SqliteRow {
 
 pub type BoxedSqliteFuture<'a, T> = Pin<Box<dyn Future<Output = pi_js::Result<T>> + Send + 'a>>;
 
-pub type BoxedSqliteTxCallback<'a> = Box<
-    dyn FnOnce(Arc<dyn SqliteExecutor>) -> BoxedSqliteFuture<'a, Box<dyn Any + Send>> + Send + 'a,
->;
+pub type BoxedSqliteTxCallback<'a> =
+    Box<dyn FnOnce(Arc<dyn SqliteExecutor>) -> BoxedSqliteFuture<'a, Box<dyn Any + Send>> + Send + 'a>;
 
 /// Asynchronous SQL operations shared by a database and its transaction handles.
 #[async_trait]
@@ -153,10 +148,8 @@ pub trait SqliteExecutor: Send + Sync {
 /// Minimal database facade required by `SqliteStorage`.
 #[async_trait]
 pub trait SqliteDatabase: SqliteExecutor {
-    async fn transaction_boxed<'a>(
-        &'a self,
-        callback: BoxedSqliteTxCallback<'a>,
-    ) -> pi_js::Result<Box<dyn Any + Send>>;
+    async fn transaction_boxed<'a>(&'a self, callback: BoxedSqliteTxCallback<'a>)
+    -> pi_js::Result<Box<dyn Any + Send>>;
 
     async fn close(&self) -> pi_js::Result<()>;
 }
@@ -177,9 +170,10 @@ pub trait SqliteDatabaseExt: SqliteDatabase {
             })
         });
         let boxed = self.transaction_boxed(boxed_cb).await?;
-        boxed.downcast::<T>().map(|b| *b).map_err(|_| {
-            pi_js::Error::msg("SQLite transaction result downcast failed")
-        })
+        boxed
+            .downcast::<T>()
+            .map(|b| *b)
+            .map_err(|_| pi_js::Error::msg("SQLite transaction result downcast failed"))
     }
 }
 

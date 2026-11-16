@@ -27,7 +27,9 @@ pub async fn prepare_fork_document_copies(
     child_conversation_id: ConversationId,
     context: &Context,
 ) -> pi_js::Result<Vec<ForkDocumentCopy>> {
-    let entry = storage.entry_in_conversation(parent_conversation_id, at, context.clone()).await?;
+    let entry = storage
+        .entry_in_conversation(parent_conversation_id, at, context.clone())
+        .await?;
     let Some(entry) = entry else {
         return Err(pi_js::Error::msg(format!(
             "Entry {at} is not visible from conversation {parent_conversation_id}"
@@ -79,7 +81,12 @@ async fn collect_copies(
     let mut cursor: Option<Cursor> = None;
     loop {
         let page = storage
-            .scan_documents(DocumentQuery { scope, at, kind: None }, SCAN_PAGE_SIZE, cursor, context.clone())
+            .scan_documents(
+                DocumentQuery { scope, at, kind: None },
+                SCAN_PAGE_SIZE,
+                cursor,
+                context.clone(),
+            )
             .await?;
         for source in page.items {
             if !matches!(source.scope, DocumentScope::Conversation { .. }) || source.fork != Some(policy) {

@@ -249,10 +249,12 @@ where
 {
     Ok(match next {
         NextTaskState::Running { checkpoint } => NextTaskState::Running {
-            checkpoint: serde_json::to_value(checkpoint).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?,
+            checkpoint: serde_json::to_value(checkpoint)
+                .map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?,
         },
         NextTaskState::Waiting { checkpoint, on, policy } => NextTaskState::Waiting {
-            checkpoint: serde_json::to_value(checkpoint).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?,
+            checkpoint: serde_json::to_value(checkpoint)
+                .map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?,
             on,
             policy,
         },
@@ -301,8 +303,8 @@ where
     S: DeserializeOwned,
     R: DeserializeOwned,
 {
-    let input: I = serde_json::from_value(record.input.clone())
-        .map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+    let input: I =
+        serde_json::from_value(record.input.clone()).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
     let state = match &record.state {
         crate::types::TaskState::Pending { checkpoint } => crate::types::TaskState::Pending {
             checkpoint: serde_json::from_value(checkpoint.clone())
@@ -351,19 +353,23 @@ pub fn decode_outcome<R: DeserializeOwned>(
             error: error.clone(),
             result: result
                 .as_ref()
-                .map(|r| serde_json::from_value(r.clone()).map_err(|err| pi_js::Error::js("TypeError", err.to_string())))
+                .map(|r| {
+                    serde_json::from_value(r.clone()).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))
+                })
                 .transpose()?,
         },
         crate::types::TaskOutcome::Aborted { reason, result } => crate::types::TaskOutcome::Aborted {
             reason: reason.clone(),
             result: result
                 .as_ref()
-                .map(|r| serde_json::from_value(r.clone()).map_err(|err| pi_js::Error::js("TypeError", err.to_string())))
+                .map(|r| {
+                    serde_json::from_value(r.clone()).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))
+                })
                 .transpose()?,
         },
-        crate::types::TaskOutcome::Orphaned { reason } => crate::types::TaskOutcome::Orphaned {
-            reason: reason.clone(),
-        },
+        crate::types::TaskOutcome::Orphaned { reason } => {
+            crate::types::TaskOutcome::Orphaned { reason: reason.clone() }
+        }
         crate::types::TaskOutcome::Faulted { error } => crate::types::TaskOutcome::Faulted { error: error.clone() },
     })
 }

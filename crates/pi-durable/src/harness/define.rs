@@ -50,7 +50,7 @@ pub fn hook<I, S, R, H: Send + Sync + 'static>(task: &Task<I, S, R, H>, handlers
 /// Erased-task variant of [`hook`].
 pub fn hook_any(task: &AnyTask, handlers: Arc<dyn Any + Send + Sync>) -> HookRegistration {
     HookRegistration {
-        task: task.name.clone(),
+        task: task.name().to_owned(),
         handlers,
     }
 }

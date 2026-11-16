@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use crate::testing::assertions::create_expect_assertions;
 use crate::testing::storage_conformance::create_storage_conformance;
-use crate::testing::types::{
-    StorageConformanceCase, StorageConformanceOptions, StorageConformanceProvider,
-};
+use crate::testing::types::{StorageConformanceCase, StorageConformanceOptions, StorageConformanceProvider};
 
 pub trait StorageConformanceRunner {
     fn run_suite(&self, name: &str, cases: Vec<StorageConformanceCase>);
@@ -21,20 +19,14 @@ pub fn register_storage_conformance(with_storage: StorageConformanceProvider) ->
 }
 
 /// Execute every storage conformance case sequentially for one storage backend.
-pub async fn run_storage_conformance(
-    _name: &str,
-    with_storage: StorageConformanceProvider,
-) {
+pub async fn run_storage_conformance(_name: &str, with_storage: StorageConformanceProvider) {
     for case in register_storage_conformance(with_storage) {
         case.run().await;
     }
 }
 
 /// Execute a specific conformance case matching `case_name`.
-pub async fn run_storage_conformance_case(
-    case_name: &str,
-    with_storage: StorageConformanceProvider,
-) {
+pub async fn run_storage_conformance_case(case_name: &str, with_storage: StorageConformanceProvider) {
     let cases = register_storage_conformance(with_storage);
     let found = cases
         .into_iter()

@@ -15,11 +15,10 @@ use crate::env::{CreateDirOptions, FileContent, FileError, FileErrorCode, FileKi
 use crate::ids::Seq;
 use crate::storage::memory::MemoryStorage;
 use crate::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent,
-    DocumentCreate, DocumentHistory, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord,
-    DocumentScopeKind, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject,
-    Page, Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord,
-    TaskId, TaskQuery, TaskStatus,
+    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate,
+    DocumentHistory, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScopeKind, EntryId, EntryLookup,
+    EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject, Page, Storage, StorageWrite, StoredDocument, SubmissionId,
+    SubmissionQuery, SubmissionRecord, TaskId, TaskQuery, TaskStatus,
 };
 
 const FORMAT_VERSION: i64 = 1;
@@ -248,15 +247,9 @@ impl JsonlStorage {
             .absolute_path(directory, &context)
             .await
             .map_err(|err| error_from_file("path resolution", err))?;
-        fs.create_dir(
-            &absolute,
-            Some(CreateDirOptions {
-                recursive: Some(true),
-            }),
-            &context,
-        )
-        .await
-        .map_err(|err| error_from_file("directory creation", err))?;
+        fs.create_dir(&absolute, Some(CreateDirOptions { recursive: Some(true) }), &context)
+            .await
+            .map_err(|err| error_from_file("directory creation", err))?;
         let main_path = fs
             .join_path(&[&absolute, MAIN_FILE], &context)
             .await
@@ -316,46 +309,29 @@ impl JsonlStorage {
         for write in writes {
             match write {
                 StorageWrite::Conversation { value } => {
-                    main_writes.push(MainOperation::Conversation {
-                        value: value.clone(),
-                    });
+                    main_writes.push(MainOperation::Conversation { value: value.clone() });
                 }
                 StorageWrite::Entry { value } => {
-                    main_writes.push(MainOperation::Entry {
-                        value: value.clone(),
-                    });
+                    main_writes.push(MainOperation::Entry { value: value.clone() });
                 }
                 StorageWrite::Submission { value } => {
-                    main_writes.push(MainOperation::Submission {
-                        value: value.clone(),
-                    });
+                    main_writes.push(MainOperation::Submission { value: value.clone() });
                 }
                 StorageWrite::DocumentRetire { id } => {
                     main_writes.push(MainOperation::DocumentRetire { id: *id });
                 }
                 StorageWrite::Task { value } => {
                     if value.state.status() == TaskStatus::Terminal {
-                        main_writes.push(MainOperation::Task {
-                            value: value.clone(),
-                        });
+                        main_writes.push(MainOperation::Task { value: value.clone() });
                     } else {
                         let ordinal = add_sidecar(
                             sidecar_file_name("task", value.id.as_i64()),
-                            SidecarPayload::Task {
-                                value: value.clone(),
-                            },
+                            SidecarPayload::Task { value: value.clone() },
                         );
-                        main_writes.push(MainOperation::TaskSidecar {
-                            id: value.id,
-                            ordinal,
-                        });
+                        main_writes.push(MainOperation::TaskSidecar { id: value.id, ordinal });
                     }
                 }
-                StorageWrite::DocumentCreate {
-                    record,
-                    version,
-                    value,
-                } => {
+                StorageWrite::DocumentCreate { record, version, value } => {
                     let ordinal = add_sidecar(
                         sidecar_file_name("doc", record.id.as_i64()),
                         SidecarPayload::Document {
@@ -411,11 +387,7 @@ impl JsonlStorage {
         })
     }
 
-    fn plan_reclamations(
-        &self,
-        writes: &[StorageWrite],
-        encoded: &EncodedCommit,
-    ) -> IndexMap<String, String> {
+    fn plan_reclamations(&self, writes: &[StorageWrite], encoded: &EncodedCommit) -> IndexMap<String, String> {
         let mut created_current_only_docs: IndexSet<DocumentId> = IndexSet::new();
         let mut retired_docs: IndexSet<DocumentId> = IndexSet::new();
         let mut base_docs: IndexSet<DocumentId> = IndexSet::new();
@@ -444,9 +416,8 @@ impl JsonlStorage {
         }
 
         let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let is_curr_only = |id: &DocumentId| {
-            guard.current_only_documents.contains(id) || created_current_only_docs.contains(id)
-        };
+        let is_curr_only =
+            |id: &DocumentId| guard.current_only_documents.contains(id) || created_current_only_docs.contains(id);
 
         let mut replacements = IndexMap::new();
         for id in &retired_docs {
@@ -551,14 +522,7 @@ impl JsonlStorage {
     }
 
     async fn recover(&self, context: &Context) -> pi_js::Result<()> {
-        let main = read_lines(
-            self.fs.as_ref(),
-            &self.main_path,
-            MAIN_FILE,
-            context,
-            parse_main_marker,
-        )
-        .await?;
+        let main = read_lines(self.fs.as_ref(), &self.main_path, MAIN_FILE, context, parse_main_marker).await?;
 
         let mut previous_seq = 0i64;
         for marker in &main.lines {
@@ -616,10 +580,9 @@ impl JsonlStorage {
                 if let Some((ps, po)) = previous
                     && (s < ps || (s == ps && o <= po))
                 {
-                    return Err(JsonlCorruptionError::new(format!(
-                        "Sidecar records are out of order in {file}"
-                    ))
-                    .into_error());
+                    return Err(
+                        JsonlCorruptionError::new(format!("Sidecar records are out of order in {file}")).into_error(),
+                    );
                 }
                 previous = Some((s, o));
                 record_by_key.insert(sidecar_key(file, line.value.seq, o)?, line.value.clone());
@@ -716,24 +679,16 @@ impl JsonlStorage {
             for operation in &marker.writes {
                 match operation {
                     MainOperation::Conversation { value } => {
-                        writes.push(StorageWrite::Conversation {
-                            value: value.clone(),
-                        });
+                        writes.push(StorageWrite::Conversation { value: value.clone() });
                     }
                     MainOperation::Entry { value } => {
-                        writes.push(StorageWrite::Entry {
-                            value: value.clone(),
-                        });
+                        writes.push(StorageWrite::Entry { value: value.clone() });
                     }
                     MainOperation::Submission { value } => {
-                        writes.push(StorageWrite::Submission {
-                            value: value.clone(),
-                        });
+                        writes.push(StorageWrite::Submission { value: value.clone() });
                     }
                     MainOperation::Task { value } => {
-                        writes.push(StorageWrite::Task {
-                            value: value.clone(),
-                        });
+                        writes.push(StorageWrite::Task { value: value.clone() });
                     }
                     MainOperation::DocumentRetire { id } => {
                         writes.push(StorageWrite::DocumentRetire { id: *id });
@@ -741,14 +696,7 @@ impl JsonlStorage {
                     MainOperation::TaskSidecar { id, ordinal } => {
                         let optional = terminal_tasks.contains(id);
                         let file = sidecar_file_name("task", id.as_i64());
-                        let record = confirm_record(
-                            marker,
-                            *ordinal,
-                            &file,
-                            &record_by_key,
-                            &mut confirmed,
-                            optional,
-                        )?;
+                        let record = confirm_record(marker, *ordinal, &file, &record_by_key, &mut confirmed, optional)?;
                         if let Some(rec) = record {
                             let SidecarPayload::Task { value } = &rec.payload else {
                                 return Err(JsonlCorruptionError::new(format!(
@@ -765,9 +713,7 @@ impl JsonlStorage {
                                 .into_error());
                             }
                             if !optional {
-                                writes.push(StorageWrite::Task {
-                                    value: value.clone(),
-                                });
+                                writes.push(StorageWrite::Task { value: value.clone() });
                             }
                         }
                     }
@@ -776,14 +722,8 @@ impl JsonlStorage {
                         let reclaimed = retired_current_only_documents.contains(&id)
                             || is_before_latest_base(id, marker.seq, *ordinal);
                         let file = sidecar_file_name("doc", id.as_i64());
-                        let rec_opt = confirm_record(
-                            marker,
-                            *ordinal,
-                            &file,
-                            &record_by_key,
-                            &mut confirmed,
-                            reclaimed,
-                        )?;
+                        let rec_opt =
+                            confirm_record(marker, *ordinal, &file, &record_by_key, &mut confirmed, reclaimed)?;
                         let content = match rec_opt {
                             None => None,
                             Some(rec) => match &rec.payload {
@@ -822,14 +762,8 @@ impl JsonlStorage {
                         let reclaimed = retired_current_only_documents.contains(id)
                             || is_before_latest_base(*id, marker.seq, *ordinal);
                         let file = sidecar_file_name("doc", id.as_i64());
-                        let rec_opt = confirm_record(
-                            marker,
-                            *ordinal,
-                            &file,
-                            &record_by_key,
-                            &mut confirmed,
-                            reclaimed,
-                        )?;
+                        let rec_opt =
+                            confirm_record(marker, *ordinal, &file, &record_by_key, &mut confirmed, reclaimed)?;
                         let content = match rec_opt {
                             None => None,
                             Some(rec) => match &rec.payload {
@@ -852,22 +786,13 @@ impl JsonlStorage {
                     }
                 }
             }
-            let mut prepared = self
-                .memory
-                .prepare_commit(&writes, Some(marker.seq))
-                .map_err(|err| {
-                    JsonlCorruptionError::with_cause(
-                        format!("Invalid committed state at sequence {}", marker.seq),
-                        err,
-                    )
+            let mut prepared = self.memory.prepare_commit(&writes, Some(marker.seq)).map_err(|err| {
+                JsonlCorruptionError::with_cause(format!("Invalid committed state at sequence {}", marker.seq), err)
                     .into_error()
-                })?;
+            })?;
             prepared.apply().map_err(|err| {
-                JsonlCorruptionError::with_cause(
-                    format!("Invalid committed state at sequence {}", marker.seq),
-                    err,
-                )
-                .into_error()
+                JsonlCorruptionError::with_cause(format!("Invalid committed state at sequence {}", marker.seq), err)
+                    .into_error()
             })?;
         }
 
@@ -915,9 +840,7 @@ impl JsonlStorage {
                             confirmed_lines
                                 .iter()
                                 .copied()
-                                .filter(|line| {
-                                    !is_before_latest_base(doc_id, line.value.seq, line.value.ordinal)
-                                })
+                                .filter(|line| !is_before_latest_base(doc_id, line.value.seq, line.value.ordinal))
                                 .collect(),
                         );
                     }
@@ -965,11 +888,7 @@ impl Storage for JsonlStorage {
         }
 
         for (file, content, path) in &sidecars {
-            if let Err(err) = self
-                .fs
-                .append_file(path, FileContent::Text(content), &context)
-                .await
-            {
+            if let Err(err) = self.fs.append_file(path, FileContent::Text(content), &context).await {
                 return Err(self.poison(error_from_file(format!("append to {file}"), err)));
             }
         }
@@ -998,11 +917,7 @@ impl Storage for JsonlStorage {
         self.memory.mint_id().await
     }
 
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<Option<ConversationRecord>> {
+    async fn conversation(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<ConversationRecord>> {
         self.assert_usable()?;
         self.memory.conversation(id, context).await
     }
@@ -1015,9 +930,7 @@ impl Storage for JsonlStorage {
         context: Context,
     ) -> pi_js::Result<Page<ConversationRecord, Cursor>> {
         self.assert_usable()?;
-        self.memory
-            .scan_conversations(query, limit, cursor, context)
-            .await
+        self.memory.scan_conversations(query, limit, cursor, context).await
     }
 
     async fn entry(&self, id: EntryId, context: Context) -> pi_js::Result<Option<EntryLookup>> {
@@ -1032,9 +945,7 @@ impl Storage for JsonlStorage {
         context: Context,
     ) -> pi_js::Result<Option<EntryLookup>> {
         self.assert_usable()?;
-        self.memory
-            .entry_in_conversation(conversation_id, id, context)
-            .await
+        self.memory.entry_in_conversation(conversation_id, id, context).await
     }
 
     async fn find_latest_head_marker(
@@ -1076,11 +987,7 @@ impl Storage for JsonlStorage {
         self.memory.scan_tasks(query, limit, cursor, context).await
     }
 
-    async fn submission(
-        &self,
-        id: SubmissionId,
-        context: Context,
-    ) -> pi_js::Result<Option<SubmissionRecord>> {
+    async fn submission(&self, id: SubmissionId, context: Context) -> pi_js::Result<Option<SubmissionRecord>> {
         self.assert_usable()?;
         self.memory.submission(id, context).await
     }
@@ -1093,9 +1000,7 @@ impl Storage for JsonlStorage {
         context: Context,
     ) -> pi_js::Result<Page<SubmissionRecord, Cursor>> {
         self.assert_usable()?;
-        self.memory
-            .scan_submissions(query, limit, cursor, context)
-            .await
+        self.memory.scan_submissions(query, limit, cursor, context).await
     }
 
     async fn submission_by_request(
@@ -1185,8 +1090,7 @@ fn is_reclaim_file_name(name: &str) -> bool {
 }
 
 fn is_current_only_create(record: &DocumentCreate) -> bool {
-    record.scope.kind() != DocumentScopeKind::Conversation
-        || record.history == Some(DocumentHistory::Latest)
+    record.scope.kind() != DocumentScopeKind::Conversation || record.history == Some(DocumentHistory::Latest)
 }
 
 fn sidecar_key(file: &str, seq: Seq, ordinal: usize) -> pi_js::Result<String> {
@@ -1245,48 +1149,41 @@ fn validate_main_operation(val: JsonValue, description: &str) -> pi_js::Result<M
                 .and_then(as_safe_int)
                 .is_some();
             if !valid_id {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid {op_type} write in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid {op_type} write in {description}")).into_error(),
+                );
             }
         }
         "task" => {
-            let valid_task = obj
-                .get("value")
-                .and_then(JsonValue::as_object)
-                .is_some_and(|task_obj| {
-                    task_obj.get("id").and_then(as_safe_int).is_some()
-                        && task_obj
-                            .get("state")
-                            .and_then(JsonValue::as_object)
-                            .and_then(|s| s.get("status"))
-                            .and_then(JsonValue::as_str)
-                            == Some("terminal")
-                });
+            let valid_task = obj.get("value").and_then(JsonValue::as_object).is_some_and(|task_obj| {
+                task_obj.get("id").and_then(as_safe_int).is_some()
+                    && task_obj
+                        .get("state")
+                        .and_then(JsonValue::as_object)
+                        .and_then(|s| s.get("status"))
+                        .and_then(JsonValue::as_str)
+                        == Some("terminal")
+            });
             if !valid_task {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid terminal task write in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid terminal task write in {description}")).into_error(),
+                );
             }
         }
         "document.retire" => {
             if obj.get("id").and_then(as_safe_int).is_none() {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid document retirement in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid document retirement in {description}")).into_error(),
+                );
             }
         }
         "task.sidecar" => {
             let valid = obj.get("id").and_then(as_safe_int).is_some()
                 && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
             if !valid {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid task sidecar write in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid task sidecar write in {description}")).into_error(),
+                );
             }
         }
         "document.create" => {
@@ -1298,27 +1195,22 @@ fn validate_main_operation(val: JsonValue, description: &str) -> pi_js::Result<M
                 .is_some()
                 && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
             if !valid {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid document creation in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid document creation in {description}")).into_error(),
+                );
             }
         }
         "document.change" => {
             let valid = obj.get("id").and_then(as_safe_int).is_some()
                 && obj.get("ordinal").and_then(as_safe_int).is_some_and(|o| o >= 0);
             if !valid {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid document change in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid document change in {description}")).into_error(),
+                );
             }
         }
         _ => {
-            return Err(JsonlCorruptionError::new(format!(
-                "Unknown write type in {description}"
-            ))
-            .into_error());
+            return Err(JsonlCorruptionError::new(format!("Unknown write type in {description}")).into_error());
         }
     }
 
@@ -1335,9 +1227,7 @@ fn parse_main_marker(text: &str, line: usize) -> pi_js::Result<MainMarker> {
     let description = format!("{MAIN_FILE} line {line}");
     let val = parse_json_value(text, &description)?;
     let Some(obj) = val.as_object() else {
-        return Err(
-            JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error(),
-        );
+        return Err(JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error());
     };
     let seq = obj.get("seq").and_then(as_safe_int);
     let writes_arr = obj.get("writes").and_then(JsonValue::as_array);
@@ -1346,20 +1236,14 @@ fn parse_main_marker(text: &str, line: usize) -> pi_js::Result<MainMarker> {
         || seq.is_none_or(|s| s < 1)
         || writes_arr.is_none()
     {
-        return Err(
-            JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error(),
-        );
+        return Err(JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error());
     }
 
     let Some(seq) = seq else {
-        return Err(
-            JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error(),
-        );
+        return Err(JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error());
     };
     let Some(raw_writes) = writes_arr else {
-        return Err(
-            JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error(),
-        );
+        return Err(JsonlCorruptionError::new(format!("Invalid commit marker in {description}")).into_error());
     };
 
     let mut writes = Vec::with_capacity(raw_writes.len());
@@ -1377,24 +1261,15 @@ fn parse_main_marker(text: &str, line: usize) -> pi_js::Result<MainMarker> {
 
 fn validate_document_content(val: &JsonValue, description: &str) -> pi_js::Result<()> {
     let Some(obj) = val.as_object() else {
-        return Err(JsonlCorruptionError::new(format!(
-            "Invalid document content in {description}"
-        ))
-        .into_error());
+        return Err(JsonlCorruptionError::new(format!("Invalid document content in {description}")).into_error());
     };
     if obj.get("version").and_then(as_safe_int).is_none_or(|v| v < 1) {
-        return Err(JsonlCorruptionError::new(format!(
-            "Invalid document content in {description}"
-        ))
-        .into_error());
+        return Err(JsonlCorruptionError::new(format!("Invalid document content in {description}")).into_error());
     }
     match obj.get("kind").and_then(JsonValue::as_str) {
         Some("base") if obj.get("value").is_some_and(JsonValue::is_object) => Ok(()),
         Some("delta") if obj.get("ops").is_some_and(JsonValue::is_array) => Ok(()),
-        _ => Err(JsonlCorruptionError::new(format!(
-            "Invalid document content in {description}"
-        ))
-        .into_error()),
+        _ => Err(JsonlCorruptionError::new(format!("Invalid document content in {description}")).into_error()),
     }
 }
 
@@ -1402,10 +1277,7 @@ fn parse_sidecar_record(text: &str, file: &str, line: usize) -> pi_js::Result<Si
     let description = format!("{file} line {line}");
     let val = parse_json_value(text, &description)?;
     let Some(obj) = val.as_object() else {
-        return Err(JsonlCorruptionError::new(format!(
-            "Invalid sidecar record in {description}"
-        ))
-        .into_error());
+        return Err(JsonlCorruptionError::new(format!("Invalid sidecar record in {description}")).into_error());
     };
     let seq = obj.get("seq").and_then(as_safe_int);
     let ordinal = obj.get("ordinal").and_then(as_safe_int);
@@ -1418,58 +1290,45 @@ fn parse_sidecar_record(text: &str, file: &str, line: usize) -> pi_js::Result<Si
         || ordinal.is_none_or(|o| o < 0)
         || payload_type.is_none()
     {
-        return Err(JsonlCorruptionError::new(format!(
-            "Invalid sidecar record in {description}"
-        ))
-        .into_error());
+        return Err(JsonlCorruptionError::new(format!("Invalid sidecar record in {description}")).into_error());
     }
 
     let Some(payload) = payload_obj else {
-        return Err(JsonlCorruptionError::new(format!(
-            "Invalid sidecar record in {description}"
-        ))
-        .into_error());
+        return Err(JsonlCorruptionError::new(format!("Invalid sidecar record in {description}")).into_error());
     };
     match payload_type {
         Some("task") => {
-            let valid = payload
-                .get("value")
-                .and_then(JsonValue::as_object)
-                .is_some_and(|t| {
-                    t.get("id").and_then(as_safe_int).is_some()
-                        && t.get("state")
-                            .and_then(JsonValue::as_object)
-                            .and_then(|s| s.get("status"))
-                            .and_then(JsonValue::as_str)
-                            .is_some_and(|st| st != "terminal")
-                });
+            let valid = payload.get("value").and_then(JsonValue::as_object).is_some_and(|t| {
+                t.get("id").and_then(as_safe_int).is_some()
+                    && t.get("state")
+                        .and_then(JsonValue::as_object)
+                        .and_then(|s| s.get("status"))
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|st| st != "terminal")
+            });
             if !valid {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid live task record in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid live task record in {description}")).into_error(),
+                );
             }
         }
         Some("document") => {
             if payload.get("id").and_then(as_safe_int).is_none() {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid document record in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid document record in {description}")).into_error(),
+                );
             }
             let Some(content) = payload.get("content") else {
-                return Err(JsonlCorruptionError::new(format!(
-                    "Invalid document content in {description}"
-                ))
-                .into_error());
+                return Err(
+                    JsonlCorruptionError::new(format!("Invalid document content in {description}")).into_error(),
+                );
             };
             validate_document_content(content, &description)?;
         }
         _ => {
-            return Err(JsonlCorruptionError::new(format!(
-                "Unknown sidecar record type in {description}"
-            ))
-            .into_error());
+            return Err(
+                JsonlCorruptionError::new(format!("Unknown sidecar record type in {description}")).into_error(),
+            );
         }
     }
 

@@ -3,9 +3,7 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use crate::storage::sqlite::database::{
-    SqliteDatabase, SqliteDatabaseExt, SqliteRowExt, SqliteValue,
-};
+use crate::storage::sqlite::database::{SqliteDatabase, SqliteDatabaseExt, SqliteRowExt, SqliteValue};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqliteMigration {
@@ -21,10 +19,7 @@ impl SqliteMigration {
         }
     }
 
-    pub fn new(
-        version: i64,
-        statements: impl IntoIterator<Item = impl Into<Cow<'static, str>>>,
-    ) -> Self {
+    pub fn new(version: i64, statements: impl IntoIterator<Item = impl Into<Cow<'static, str>>>) -> Self {
         Self {
             version,
             statements: statements.into_iter().map(Into::into).collect(),
@@ -151,9 +146,7 @@ pub async fn apply_sqlite_migrations(
                 let row = transaction
                     .get("SELECT version FROM durable_schema WHERE singleton = 1", &[])
                     .await?
-                    .ok_or_else(|| {
-                        pi_js::Error::msg("Durable SQLite schema metadata is missing")
-                    })?;
+                    .ok_or_else(|| pi_js::Error::msg("Durable SQLite schema metadata is missing"))?;
                 let db_version = row.get_i64("version")?;
                 let current_version = migrations.last().map_or(0, |m| m.version);
                 if db_version > current_version {

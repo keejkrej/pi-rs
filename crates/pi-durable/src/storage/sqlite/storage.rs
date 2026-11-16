@@ -6,23 +6,21 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use pi_chord::Context;
 use pi_chord::delta::{Op, apply_immutable_batches};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use tokio::sync::{Notify, OnceCell};
 
 use crate::errors::StorageRejected;
 use crate::ids::Seq;
-use crate::storage::sqlite::database::{
-    SqliteDatabase, SqliteDatabaseExt, SqliteExecutor, SqliteRowExt, SqliteValue,
-};
+use crate::storage::sqlite::database::{SqliteDatabase, SqliteDatabaseExt, SqliteExecutor, SqliteRowExt, SqliteValue};
 use crate::storage::sqlite::migrations::apply_sqlite_migrations;
 use crate::types::{
     ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent,
-    DocumentCopySource, DocumentCreate, DocumentHistory, DocumentId, DocumentPoint, DocumentQuery,
-    DocumentRecord, DocumentScope, DocumentScopeKind, EntryId, EntryLookup, EntryQuery,
-    EntryRecord, ErasedTaskRecord, JsonObject, Page, Storage, StorageWrite, StoredDocument,
-    SubmissionId, SubmissionQuery, SubmissionRecord, TaskId, TaskQuery, TaskStatus,
+    DocumentCopySource, DocumentCreate, DocumentHistory, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord,
+    DocumentScope, DocumentScopeKind, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject,
+    Page, Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord, TaskId, TaskQuery,
+    TaskStatus,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,9 +107,9 @@ impl SqliteStorage {
                 .await?
                 .ok_or_else(|| pi_js::Error::msg("Durable SQLite metadata is missing"))?;
             let next_id_str = metadata.get_str("next_id")?;
-            let next_id = next_id_str.parse::<i64>().map_err(|err| {
-                pi_js::Error::msg(format!("Invalid durable_metadata.next_id '{next_id_str}': {err}"))
-            })?;
+            let next_id = next_id_str
+                .parse::<i64>()
+                .map_err(|err| pi_js::Error::msg(format!("Invalid durable_metadata.next_id '{next_id_str}': {err}")))?;
             Ok(next_id)
         }
         .await;
@@ -178,9 +176,9 @@ impl SqliteStorage {
     ) -> pi_js::Result<Option<EntryLookup>> {
         let mut conv: Option<ConversationRecord> = None;
         if let Some(cid) = conversation_id {
-            let loaded = read_conversation(self.db.as_ref(), cid).await?.ok_or_else(|| {
-                pi_js::Error::msg(format!("Unknown conversation: {cid}"))
-            })?;
+            let loaded = read_conversation(self.db.as_ref(), cid)
+                .await?
+                .ok_or_else(|| pi_js::Error::msg(format!("Unknown conversation: {cid}")))?;
             conv = Some(loaded);
         }
 
@@ -207,10 +205,7 @@ impl SqliteStorage {
                 conversation = read_conversation(self.db.as_ref(), parent.conversation_id)
                     .await?
                     .ok_or_else(|| {
-                        pi_js::Error::msg(format!(
-                            "Unknown ancestor conversation: {}",
-                            parent.conversation_id
-                        ))
+                        pi_js::Error::msg(format!("Unknown ancestor conversation: {}", parent.conversation_id))
                     })?;
             }
             if entry.id.as_i64() > upper_entry_id {
@@ -264,10 +259,7 @@ impl SqliteStorage {
             conversation = read_conversation(self.db.as_ref(), parent.conversation_id)
                 .await?
                 .ok_or_else(|| {
-                    pi_js::Error::msg(format!(
-                        "Unknown ancestor conversation: {}",
-                        parent.conversation_id
-                    ))
+                    pi_js::Error::msg(format!("Unknown ancestor conversation: {}", parent.conversation_id))
                 })?;
         }
     }
@@ -280,9 +272,7 @@ impl SqliteStorage {
     ) -> pi_js::Result<Page<EntryRecord, Cursor>> {
         let mut conversation = read_conversation(self.db.as_ref(), query.conversation_id)
             .await?
-            .ok_or_else(|| {
-                pi_js::Error::msg(format!("Unknown conversation: {}", query.conversation_id))
-            })?;
+            .ok_or_else(|| pi_js::Error::msg(format!("Unknown conversation: {}", query.conversation_id)))?;
         let after = cursor_id(cursor.as_ref())?;
         let mut upper = query.max_entry_id.map(|id| id.as_i64());
         if let Some(a) = after {
@@ -334,10 +324,7 @@ impl SqliteStorage {
             conversation = read_conversation(self.db.as_ref(), parent.conversation_id)
                 .await?
                 .ok_or_else(|| {
-                    pi_js::Error::msg(format!(
-                        "Unknown ancestor conversation: {}",
-                        parent.conversation_id
-                    ))
+                    pi_js::Error::msg(format!("Unknown ancestor conversation: {}", parent.conversation_id))
                 })?;
         }
         Ok(build_page(values, limit, |e| e.id.as_i64()))
@@ -363,12 +350,11 @@ impl Storage for SqliteStorage {
                             &[],
                         )
                         .await?
-                        .ok_or_else(|| {
-                            pi_js::Error::msg("Durable SQLite metadata is missing")
-                        })?;
-                    let meta_next_id = metadata.get_str("next_id")?.parse::<i64>().map_err(|err| {
-                        pi_js::Error::msg(format!("Invalid durable_metadata.next_id: {err}"))
-                    })?;
+                        .ok_or_else(|| pi_js::Error::msg("Durable SQLite metadata is missing"))?;
+                    let meta_next_id = metadata
+                        .get_str("next_id")?
+                        .parse::<i64>()
+                        .map_err(|err| pi_js::Error::msg(format!("Invalid durable_metadata.next_id: {err}")))?;
                     let committed_seq = Seq::new_unchecked(metadata.get_i64("next_seq")?);
 
                     check_global_ids(transaction.as_ref(), &writes).await?;
@@ -377,8 +363,7 @@ impl Storage for SqliteStorage {
                     for write in &writes {
                         apply_table_write(transaction.as_ref(), write, committed_seq).await?;
                     }
-                    apply_document_actions(transaction.as_ref(), &document_actions, committed_seq)
-                        .await?;
+                    apply_document_actions(transaction.as_ref(), &document_actions, committed_seq).await?;
 
                     let updated_next_id = meta_next_id.max(candidate_next_id).to_string();
                     transaction
@@ -413,11 +398,7 @@ impl Storage for SqliteStorage {
         Ok(id)
     }
 
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        _context: Context,
-    ) -> pi_js::Result<Option<ConversationRecord>> {
+    async fn conversation(&self, id: ConversationId, _context: Context) -> pi_js::Result<Option<ConversationRecord>> {
         self.assert_open()?;
         read_conversation(self.db.as_ref(), id).await
     }
@@ -464,8 +445,7 @@ impl Storage for SqliteStorage {
         id: EntryId,
         _context: Context,
     ) -> pi_js::Result<Option<EntryLookup>> {
-        self.admit_read(|| self.read_entry(Some(conversation_id), id))
-            .await
+        self.admit_read(|| self.read_entry(Some(conversation_id), id)).await
     }
 
     async fn find_latest_head_marker(
@@ -485,18 +465,14 @@ impl Storage for SqliteStorage {
         cursor: Option<Cursor>,
         _context: Context,
     ) -> pi_js::Result<Page<EntryRecord, Cursor>> {
-        self.admit_read(|| self.read_entries(query, limit, cursor))
-            .await
+        self.admit_read(|| self.read_entries(query, limit, cursor)).await
     }
 
     async fn task(&self, id: TaskId, _context: Context) -> pi_js::Result<Option<ErasedTaskRecord>> {
         self.assert_open()?;
         let row = self
             .db
-            .get(
-                "SELECT record FROM tasks WHERE id = ?",
-                &[SqliteValue::from(id)],
-            )
+            .get("SELECT record FROM tasks WHERE id = ?", &[SqliteValue::from(id)])
             .await?;
         match row {
             Some(r) => Ok(Some(parse_json(r.get_str("record")?)?)),
@@ -548,18 +524,11 @@ impl Storage for SqliteStorage {
         Ok(build_page(records, limit, |t| t.id.as_i64()))
     }
 
-    async fn submission(
-        &self,
-        id: SubmissionId,
-        _context: Context,
-    ) -> pi_js::Result<Option<SubmissionRecord>> {
+    async fn submission(&self, id: SubmissionId, _context: Context) -> pi_js::Result<Option<SubmissionRecord>> {
         self.assert_open()?;
         let row = self
             .db
-            .get(
-                "SELECT record FROM submissions WHERE id = ?",
-                &[SqliteValue::from(id)],
-            )
+            .get("SELECT record FROM submissions WHERE id = ?", &[SqliteValue::from(id)])
             .await?;
         match row {
             Some(r) => Ok(Some(parse_json(r.get_str("record")?)?)),
@@ -744,8 +713,7 @@ impl Storage for SqliteStorage {
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> pi_js::Result<T> {
-    serde_json::from_str::<T>(value)
-        .map_err(|err| pi_js::Error::msg(format!("Failed to parse stored JSON: {err}")))
+    serde_json::from_str::<T>(value).map_err(|err| pi_js::Error::msg(format!("Failed to parse stored JSON: {err}")))
 }
 
 fn encode_json<T: Serialize>(value: &T) -> pi_js::Result<String> {
@@ -789,10 +757,7 @@ fn build_page<T>(mut values: Vec<T>, limit: usize, id_of: impl Fn(&T) -> i64) ->
         map.insert("after".to_string(), JsonValue::from(id_of(last)));
         map
     });
-    Page {
-        items: values,
-        next,
-    }
+    Page { items: values, next }
 }
 
 fn scope_columns(scope: &DocumentScope) -> (&'static str, i64) {
@@ -811,11 +776,7 @@ struct AddressParts {
     key_value: String,
 }
 
-fn address_parts(
-    kind: &str,
-    scope: &DocumentScope,
-    key: Option<&str>,
-) -> pi_js::Result<AddressParts> {
+fn address_parts(kind: &str, scope: &DocumentScope, key: Option<&str>) -> pi_js::Result<AddressParts> {
     let (scope_kind, owner_id) = scope_columns(scope);
     Ok(AddressParts {
         kind: encode_indexed_string(kind)?,
@@ -842,15 +803,13 @@ fn is_alive_at(record: &DocumentRecord, at: DocumentPoint) -> bool {
         DocumentPoint::Current => record.retired_at.is_none(),
         DocumentPoint::At(seq) => {
             let s = seq.as_i64();
-            record.created_at.as_i64() <= s
-                && record.retired_at.is_none_or(|retired| s < retired.as_i64())
+            record.created_at.as_i64() <= s && record.retired_at.is_none_or(|retired| s < retired.as_i64())
         }
     }
 }
 
 fn is_current_only(record: &DocumentRecord) -> bool {
-    record.scope.kind() != DocumentScopeKind::Conversation
-        || record.history == Some(DocumentHistory::Latest)
+    record.scope.kind() != DocumentScopeKind::Conversation || record.history == Some(DocumentHistory::Latest)
 }
 
 fn write_id(write: &StorageWrite) -> Option<i64> {
@@ -859,8 +818,9 @@ fn write_id(write: &StorageWrite) -> Option<i64> {
         StorageWrite::Entry { value } => Some(value.id.as_i64()),
         StorageWrite::Task { value } => Some(value.id.as_i64()),
         StorageWrite::Submission { value } => Some(value.id.as_i64()),
-        StorageWrite::DocumentCreate { record, .. }
-        | StorageWrite::DocumentCopy { record, .. } => Some(record.id.as_i64()),
+        StorageWrite::DocumentCreate { record, .. } | StorageWrite::DocumentCopy { record, .. } => {
+            Some(record.id.as_i64())
+        }
         StorageWrite::DocumentChange { .. } | StorageWrite::DocumentRetire { .. } => None,
     }
 }
@@ -906,10 +866,7 @@ async fn materialize_document(
     at: DocumentPoint,
 ) -> pi_js::Result<Option<StoredDocument>> {
     let Some(row) = executor
-        .get(
-            "SELECT record FROM documents WHERE id = ?",
-            &[SqliteValue::from(id)],
-        )
+        .get("SELECT record FROM documents WHERE id = ?", &[SqliteValue::from(id)])
         .await?
     else {
         return Ok(None);
@@ -982,10 +939,7 @@ async fn materialize_document(
     }))
 }
 
-async fn check_global_ids(
-    executor: &dyn SqliteExecutor,
-    writes: &[StorageWrite],
-) -> pi_js::Result<()> {
+async fn check_global_ids(executor: &dyn SqliteExecutor, writes: &[StorageWrite]) -> pi_js::Result<()> {
     let mut claimed: IndexMap<i64, TableName> = IndexMap::new();
     for write in writes {
         let (id, table) = match write {
@@ -993,8 +947,9 @@ async fn check_global_ids(
             StorageWrite::Entry { value } => (value.id.as_i64(), TableName::Entry),
             StorageWrite::Task { value } => (value.id.as_i64(), TableName::Task),
             StorageWrite::Submission { value } => (value.id.as_i64(), TableName::Submission),
-            StorageWrite::DocumentCreate { record, .. }
-            | StorageWrite::DocumentCopy { record, .. } => (record.id.as_i64(), TableName::Document),
+            StorageWrite::DocumentCreate { record, .. } | StorageWrite::DocumentCopy { record, .. } => {
+                (record.id.as_i64(), TableName::Document)
+            }
             StorageWrite::DocumentChange { .. } | StorageWrite::DocumentRetire { .. } => continue,
         };
 
@@ -1010,36 +965,23 @@ async fn check_global_ids(
         };
         let earlier = claimed.get(&id).copied();
 
-        if matches!(
-            table,
-            TableName::Conversation | TableName::Entry | TableName::Document
-        ) {
+        if matches!(table, TableName::Conversation | TableName::Entry | TableName::Document) {
             if let Some(ex) = existing {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} already belongs to {}",
-                    ex.as_str()
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} already belongs to {}", ex.as_str())));
             }
             if earlier.is_some() {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} is written more than once"
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} is written more than once")));
             }
         } else {
             if let Some(ex) = existing
                 && ex != table
             {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} already belongs to {}",
-                    ex.as_str()
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} already belongs to {}", ex.as_str())));
             }
             if let Some(ea) = earlier
                 && ea != table
             {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} is written as two record types"
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} is written as two record types")));
             }
         }
         claimed.insert(id, table);
@@ -1051,11 +993,7 @@ fn prepare_document_actions(writes: &[StorageWrite]) -> pi_js::Result<IndexMap<D
     let mut actions: IndexMap<DocumentId, DocumentAction> = IndexMap::new();
     for write in writes {
         match write {
-            StorageWrite::DocumentCreate {
-                record,
-                version,
-                value,
-            } => {
+            StorageWrite::DocumentCreate { record, version, value } => {
                 let action = actions.entry(record.id).or_insert(DocumentAction {
                     create: None,
                     copy: None,
@@ -1112,9 +1050,7 @@ fn prepare_document_actions(writes: &[StorageWrite]) -> pi_js::Result<IndexMap<D
                     retire: false,
                 });
                 if action.retire {
-                    return Err(pi_js::Error::msg(format!(
-                        "Document {id} is retired more than once"
-                    )));
+                    return Err(pi_js::Error::msg(format!("Document {id} is retired more than once")));
                 }
                 action.retire = true;
             }
@@ -1133,16 +1069,12 @@ async fn check_document_actions(
         if let Some(copy) = action.copy
             && actions.contains_key(&copy.id)
         {
-            return Err(StorageRejected::new(format!(
-                "Document copy {id} source is changed in the copy batch"
-            ))
-            .into_error());
+            return Err(
+                StorageRejected::new(format!("Document copy {id} source is changed in the copy batch")).into_error(),
+            );
         }
         let row = executor
-            .get(
-                "SELECT record FROM documents WHERE id = ?",
-                &[SqliteValue::from(id)],
-            )
+            .get("SELECT record FROM documents WHERE id = ?", &[SqliteValue::from(id)])
             .await?;
         let existing: Option<DocumentRecord> = match row {
             Some(r) => Some(parse_json(r.get_str("record")?)?),
@@ -1167,9 +1099,7 @@ async fn check_document_actions(
                 )
                 .await?;
             let Some(prev_row) = previous else {
-                return Err(pi_js::Error::msg(format!(
-                    "Document {id} delta has no base"
-                )));
+                return Err(pi_js::Error::msg(format!("Document {id} delta has no base")));
             };
             if prev_row.get_i64("version")? != *version {
                 return Err(pi_js::Error::msg(format!(
@@ -1193,13 +1123,7 @@ async fn check_document_actions(
             None => {
                 let existing_live = match &action.create {
                     Some(create) => {
-                        current_document_id(
-                            executor,
-                            &create.kind,
-                            &create.scope,
-                            create.key.as_deref(),
-                        )
-                        .await?
+                        current_document_id(executor, &create.kind, &create.scope, create.key.as_deref()).await?
                     }
                     None => {
                         let Some(ex) = existing.as_ref() else {
@@ -1223,9 +1147,7 @@ async fn check_document_actions(
 
     for live in live_counts.values() {
         if *live > 1 {
-            return Err(pi_js::Error::msg(
-                "Document address already has a current incarnation",
-            ));
+            return Err(pi_js::Error::msg("Document address already has a current incarnation"));
         }
     }
     Ok(())
@@ -1258,27 +1180,16 @@ async fn current_document_id(
     }
 }
 
-async fn claim_id(
-    executor: &dyn SqliteExecutor,
-    id: i64,
-    table: TableName,
-) -> pi_js::Result<()> {
+async fn claim_id(executor: &dyn SqliteExecutor, id: i64, table: TableName) -> pi_js::Result<()> {
     executor
         .run(
             "INSERT OR IGNORE INTO record_ids (id, record_type) VALUES (?, ?)",
-            &[
-                SqliteValue::Integer(id),
-                SqliteValue::Text(table.as_str().to_string()),
-            ],
+            &[SqliteValue::Integer(id), SqliteValue::Text(table.as_str().to_string())],
         )
         .await
 }
 
-async fn apply_table_write(
-    executor: &dyn SqliteExecutor,
-    write: &StorageWrite,
-    seq: Seq,
-) -> pi_js::Result<()> {
+async fn apply_table_write(executor: &dyn SqliteExecutor, write: &StorageWrite, seq: Seq) -> pi_js::Result<()> {
     match write {
         StorageWrite::Conversation { value } => {
             claim_id(executor, value.id.as_i64(), TableName::Conversation).await?;
@@ -1398,10 +1309,7 @@ async fn apply_document_actions(
                 .await?;
         } else {
             let row = executor
-                .get(
-                    "SELECT record FROM documents WHERE id = ?",
-                    &[SqliteValue::from(id)],
-                )
+                .get("SELECT record FROM documents WHERE id = ?", &[SqliteValue::from(id)])
                 .await?
                 .ok_or_else(|| pi_js::Error::msg(format!("Unknown document: {id}")))?;
             record = parse_json(row.get_str("record")?)?;
@@ -1470,9 +1378,7 @@ async fn resolve_copy_for_sqlite(
     let inner = async {
         let stored = materialize_document(executor, copy.id, copy.at)
             .await?
-            .ok_or_else(|| {
-                pi_js::Error::msg(format!("Fork source document {} cannot be read", copy.id))
-            })?;
+            .ok_or_else(|| pi_js::Error::msg(format!("Fork source document {} cannot be read", copy.id)))?;
         let create = create.ok_or_else(|| pi_js::Error::msg("Missing create record for copy"))?;
         if stored.record.scope.kind() != DocumentScopeKind::Conversation
             || create.scope.kind() != DocumentScopeKind::Conversation

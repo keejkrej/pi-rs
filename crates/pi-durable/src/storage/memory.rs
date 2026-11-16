@@ -12,11 +12,10 @@ use serde_json::Value as JsonValue;
 use crate::errors::StorageRejected;
 use crate::ids::Seq;
 use crate::types::{
-    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent,
-    DocumentCreate, DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope,
-    DocumentScopeKind, EntryId, EntryLookup, EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject,
-    Page, Storage, StorageWrite, StoredDocument, SubmissionId, SubmissionQuery, SubmissionRecord,
-    SubmissionStatus, TaskId, TaskQuery, TaskStatus,
+    ConversationId, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentContent, DocumentCreate,
+    DocumentId, DocumentPoint, DocumentQuery, DocumentRecord, DocumentScope, DocumentScopeKind, EntryId, EntryLookup,
+    EntryQuery, EntryRecord, ErasedTaskRecord, JsonObject, Page, Storage, StorageWrite, StoredDocument, SubmissionId,
+    SubmissionQuery, SubmissionRecord, SubmissionStatus, TaskId, TaskQuery, TaskStatus,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,11 +157,7 @@ impl MemoryStorage {
     }
 
     /// Validate and detach one commit without changing observable state.
-    pub fn prepare_commit(
-        &self,
-        writes: &[StorageWrite],
-        seq: Option<Seq>,
-    ) -> pi_js::Result<PreparedMemoryCommit> {
+    pub fn prepare_commit(&self, writes: &[StorageWrite], seq: Option<Seq>) -> pi_js::Result<PreparedMemoryCommit> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.assert_open()?;
         let target_seq = seq.unwrap_or_else(|| Seq::new_unchecked(guard.next_seq));
@@ -230,11 +225,7 @@ impl Storage for MemoryStorage {
         Ok(id)
     }
 
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        _context: Context,
-    ) -> pi_js::Result<Option<ConversationRecord>> {
+    async fn conversation(&self, id: ConversationId, _context: Context) -> pi_js::Result<Option<ConversationRecord>> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.assert_open()?;
         Ok(guard.state.conversations.get(&id).cloned())
@@ -301,9 +292,7 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
         let Some(&commit_seq) = guard.state.entry_commit_seqs.get(&id) else {
-            return Err(pi_js::Error::msg(format!(
-                "Entry {id} is missing its commit sequence"
-            )));
+            return Err(pi_js::Error::msg(format!("Entry {id} is missing its commit sequence")));
         };
         Ok(Some(EntryLookup {
             entry: entry.clone(),
@@ -320,9 +309,7 @@ impl Storage for MemoryStorage {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.assert_open()?;
         let Some(mut conversation) = guard.state.conversations.get(&conversation_id).cloned() else {
-            return Err(pi_js::Error::msg(format!(
-                "Unknown conversation: {conversation_id}"
-            )));
+            return Err(pi_js::Error::msg(format!("Unknown conversation: {conversation_id}")));
         };
         let Some(entry) = guard.state.entries.get(&id) else {
             return Ok(None);
@@ -345,9 +332,7 @@ impl Storage for MemoryStorage {
             return Ok(None);
         }
         let Some(&commit_seq) = guard.state.entry_commit_seqs.get(&id) else {
-            return Err(pi_js::Error::msg(format!(
-                "Entry {id} is missing its commit sequence"
-            )));
+            return Err(pi_js::Error::msg(format!("Entry {id} is missing its commit sequence")));
         };
         Ok(Some(EntryLookup {
             entry: entry.clone(),
@@ -364,9 +349,7 @@ impl Storage for MemoryStorage {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.assert_open()?;
         let Some(mut conversation) = guard.state.conversations.get(&conversation_id).cloned() else {
-            return Err(pi_js::Error::msg(format!(
-                "Unknown conversation: {conversation_id}"
-            )));
+            return Err(pi_js::Error::msg(format!("Unknown conversation: {conversation_id}")));
         };
         let mut upper = at_or_before_entry_id.map(|id| id.as_i64());
         loop {
@@ -521,11 +504,7 @@ impl Storage for MemoryStorage {
         Ok(build_page(values, limit, |t| t.id.as_i64()))
     }
 
-    async fn submission(
-        &self,
-        id: SubmissionId,
-        _context: Context,
-    ) -> pi_js::Result<Option<SubmissionRecord>> {
+    async fn submission(&self, id: SubmissionId, _context: Context) -> pi_js::Result<Option<SubmissionRecord>> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.assert_open()?;
         Ok(guard.state.submissions.get(&id).cloned())
@@ -784,8 +763,7 @@ fn is_alive_at(record: &DocumentRecord, at: DocumentPoint) -> bool {
         DocumentPoint::Current => record.retired_at.is_none(),
         DocumentPoint::At(seq) => {
             let s = seq.as_i64();
-            record.created_at.as_i64() <= s
-                && record.retired_at.is_none_or(|retired| s < retired.as_i64())
+            record.created_at.as_i64() <= s && record.retired_at.is_none_or(|retired| s < retired.as_i64())
         }
     }
 }
@@ -827,10 +805,7 @@ fn build_page<T>(mut values: Vec<T>, limit: usize, id_of: impl Fn(&T) -> i64) ->
         map.insert("after".to_string(), JsonValue::from(id_of(last)));
         map
     });
-    Page {
-        items: values,
-        next,
-    }
+    Page { items: values, next }
 }
 
 fn clone_json_object(map: &JsonObject) -> pi_js::Result<JsonObject> {
@@ -843,9 +818,7 @@ fn clone_json_object(map: &JsonObject) -> pi_js::Result<JsonObject> {
 
 fn clone_write(write: &StorageWrite) -> pi_js::Result<StorageWrite> {
     match write {
-        StorageWrite::Conversation { value } => Ok(StorageWrite::Conversation {
-            value: value.clone(),
-        }),
+        StorageWrite::Conversation { value } => Ok(StorageWrite::Conversation { value: value.clone() }),
         StorageWrite::Entry { value } => {
             let mut next = value.clone();
             if let Some(ref data) = next.data {
@@ -862,8 +835,7 @@ fn clone_write(write: &StorageWrite) -> pi_js::Result<StorageWrite> {
                 | crate::types::TaskState::Waiting { checkpoint, .. } => {
                     *checkpoint = copy_json(checkpoint, None)?;
                 }
-                crate::types::TaskState::Completing { outcome }
-                | crate::types::TaskState::Terminal { outcome } => {
+                crate::types::TaskState::Completing { outcome } | crate::types::TaskState::Terminal { outcome } => {
                     clone_task_outcome(outcome)?;
                 }
             }
@@ -877,27 +849,21 @@ fn clone_write(write: &StorageWrite) -> pi_js::Result<StorageWrite> {
         StorageWrite::Submission { value } => {
             let mut next = value.clone();
             match &mut next.state {
-                crate::types::SubmissionState::Input(
-                    crate::types::InputSubmissionState::Unanswered {
-                        detail: Some(detail), ..
-                    },
-                )
-                | crate::types::SubmissionState::Write(
-                    crate::types::WriteSubmissionState::Unanswered {
-                        detail: Some(detail), ..
-                    },
-                ) => {
+                crate::types::SubmissionState::Input(crate::types::InputSubmissionState::Unanswered {
+                    detail: Some(detail),
+                    ..
+                })
+                | crate::types::SubmissionState::Write(crate::types::WriteSubmissionState::Unanswered {
+                    detail: Some(detail),
+                    ..
+                }) => {
                     *detail = copy_json(detail, None)?;
                 }
                 _ => {}
             }
             Ok(StorageWrite::Submission { value: next })
         }
-        StorageWrite::DocumentCreate {
-            record,
-            version,
-            value,
-        } => Ok(StorageWrite::DocumentCreate {
+        StorageWrite::DocumentCreate { record, version, value } => Ok(StorageWrite::DocumentCreate {
             record: record.clone(),
             version: *version,
             value: clone_json_object(value)?,
@@ -958,12 +924,8 @@ fn clone_ops(ops: &[Op]) -> pi_js::Result<Vec<Op>> {
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         let cloned = match op {
-            Op::Replace(r) => {
-                Op::Replace(pi_chord::delta::OpReplace(r.0, copy_json(&r.1, None)?))
-            }
-            Op::Set(s) => {
-                Op::Set(pi_chord::delta::OpSet(s.0, s.1.clone(), copy_json(&s.2, None)?))
-            }
+            Op::Replace(r) => Op::Replace(pi_chord::delta::OpReplace(r.0, copy_json(&r.1, None)?)),
+            Op::Set(s) => Op::Set(pi_chord::delta::OpSet(s.0, s.1.clone(), copy_json(&s.2, None)?)),
             Op::Delete(d) => Op::Delete(d.clone()),
             Op::Append(a) => Op::Append(a.clone()),
             Op::Truncate(t) => Op::Truncate(t.clone()),
@@ -982,10 +944,7 @@ fn clone_ops(ops: &[Op]) -> pi_js::Result<Vec<Op>> {
 }
 
 fn resolve_document_copies(state: &State, writes: Vec<StorageWrite>) -> pi_js::Result<Vec<StorageWrite>> {
-    if !writes
-        .iter()
-        .any(|w| matches!(w, StorageWrite::DocumentCopy { .. }))
-    {
+    if !writes.iter().any(|w| matches!(w, StorageWrite::DocumentCopy { .. })) {
         return Ok(writes);
     }
     let mut changed_document_ids = IndexSet::new();
@@ -1005,18 +964,14 @@ fn resolve_document_copies(state: &State, writes: Vec<StorageWrite>) -> pi_js::R
     for write in writes {
         match write {
             StorageWrite::DocumentCopy { record, source } => {
-                let resolved = resolve_single_copy(state, &changed_document_ids, &record, source)
-                    .map_err(|err| {
-                        if err.name() == "StorageRejected" {
-                            err
-                        } else {
-                            StorageRejected::with_cause(
-                                format!("Document copy {} was rejected", record.id),
-                                err,
-                            )
+                let resolved = resolve_single_copy(state, &changed_document_ids, &record, source).map_err(|err| {
+                    if err.name() == "StorageRejected" {
+                        err
+                    } else {
+                        StorageRejected::with_cause(format!("Document copy {} was rejected", record.id), err)
                             .into_error()
-                        }
-                    })?;
+                    }
+                })?;
                 out.push(resolved);
             }
             other => out.push(other),
@@ -1037,12 +992,8 @@ fn resolve_single_copy(
             source.id
         )));
     }
-    let stored = materialize_document(state, source.id, source.at)?.ok_or_else(|| {
-        pi_js::Error::msg(format!(
-            "Fork source document {} cannot be read",
-            source.id
-        ))
-    })?;
+    let stored = materialize_document(state, source.id, source.at)?
+        .ok_or_else(|| pi_js::Error::msg(format!("Fork source document {} cannot be read", source.id)))?;
     if stored.record.scope.kind() != DocumentScopeKind::Conversation
         || record.scope.kind() != DocumentScopeKind::Conversation
         || stored.record.kind != record.kind
@@ -1062,11 +1013,7 @@ fn resolve_single_copy(
     })
 }
 
-fn materialize_document(
-    state: &State,
-    id: DocumentId,
-    at: DocumentPoint,
-) -> pi_js::Result<Option<StoredDocument>> {
+fn materialize_document(state: &State, id: DocumentId, at: DocumentPoint) -> pi_js::Result<Option<StoredDocument>> {
     let Some(stored) = state.documents.get(&id) else {
         return Ok(None);
     };
@@ -1094,18 +1041,14 @@ fn materialize_document(
         .iter()
         .rposition(|rev| matches!(rev.content, DocumentContent::Base { .. }))
     else {
-        return Err(pi_js::Error::msg(format!(
-            "Document {id} is missing a required base"
-        )));
+        return Err(pi_js::Error::msg(format!("Document {id} is missing a required base")));
     };
     let DocumentContent::Base {
         version: base_version,
         value: base_value,
     } = &revisions[base_index].content
     else {
-        return Err(pi_js::Error::msg(format!(
-            "Document {id} is missing a required base"
-        )));
+        return Err(pi_js::Error::msg(format!("Document {id} is missing a required base")));
     };
 
     let tail = &revisions[base_index + 1..];
@@ -1123,10 +1066,7 @@ fn materialize_document(
         }
     }
 
-    let applied = apply_immutable_batches::<JsonValue, _, _>(
-        Some(JsonValue::Object(base_value.clone())),
-        batches,
-    )?;
+    let applied = apply_immutable_batches::<JsonValue, _, _>(Some(JsonValue::Object(base_value.clone())), batches)?;
     let JsonValue::Object(value) = applied else {
         return Err(pi_js::Error::msg(format!(
             "Document {id} did not materialize to a JSON object"
@@ -1149,43 +1089,31 @@ fn check_global_ids(state: &State, writes: &[StorageWrite]) -> pi_js::Result<()>
             StorageWrite::Entry { value } => (value.id.as_i64(), TableName::Entry),
             StorageWrite::Task { value } => (value.id.as_i64(), TableName::Task),
             StorageWrite::Submission { value } => (value.id.as_i64(), TableName::Submission),
-            StorageWrite::DocumentCreate { record, .. }
-            | StorageWrite::DocumentCopy { record, .. } => (record.id.as_i64(), TableName::Document),
+            StorageWrite::DocumentCreate { record, .. } | StorageWrite::DocumentCopy { record, .. } => {
+                (record.id.as_i64(), TableName::Document)
+            }
             StorageWrite::DocumentChange { .. } | StorageWrite::DocumentRetire { .. } => continue,
         };
 
         let existing = state.record_types.get(&id).copied();
         let earlier = claimed.get(&id).copied();
-        if matches!(
-            table,
-            TableName::Conversation | TableName::Entry | TableName::Document
-        ) {
+        if matches!(table, TableName::Conversation | TableName::Entry | TableName::Document) {
             if let Some(ex) = existing {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} already belongs to {}",
-                    ex.as_str()
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} already belongs to {}", ex.as_str())));
             }
             if earlier.is_some() {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} is written more than once"
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} is written more than once")));
             }
         } else {
             if let Some(ex) = existing
                 && ex != table
             {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} already belongs to {}",
-                    ex.as_str()
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} already belongs to {}", ex.as_str())));
             }
             if let Some(ea) = earlier
                 && ea != table
             {
-                return Err(pi_js::Error::msg(format!(
-                    "ID {id} is written as two record types"
-                )));
+                return Err(pi_js::Error::msg(format!("ID {id} is written as two record types")));
             }
         }
         claimed.insert(id, table);
@@ -1197,11 +1125,7 @@ fn prepare_document_actions(writes: &[StorageWrite]) -> pi_js::Result<IndexMap<D
     let mut actions: IndexMap<DocumentId, DocumentAction> = IndexMap::new();
     for write in writes {
         match write {
-            StorageWrite::DocumentCreate {
-                record,
-                version,
-                value,
-            } => {
+            StorageWrite::DocumentCreate { record, version, value } => {
                 let action = actions.entry(record.id).or_insert(DocumentAction {
                     create: None,
                     content: None,
@@ -1245,9 +1169,7 @@ fn prepare_document_actions(writes: &[StorageWrite]) -> pi_js::Result<IndexMap<D
                     retire: false,
                 });
                 if action.retire {
-                    return Err(pi_js::Error::msg(format!(
-                        "Document {id} is retired more than once"
-                    )));
+                    return Err(pi_js::Error::msg(format!("Document {id} is retired more than once")));
                 }
                 action.retire = true;
             }
@@ -1257,10 +1179,7 @@ fn prepare_document_actions(writes: &[StorageWrite]) -> pi_js::Result<IndexMap<D
     Ok(actions)
 }
 
-fn check_document_actions(
-    state: &State,
-    actions: &IndexMap<DocumentId, DocumentAction>,
-) -> pi_js::Result<()> {
+fn check_document_actions(state: &State, actions: &IndexMap<DocumentId, DocumentAction>) -> pi_js::Result<()> {
     let mut live_counts: IndexMap<String, i64> = IndexMap::new();
     for (&id, action) in actions {
         let existing = state.documents.get(&id);
@@ -1276,13 +1195,13 @@ fn check_document_actions(
             return Err(pi_js::Error::msg(format!("Document {id} is retired")));
         }
         if let Some(DocumentContent::Delta { version, .. }) = &action.content {
-            let previous_version = existing.and_then(|ex| ex.revisions.last()).map(|rev| match &rev.content {
-                DocumentContent::Base { version, .. } | DocumentContent::Delta { version, .. } => *version,
-            });
+            let previous_version = existing
+                .and_then(|ex| ex.revisions.last())
+                .map(|rev| match &rev.content {
+                    DocumentContent::Base { version, .. } | DocumentContent::Delta { version, .. } => *version,
+                });
             let Some(prev_ver) = previous_version else {
-                return Err(pi_js::Error::msg(format!(
-                    "Document {id} delta has no base"
-                )));
+                return Err(pi_js::Error::msg(format!("Document {id} delta has no base")));
             };
             if prev_ver != *version {
                 return Err(pi_js::Error::msg(format!(
@@ -1301,10 +1220,7 @@ fn check_document_actions(
             }
         };
 
-        let current_id = state
-            .document_addresses
-            .get(&key)
-            .and_then(|addr| addr.current_id);
+        let current_id = state.document_addresses.get(&key).and_then(|addr| addr.current_id);
         let live = live_counts
             .entry(key)
             .or_insert_with(|| if current_id.is_some() { 1 } else { 0 });
@@ -1318,9 +1234,7 @@ fn check_document_actions(
 
     for live in live_counts.values() {
         if *live > 1 {
-            return Err(pi_js::Error::msg(
-                "Document address already has a current incarnation",
-            ));
+            return Err(pi_js::Error::msg("Document address already has a current incarnation"));
         }
     }
     Ok(())
@@ -1345,11 +1259,7 @@ fn apply_prepared_commit(
                         owner.conversation_id,
                         id,
                     );
-                    insert_map_id(
-                        &mut inner.state.conversation_ids_by_owner_task,
-                        owner.task_id,
-                        id,
-                    );
+                    insert_map_id(&mut inner.state.conversation_ids_by_owner_task, owner.task_id, id);
                 }
                 inner.next_id = inner.next_id.max(id.as_i64() + 1);
             }
@@ -1404,7 +1314,10 @@ fn apply_prepared_commit(
                     {
                         prev_map.shift_remove(prev_req_id);
                         if prev_map.is_empty() {
-                            inner.state.submission_ids_by_request.shift_remove(&prev.conversation_id);
+                            inner
+                                .state
+                                .submission_ids_by_request
+                                .shift_remove(&prev.conversation_id);
                         }
                     }
                 } else {
@@ -1481,8 +1394,7 @@ fn apply_document_actions(
             };
             if let Some(content) = action.content.clone() {
                 let revision = DocumentRevision { seq, content };
-                if matches!(revision.content, DocumentContent::Base { .. }) && is_current_only(&stored.record)
-                {
+                if matches!(revision.content, DocumentContent::Base { .. }) && is_current_only(&stored.record) {
                     stored.revisions = vec![revision];
                 } else {
                     stored.revisions.push(revision);

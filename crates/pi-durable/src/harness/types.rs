@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::documents::{
-    ConversationDoc, ConversationDocFamily, RewindableConversationDocToken, RewindableConversationDocFamilyToken,
+    ConversationDoc, ConversationDocFamily, RewindableConversationDocFamilyToken, RewindableConversationDocToken,
     SessionDocFamilyToken, SessionDocToken, TaskDocFamilyToken, TaskDocToken,
 };
 use crate::env::ExecutionEnv;
@@ -617,9 +617,8 @@ pub struct Agent {
 }
 
 /// Callback run inside the creating commit of a new or forked conversation.
-pub type ConversationInitFn = Arc<
-    dyn Fn(crate::session::transaction::Tx, ConversationId) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync,
->;
+pub type ConversationInitFn =
+    Arc<dyn Fn(crate::session::transaction::Tx, ConversationId) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ConversationCreateOptions {
@@ -804,12 +803,12 @@ pub struct EnvTarget {
     pub read: DocumentReader,
 }
 
-pub type EnvFactory = Arc<
-    dyn Fn(EnvTarget, Context) -> pi_js::BoxFuture<pi_js::Result<Option<Arc<dyn ExecutionEnv>>>> + Send + Sync,
->;
+pub type EnvFactory =
+    Arc<dyn Fn(EnvTarget, Context) -> pi_js::BoxFuture<pi_js::Result<Option<Arc<dyn ExecutionEnv>>>> + Send + Sync>;
 
-pub type ConversationCreatedHook =
-    Arc<dyn Fn(crate::session::transaction::Tx, ConversationRecord) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>;
+pub type ConversationCreatedHook = Arc<
+    dyn Fn(crate::session::transaction::Tx, ConversationRecord) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync,
+>;
 
 pub type NowFn = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub type OnReportFn = Arc<dyn Fn(pi_js::Error) + Send + Sync>;
@@ -839,8 +838,12 @@ pub enum TaskBlockedReason {
 #[derive(Clone, Debug)]
 pub enum TaskInspectionState {
     Running,
-    Ready { migrates: bool },
-    Waiting { on: Vec<TaskId> },
+    Ready {
+        migrates: bool,
+    },
+    Waiting {
+        on: Vec<TaskId>,
+    },
     Completing,
     Blocked {
         reason: TaskBlockedReason,
@@ -903,14 +906,20 @@ pub struct ConversationView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum TaskGraphState {
-    Pending { phase: String },
-    Running { phase: String },
+    Pending {
+        phase: String,
+    },
+    Running {
+        phase: String,
+    },
     Waiting {
         phase: String,
         on: Vec<TaskId>,
         policy: JoinPolicy,
     },
-    Completing { outcome: String },
+    Completing {
+        outcome: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -982,8 +991,7 @@ impl HookApi {
         candidate: &T,
         context: Context,
     ) -> pi_js::Result<T> {
-        let encoded =
-            serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+        let encoded = serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
         let winner = self.backend.memo_set(name, encoded, context).await?;
         serde_json::from_value(winner).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))
     }
@@ -1048,9 +1056,7 @@ pub trait ToolExecutionApiBackend: DocumentReaderBackend + DocumentObserverBacke
     async fn details(&self, value: JsonValue, context: Context) -> pi_js::Result<()>;
     async fn commit_erased(
         &self,
-        change: Box<
-            dyn FnOnce(crate::session::transaction::Tx) -> pi_js::BoxFuture<pi_js::Result<JsonValue>> + Send,
-        >,
+        change: Box<dyn FnOnce(crate::session::transaction::Tx) -> pi_js::BoxFuture<pi_js::Result<JsonValue>> + Send>,
         context: Context,
     ) -> pi_js::Result<JsonValue>;
     async fn memo_get(&self, name: &str, context: Context) -> pi_js::Result<Option<JsonValue>>;
@@ -1065,11 +1071,7 @@ pub trait ToolExecutionApiBackend: DocumentReaderBackend + DocumentObserverBacke
     ) -> pi_js::Result<TaskId>;
     async fn get_task(&self, id: TaskId, context: Context) -> pi_js::Result<Option<ErasedTaskRecord>>;
     async fn wait_for_task(&self, id: TaskId, context: Context) -> pi_js::Result<SettledTask<JsonValue>>;
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<Option<ConversationHandle>>;
+    async fn conversation(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<ConversationHandle>>;
 }
 
 /// Operations available to one tool invocation.
@@ -1170,8 +1172,7 @@ impl ToolExecutionApi {
         candidate: &T,
         context: Context,
     ) -> pi_js::Result<T> {
-        let encoded =
-            serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+        let encoded = serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
         let winner = self.backend.memo_set(name, encoded, context).await?;
         serde_json::from_value(winner).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))
     }
@@ -1298,7 +1299,7 @@ pub trait TaskRuntimeBackend: DocumentReaderBackend + DocumentObserverBackend + 
     fn settings(&self) -> Settings;
     fn models(&self) -> &Models;
     async fn env(&self, context: Context) -> pi_js::Result<Option<Arc<dyn ExecutionEnv>>>;
-    fn hooks_for_task(&self, task_name: &str) -> Vec<Arc<dyn Any + Send + Sync>>;
+    async fn hooks_for_task(&self, task_name: &str) -> pi_js::Result<Vec<Arc<dyn Any + Send + Sync>>>;
     async fn commit_erased(
         &self,
         change: Box<
@@ -1315,11 +1316,7 @@ pub trait TaskRuntimeBackend: DocumentReaderBackend + DocumentObserverBackend + 
     async fn get_task(&self, id: TaskId, context: Context) -> pi_js::Result<Option<ErasedTaskRecord>>;
     async fn wait_for_task(&self, id: TaskId, context: Context) -> pi_js::Result<SettledTask<JsonValue>>;
     async fn outcomes(&self, ids: &[TaskId], context: Context) -> pi_js::Result<Vec<TaskOutcome<JsonValue>>>;
-    async fn conversation(
-        &self,
-        id: ConversationId,
-        context: Context,
-    ) -> pi_js::Result<Option<ConversationHandle>>;
+    async fn conversation(&self, id: ConversationId, context: Context) -> pi_js::Result<Option<ConversationHandle>>;
     async fn entry(&self, id: EntryId, context: Context) -> pi_js::Result<Option<EntryRecord>>;
     async fn context_view(
         &self,
@@ -1363,7 +1360,7 @@ impl<H: Send + Sync + 'static> HookRunner<H> {
     {
         let api = self.backend.hook_api();
         let signal = self.backend.signal();
-        let handlers = self.backend.hooks_for_task(&self.task_name);
+        let handlers = self.backend.hooks_for_task(&self.task_name).await?;
         for any_handler in handlers {
             let Some(handler) = any_handler.downcast_ref::<H>() else {
                 continue;
@@ -1384,22 +1381,15 @@ pub type HookResult<T> = pi_js::Result<Option<T>>;
 /// Hooks of the built-in generation task.
 #[derive(Clone, Default)]
 pub struct GenerationHooks {
-    pub before_request: Option<
-        Arc<
-            dyn Fn(Vec<Message>, HookApi, Context) -> pi_js::BoxFuture<HookResult<Vec<Message>>> + Send + Sync,
-        >,
-    >,
+    pub before_request:
+        Option<Arc<dyn Fn(Vec<Message>, HookApi, Context) -> pi_js::BoxFuture<HookResult<Vec<Message>>> + Send + Sync>>,
     pub after_response:
         Option<Arc<dyn Fn(AssistantMessage, HookApi, Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>>,
     pub on_yield: Option<
-        Arc<
-            dyn Fn(AssistantMessage, HookApi, Context) -> pi_js::BoxFuture<HookResult<UserInput>> + Send + Sync,
-        >,
+        Arc<dyn Fn(AssistantMessage, HookApi, Context) -> pi_js::BoxFuture<HookResult<UserInput>> + Send + Sync>,
     >,
     pub after_tools: Option<
-        Arc<
-            dyn Fn(EntryId, Vec<EntryId>, HookApi, Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync,
-        >,
+        Arc<dyn Fn(EntryId, Vec<EntryId>, HookApi, Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
     >,
 }
 
@@ -1414,9 +1404,7 @@ pub enum BeforeToolDecision {
 #[derive(Clone, Default)]
 pub struct ToolHooks {
     pub before_tool: Option<
-        Arc<
-            dyn Fn(ToolCall, HookApi, Context) -> pi_js::BoxFuture<HookResult<BeforeToolDecision>> + Send + Sync,
-        >,
+        Arc<dyn Fn(ToolCall, HookApi, Context) -> pi_js::BoxFuture<HookResult<BeforeToolDecision>> + Send + Sync>,
     >,
     pub after_tool: Option<
         Arc<
@@ -1571,8 +1559,7 @@ where
         candidate: &T,
         context: Context,
     ) -> pi_js::Result<T> {
-        let encoded =
-            serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
+        let encoded = serde_json::to_value(candidate).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))?;
         let winner = self.rt()?.memo_set(name, encoded, context).await?;
         serde_json::from_value(winner).map_err(|err| pi_js::Error::js("TypeError", err.to_string()))
     }

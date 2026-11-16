@@ -138,9 +138,13 @@ pub enum DocumentScopeKind {
 pub enum DocumentScope {
     Session,
     #[serde(rename_all = "camelCase")]
-    Conversation { conversation_id: ConversationId },
+    Conversation {
+        conversation_id: ConversationId,
+    },
     #[serde(rename_all = "camelCase")]
-    Task { task_id: TaskId },
+    Task {
+        task_id: TaskId,
+    },
 }
 
 impl DocumentScope {
@@ -173,7 +177,9 @@ impl DocumentScope {
 pub enum TaskOwnership {
     Conversation,
     #[serde(rename_all = "camelCase")]
-    Task { task_id: TaskId },
+    Task {
+        task_id: TaskId,
+    },
 }
 
 /// How a waiting task treats the tasks it waits on (spec §5.5).
@@ -202,7 +208,9 @@ pub struct TaskOptions {
 pub enum ConversationOwnership {
     Ownerless,
     #[serde(rename_all = "camelCase")]
-    Task { task_id: TaskId },
+    Task {
+        task_id: TaskId,
+    },
 }
 
 /// Fork source and inclusive parent entry through which history is inherited.
@@ -236,13 +244,8 @@ pub struct ConversationRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum ContextEdit {
-    Omit {
-        target: EntryId,
-    },
-    Replace {
-        target: EntryId,
-        messages: Vec<Message>,
-    },
+    Omit { target: EntryId },
+    Replace { target: EntryId, messages: Vec<Message> },
 }
 
 impl ContextEdit {
@@ -510,20 +513,28 @@ impl<'de> Deserialize<'de> for SubmissionRecord {
         let state = match (raw.kind, raw.status) {
             (SubmissionType::Input, SubmissionStatus::Queued) => {
                 if raw.entry.is_some() || raw.answer.is_some() || raw.reason.is_some() || raw.detail.is_some() {
-                    return Err(serde::de::Error::custom("queued input submission cannot carry settled fields"));
+                    return Err(serde::de::Error::custom(
+                        "queued input submission cannot carry settled fields",
+                    ));
                 }
                 SubmissionState::Input(InputSubmissionState::Queued)
             }
             (SubmissionType::Input, SubmissionStatus::Placed) => {
-                let entry = raw.entry.ok_or_else(|| serde::de::Error::custom("placed input requires entry"))?;
+                let entry = raw
+                    .entry
+                    .ok_or_else(|| serde::de::Error::custom("placed input requires entry"))?;
                 if raw.answer.is_some() || raw.reason.is_some() || raw.detail.is_some() {
                     return Err(serde::de::Error::custom("placed input cannot carry answer/reason"));
                 }
                 SubmissionState::Input(InputSubmissionState::Placed { entry })
             }
             (SubmissionType::Input, SubmissionStatus::Done) => {
-                let entry = raw.entry.ok_or_else(|| serde::de::Error::custom("done input requires entry"))?;
-                let answer = raw.answer.ok_or_else(|| serde::de::Error::custom("done input requires answer"))?;
+                let entry = raw
+                    .entry
+                    .ok_or_else(|| serde::de::Error::custom("done input requires entry"))?;
+                let answer = raw
+                    .answer
+                    .ok_or_else(|| serde::de::Error::custom("done input requires answer"))?;
                 if raw.reason.is_some() || raw.detail.is_some() {
                     return Err(serde::de::Error::custom("done input cannot carry reason/detail"));
                 }
@@ -552,7 +563,9 @@ impl<'de> Deserialize<'de> for SubmissionRecord {
                 return Err(serde::de::Error::custom("write submission cannot be placed"));
             }
             (SubmissionType::Write, SubmissionStatus::Done) => {
-                let entry = raw.entry.ok_or_else(|| serde::de::Error::custom("done write requires entry"))?;
+                let entry = raw
+                    .entry
+                    .ok_or_else(|| serde::de::Error::custom("done write requires entry"))?;
                 if raw.answer.is_some() || raw.reason.is_some() || raw.detail.is_some() {
                     return Err(serde::de::Error::custom("done write cannot carry answer/reason/detail"));
                 }
@@ -705,9 +718,9 @@ impl<S, R> TaskState<S, R> {
 
     pub fn checkpoint(&self) -> Option<&S> {
         match self {
-            Self::Pending { checkpoint }
-            | Self::Running { checkpoint }
-            | Self::Waiting { checkpoint, .. } => Some(checkpoint),
+            Self::Pending { checkpoint } | Self::Running { checkpoint } | Self::Waiting { checkpoint, .. } => {
+                Some(checkpoint)
+            }
             Self::Completing { .. } | Self::Terminal { .. } => None,
         }
     }
@@ -1020,9 +1033,7 @@ impl PartialEq for WatchEnd {
             | (Self::Cancelled, Self::Cancelled)
             | (Self::SessionClosed, Self::SessionClosed)
             | (Self::Retired, Self::Retired) => true,
-            (Self::ListenerError { error: a }, Self::ListenerError { error: b }) => {
-                a.to_string() == b.to_string()
-            }
+            (Self::ListenerError { error: a }, Self::ListenerError { error: b }) => a.to_string() == b.to_string(),
             _ => false,
         }
     }
@@ -1121,7 +1132,10 @@ impl<T> DocumentState<T> {
 
     pub fn subscribe_json<F>(&self, listener: F) -> pi_js::Unsubscribe
     where
-        F: Fn(JsonValue, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync + 'static,
+        F: Fn(JsonValue, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>>
+            + Send
+            + Sync
+            + 'static,
     {
         self.raw.subscribe(Arc::new(listener))
     }
@@ -1142,7 +1156,10 @@ impl<T: DeserializeOwned> DocumentState<T> {
 
     pub fn subscribe<F>(&self, listener: F) -> pi_js::Unsubscribe
     where
-        F: Fn(Option<T>, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync + 'static,
+        F: Fn(Option<T>, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>>
+            + Send
+            + Sync
+            + 'static,
     {
         let listener = Arc::new(listener);
         self.raw.subscribe(Arc::new(move |json, ctx, delivery| {
