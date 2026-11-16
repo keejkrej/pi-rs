@@ -4,3 +4,7 @@
 pub mod node;
 pub mod storage;
 // @generated-mods end
+
+pub use crate::storage::jsonl::storage::{
+    JsonlCorruptionError, JsonlStorage, JsonlStorageOptions, JsonlStoragePoisonedError,
+};
