@@ -34,5 +34,24 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    todo!("port: string_enum")
+    let enum_values: Vec<serde_json::Value> = values
+        .into_iter()
+        .map(|v| serde_json::Value::String(v.as_ref().to_string()))
+        .collect();
+    let mut obj = serde_json::Map::new();
+    obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+    obj.insert("enum".to_string(), serde_json::Value::Array(enum_values));
+    if let Some(opts) = options {
+        if let Some(desc) = opts.description {
+            if !desc.is_empty() {
+                obj.insert("description".to_string(), serde_json::Value::String(desc));
+            }
+        }
+        if let Some(default) = opts.r#default {
+            if !default.is_empty() {
+                obj.insert("default".to_string(), serde_json::Value::String(default));
+            }
+        }
+    }
+    pi_js::vendor::typebox::t::unsafe_(serde_json::Value::Object(obj))
 }
