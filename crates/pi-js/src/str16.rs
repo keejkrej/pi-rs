@@ -9,6 +9,8 @@
 
 use std::cmp::Ordering;
 
+use unicode_normalization::UnicodeNormalization;
+
 /// `s.length`: the number of UTF-16 code units.
 pub fn len(s: &str) -> usize {
     // Every char contributes one unit, astral chars (4-byte UTF-8 sequences) contribute two.
@@ -276,4 +278,24 @@ pub fn code_point_at(s: &str, i: usize) -> Option<u32> {
         return Some(u32::from(buf[1]));
     }
     Some(c as u32)
+}
+
+/// `s.normalize("NFC")`: Unicode Normalization Form C.
+pub fn normalize_nfc(s: &str) -> String {
+    s.nfc().collect()
+}
+
+/// `s.normalize("NFD")`: Unicode Normalization Form D.
+pub fn normalize_nfd(s: &str) -> String {
+    s.nfd().collect()
+}
+
+/// `s.normalize("NFKC")`: Unicode Normalization Form KC.
+pub fn normalize_nfkc(s: &str) -> String {
+    s.nfkc().collect()
+}
+
+/// `s.normalize("NFKD")`: Unicode Normalization Form KD.
+pub fn normalize_nfkd(s: &str) -> String {
+    s.nfkd().collect()
 }

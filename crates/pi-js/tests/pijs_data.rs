@@ -224,6 +224,36 @@ fn utf16_and_byte_offsets_convert() {
     assert_eq!(str16::from_utf16_lossy(&[0xD83D, 0xDE00]), "😀");
 }
 
+#[test]
+fn unicode_normalization_forms_match_js() {
+    assert_eq!(str16::normalize_nfc(""), "");
+    assert_eq!(str16::normalize_nfd(""), "");
+    assert_eq!(str16::normalize_nfkc(""), "");
+    assert_eq!(str16::normalize_nfkd(""), "");
+
+    assert_eq!(str16::normalize_nfc("ascii"), "ascii");
+    assert_eq!(str16::normalize_nfd("ascii"), "ascii");
+    assert_eq!(str16::normalize_nfkc("ascii"), "ascii");
+    assert_eq!(str16::normalize_nfkd("ascii"), "ascii");
+
+    // Canonical composition vs decomposition (e + U+0301 <-> U+00E9).
+    assert_eq!(str16::normalize_nfc("e\u{0301}"), "\u{00E9}");
+    assert_eq!(str16::normalize_nfd("\u{00E9}"), "e\u{0301}");
+    assert_eq!(str16::normalize_nfc("\u{212B}"), "\u{00C5}");
+    assert_eq!(str16::normalize_nfd("\u{212B}"), "A\u{030A}");
+
+    // Compatibility ligatures/fullwidth/superscripts preserve under NFC/NFD and fold under NFKC/NFKD.
+    assert_eq!(str16::normalize_nfc("\u{FB01}"), "\u{FB01}");
+    assert_eq!(str16::normalize_nfd("\u{FB01}"), "\u{FB01}");
+    assert_eq!(str16::normalize_nfkc("e\u{0301}\u{FB01}\u{FF21}"), "\u{00E9}fiA");
+    assert_eq!(str16::normalize_nfkd("\u{00E9}\u{FB01}\u{FF21}"), "e\u{0301}fiA");
+    assert_eq!(str16::normalize_nfkc("\u{2460}\u{00B2}"), "12");
+    assert_eq!(str16::normalize_nfc("\u{1E9B}\u{0323}"), "\u{1E9B}\u{0323}");
+    assert_eq!(str16::normalize_nfd("\u{1E9B}\u{0323}"), "\u{017F}\u{0323}\u{0307}");
+    assert_eq!(str16::normalize_nfkc("\u{1E9B}\u{0323}"), "\u{1E69}");
+    assert_eq!(str16::normalize_nfkd("\u{1E9B}\u{0323}"), "s\u{0323}\u{0307}");
+}
+
 // ---- text ----
 
 #[test]
