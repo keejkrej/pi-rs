@@ -4,3 +4,5 @@
 #[path = "oauth_selector/part_2.rs"]
 mod part_2;
 // @generated-mods end
+
+// WIRE(@tui-w3): Add `InteractiveMode::get_login_provider_options` unit tests once interactive_mode.rs is ported.
