@@ -275,7 +275,8 @@ async fn run_async() -> Result<()> {
 }
 
 pub fn run() -> ExitCode {
-    let rt = match tokio::runtime::Runtime::new() {
+    pi_js::ensure_crypto_provider();
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "Error: {e}");
@@ -284,6 +285,7 @@ pub fn run() -> ExitCode {
     };
     match rt.block_on(run_async()) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(Error::Exit(c)) => ExitCode::from(c as u8),
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "Error: {e}");
             ExitCode::FAILURE
