@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+use indexmap::IndexMap;
+use pi_ai::api::bedrock_converse_stream::{
+    BedrockTransportError, BedrockTransportOutcome, override_bedrock_transport, stream as stream_bedrock,
+};
 use pi_ai::api::openai_completions::stream as stream_openai_completions;
 use pi_ai::api::openai_responses::stream as stream_openai_responses;
 use pi_ai::types::{
@@ -78,7 +82,6 @@ fn error_fetch(status: u16, body: &'static str) -> FetchFunction {
 
 #[tokio::test]
 async fn openai_completions_and_responses_surface_status_and_body_without_duplicating_raw_metadata() {
-    // WIRE(@mcp-w2): also test bedrock_converse_stream error metadata once @mcp-w2 lands.
     let context = make_context();
 
     let output = stream_openai_completions(
@@ -141,4 +144,40 @@ async fn openai_completions_and_responses_surface_status_and_body_without_duplic
     let err = resp_out.error_message.as_deref().unwrap_or("");
     assert!(err.contains("OpenAI API error (403)"), "err={err}");
     assert!(err.contains("blocked by gateway WAF"), "err={err}");
+
+    let _bedrock_guard = override_bedrock_transport(|_req| {
+        Box::pin(async {
+            Ok(BedrockTransportOutcome::Error(BedrockTransportError {
+                message: "403 status code (no body)".to_owned(),
+                status: Some(403),
+                body: Some(r#"{"error":"blocked by gateway WAF"}"#.to_owned()),
+                error_code: None,
+                request_id: Some("req-waf-1".to_owned()),
+                is_service_exception: false,
+            }))
+        })
+    });
+    let mut bedrock_model = responses_model();
+    bedrock_model.api = "bedrock-converse-stream".to_owned();
+    bedrock_model.provider = "amazon-bedrock".into();
+    bedrock_model.base_url = "https://bedrock-runtime.us-east-1.amazonaws.com".to_owned();
+    let bedrock_out = stream_bedrock(
+        &bedrock_model,
+        &context,
+        Some(ApiStreamOptions {
+            base: StreamOptions {
+                env: Some(IndexMap::from([("AWS_REGION".to_owned(), "us-east-1".to_owned())])),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .result()
+    .await;
+    assert_eq!(bedrock_out.stop_reason, StopReason::Error);
+    let bedrock_err = bedrock_out.error_message.as_deref().unwrap_or("");
+    assert!(
+        bedrock_err.contains("blocked by gateway WAF"),
+        "bedrock_err={bedrock_err}"
+    );
 }

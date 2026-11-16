@@ -33,16 +33,7 @@ pub struct RadiusOAuthOptions {
     pub gateway: String,
 }
 
-// WIRE(@mcp-w2): switch to crate::providers::radius_config::normalize_radius_gateway_url
-fn normalize_radius_gateway_url(value: &str) -> String {
-    let lower = value.to_ascii_lowercase();
-    let with_scheme = if lower.starts_with("http://") || lower.starts_with("https://") {
-        value.to_owned()
-    } else {
-        format!("https://{value}")
-    };
-    with_scheme.trim_end_matches('/').to_owned()
-}
+use crate::providers::radius_config::normalize_radius_gateway_url;
 
 fn gateway_url(gateway: &str, path: &str) -> Result<String> {
     let base =
