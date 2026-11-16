@@ -693,7 +693,7 @@ pub struct PartialRetryPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct CompactionPolicy {
     pub enabled: bool,
-    pub reserve_tokens: u64,
+    pub reserve_tokens: i64,
     pub keep_recent_tokens: u64,
     pub background_tokens: u64,
 }
@@ -702,7 +702,7 @@ pub struct CompactionPolicy {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PartialCompactionPolicy {
     pub enabled: Option<bool>,
-    pub reserve_tokens: Option<u64>,
+    pub reserve_tokens: Option<i64>,
     pub keep_recent_tokens: Option<u64>,
     pub background_tokens: Option<u64>,
 }

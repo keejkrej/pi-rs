@@ -780,7 +780,7 @@ fn threshold_compaction(
         .flat_map(|entry| entry.model.as_deref().unwrap_or(&[]).iter().cloned())
         .collect();
     let tokens = estimate_context(view, &extra);
-    let blocking = context_window.saturating_sub(policy.reserve_tokens as i64);
+    let blocking = context_window.saturating_sub(policy.reserve_tokens);
     let background = blocking.saturating_sub(policy.background_tokens as i64);
     let over = if tokens > blocking {
         Some(ThresholdDecision::Blocking)

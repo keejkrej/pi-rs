@@ -235,7 +235,7 @@ async fn phase_select(
         None => {}
     }
 
-    let max_budget = (0.8 * policy.reserve_tokens as f64).floor() as u64;
+    let max_budget = (0.8 * policy.reserve_tokens.max(0) as f64).floor() as u64;
     let max_tokens = if model.max_tokens > 0 {
         max_budget.min(model.max_tokens as u64)
     } else {
