@@ -30,14 +30,15 @@ pub use pi_js::{Error, Result};
 pub use pi_js::vendor::typebox::Schema as TSchema;
 pub use pi_js::vendor::typebox::t as Type;
 
+// WIRE(@tui-w2 Step 3 / @mcp-w2): remaining api re-exports gated until Step 3 and @mcp-w2 land.
 pub use crate::api::anthropic_messages::{AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay};
 pub use crate::api::azure_openai_responses::AzureOpenAIResponsesOptions;
-pub use crate::api::bedrock_converse_stream::{BedrockOptions, BedrockThinkingDisplay};
-pub use crate::api::google_generative_ai::GoogleOptions;
-pub use crate::api::google_shared::{GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel};
-pub use crate::api::google_vertex::GoogleVertexOptions;
+// WIRE(@mcp-w2): pub use crate::api::bedrock_converse_stream::{BedrockOptions, BedrockThinkingDisplay};
+// WIRE(@mcp-w2): pub use crate::api::google_generative_ai::GoogleOptions;
+// WIRE(@mcp-w2): pub use crate::api::google_shared::{GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel};
+// WIRE(@mcp-w2): pub use crate::api::google_vertex::GoogleVertexOptions;
 pub use crate::api::lazy::*;
-pub use crate::api::mistral_conversations::MistralOptions;
+// WIRE(@mcp-w2): pub use crate::api::mistral_conversations::MistralOptions;
 pub use crate::api::openai_codex_responses::{OpenAICodexResponsesOptions, OpenAICodexWebSocketDebugStats};
 pub use crate::api::openai_completions::OpenAICompletionsOptions;
 pub use crate::api::openai_responses::OpenAIResponsesOptions;
