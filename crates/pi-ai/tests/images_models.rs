@@ -955,13 +955,18 @@ async fn supports_dynamic_providers_listing_image_models_via_refresh() {
 
 #[test]
 fn keeps_existing_built_in_and_compat_model_reads_chat_only() {
-    // WIRE(@mcp-w2): also cross-check providers::all::{get_builtin_models, get_builtin_image_models, get_all_builtin_models}
     let compat = get_models(Some("openrouter"));
     let images = get_image_models("openrouter");
+    let builtin_chat = pi_ai::providers::all::get_builtin_models("openrouter");
+    let builtin_img = pi_ai::providers::all::get_builtin_image_models("openrouter");
+    let builtin_all = pi_ai::providers::all::get_all_builtin_models("openrouter");
     let all = builtin_models().get_all_models(Some("openrouter"));
     let chat_typed = builtin_models().get_models_of_type(ModelType::Chat, Some("openrouter"));
     let clfs = provider_classifier_models("openrouter").map(|m| m.len()).unwrap_or(0);
 
+    assert_eq!(compat, builtin_chat);
+    assert_eq!(images, builtin_img);
+    assert_eq!(all, builtin_all);
     assert_eq!(
         compat,
         chat_typed.into_iter().filter_map(|m| m.into_chat()).collect::<Vec<_>>()
@@ -976,10 +981,24 @@ fn keeps_existing_built_in_and_compat_model_reads_chat_only() {
 #[tokio::test]
 #[serial]
 async fn builtin_models_exposes_openrouter_image_models_under_the_openrouter_provider() {
-    // WIRE(@mcp-w2): providers::all::builtin_models() will supply injected AuthContext support;
-    // compat::builtin_models() uses process env here.
+    struct InjectedOpenRouterAuthCtx;
+    #[async_trait::async_trait]
+    impl AuthContext for InjectedOpenRouterAuthCtx {
+        async fn env(&self, name: &str) -> Option<String> {
+            (name == "OPENROUTER_API_KEY").then(|| "or-injected-key".to_owned())
+        }
+        async fn file_exists(&self, _path: &str) -> bool {
+            false
+        }
+    }
+
     let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "or-key");
     let models = builtin_models();
+    let injected_models = pi_ai::providers::all::builtin_models(Some(CreateModelsOptions {
+        credentials: None,
+        models_store: None,
+        auth_context: Some(Arc::new(InjectedOpenRouterAuthCtx)),
+    }));
     let provider = models.get_provider("openrouter").unwrap();
     let images = models.get_models_of_type(ModelType::Image, Some("openrouter"));
     assert!(!images.is_empty());
@@ -1011,7 +1030,7 @@ async fn builtin_models_exposes_openrouter_image_models_under_the_openrouter_pro
     assert_eq!(chat.api, "openai-completions");
     assert_eq!(image.as_image().unwrap().api, "openrouter-images");
 
-    // One credential covers both.
+    // One credential covers both (process env and injected AuthContext).
     assert_eq!(
         models
             .get_auth_model(&image, None)
@@ -1022,11 +1041,27 @@ async fn builtin_models_exposes_openrouter_image_models_under_the_openrouter_pro
     );
     assert_eq!(
         models
-            .get_auth_model(&AnyModel::Chat(chat), None)
+            .get_auth_model(&AnyModel::Chat(chat.clone()), None)
             .await
             .unwrap()
             .and_then(|r| r.auth.api_key),
         Some("or-key".to_owned())
+    );
+    assert_eq!(
+        injected_models
+            .get_auth_model(&image, None)
+            .await
+            .unwrap()
+            .and_then(|r| r.auth.api_key),
+        Some("or-injected-key".to_owned())
+    );
+    assert_eq!(
+        injected_models
+            .get_auth_model(&AnyModel::Chat(chat), None)
+            .await
+            .unwrap()
+            .and_then(|r| r.auth.api_key),
+        Some("or-injected-key".to_owned())
     );
     let img_ref = image.as_image().unwrap();
     assert!(provider.generate_images(img_ref, &sample_context(), None).is_some());

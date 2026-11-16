@@ -258,32 +258,7 @@ pub struct ResolvedOpenAICompletionsCompat {
     pub chat_template_args: Option<IndexMap<String, ChatTemplateKwargValue>>,
 }
 
-// WIRE(@mcp-w2): use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input}
-mod copilot_headers_fallback {
-    use super::*;
-
-    pub fn has_copilot_vision_input(messages: &[Message]) -> bool {
-        messages.iter().any(|m| match m {
-            Message::User(u) => matches!(&u.content, UserMessageContent::Blocks(b) if b.iter().any(|x| matches!(x, UserContentBlock::Image(_)))),
-            Message::ToolResult(tr) => tr.content.iter().any(|x| matches!(x, UserContentBlock::Image(_))),
-            _ => false,
-        })
-    }
-
-    pub fn build_copilot_dynamic_headers(messages: &[Message], has_images: bool) -> IndexMap<String, String> {
-        let mut h = IndexMap::new();
-        let is_agent = messages.last().is_some_and(|m| !matches!(m, Message::User(_)));
-        h.insert(
-            "X-Initiator".to_string(),
-            if is_agent { "agent" } else { "user" }.to_string(),
-        );
-        h.insert("Openai-Intent".to_string(), "conversation-edits".to_string());
-        if has_images {
-            h.insert("Copilot-Vision-Request".to_string(), "true".to_string());
-        }
-        h
-    }
-}
+use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 
 /// Resolve compatibility settings for an `openai-completions` model.
 pub fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
@@ -1420,8 +1395,8 @@ fn build_headers(
     }
 
     if model.provider == "github-copilot" {
-        let has_images = copilot_headers_fallback::has_copilot_vision_input(&context.messages);
-        let copilot = copilot_headers_fallback::build_copilot_dynamic_headers(&context.messages, has_images);
+        let has_images = has_copilot_vision_input(&context.messages);
+        let copilot = build_copilot_dynamic_headers(&context.messages, has_images);
         apply_raw_header_layer(&mut headers, &copilot);
     }
 

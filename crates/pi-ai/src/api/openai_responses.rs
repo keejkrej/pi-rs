@@ -21,9 +21,8 @@ use crate::api::openai_responses_shared::{
 use crate::api::simple_options::{build_base_options, clamp_reasoning};
 use crate::env_api_keys::get_env_api_key;
 use crate::types::{
-    ApiStreamOptions, CacheRetention, Message, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders,
-    ProviderStreams, SessionAffinityFormat, SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice,
-    TranscriptContext,
+    ApiStreamOptions, CacheRetention, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders, ProviderStreams,
+    SessionAffinityFormat, SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice, TranscriptContext,
 };
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::diagnostics::{append_assistant_message_diagnostic, create_assistant_message_diagnostic};
@@ -172,33 +171,7 @@ impl OpenAIResponsesOptions {
     }
 }
 
-// WIRE(@mcp-w2): use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input}
-mod copilot_headers_fallback {
-    use super::*;
-    use crate::types::UserContentBlock;
-
-    pub fn has_copilot_vision_input(messages: &[Message]) -> bool {
-        messages.iter().any(|m| match m {
-            Message::User(u) => matches!(&u.content, crate::types::UserMessageContent::Blocks(b) if b.iter().any(|x| matches!(x, UserContentBlock::Image(_)))),
-            Message::ToolResult(tr) => tr.content.iter().any(|x| matches!(x, UserContentBlock::Image(_))),
-            _ => false,
-        })
-    }
-
-    pub fn build_copilot_dynamic_headers(messages: &[Message], has_images: bool) -> IndexMap<String, String> {
-        let mut h = IndexMap::new();
-        let is_agent = messages.last().is_some_and(|m| !matches!(m, Message::User(_)));
-        h.insert(
-            "X-Initiator".to_string(),
-            if is_agent { "agent" } else { "user" }.to_string(),
-        );
-        h.insert("Openai-Intent".to_string(), "conversation-edits".to_string());
-        if has_images {
-            h.insert("Copilot-Vision-Request".to_string(), "true".to_string());
-        }
-        h
-    }
-}
+use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 
 #[derive(Debug, Clone)]
 struct ResolvedOpenAIResponsesCompat {
@@ -563,11 +536,8 @@ async fn run_openai_responses_stream(
     let cache_retention = resolve_responses_cache_retention(options.base.cache_retention, options.base.env.as_ref());
 
     let copilot_dynamic = if model.provider == "github-copilot" {
-        let has_images = copilot_headers_fallback::has_copilot_vision_input(&context.messages);
-        Some(copilot_headers_fallback::build_copilot_dynamic_headers(
-            &context.messages,
-            has_images,
-        ))
+        let has_images = has_copilot_vision_input(&context.messages);
+        Some(build_copilot_dynamic_headers(&context.messages, has_images))
     } else {
         None
     };

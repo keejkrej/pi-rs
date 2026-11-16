@@ -12,6 +12,10 @@ use serde_json::{Map, Value};
 
 pub use crate::api::anthropic_messages_lazy::anthropic_messages_api;
 pub use crate::api::azure_openai_responses_lazy::azure_openai_responses_api;
+pub use crate::api::bedrock_converse_stream_lazy::bedrock_converse_stream_api;
+pub use crate::api::google_generative_ai_lazy::google_generative_ai_api;
+pub use crate::api::google_vertex_lazy::google_vertex_api;
+pub use crate::api::mistral_conversations_lazy::mistral_conversations_api;
 pub use crate::api::openai_codex_responses_lazy::openai_codex_responses_api;
 pub use crate::api::openai_completions_lazy::openai_completions_api;
 pub use crate::api::openai_responses_lazy::openai_responses_api;
@@ -31,30 +35,15 @@ pub use crate::utils::text::content_text;
 pub use crate::utils::transcript::normalize_context;
 pub use crate::utils::validation::{validate_tool_arguments, validate_tool_call};
 
-// WIRE(@mcp-w2): re-export bedrock_converse_stream_api, google_generative_ai_api,
-// google_vertex_api, mistral_conversations_api when @mcp-w2 lands.
-
 use crate::api::lazy::lazy_stream;
-use crate::auth::helpers::env_api_key_auth;
-use crate::auth::types::ProviderAuth;
-use crate::models::{
-    CreateProviderApi, CreateProviderOptions, ModelsApiStreamOptions, ModelsSimpleStreamOptions, MutableModels,
-    Provider, create_models, create_provider,
-};
-use crate::models_generated::{
-    BUILTIN_MODEL_PROVIDER_IDS, provider_chat_models, provider_classifier_models, provider_image_models,
-};
-use crate::providers::anthropic::anthropic_provider;
-use crate::providers::azure_openai_responses::azure_openai_responses_provider;
+use crate::models::{ModelsApiStreamOptions, ModelsSimpleStreamOptions, MutableModels, Provider};
+use crate::providers::all::builtin_models as build_all_builtin_models;
 use crate::providers::faux::{FauxProviderRegistration, RegisterFauxProviderOptions, create_faux_core};
-use crate::providers::openai::openai_provider;
-use crate::providers::openai_codex::openai_codex_provider;
 use crate::types::{
-    AnyModel, ApiStreamOptions, AssistantMessage, Context, Model, ProviderClassifier, ProviderImages, ProviderStreams,
-    SimpleStreamOptions, StreamOptions, TranscriptContext,
+    ApiStreamOptions, AssistantMessage, Context, Model, ProviderStreams, SimpleStreamOptions, StreamOptions,
+    TranscriptContext,
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
-use crate::utils::model_operations::{classifier_error_result_message, image_error_result};
 use crate::utils::uuid::uuidv7;
 
 const AMBIENT_AUTH_MARKER: &str = "<authenticated>";
@@ -190,8 +179,11 @@ fn builtin_api_pairs() -> Vec<(&'static str, ProviderStreams)> {
         ("openai-responses", openai_responses_api()),
         ("openai-codex-responses", openai_codex_responses_api()),
         ("azure-openai-responses", azure_openai_responses_api()),
+        ("bedrock-converse-stream", bedrock_converse_stream_api()),
+        ("google-generative-ai", google_generative_ai_api()),
+        ("google-vertex", google_vertex_api()),
+        ("mistral-conversations", mistral_conversations_api()),
         ("pi-messages", pi_messages_api()),
-        // WIRE(@mcp-w2): add google-generative-ai, google-vertex, mistral-conversations, bedrock-converse-stream
     ]
 }
 
@@ -236,158 +228,9 @@ fn ensure_builtin_apis_registered() {
     });
 }
 
-fn build_fallback_api_map() -> IndexMap<String, ProviderStreams> {
-    let mut map = IndexMap::new();
-    for (api, streams) in builtin_api_pairs() {
-        map.insert(api.to_string(), streams);
-    }
-    map
-}
-
-// WIRE(@mcp-w2): delegate compat_models catalog construction to crate::providers::all::builtin_models().
 static COMPAT_MODELS: LazyLock<MutableModels> = LazyLock::new(|| {
     ensure_builtin_apis_registered();
-    let models = create_models(None);
-    let primary: [Option<Arc<dyn Provider + Send + Sync>>; 4] = [
-        anthropic_provider().ok(),
-        azure_openai_responses_provider().ok(),
-        openai_provider().ok(),
-        openai_codex_provider().ok(),
-    ];
-    let mut registered_ids = indexmap::IndexSet::new();
-    for prov in primary.into_iter().flatten() {
-        registered_ids.insert(prov.id().to_string());
-        models.set_provider(prov);
-    }
-
-    let api_map = build_fallback_api_map();
-    for &provider_id in BUILTIN_MODEL_PROVIDER_IDS {
-        if registered_ids.contains(provider_id) {
-            continue;
-        }
-        let env_keys = find_env_keys(provider_id, None).unwrap_or_default();
-        let api_key_auth = env_api_key_auth(provider_id, &env_keys);
-        let chat_catalog = provider_chat_models(provider_id);
-        let image_catalog = provider_image_models(provider_id);
-        let classifier_catalog = provider_classifier_models(provider_id);
-        let mut any_models: Vec<AnyModel> = Vec::new();
-        let mut by_api = IndexMap::new();
-        if let Some(chats) = chat_catalog {
-            for m in chats.values() {
-                any_models.push(AnyModel::Chat(m.clone()));
-                if !by_api.contains_key(&m.api) {
-                    if let Some(streams) = api_map.get(&m.api) {
-                        by_api.insert(m.api.clone(), streams.clone());
-                    } else {
-                        let missing_api = m.api.clone();
-                        let missing_api_simple = missing_api.clone();
-                        by_api.insert(
-                            missing_api.clone(),
-                            ProviderStreams {
-                                stream: Arc::new(move |model, _ctx, _opts| {
-                                    let api_name = missing_api.clone();
-                                    lazy_stream(model, async move {
-                                        Err(Error::msg(format!("API {api_name} requires @mcp-w2 integration")))
-                                    })
-                                }),
-                                stream_simple: Arc::new(move |model, _ctx, _opts| {
-                                    let api_name = missing_api_simple.clone();
-                                    lazy_stream(model, async move {
-                                        Err(Error::msg(format!("API {api_name} requires @mcp-w2 integration")))
-                                    })
-                                }),
-                                fetch_deferred: None,
-                                cancel_deferred: None,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        let mut by_image_api = IndexMap::new();
-        if let Some(imgs) = image_catalog {
-            for m in imgs.values() {
-                any_models.push(AnyModel::Image(m.clone()));
-                if !by_image_api.contains_key(&m.api) {
-                    by_image_api.insert(
-                        m.api.clone(),
-                        ProviderImages {
-                            generate_images: Arc::new(|model, ctx, opts| {
-                                let m = model.clone();
-                                let c = ctx.clone();
-                                Box::pin(async move {
-                                    let aborted = opts
-                                        .as_ref()
-                                        .and_then(|o| o.base.signal.as_ref())
-                                        .is_some_and(|s| s.aborted());
-                                    crate::images::generate_images(&m, &c, opts.map(Into::into))
-                                        .await
-                                        .unwrap_or_else(|e| image_error_result(&m, &e, aborted))
-                                })
-                            }),
-                        },
-                    );
-                }
-            }
-        }
-        let mut by_classifier_api = IndexMap::new();
-        if let Some(clfs) = classifier_catalog {
-            for m in clfs.values() {
-                any_models.push(AnyModel::Classifier(m.clone()));
-                if !by_classifier_api.contains_key(&m.api) {
-                    let api_name = m.api.clone();
-                    by_classifier_api.insert(
-                        api_name.clone(),
-                        ProviderClassifier {
-                            classify: Arc::new(move |model, _ctx, _opts| {
-                                let msg = format!("API {api_name} requires @mcp-w2 integration");
-                                let m = model.clone();
-                                Box::pin(async move { classifier_error_result_message(&m, msg, false) })
-                            }),
-                        },
-                    );
-                }
-            }
-        }
-        if any_models.is_empty() {
-            continue;
-        }
-        let api_opt = if by_api.is_empty() {
-            None
-        } else {
-            Some(CreateProviderApi::ByApi(by_api))
-        };
-        let images_opt = if by_image_api.is_empty() {
-            None
-        } else {
-            Some(by_image_api)
-        };
-        let classifiers_opt = if by_classifier_api.is_empty() {
-            None
-        } else {
-            Some(by_classifier_api)
-        };
-        if let Ok(prov) = create_provider(CreateProviderOptions {
-            id: provider_id.to_owned(),
-            name: None,
-            base_url: None,
-            headers: None,
-            auth: ProviderAuth {
-                api_key: Some(api_key_auth),
-                oauth: None,
-            },
-            models: any_models,
-            fetch_models: None,
-            filter_models: None,
-            filter_all_models: None,
-            api: api_opt,
-            images: images_opt,
-            classifiers: classifiers_opt,
-        }) {
-            models.set_provider(prov);
-        }
-    }
-    models
+    build_all_builtin_models(None)
 });
 
 pub fn builtin_models() -> &'static MutableModels {

@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
+use pi_ai::api::openrouter_images::generate_images as generate_openrouter_images;
 use pi_ai::images::generate_images;
 use pi_ai::images_api_registry::{clear_images_api_providers, register_images_api_provider};
 use pi_ai::providers::images::register_builtins::register_built_in_images_api_providers;
 use pi_ai::types::{
-    AssistantImages, ImageModel, ImagesContext, ImagesFunction, ImagesStopReason, ModelCost, ModelInput, ModelOutput,
-    TextContent, UserContentBlock,
+    AssistantImages, ImageModel, ImagesContext, ImagesFunction, ImagesOptions, ImagesStopReason, ModelCost, ModelInput,
+    ModelOutput, ProviderRequestOptions, TextContent, UserContentBlock,
 };
 use pi_ai::utils::error_body::{SdkErrorInfo, format_provider_error, normalize_provider_error};
+use pi_js::fetch::{Headers, Response};
 use serde_json::json;
 use serial_test::serial;
 
@@ -28,7 +30,6 @@ async fn surfaces_http_body_reason_instead_of_opaque_sdk_message() {
     register_built_in_images_api_providers();
     let _guard = ImagesResetGuard;
 
-    // WIRE(@mcp-w2): also route directly through openrouter_images::generate_images once @mcp-w2 lands.
     let model = ImageModel {
         id: "black-forest-labs/flux.2-pro".to_string(),
         name: "FLUX.2 Pro".to_string(),
@@ -94,4 +95,31 @@ async fn surfaces_http_body_reason_instead_of_opaque_sdk_message() {
     assert!(err.contains("403"), "err={err}");
     assert!(err.contains("blocked by gateway WAF"), "err={err}");
     assert_ne!(err, "403 status code (no body)");
+
+    let direct = generate_openrouter_images(
+        &model,
+        &context,
+        Some(ImagesOptions {
+            base: ProviderRequestOptions {
+                api_key: Some("test-key".to_owned()),
+                fetch: Some(Arc::new(|_req| {
+                    Box::pin(async {
+                        Ok(Response::new(
+                            403,
+                            Headers::from_pairs([("content-type", "application/json")]),
+                            r#"{"error":"blocked by gateway WAF"}"#,
+                        ))
+                    })
+                })),
+                max_retries: Some(0),
+                ..Default::default()
+            },
+            metadata: None,
+        }),
+    )
+    .await;
+    assert_eq!(direct.stop_reason, ImagesStopReason::Error);
+    let direct_err = direct.error_message.as_deref().unwrap_or("");
+    assert!(direct_err.contains("403"), "direct_err={direct_err}");
+    assert!(direct_err.contains("blocked by gateway WAF"), "direct_err={direct_err}");
 }

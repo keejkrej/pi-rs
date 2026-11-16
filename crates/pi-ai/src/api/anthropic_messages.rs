@@ -48,44 +48,7 @@ use crate::utils::transcript::{
     get_current_tools, get_declared_tools, get_initial_system_message, has_tool_redefinitions, resolve_transcript,
 };
 
-// WIRE(@mcp-w2): use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input} once @mcp-w2 lands.
-mod copilot_headers_fallback {
-    use indexmap::IndexMap;
-
-    use crate::types::{Message, UserContentBlock, UserMessageContent};
-
-    pub(super) fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
-        let Some(last) = messages.last() else {
-            return "user";
-        };
-        if !matches!(last, Message::User(_)) {
-            "agent"
-        } else {
-            "user"
-        }
-    }
-
-    pub(super) fn has_copilot_vision_input(messages: &[Message]) -> bool {
-        messages.iter().any(|msg| match msg {
-            Message::User(u) => match &u.content {
-                UserMessageContent::Blocks(blocks) => blocks.iter().any(|b| matches!(b, UserContentBlock::Image(_))),
-                UserMessageContent::Text(_) => false,
-            },
-            Message::ToolResult(tr) => tr.content.iter().any(|b| matches!(b, UserContentBlock::Image(_))),
-            _ => false,
-        })
-    }
-
-    pub(super) fn build_copilot_dynamic_headers(messages: &[Message], has_images: bool) -> IndexMap<String, String> {
-        let mut headers = IndexMap::new();
-        headers.insert("X-Initiator".to_string(), infer_copilot_initiator(messages).to_string());
-        headers.insert("Openai-Intent".to_string(), "conversation-edits".to_string());
-        if has_images {
-            headers.insert("Copilot-Vision-Request".to_string(), "true".to_string());
-        }
-        headers
-    }
-}
+use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 
 const CLAUDE_CODE_VERSION: &str = "2.1.280";
 
@@ -2453,11 +2416,8 @@ async fn run_anthropic_stream(
         }
 
         if model.provider == "github-copilot" {
-            let has_images = copilot_headers_fallback::has_copilot_vision_input(&normalized_context.messages);
-            copilot_dynamic_headers = Some(copilot_headers_fallback::build_copilot_dynamic_headers(
-                &normalized_context.messages,
-                has_images,
-            ));
+            let has_images = has_copilot_vision_input(&normalized_context.messages);
+            copilot_dynamic_headers = Some(build_copilot_dynamic_headers(&normalized_context.messages, has_images));
         }
 
         let retention = resolve_cache_retention(options.base.cache_retention, env);

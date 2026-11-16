@@ -15,24 +15,16 @@ use crate::auth::types::{
     ProviderAuthInteraction,
 };
 use crate::models::Provider;
-use crate::providers::anthropic::anthropic_provider;
-use crate::providers::openai::openai_provider;
-use crate::providers::openai_codex::openai_codex_provider;
+use crate::providers::all::builtin_providers;
 use crate::utils::uuid::uuidv7;
 
 const AUTH_FILE: &str = "auth.json";
 
 fn oauth_providers() -> Vec<Arc<dyn Provider + Send + Sync>> {
-    // WIRE(@mcp-w2): delegate provider list to crate::providers::all::builtin_providers()
-    [
-        anthropic_provider().ok(),
-        openai_provider().ok(),
-        openai_codex_provider().ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|p| p.auth().oauth.is_some())
-    .collect()
+    builtin_providers()
+        .into_iter()
+        .filter(|p| p.auth().oauth.is_some())
+        .collect()
 }
 
 fn prompt_line(question: &str) -> Result<String> {

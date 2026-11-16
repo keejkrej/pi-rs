@@ -2,6 +2,8 @@
 
 use pi_ai::api::anthropic_messages::stream_simple as stream_anthropic;
 use pi_ai::api::azure_openai_responses::stream_simple as stream_azure;
+use pi_ai::api::google_generative_ai::stream_simple as stream_google;
+use pi_ai::api::mistral_conversations::stream_simple as stream_mistral;
 use pi_ai::api::openai_codex_responses::stream_simple as stream_codex;
 use pi_ai::api::openai_completions::stream_simple as stream_openai_completions;
 use pi_ai::api::openai_responses::stream_simple as stream_openai_responses;
@@ -39,7 +41,6 @@ async fn direct_apis_report_missing_auth_without_panicking() {
         tools: None,
     });
 
-    // WIRE(@mcp-w2): also cover google_generative_ai and mistral_conversations
     let streams = [
         (
             "anthropic-messages",
@@ -50,6 +51,16 @@ async fn direct_apis_report_missing_auth_without_panicking() {
             "azure-openai-responses",
             stream_azure(&model("azure-openai-responses"), &context, None),
             "API key",
+        ),
+        (
+            "google-generative-ai",
+            stream_google(&model("google-generative-ai"), &context, None),
+            "API key",
+        ),
+        (
+            "mistral-conversations",
+            stream_mistral(&model("mistral-conversations"), &context, None),
+            "No API key for provider: test-provider",
         ),
         (
             "openai-codex-responses",
