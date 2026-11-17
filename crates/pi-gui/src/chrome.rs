@@ -9,7 +9,7 @@ use crate::composer;
 use crate::overlays;
 use crate::right_panel;
 use crate::sidebar;
-use crate::state::{DemoScene, LaunchConfig, OverlayKind, PiGuiAction, PiGuiState};
+use crate::state::{LaunchConfig, OverlayKind, PiGuiAction, PiGuiState, SCENE_ENTRIES};
 use crate::theme::{LayoutMetrics, WakuPalette, palette, waku_kit};
 use crate::transcript;
 
@@ -345,23 +345,12 @@ pub fn app_view(s: &PiGuiState, cx: &mut Cx<PiGuiState>) -> El {
     rune_kit::root(base, overlay_layers)
 }
 
-static SCENES: &[(&str, fn(&mut PiGuiState))] = &[
-    (DemoScene::Default.id(), |s| DemoScene::Default.apply(s)),
-    (DemoScene::Empty.id(), |s| DemoScene::Empty.apply(s)),
-    (DemoScene::Streaming.id(), |s| DemoScene::Streaming.apply(s)),
-    (DemoScene::DiffReview.id(), |s| DemoScene::DiffReview.apply(s)),
-    (DemoScene::Overlays.id(), |s| DemoScene::Overlays.apply(s)),
-    (DemoScene::Settings.id(), |s| DemoScene::Settings.apply(s)),
-    (DemoScene::Plugins.id(), |s| DemoScene::Plugins.apply(s)),
-    (DemoScene::LightTheme.id(), |s| DemoScene::LightTheme.apply(s)),
-];
-
 /// Builds the Rune [`AppSpec`] for `pi-gui`.
 #[must_use]
 pub fn app_spec(_config: LaunchConfig) -> AppSpec<PiGuiState> {
     AppSpec {
         min_size: Some((LayoutMetrics::MIN_WINDOW_WIDTH, LayoutMetrics::MIN_WINDOW_HEIGHT)),
-        scenes: SCENES,
+        scenes: SCENE_ENTRIES,
         fonts: rune_theme_opencode::FONTS,
         families: rune_theme_opencode::FAMILIES,
         setup: Some(setup_state),
@@ -400,6 +389,7 @@ mod tests {
         ContentBlockView, FileTreeEntryView, MessageRoleView, MessageViewModel, ThreadGroup, ThreadSummary,
         ToolCallStatus, ToolCallViewModel,
     };
+    use crate::state::DemoScene;
     use rune::{Env, Mods, Runtime};
 
     fn test_runtime(state: PiGuiState, size: (f32, f32)) -> Runtime<PiGuiState> {
@@ -418,35 +408,43 @@ mod tests {
         }
     }
 
+    fn assert_scene_layout(scene_id: &str, st: PiGuiState) {
+        let nav_tab = st.nav_tab;
+        let rt = test_runtime(st, (1280.0, 820.0));
+        let mut keys = vec![
+            "main-pane",
+            "transcript-scroll-host",
+            "composer-card",
+            "composer-status-footer",
+            "sidebar",
+            "sidebar-nav-rail",
+        ];
+        if nav_tab == crate::state::NavRailTab::Sessions {
+            keys.push("new-thread-btn");
+        }
+        for key in keys {
+            let (rect, opacity) = rt
+                .presented(key)
+                .unwrap_or_else(|| panic!("scene {scene_id} missing element {key}"));
+            assert!(
+                rect[2] > 0.0 && rect[3] > 0.0,
+                "scene {scene_id} collapsed rect for {key}: {rect:?}"
+            );
+            assert!(opacity > 0.0, "scene {scene_id} zero opacity for {key}");
+        }
+    }
+
     #[test]
     fn all_demo_scenes_layout_with_nonzero_bounds() {
         for scene in DemoScene::ALL {
             let mut st = PiGuiState::new(LaunchConfig::parse_args(&["--demo"], "/tmp/pi-workspace"));
             scene.apply(&mut st);
-            let nav_tab = st.nav_tab;
-            let rt = test_runtime(st, (1280.0, 820.0));
-            let mut keys = vec![
-                "main-pane",
-                "transcript-scroll-host",
-                "composer-card",
-                "composer-status-footer",
-                "sidebar",
-                "sidebar-nav-rail",
-            ];
-            if nav_tab == crate::state::NavRailTab::Sessions {
-                keys.push("new-thread-btn");
-            }
-            for key in keys {
-                let (rect, opacity) = rt
-                    .presented(key)
-                    .unwrap_or_else(|| panic!("scene {} missing element {key}", scene.id()));
-                assert!(
-                    rect[2] > 0.0 && rect[3] > 0.0,
-                    "scene {} collapsed rect for {key}: {rect:?}",
-                    scene.id()
-                );
-                assert!(opacity > 0.0, "scene {} zero opacity for {key}", scene.id());
-            }
+            assert_scene_layout(scene.id(), st);
+        }
+        for (scene_id, apply_fn) in SCENE_ENTRIES {
+            let mut st = PiGuiState::new(LaunchConfig::parse_args(&["--demo"], "/tmp/pi-workspace"));
+            apply_fn(&mut st);
+            assert_scene_layout(scene_id, st);
         }
     }
 

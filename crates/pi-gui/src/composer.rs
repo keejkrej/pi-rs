@@ -127,6 +127,11 @@ fn apply_autocomplete_choice(
                 st.dispatch(PiGuiAction::NewThread, None);
                 return;
             }
+            "/compact" => {
+                st.composer_edit.clear();
+                st.dispatch(PiGuiAction::CompactSession, None);
+                return;
+            }
             "/model" => {
                 st.composer_edit.clear();
                 st.dispatch(PiGuiAction::OpenOverlay(OverlayKind::ModelPicker), None);
