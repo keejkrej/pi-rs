@@ -1,11 +1,24 @@
 //! Port of packages/coding-agent/src/utils/shell.ts
 
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use indexmap::{IndexMap, IndexSet};
+use pi_js::seam::{Guard, Slot};
 use pi_js::{Error, Result};
 
 use crate::config::get_bin_dir;
+
+pub type TaskkillSpawnFn = Arc<dyn Fn(&str, &[String]) -> std::io::Result<()> + Send + Sync>;
+static TASKKILL_SPAWN_SLOT: LazyLock<Slot<TaskkillSpawnFn>> = LazyLock::new(Slot::new);
+
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    pub fn override_taskkill_spawn(func: TaskkillSpawnFn) -> Guard {
+        TASKKILL_SPAWN_SLOT.set(Arc::new(func))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandTransport {
@@ -210,11 +223,17 @@ pub fn kill_tracked_detached_children() {
 /// Kill a process and all its children (cross-platform).
 pub fn kill_process_tree(pid: u32) {
     if pi_js::env::platform() == "win32" {
-        let sys_root = pi_js::env::var("SystemRoot").unwrap_or_else(|| "C:\\Windows".to_owned());
+        let sys_root = pi_js::env::var("SystemRoot")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "C:\\Windows".to_owned());
         let taskkill = pi_js::path::win32::join(&[&sys_root, "System32", "taskkill.exe"]);
-        let pid_str = pid.to_string();
+        let args = vec!["/F".to_owned(), "/T".to_owned(), "/PID".to_owned(), pid.to_string()];
+        if let Some(hook) = TASKKILL_SPAWN_SLOT.get() {
+            let _ = hook(&taskkill, &args);
+            return;
+        }
         let mut cmd = std::process::Command::new(taskkill);
-        cmd.args(["/F", "/T", "/PID", &pid_str])
+        cmd.args(&args)
             .env_clear()
             .envs(pi_js::env::vars())
             .stdin(std::process::Stdio::null())

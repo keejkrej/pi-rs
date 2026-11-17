@@ -1679,6 +1679,28 @@ pub struct SessionManager {
     inner: Arc<Mutex<SessionManagerInner>>,
 }
 
+impl Default for SessionManager {
+    fn default() -> Self {
+        let mut inner = SessionManagerInner {
+            session_id: String::new(),
+            session_file: None,
+            session_dir: String::new(),
+            cwd: String::new(),
+            persist: false,
+            flushed: false,
+            file_entries: Vec::new(),
+            by_id: IndexMap::new(),
+            labels_by_id: IndexMap::new(),
+            label_timestamps_by_id: IndexMap::new(),
+            leaf_id: None,
+        };
+        let _ = inner.new_session(None);
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+}
+
 impl SessionManager {
     fn init(
         cwd: &str,

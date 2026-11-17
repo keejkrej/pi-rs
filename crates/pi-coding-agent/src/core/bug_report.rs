@@ -344,7 +344,6 @@ fn describe_provider(info: &BugReportProviderInfo) -> BugReportProviderInfo {
 }
 
 /// Summary descriptor for one loaded extension in a bug report.
-// WIRE(@codemode-w3): convert from `crate::core::extensions::types::Extension` when extensions land.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BugReportExtensionInput {
@@ -353,6 +352,27 @@ pub struct BugReportExtensionInput {
     pub scope: String,
     pub origin: String,
     pub hidden: bool,
+}
+
+impl From<&crate::core::extensions::types::LoadedExtension> for BugReportExtensionInput {
+    fn from(ext: &crate::core::extensions::types::LoadedExtension) -> Self {
+        let scope = match ext.source_info.scope {
+            crate::core::source_info::SourceScope::User => "user",
+            crate::core::source_info::SourceScope::Project => "project",
+            crate::core::source_info::SourceScope::Temporary => "temporary",
+        };
+        let origin = match ext.source_info.origin {
+            crate::core::source_info::SourceOrigin::Package => "package",
+            crate::core::source_info::SourceOrigin::TopLevel => "top-level",
+        };
+        Self {
+            path: ext.path.clone(),
+            source: ext.source_info.source.clone(),
+            scope: scope.to_owned(),
+            origin: origin.to_owned(),
+            hidden: ext.hidden,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +390,15 @@ pub struct BugReportExtensionDescription {
 pub struct BugReportExtensionError {
     pub path: String,
     pub error: String,
+}
+
+impl From<&crate::core::extensions::types::ExtensionError> for BugReportExtensionError {
+    fn from(err: &crate::core::extensions::types::ExtensionError) -> Self {
+        Self {
+            path: err.extension_path.clone(),
+            error: err.error.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

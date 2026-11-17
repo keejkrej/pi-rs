@@ -415,8 +415,8 @@ pub enum HarnessSessionEvent {
     },
 }
 
-// WIRE(@codemode-w3): replace `HarnessSession` adapter with real `pi_coding_agent::core::agent_session::AgentSession`
-// once `@codemode-w3` lands `AgentSession` + retry/session persistence integration.
+// WIRE(@ca-cli-w3): replace `HarnessSession` adapter with real `pi_coding_agent::core::agent_session::AgentSession`
+// once `@ca-cli-w3` lands `AgentSession` + retry/session persistence integration.
 #[derive(Clone)]
 pub struct HarnessSession {
     agent: Agent,

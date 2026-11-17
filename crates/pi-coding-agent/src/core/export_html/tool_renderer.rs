@@ -40,7 +40,6 @@ pub struct ToolResultRenderOptions {
 }
 
 /// Context passed to custom `render_call`/`render_result` implementations during HTML export.
-// WIRE(@codemode-w3): bridge `crate::core::extensions::types::ToolRenderContext` when extension types merge.
 #[derive(Clone)]
 pub struct ToolRenderContext {
     pub args: Option<Value>,
@@ -57,8 +56,64 @@ pub struct ToolRenderContext {
     pub output_pad: usize,
 }
 
+impl From<&ToolRenderContext> for crate::core::extensions::types::ToolRenderContext {
+    fn from(ctx: &ToolRenderContext) -> Self {
+        Self {
+            args: ctx.args.clone().unwrap_or(Value::Null),
+            tool_call_id: ctx.tool_call_id.clone(),
+            invalidate: Arc::new(|| {}),
+            last_component: ctx.last_component.clone(),
+            state: Arc::new(Mutex::new(None)),
+            cwd: ctx.cwd.clone(),
+            execution_started: ctx.execution_started,
+            args_complete: ctx.args_complete,
+            is_partial: ctx.is_partial,
+            expanded: ctx.expanded,
+            show_images: ctx.show_images,
+            is_error: ctx.is_error,
+        }
+    }
+}
+
+impl crate::core::extensions::types::ExtensionTheme for HtmlTheme {
+    fn fg(&self, _color: &str, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn bg(&self, _bg: &str, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn bold(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn italic(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn underline(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn inverse(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn strikethrough(&self, text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn get_fg_ansi(&self, _color: &str) -> String {
+        String::new()
+    }
+
+    fn get_bg_ansi(&self, _bg: &str) -> String {
+        String::new()
+    }
+}
+
 /// Adapter trait for custom tool call/result TUI rendering during HTML export.
-// WIRE(@codemode-w3): implement for `crate::core::extensions::types::ToolDefinition` / `ToolRenderers` when extensions merge.
 pub trait CustomToolRenderer: Send + Sync {
     fn render_call(
         &self,
@@ -79,6 +134,36 @@ pub trait CustomToolRenderer: Send + Sync {
         _context: &ToolRenderContext,
     ) -> Option<Arc<dyn Component>> {
         None
+    }
+}
+
+impl CustomToolRenderer for crate::core::extensions::types::ToolDefinition {
+    fn render_call(&self, args: &Value, theme: &HtmlTheme, context: &ToolRenderContext) -> Option<Arc<dyn Component>> {
+        let render_fn = self.render_call.as_ref()?;
+        let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));
+        Some(render_fn(args.clone(), ext_theme, context.into()))
+    }
+
+    fn render_result(
+        &self,
+        content: &[UserContentBlock],
+        details: Option<&Value>,
+        is_error: bool,
+        options: ToolResultRenderOptions,
+        theme: &HtmlTheme,
+        context: &ToolRenderContext,
+    ) -> Option<Arc<dyn Component>> {
+        let render_fn = self.render_result.as_ref()?;
+        let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));
+        let mut result = pi_agent_core::AgentToolResult::text("");
+        result.content = content.to_vec();
+        result.details = details.cloned();
+        result.is_error = Some(is_error);
+        let opts = crate::core::extensions::types::ToolRenderResultOptions {
+            expanded: options.expanded,
+            is_partial: options.is_partial,
+        };
+        Some(render_fn(result, opts, ext_theme, context.into()))
     }
 }
 
