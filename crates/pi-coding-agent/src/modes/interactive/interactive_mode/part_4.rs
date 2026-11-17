@@ -521,7 +521,7 @@ impl InteractiveMode {
     // Key Handlers
     // =========================================================================
 
-    pub(crate) fn setup_key_handlers(&self) {
+    pub fn setup_key_handlers(&self) {
         let m_esc = self.clone();
         self.set_default_editor_escape(Some(Arc::new(move || {
             let sess = m_esc.session();
@@ -694,7 +694,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn handle_clipboard_paste(&self) {
+    pub async fn handle_clipboard_paste(&self) {
         match (self.inner.hooks.clipboard_read_file_paths)().await {
             Ok(Some(file_paths)) if !file_paths.is_empty() => {
                 if file_paths
