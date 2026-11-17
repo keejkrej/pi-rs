@@ -16,8 +16,11 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [profile.dev]
 debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 1
+debug = false
+
 [profile.dev.package.cranelift-codegen]
 opt-level = 3
 
@@ -35,6 +38,13 @@ pi-client = { path = "crates/pi-client" }
 pi-server = { path = "crates/pi-server" }
 pi-durable = { path = "crates/pi-durable" }
 pi-coding-agent = { path = "crates/pi-coding-agent" }
+# rune GUI framework
+rune = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune", features = ["keys-overlay"] }
+rune-kit = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-kit", features = ["markdown", "mermaid"] }
+rune-motion = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-motion" }
+rune-highlights = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-highlights" }
+rune-mermaid = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-mermaid" }
+rune-theme-opencode = { path = "/Volumes/SSD/mac-offload/workspace/rune/themes/opencode" }
 # async
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec", "io", "rt"] }
@@ -113,3 +123,10 @@ x11rb = "0.14.0"
 # dev
 pretty_assertions = "1.4.1"
 serial_test = "4.0.1"
+
+[patch.crates-io]
+wgpu-hal = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/wgpu-hal" }
+winit = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/winit" }
+parley_engine = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/parley_engine" }
+accesskit_windows = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/accesskit_windows" }
+accesskit_macos = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/accesskit_macos" }
