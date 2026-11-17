@@ -178,7 +178,8 @@ async fn reports_unsupported_js_bundling_and_loads_manifest_and_artifact_contrac
         },
         entries,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    let manifest_val = serde_json::to_value(&manifest).expect("manifest to value");
+    let manifest_bytes = pi_js::json::stringify_pretty(&manifest_val, "  ").into_bytes();
     write_file(&manifest_path, &manifest_bytes, None)
         .await
         .expect("write manifest");

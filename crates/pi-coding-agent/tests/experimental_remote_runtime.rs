@@ -1094,7 +1094,8 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
         },
         entries,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    let manifest_val = serde_json::to_value(&manifest).expect("manifest to value");
+    let manifest_bytes = pi_js::json::stringify_pretty(&manifest_val, "  ").into_bytes();
     write_file(
         &join(&[&manifest_dir, FACET_BUNDLE_MANIFEST_FILE]),
         &manifest_bytes,

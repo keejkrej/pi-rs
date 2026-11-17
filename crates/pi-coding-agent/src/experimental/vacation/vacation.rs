@@ -113,13 +113,13 @@ pub static SEARCH: LazyLock<Extension> = LazyLock::new(|| {
 });
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ResearchInput {
+pub struct ResearchInput {
     task: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "camelCase")]
-enum ResearchState {
+pub enum ResearchState {
     Deliver,
     Report { report: String },
 }
