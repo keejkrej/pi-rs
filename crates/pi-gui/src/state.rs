@@ -27,6 +27,7 @@ pub struct LaunchConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub theme: Option<ThemePreference>,
     pub scene: Option<String>,
     pub demo: bool,
     pub reduced_motion: bool,
@@ -48,90 +49,59 @@ impl LaunchConfig {
         let mut i = 0usize;
         while i < args.len() {
             let arg = args[i].as_ref();
-            let next = args.get(i + 1).map(AsRef::as_ref);
-            if arg == "--cwd" {
-                if let Some(val) = next {
-                    cfg.cwd = val.to_string();
-                    i += 2;
+            match arg {
+                "--demo" => {
+                    cfg.demo = true;
+                    i += 1;
                     continue;
                 }
-            } else if let Some(val) = arg.strip_prefix("--cwd=") {
-                cfg.cwd = val.to_string();
-                i += 1;
-                continue;
-            } else if arg == "--session" {
-                if let Some(val) = next {
-                    cfg.session = Some(val.to_string());
-                    i += 2;
+                "--reduced-motion" => {
+                    cfg.reduced_motion = true;
+                    i += 1;
                     continue;
                 }
-            } else if let Some(val) = arg.strip_prefix("--session=") {
-                cfg.session = Some(val.to_string());
+                _ => {}
+            }
+            if let Some((flag, val)) = arg.split_once('=')
+                && cfg.apply_kv(flag, val)
+            {
                 i += 1;
                 continue;
-            } else if arg == "--session-dir" {
-                if let Some(val) = next {
-                    cfg.session_dir = Some(val.to_string());
-                    i += 2;
-                    continue;
-                }
-            } else if let Some(val) = arg.strip_prefix("--session-dir=") {
-                cfg.session_dir = Some(val.to_string());
-                i += 1;
-                continue;
-            } else if arg == "--provider" {
-                if let Some(val) = next {
-                    cfg.provider = Some(val.to_string());
-                    i += 2;
-                    continue;
-                }
-            } else if let Some(val) = arg.strip_prefix("--provider=") {
-                cfg.provider = Some(val.to_string());
-                i += 1;
-                continue;
-            } else if arg == "--model" {
-                if let Some(val) = next {
-                    cfg.model = Some(val.to_string());
-                    i += 2;
-                    continue;
-                }
-            } else if let Some(val) = arg.strip_prefix("--model=") {
-                cfg.model = Some(val.to_string());
-                i += 1;
-                continue;
-            } else if arg == "--thinking" {
-                if let Some(val) = next {
-                    cfg.thinking = Some(val.to_string());
-                    i += 2;
-                    continue;
-                }
-            } else if let Some(val) = arg.strip_prefix("--thinking=") {
-                cfg.thinking = Some(val.to_string());
-                i += 1;
-                continue;
-            } else if arg == "--scene" {
-                if let Some(val) = next {
-                    cfg.scene = Some(val.to_string());
-                    i += 2;
-                    continue;
-                }
-            } else if let Some(val) = arg.strip_prefix("--scene=") {
-                cfg.scene = Some(val.to_string());
-                i += 1;
-                continue;
-            } else if arg == "--demo" {
-                cfg.demo = true;
-                i += 1;
-                continue;
-            } else if arg == "--reduced-motion" {
-                cfg.reduced_motion = true;
-                i += 1;
+            }
+            if let Some(val) = args.get(i + 1).map(AsRef::as_ref)
+                && cfg.apply_kv(arg, val)
+            {
+                i += 2;
                 continue;
             }
             cfg.extra_args.push(arg.to_string());
             i += 1;
         }
         cfg
+    }
+
+    fn apply_kv(&mut self, flag: &str, val: &str) -> bool {
+        match flag {
+            "--cwd" => self.cwd = val.to_string(),
+            "--session" => self.session = Some(val.to_string()),
+            "--session-dir" => self.session_dir = Some(val.to_string()),
+            "--provider" => self.provider = Some(val.to_string()),
+            "--model" => self.model = Some(val.to_string()),
+            "--thinking" => self.thinking = Some(val.to_string()),
+            "--theme" => self.theme = parse_theme_arg(val),
+            "--scene" => self.scene = Some(val.to_string()),
+            _ => return false,
+        }
+        true
+    }
+}
+
+fn parse_theme_arg(raw: &str) -> Option<ThemePreference> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dark" => Some(ThemePreference::Dark),
+        "light" => Some(ThemePreference::Light),
+        "system" | "auto" => Some(ThemePreference::System),
+        _ => None,
     }
 }
 
@@ -257,14 +227,37 @@ impl DemoScene {
 
     #[must_use]
     pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|scene| scene.id() == id)
+        match id {
+            "dark-session" => Some(Self::Default),
+            "light-session" => Some(Self::LightTheme),
+            "diff-inspector" => Some(Self::DiffReview),
+            "command-palette" => Some(Self::Overlays),
+            "settings-plugins" => Some(Self::Settings),
+            _ => Self::ALL.into_iter().find(|scene| scene.id() == id),
+        }
     }
 
     pub fn apply(self, state: &mut PiGuiState) {
         state.demo_scene = Some(self);
+        if self != Self::Empty {
+            let bundle = crate::models::build_demo_bundle(&state.config.cwd);
+            state.threads = bundle.threads;
+            state.active_thread_id = bundle.active_thread_id;
+            state.messages = bundle.messages;
+            state.diff = bundle.diff;
+            state.apply_files_snapshot(bundle.files);
+            state.open_file = bundle.open_file;
+            state.terminal = bundle.terminal;
+            state.plugins = bundle.plugins;
+            state.auth_providers = bundle.auth_providers;
+            state.models = bundle.models;
+            state.active_model = bundle.active_model;
+            state.context_usage = bundle.context_usage;
+        }
         match self {
             Self::Default => {
                 state.nav_tab = NavRailTab::Sessions;
+                state.theme_preference = ThemePreference::Dark;
                 state.overlay = None;
             }
             Self::Empty => {
@@ -286,9 +279,7 @@ impl DemoScene {
                 state.inspector_tab = InspectorTab::Diff;
                 state.inspector_pane.set_open(true);
             }
-            Self::Overlays => {
-                state.overlay = Some(OverlayKind::CommandPalette);
-            }
+            Self::Overlays => state.overlay = Some(OverlayKind::CommandPalette),
             Self::Settings => {
                 state.nav_tab = NavRailTab::Settings;
                 state.overlay = Some(OverlayKind::Settings);
@@ -298,12 +289,27 @@ impl DemoScene {
                 state.inspector_tab = InspectorTab::Plugins;
                 state.inspector_pane.set_open(true);
             }
-            Self::LightTheme => {
-                state.theme_preference = ThemePreference::Light;
-            }
+            Self::LightTheme => state.theme_preference = ThemePreference::Light,
         }
     }
 }
+
+/// Complete scene table supporting legacy names and Wave 4 `--scene <id>` aliases.
+pub static SCENE_ENTRIES: &[(&str, fn(&mut PiGuiState))] = &[
+    (DemoScene::Default.id(), |s| DemoScene::Default.apply(s)),
+    (DemoScene::Empty.id(), |s| DemoScene::Empty.apply(s)),
+    (DemoScene::Streaming.id(), |s| DemoScene::Streaming.apply(s)),
+    (DemoScene::DiffReview.id(), |s| DemoScene::DiffReview.apply(s)),
+    (DemoScene::Overlays.id(), |s| DemoScene::Overlays.apply(s)),
+    (DemoScene::Settings.id(), |s| DemoScene::Settings.apply(s)),
+    (DemoScene::Plugins.id(), |s| DemoScene::Plugins.apply(s)),
+    (DemoScene::LightTheme.id(), |s| DemoScene::LightTheme.apply(s)),
+    ("dark-session", |s| DemoScene::Default.apply(s)),
+    ("light-session", |s| DemoScene::LightTheme.apply(s)),
+    ("diff-inspector", |s| DemoScene::DiffReview.apply(s)),
+    ("command-palette", |s| DemoScene::Overlays.apply(s)),
+    ("settings-plugins", |s| DemoScene::Settings.apply(s)),
+];
 
 pub use crate::models::*;
 
@@ -339,6 +345,7 @@ pub enum PiGuiAction {
     DismissToast(u64),
     LoadDemoScene(DemoScene),
     SetStatusBanner(Option<String>),
+    CompactSession,
 }
 
 /// Root UI state owned by Rune's window runtime.
@@ -387,13 +394,14 @@ impl PiGuiState {
     #[must_use]
     pub fn new(config: LaunchConfig) -> Self {
         let reduced_motion = config.reduced_motion;
+        let theme_preference = config.theme.unwrap_or_default();
         let cwd = config.cwd.clone();
         let file_tree = FileTree::new()
             .compact_folders(false)
             .build(std::iter::empty::<(&str, ())>());
         let mut state = Self {
             config,
-            theme_preference: ThemePreference::System,
+            theme_preference,
             nav_tab: NavRailTab::Sessions,
             inspector_tab: InspectorTab::Diff,
             overlay: None,
@@ -447,6 +455,16 @@ impl PiGuiState {
         state
     }
 
+    pub fn apply_files_snapshot(&mut self, files: Vec<FileTreeEntryView>) {
+        let paths: Vec<(&str, ())> = files
+            .iter()
+            .filter(|f| !f.is_dir)
+            .map(|f| (f.path.as_str(), ()))
+            .collect();
+        self.file_tree = FileTree::new().compact_folders(false).build(paths);
+        self.files = files;
+    }
+
     pub fn push_toast(&mut self, message: impl Into<String>, tone: ToastTone) {
         let id = self.next_toast_id;
         self.next_toast_id += 1;
@@ -457,7 +475,14 @@ impl PiGuiState {
         });
     }
 
+    fn send_cmd(&self, cmd: crate::bridge::BridgeCommand) {
+        if let Some(bridge) = &self.bridge {
+            bridge.send(cmd);
+        }
+    }
+
     pub fn dispatch(&mut self, action: PiGuiAction, tx: Option<&mut Tx>) {
+        use crate::bridge::BridgeCommand;
         match action {
             PiGuiAction::SelectNavTab(tab) => {
                 self.nav_tab = tab;
@@ -477,26 +502,14 @@ impl PiGuiState {
                 let open = self.inspector_pane.is_open();
                 self.inspector_pane.set_open(!open);
             }
-            PiGuiAction::OpenOverlay(kind) => {
-                self.overlay = Some(kind);
-            }
-            PiGuiAction::CloseOverlay => {
-                self.overlay = None;
-            }
-            PiGuiAction::SetThemePreference(pref) => {
-                self.theme_preference = pref;
-            }
+            PiGuiAction::OpenOverlay(kind) => self.overlay = Some(kind),
+            PiGuiAction::CloseOverlay => self.overlay = None,
+            PiGuiAction::SetThemePreference(pref) => self.theme_preference = pref,
             PiGuiAction::SelectThread(id) => {
                 self.active_thread_id = Some(id.clone());
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::SwitchSession { id });
-                }
+                self.send_cmd(BridgeCommand::SwitchSession { id });
             }
-            PiGuiAction::NewThread => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::NewSession);
-                }
-            }
+            PiGuiAction::NewThread => self.send_cmd(BridgeCommand::NewSession),
             PiGuiAction::DeleteThread(id) => {
                 self.threads.retain(|t| t.id != id);
                 if self.active_thread_id.as_deref() == Some(id.as_str()) {
@@ -511,17 +524,11 @@ impl PiGuiState {
             PiGuiAction::SubmitPrompt => {
                 let text = self.composer_edit.text.trim().to_string();
                 if !text.is_empty() {
-                    if let Some(bridge) = &self.bridge {
-                        bridge.send(crate::bridge::BridgeCommand::Prompt { text });
-                    }
+                    self.send_cmd(BridgeCommand::Prompt { text });
                     self.composer_edit.clear();
                 }
             }
-            PiGuiAction::AbortRun => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::Abort);
-                }
-            }
+            PiGuiAction::AbortRun => self.send_cmd(BridgeCommand::Abort),
             PiGuiAction::QueueSteering { text, follow_up } => {
                 let id = format!("steer-{}", self.steering_queue.len() + 1);
                 self.steering_queue.push(SteeringQueueItem {
@@ -529,9 +536,7 @@ impl PiGuiState {
                     text: text.clone(),
                     is_follow_up: follow_up,
                 });
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::Prompt { text });
-                }
+                self.send_cmd(BridgeCommand::Prompt { text });
             }
             PiGuiAction::SelectModel { provider, model_id } => {
                 if let Some(found) = self
@@ -542,9 +547,7 @@ impl PiGuiState {
                 {
                     self.active_model = Some(found);
                 }
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::SelectModel { provider, model_id });
-                }
+                self.send_cmd(BridgeCommand::SelectModel { provider, model_id });
                 self.overlay = None;
             }
             PiGuiAction::CycleThinkingLevel => {
@@ -557,11 +560,9 @@ impl PiGuiState {
                     _ => "off",
                 };
                 self.context_usage.thinking_level = next.to_string();
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::SetThinkingLevel {
-                        level: next.to_string(),
-                    });
-                }
+                self.send_cmd(BridgeCommand::SetThinkingLevel {
+                    level: next.to_string(),
+                });
             }
             PiGuiAction::ToggleToolExpanded(tool_id) => {
                 for msg in &mut self.messages {
@@ -577,9 +578,7 @@ impl PiGuiState {
             PiGuiAction::OpenFile(path) => {
                 self.inspector_tab = InspectorTab::File;
                 self.inspector_pane.set_open(true);
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::ReadFile { path });
-                }
+                self.send_cmd(BridgeCommand::ReadFile { path });
             }
             PiGuiAction::SelectDiffFile(path) => {
                 self.diff.selected_path = Some(path);
@@ -591,48 +590,27 @@ impl PiGuiState {
                     plugin.enabled = enabled;
                 }
             }
-            PiGuiAction::ReloadPlugins => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::RefreshWorkspace);
-                }
-            }
-            PiGuiAction::LoginProvider(provider) => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::LoginProvider { provider });
-                }
-            }
-            PiGuiAction::LogoutProvider(provider) => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::LogoutProvider { provider });
-                }
-            }
+            PiGuiAction::ReloadPlugins => self.send_cmd(BridgeCommand::ReloadPlugins),
+            PiGuiAction::CompactSession => self.send_cmd(BridgeCommand::CompactSession),
+            PiGuiAction::LoginProvider(provider) => self.send_cmd(BridgeCommand::LoginProvider { provider }),
+            PiGuiAction::LogoutProvider(provider) => self.send_cmd(BridgeCommand::LogoutProvider { provider }),
             PiGuiAction::RunTerminalCommand(command) => {
                 self.terminal.running = true;
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::RunShellCommand { command });
-                }
+                self.send_cmd(BridgeCommand::RunShellCommand { command });
             }
-            PiGuiAction::ClearTerminal => {
-                self.terminal.lines.clear();
-            }
+            PiGuiAction::ClearTerminal => self.terminal.lines.clear(),
             PiGuiAction::RespondExtensionDialog { request_id, value } => {
-                if let Some(bridge) = &self.bridge {
-                    bridge.send(crate::bridge::BridgeCommand::ExtensionDialogResponse { request_id, value });
-                }
+                self.send_cmd(BridgeCommand::ExtensionDialogResponse { request_id, value });
                 self.overlay = None;
             }
-            PiGuiAction::DismissToast(id) => {
-                self.toasts.retain(|t| t.id != id);
-            }
+            PiGuiAction::DismissToast(id) => self.toasts.retain(|t| t.id != id),
             PiGuiAction::LoadDemoScene(scene) => {
                 scene.apply(self);
                 if let Some(tx) = tx {
                     tx.settle();
                 }
             }
-            PiGuiAction::SetStatusBanner(banner) => {
-                self.status_banner = banner;
-            }
+            PiGuiAction::SetStatusBanner(banner) => self.status_banner = banner,
         }
     }
 
@@ -656,12 +634,8 @@ impl PiGuiState {
                 self.auth_providers = auth_providers;
                 self.context_usage = context_usage;
                 self.active_stream = None;
-                true
             }
-            BridgeEvent::ThreadsUpdated(threads) => {
-                self.threads = threads;
-                true
-            }
+            BridgeEvent::ThreadsUpdated(threads) => self.threads = threads,
             BridgeEvent::StreamStarted { turn_id, started_ms } => {
                 self.active_stream = Some(ActiveStreamState {
                     turn_id,
@@ -669,73 +643,42 @@ impl PiGuiState {
                     partial_thinking: None,
                     started_ms,
                 });
-                true
             }
-            BridgeEvent::StreamTextDelta(delta) => {
-                if let Some(stream) = &mut self.active_stream {
-                    stream.partial_text.push_str(&delta);
-                    true
-                } else {
-                    false
-                }
+            BridgeEvent::StreamTextDelta(delta) => match &mut self.active_stream {
+                Some(stream) => stream.partial_text.push_str(&delta),
+                None => return false,
+            },
+            BridgeEvent::StreamThinkingDelta(delta) => match &mut self.active_stream {
+                Some(stream) => stream.partial_thinking.get_or_insert_with(String::new).push_str(&delta),
+                None => return false,
+            },
+            BridgeEvent::MessageAppended(msg) => self.messages.push(msg),
+            BridgeEvent::StreamFinished => self.active_stream = None,
+            BridgeEvent::DiffUpdated(diff) => self.diff = diff,
+            BridgeEvent::FilesUpdated(files) => self.apply_files_snapshot(files),
+            BridgeEvent::PluginsUpdated(plugins) => self.plugins = plugins,
+            BridgeEvent::ModelsUpdated { models, active_model } => {
+                self.models = models;
+                self.active_model = active_model;
             }
-            BridgeEvent::StreamThinkingDelta(delta) => {
-                if let Some(stream) = &mut self.active_stream {
-                    stream.partial_thinking.get_or_insert_with(String::new).push_str(&delta);
-                    true
-                } else {
-                    false
-                }
-            }
-            BridgeEvent::MessageAppended(msg) => {
-                self.messages.push(msg);
-                true
-            }
-            BridgeEvent::StreamFinished => {
-                self.active_stream = None;
-                true
-            }
-            BridgeEvent::DiffUpdated(diff) => {
-                self.diff = diff;
-                true
-            }
-            BridgeEvent::FilesUpdated(files) => {
-                let paths: Vec<(&str, ())> = files
-                    .iter()
-                    .filter(|f| !f.is_dir)
-                    .map(|f| (f.path.as_str(), ()))
-                    .collect();
-                self.file_tree = FileTree::new().compact_folders(false).build(paths);
-                self.files = files;
-                true
-            }
-            BridgeEvent::FileOpened(file) => {
-                self.open_file = Some(file);
-                true
-            }
-            BridgeEvent::TerminalOutput(line) => {
-                self.terminal.lines.push(line);
-                true
-            }
+            BridgeEvent::ContextUpdated(usage) => self.context_usage = usage,
+            BridgeEvent::MessagesReplaced(messages) => self.messages = messages,
+            BridgeEvent::FileOpened(file) => self.open_file = Some(file),
+            BridgeEvent::TerminalOutput(line) => self.terminal.lines.push(line),
             BridgeEvent::TerminalFinished { exit_code } => {
                 self.terminal.running = false;
                 self.terminal.last_exit_code = exit_code;
-                true
             }
             BridgeEvent::ExtensionDialogRequested(dialog) => {
                 self.overlay = Some(OverlayKind::ExtensionDialog(dialog));
-                true
             }
-            BridgeEvent::Toast { message, tone } => {
-                self.push_toast(message, tone);
-                true
-            }
+            BridgeEvent::Toast { message, tone } => self.push_toast(message, tone),
             BridgeEvent::Error(err) => {
                 self.status_banner = Some(err.clone());
                 self.push_toast(err, ToastTone::Error);
-                true
             }
         }
+        true
     }
 }
 
@@ -755,6 +698,7 @@ mod tests {
                 "--model=claude-sonnet-4",
                 "--thinking",
                 "high",
+                "--theme=light",
                 "--demo",
                 "--reduced-motion",
             ],
@@ -765,8 +709,12 @@ mod tests {
         assert_eq!(cfg.provider.as_deref(), Some("anthropic"));
         assert_eq!(cfg.model.as_deref(), Some("claude-sonnet-4"));
         assert_eq!(cfg.thinking.as_deref(), Some("high"));
+        assert_eq!(cfg.theme, Some(ThemePreference::Light));
         assert!(cfg.demo);
         assert!(cfg.reduced_motion);
+        assert_eq!(DemoScene::from_id("dark-session"), Some(DemoScene::Default));
+        assert_eq!(DemoScene::from_id("diff-inspector"), Some(DemoScene::DiffReview));
+        assert!(SCENE_ENTRIES.iter().any(|(id, _)| *id == "settings-plugins"));
     }
 
     #[test]
