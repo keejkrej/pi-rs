@@ -288,7 +288,18 @@ pub fn render_highlighted_html(html: &str, theme: Option<&HighlightTheme>) -> St
             return;
         }
         if let Some(formatter) = get_active_formatter(scopes, theme) {
-            output.push_str(&formatter(text_buffer));
+            let formatted = text_buffer
+                .split('\n')
+                .map(|line| {
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        formatter(line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            output.push_str(&formatted);
         } else {
             output.push_str(text_buffer);
         }
@@ -339,4 +350,34 @@ pub fn render_highlighted_html(html: &str, theme: Option<&HighlightTheme>) -> St
 pub fn highlight(code: &str, options: HighlightOptions) -> String {
     let html = highlight_to_hljs_html(code, options.language.as_deref());
     render_highlighted_html(&html, options.theme.as_ref())
+}
+
+/// Number of registered grammars. It grows when the deferred grammars load, which can change the highlighting of
+/// code that embeds another language, such as HTML in a JavaScript template literal.
+pub fn get_highlight_language_count() -> usize {
+    if !ALL_LANGUAGES_LOADED.load(Ordering::Acquire) {
+        EAGER_LANGUAGES.len()
+    } else {
+        SYNTAX_SET.syntaxes().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_multiline_spans_per_non_empty_line_and_reports_grammar_count() {
+        let theme: HighlightTheme = IndexMap::from([(
+            "string".to_owned(),
+            Arc::new(|line: &str| format!("<S>{line}</S>")) as HighlightFormatter,
+        )]);
+        let rendered = render_highlighted_html(r#"<span class="hljs-string">first\n\nsecond</span>"#, Some(&theme));
+        // Decoded vs literal newline inside HTML text:
+        assert_eq!(rendered, r#"<S>first\n\nsecond</S>"#);
+
+        let multiline = render_highlighted_html("<span class=\"hljs-string\">first\n\nsecond</span>", Some(&theme));
+        assert_eq!(multiline, "<S>first</S>\n\n<S>second</S>");
+        assert!(get_highlight_language_count() >= EAGER_LANGUAGES.len());
+    }
 }
