@@ -2,26 +2,16 @@
 
 use std::sync::{Arc, Mutex};
 
+use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
+use super::keybinding_hints::key_text;
 use pi_tui::components::box_::TuiBox;
 use pi_tui::components::markdown::DefaultTextStyle;
 use pi_tui::{
     Component, Container, Markdown, MarkdownTheme, MouseRegion, Text, TuiMouseButton, TuiMouseEvent,
     TuiMouseEventResult, TuiMouseEventType,
 };
-use serde::{Deserialize, Serialize};
 
-use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
-use super::keybinding_hints::key_text;
-
-// WIRE(@tui-w3): Replace local mirror type with `crate::core::agent_session::ParsedSkillBlock` once @ca-cli merges onto main.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParsedSkillBlock {
-    pub name: String,
-    pub location: String,
-    pub content: String,
-    pub user_message: Option<String>,
-}
+pub use crate::core::agent_session::ParsedSkillBlock;
 
 struct SkillInvocationState {
     expanded: bool,

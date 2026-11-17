@@ -2434,15 +2434,44 @@ impl AgentSession {
     ) -> pi_js::Result<String> {
         let requested_theme = options.and_then(|o| o.theme_name);
         let settings_theme = self.inner.settings_manager.get_theme();
-        // WIRE(@tui-w3): resolve theme_name with modes::interactive::theme::theme::get_theme_by_name and pass theme to create_tool_html_renderer
-        let theme_name = requested_theme.or(settings_theme);
+        let candidate_theme = requested_theme.or(settings_theme);
+        let resolved_theme = candidate_theme.as_deref().and_then(|name| {
+            crate::modes::interactive::theme::theme::resolve_theme_setting(
+                Some(name),
+                crate::modes::interactive::theme::theme::get_terminal_theme(),
+            )
+            .or_else(|| Some(name.to_string()))
+        });
+        let theme_name = resolved_theme
+            .as_deref()
+            .and_then(crate::modes::interactive::theme::theme::get_theme_by_name)
+            .and_then(|t| t.name().map(str::to_string))
+            .or(resolved_theme);
+        let session = self.clone();
+        let get_tool_definition: Arc<
+            dyn Fn(&str) -> Option<Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>> + Send + Sync,
+        > = Arc::new(move |name| {
+            session
+                .get_tool_definition(name)
+                .map(|def| Arc::new(def) as Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>)
+        });
+        let tool_renderer = crate::core::export_html::tool_renderer::create_tool_html_renderer(
+            crate::core::export_html::tool_renderer::ToolHtmlRendererDeps {
+                get_tool_definition,
+                theme: crate::core::export_html::tool_renderer::HtmlTheme {
+                    name: theme_name.clone(),
+                },
+                cwd: self.inner.session_manager.get_cwd(),
+                width: None,
+            },
+        );
         export_session_to_html(
             &self.inner.session_manager,
             Some(&self.inner.agent.state()),
             Some(ExportOptions {
                 output_path: output_path.map(str::to_string),
                 theme_name,
-                tool_renderer: None,
+                tool_renderer: Some(tool_renderer),
                 theme_override: None,
             }),
         )

@@ -1,8 +1,8 @@
 //! Port of packages/coding-agent/src/core/resource-loader.ts
 //!
-//! Unowned sibling seams (`prompt_templates`, `extensions/*`, `theme`) currently use explicit
-//! hook traits and standalone fallback loaders marked `// WIRE(@...)` so this module and its
-//! tests compile and execute without modifying unowned stub files.
+//! Includes hook traits (`PromptLoaderHook`, `ThemeLoaderHook`, `ExtensionHostHook`) with
+//! default implementations backed by `prompt_templates`, `modes::interactive::theme::theme`,
+//! and `extensions`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -71,10 +71,8 @@ impl PromptLoaderHook for BasicPromptLoader {
     }
 }
 
-/// Loaded TUI theme instance.
-///
-/// // WIRE(@tui-w3): replace/bridge with `crate::modes::interactive::theme::theme::Theme` once landed.
-#[derive(Clone, Debug, PartialEq)]
+/// Loaded TUI theme instance bridged to `crate::modes::interactive::theme::theme::Theme`.
+#[derive(Clone)]
 pub struct Theme {
     pub name: Option<String>,
     pub source_path: Option<String>,
@@ -82,9 +80,72 @@ pub struct Theme {
     mode: TerminalColorMode,
     fg_ansi: IndexMap<String, String>,
     bg_ansi: IndexMap<String, String>,
+    tui_theme: Option<crate::modes::interactive::theme::theme::Theme>,
+}
+
+impl std::fmt::Debug for Theme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Theme")
+            .field("name", &self.name)
+            .field("source_path", &self.source_path)
+            .field("source_info", &self.source_info)
+            .field("mode", &self.mode)
+            .field("fg_ansi", &self.fg_ansi)
+            .field("bg_ansi", &self.bg_ansi)
+            .field("has_tui_theme", &self.tui_theme.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for Theme {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.source_path == other.source_path
+            && self.source_info == other.source_info
+            && self.mode == other.mode
+            && self.fg_ansi == other.fg_ansi
+            && self.bg_ansi == other.bg_ansi
+    }
 }
 
 impl Theme {
+    pub fn from_tui_theme(tui_theme: crate::modes::interactive::theme::theme::Theme) -> Self {
+        use crate::modes::interactive::theme::theme::{ThemeBg, ThemeColor};
+        let mut fg_ansi = IndexMap::new();
+        for &tok in ThemeColor::all() {
+            let ansi = tui_theme.get_fg_ansi(tok);
+            fg_ansi.insert(
+                tok.as_str().to_owned(),
+                if ansi == "\x1b[39m" { String::new() } else { ansi },
+            );
+        }
+        let mut bg_ansi = IndexMap::new();
+        for &tok in ThemeBg::all() {
+            let ansi = tui_theme.get_bg_ansi(tok);
+            bg_ansi.insert(
+                tok.as_str().to_owned(),
+                if ansi == "\x1b[49m" { String::new() } else { ansi },
+            );
+        }
+        Self {
+            name: tui_theme.name().map(str::to_owned),
+            source_path: tui_theme.source_path().map(str::to_owned),
+            source_info: tui_theme.source_info().cloned(),
+            mode: tui_theme.get_color_mode(),
+            fg_ansi,
+            bg_ansi,
+            tui_theme: Some(tui_theme),
+        }
+    }
+
+    pub fn to_tui_theme(&self) -> Option<crate::modes::interactive::theme::theme::Theme> {
+        self.tui_theme.clone().or_else(|| {
+            self.source_path.as_deref().and_then(|path| {
+                crate::modes::interactive::theme::theme::load_theme_from_path(path, Some(self.mode)).ok()
+            })
+        })
+    }
+
     pub fn from_json_str(content: &str, mode: TerminalColorMode, source_path: Option<String>) -> Result<Self> {
         let value: Value = serde_json::from_str(strip_bom(content))
             .map_err(|err| Error::msg(format!("Failed to parse theme JSON: {err}")))?;
@@ -120,6 +181,7 @@ impl Theme {
             mode,
             fg_ansi,
             bg_ansi,
+            tui_theme: None,
         })
     }
 
@@ -173,8 +235,6 @@ fn resolve_theme_color_value(
 }
 
 /// Hook for loading a theme from disk.
-///
-/// // WIRE(@tui-w3): connect `crate::modes::interactive::theme::theme::load_theme_from_path`.
 pub trait ThemeLoaderHook: Send + Sync {
     fn load_theme_from_path(&self, theme_path: &str, color_mode: TerminalColorMode) -> Result<Theme>;
 }
@@ -184,6 +244,11 @@ pub struct BasicThemeLoader;
 
 impl ThemeLoaderHook for BasicThemeLoader {
     fn load_theme_from_path(&self, theme_path: &str, color_mode: TerminalColorMode) -> Result<Theme> {
+        if let Ok(tui_theme) =
+            crate::modes::interactive::theme::theme::load_theme_from_path(theme_path, Some(color_mode))
+        {
+            return Ok(Theme::from_tui_theme(tui_theme));
+        }
         let content = read_to_string(theme_path)?;
         Theme::from_json_str(&content, color_mode, Some(theme_path.to_owned()))
     }

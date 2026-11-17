@@ -1319,7 +1319,7 @@ async fn set_tools_expanded_applies_expansion_state_to_active_header_and_chat_en
         .emit(AgentSessionEvent::ToolExecutionEnd {
             tool_call_id: "tc-1".to_string(),
             tool_name: "bash".to_string(),
-            result: json!({ "content": [{ "type": "text", "text": lines.join("\n") }] }),
+            result: pi_agent_core::AgentToolResult::text(lines.join("\n")),
             is_error: false,
             parent_tool_call_id: None,
         })

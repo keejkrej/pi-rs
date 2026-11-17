@@ -913,10 +913,7 @@ mod interactive_mode_render_session_entries {
             .emit(AgentSessionEvent::ToolExecutionEnd {
                 tool_call_id: TOOL_CALL_ID.to_string(),
                 tool_name: TOOL_NAME.to_string(),
-                result: json!({
-                    "content": [{ "type": "text", "text": "FINAL_RESULT" }],
-                    "details": null
-                }),
+                result: pi_agent_core::AgentToolResult::text("FINAL_RESULT"),
                 is_error: false,
                 parent_tool_call_id: None,
             })
@@ -929,10 +926,7 @@ mod interactive_mode_render_session_entries {
             .emit(AgentSessionEvent::ToolExecutionEnd {
                 tool_call_id: TOOL_CALL_ID.to_string(),
                 tool_name: TOOL_NAME.to_string(),
-                result: json!({
-                    "content": [{ "type": "text", "text": "STALE_SECOND_RESULT" }],
-                    "details": null
-                }),
+                result: pi_agent_core::AgentToolResult::text("STALE_SECOND_RESULT"),
                 is_error: false,
                 parent_tool_call_id: None,
             })
@@ -965,10 +959,7 @@ mod interactive_mode_render_session_entries {
             .emit(AgentSessionEvent::ToolExecutionEnd {
                 tool_call_id: TOOL_CALL_ID.to_string(),
                 tool_name: TOOL_NAME.to_string(),
-                result: json!({
-                    "content": [{ "type": "text", "text": "UNEXPECTED_OVERWRITE" }],
-                    "details": null
-                }),
+                result: pi_agent_core::AgentToolResult::text("UNEXPECTED_OVERWRITE"),
                 is_error: false,
                 parent_tool_call_id: None,
             })

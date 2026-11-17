@@ -852,9 +852,7 @@ mod thinking_visibility_while_bash_tool_is_running_8611 {
                 tool_call_id: "tool-8611".to_string(),
                 tool_name: "bash".to_string(),
                 args: json!({ "command": "echo first; sleep 10" }),
-                partial_result: json!({
-                    "content": [{ "type": "text", "text": "first" }]
-                }),
+                partial_result: pi_agent_core::AgentToolResult::text("first"),
                 parent_tool_call_id: None,
             })
             .await;

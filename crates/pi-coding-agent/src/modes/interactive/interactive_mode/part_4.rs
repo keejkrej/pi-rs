@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use indexmap::{IndexMap, IndexSet};
-use pi_agent_core::AgentMessage;
+use pi_agent_core::{AgentMessage, AgentToolResult};
 use pi_ai::{
-    AssistantContentBlock, AssistantMessage, Message, ModelThinkingLevel, StopReason, Usage, UserContentBlock,
+    AssistantContentBlock, AssistantMessage, Message, ModelThinkingLevel, StopReason, UserContentBlock,
     UserMessageContent,
 };
 use pi_js::Result;
@@ -14,6 +14,8 @@ use pi_tui::editor_component::EditorBorderColor;
 use pi_tui::tui::OverlayHandle;
 use pi_tui::{Component, Spacer};
 use serde_json::Value;
+
+use crate::core::agent_session::parse_skill_block;
 
 use crate::core::cache_stats::{CACHE_TTL_MS, ModelPriceSource, collect_cache_misses};
 use crate::core::cache_warmer::format_cache_warming_usage;
@@ -33,9 +35,7 @@ use crate::modes::interactive::components::custom_message::{
     CustomMessage, CustomMessageComponent, CustomMessageContent,
 };
 use crate::modes::interactive::components::settings_selector::DoubleEscapeAction;
-use crate::modes::interactive::components::skill_invocation_message::{
-    ParsedSkillBlock, SkillInvocationMessageComponent,
-};
+use crate::modes::interactive::components::skill_invocation_message::SkillInvocationMessageComponent;
 use crate::modes::interactive::components::status_indicator::{
     CompactionStatusReason, StatusIndicator, StatusIndicatorKind,
 };
@@ -55,38 +55,6 @@ fn json_object_to_value(obj: &pi_ai::JsonObject) -> Value {
         map.insert(k.clone(), v.clone());
     }
     Value::Object(map)
-}
-
-// WIRE(@tui-w3): Replace local `parse_skill_block_local` with `crate::core::agent_session::parse_skill_block` once Stage 3B-1 merges onto main.
-pub fn parse_skill_block_local(text: &str) -> Option<ParsedSkillBlock> {
-    let rest = text.strip_prefix("<skill name=\"")?;
-    let name_end = rest.find('"')?;
-    let name = &rest[..name_end];
-    let after_name = rest[name_end + 1..].strip_prefix(" location=\"")?;
-    let loc_end = after_name.find("\">\n")?;
-    let location = &after_name[..loc_end];
-    let body_and_tail = &after_name[loc_end + 3..];
-    let close_tag = "\n</skill>";
-    let close_idx = body_and_tail.find(close_tag)?;
-    let content = &body_and_tail[..close_idx];
-    let trailing = &body_and_tail[close_idx + close_tag.len()..];
-    let user_message = if trailing.is_empty() {
-        None
-    } else {
-        let after_sep = trailing.strip_prefix("\n\n")?;
-        let trimmed = after_sep.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    };
-    Some(ParsedSkillBlock {
-        name: name.to_string(),
-        location: location.to_string(),
-        content: content.to_string(),
-        user_message,
-    })
 }
 
 fn thinking_level_name(level: ModelThinkingLevel) -> &'static str {
@@ -1092,21 +1060,17 @@ impl InteractiveMode {
             }
 
             AgentSessionEvent::EntryAppended { entry } => {
-                let parsed_entry = match serde_json::from_value::<SessionEntry>(entry.clone()) {
-                    Ok(e) => e,
-                    Err(_) => return,
-                };
                 let already_rendered = self
                     .inner
                     .state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .entries_rendered_by_boundary_compaction
-                    .shift_remove(parsed_entry.id());
+                    .shift_remove(entry.id());
                 if already_rendered {
                     return;
                 }
-                match &parsed_entry {
+                match entry {
                     SessionEntry::Custom(custom) => {
                         self.add_custom_entry_to_chat(custom);
                         self.ui().request_render(None);
@@ -1161,12 +1125,7 @@ impl InteractiveMode {
                             ),
                             false,
                         );
-                        let usage_opt = compaction.usage.or_else(|| {
-                            entry
-                                .get("usage")
-                                .and_then(|u| serde_json::from_value::<Usage>(u.clone()).ok())
-                        });
-                        if let Some(usage) = usage_opt {
+                        if let Some(usage) = compaction.usage {
                             self.add_compaction_cost_notice(&CompactionCostNotice {
                                 kind: CompactionCostKind::Compaction,
                                 usage,
@@ -1437,7 +1396,7 @@ impl InteractiveMode {
                     .get(tool_call_id)
                     .cloned();
                 if let Some(component) = comp {
-                    let parsed = value_to_tool_execution_result(partial_result, false, None);
+                    let parsed = agent_tool_result_to_execution_result(partial_result, false, None);
                     component.update_result(parsed, Some(true));
                     self.ui().request_render(None);
                 }
@@ -1460,8 +1419,12 @@ impl InteractiveMode {
                     .pending_tool_components
                     .shift_remove(tool_call_id);
                 if let Some(component) = comp {
-                    let duration_ms = result.get("durationMs").and_then(Value::as_f64);
-                    let parsed = value_to_tool_execution_result(result, *is_error, duration_ms);
+                    let duration_ms = result
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.get("durationMs"))
+                        .and_then(Value::as_f64);
+                    let parsed = agent_tool_result_to_execution_result(result, *is_error, duration_ms);
                     component.update_result(parsed, None);
                     self.ui().request_render(None);
                 }
@@ -1555,25 +1518,17 @@ impl InteractiveMode {
                     } else {
                         self.show_status("Auto-compaction cancelled");
                     }
-                } else if let Some(res_val) = result {
+                } else if let Some(res) = result {
                     let entries = self.session_manager().build_context_entries();
                     if matches!(entries.first(), Some(SessionEntry::Compaction(_))) {
                         self.clear_chat_container();
                         self.render_session_entries(&entries[1..], false, false);
-                        let summary = res_val.get("summary").and_then(Value::as_str).unwrap_or("");
-                        let tokens_before = res_val
-                            .get("tokensBefore")
-                            .or_else(|| res_val.get("tokens_before"))
-                            .and_then(Value::as_i64)
-                            .unwrap_or(0);
                         let now_iso = chrono::Utc::now().to_rfc3339();
                         self.add_message_to_chat(
-                            &create_compaction_summary_agent_message(summary, tokens_before, &now_iso),
+                            &create_compaction_summary_agent_message(&res.summary, res.tokens_before, &now_iso),
                             false,
                         );
-                        if let Some(usage_val) = res_val.get("usage")
-                            && let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone())
-                        {
+                        if let Some(usage) = res.usage {
                             self.add_compaction_cost_notice(&CompactionCostNotice {
                                 kind: CompactionCostKind::Compaction,
                                 usage,
@@ -1874,7 +1829,7 @@ impl InteractiveMode {
                 if !self.inner.chat_container.children().is_empty() {
                     self.add_chat_component(Arc::new(Spacer::new(Some(1))), None, None, None);
                 }
-                if let Some(skill_block) = parse_skill_block_local(&text_content) {
+                if let Some(skill_block) = parse_skill_block(&text_content) {
                     let user_after = skill_block.user_message.clone();
                     let skill_comp = SkillInvocationMessageComponent::new(
                         skill_block,
@@ -2732,15 +2687,14 @@ impl InteractiveMode {
     }
 }
 
-fn value_to_tool_execution_result(value: &Value, is_error: bool, duration_ms: Option<f64>) -> ToolExecutionResult {
-    let content = value
-        .get("content")
-        .and_then(|c| serde_json::from_value::<Vec<UserContentBlock>>(c.clone()).ok())
-        .unwrap_or_default();
-    let details = value.get("details").cloned();
+fn agent_tool_result_to_execution_result(
+    result: &AgentToolResult,
+    is_error: bool,
+    duration_ms: Option<f64>,
+) -> ToolExecutionResult {
     ToolExecutionResult {
-        content,
-        details,
+        content: result.content.clone(),
+        details: result.details.clone(),
         is_error,
         duration_ms,
     }

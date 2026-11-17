@@ -1123,15 +1123,17 @@ async fn renders_retained_entries_and_appends_the_latest_summary_cost_at_the_bot
     mode.init().await;
     mode.create_extension_ui_context().set_tools_expanded(true);
 
-    let usage_json = pi_js::json::parse(&pi_js::json::stringify(&usage)).expect("usage json roundtrip");
     session
         .emit(AgentSessionEvent::CompactionEnd {
             reason: CompactionReason::Manual,
-            result: Some(json!({
-                "tokensBefore": 123,
-                "summary": "summary",
-                "usage": usage_json,
-            })),
+            result: Some(pi_coding_agent::core::compaction::CompactionResult {
+                summary: "summary".to_string(),
+                first_kept_entry_id: String::new(),
+                tokens_before: 123,
+                estimated_tokens_after: None,
+                usage: Some(usage),
+                details: None,
+            }),
             aborted: false,
             will_retry: false,
             error_message: None,
