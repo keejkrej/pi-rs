@@ -17,7 +17,7 @@ async fn run() -> pi_coding_agent::Result<()> {
         agents_files_override: Some(Arc::new(|mut current| {
             current.agents_files.push(ContextFile {
                 path: "/virtual/AGENTS.md".to_string(),
-                content: "# Project Guidelines\n\n## Code Style\n- Prefer Result over panic\n- Avoid unsafe\n"
+                content: "# Project Guidelines\n\n## Code Style\n- Prefer Result over panic\n- Prefer immutable data\n"
                     .to_string(),
             });
             AgentsFilesResult {

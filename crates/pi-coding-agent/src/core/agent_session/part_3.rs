@@ -2450,4 +2450,19 @@ impl AgentSession {
             .extension_runner
             .clone()
     }
+
+    #[doc(hidden)]
+    pub async fn check_compaction_for_test(&self, assistant_message: &AssistantMessage, skip_aborted_check: bool) -> bool {
+        self._check_compaction(assistant_message, skip_aborted_check, &[]).await
+    }
+
+    #[doc(hidden)]
+    pub async fn run_auto_compaction_for_test(&self, reason: CompactionReason, will_retry: bool) -> bool {
+        self._run_auto_compaction(reason, will_retry).await
+    }
+
+    #[doc(hidden)]
+    pub fn clear_model_for_test(&self) {
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).has_model = false;
+    }
 }
