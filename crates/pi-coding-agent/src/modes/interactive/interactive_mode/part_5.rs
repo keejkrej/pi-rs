@@ -442,7 +442,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn toggle_thinking_block_visibility(&self) {
+    pub fn toggle_thinking_block_visibility(&self) {
         let next = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.hide_thinking_block = !st.hide_thinking_block;
@@ -673,7 +673,7 @@ impl InteractiveMode {
         (steering, follow_up)
     }
 
-    pub(crate) fn update_pending_messages_display(&self) {
+    pub fn update_pending_messages_display(&self) {
         self.clear_pending_container();
         let pending_bash = self
             .inner
@@ -683,8 +683,9 @@ impl InteractiveMode {
             .pending_bash_components
             .clone();
         for (bash_comp, comp_arc) in pending_bash {
+            let exp_fn: Arc<dyn Expandable> = Arc::new(BashExecutionExpandable(bash_comp.clone()));
             let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| bash_comp.set_output_pad(p));
-            self.add_pending_component(comp_arc, None, Some(pad_fn));
+            self.add_pending_component(comp_arc, Some(exp_fn), Some(pad_fn));
         }
 
         let (steering_msgs, follow_up_msgs) = self.get_all_queued_messages();
@@ -735,7 +736,7 @@ impl InteractiveMode {
         all_queued.len()
     }
 
-    pub(crate) fn queue_compaction_message(&self, text: &str, mode: CompactionQueueMode) {
+    pub fn queue_compaction_message(&self, text: &str, mode: CompactionQueueMode) {
         {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.compaction_queued_messages.push(CompactionQueuedMessage {
@@ -757,7 +758,7 @@ impl InteractiveMode {
         self.session().extension_runner().has_command(command_name)
     }
 
-    pub(crate) async fn flush_compaction_queue(&self, will_retry: bool) {
+    pub async fn flush_compaction_queue(&self, will_retry: bool) {
         let queued_messages = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.compaction_queued_messages.is_empty() {
@@ -861,7 +862,7 @@ impl InteractiveMode {
         self.update_pending_messages_display();
     }
 
-    pub(crate) fn flush_pending_bash_components(&self) {
+    pub fn flush_pending_bash_components(&self) {
         let pending = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut st.pending_bash_components)
@@ -872,8 +873,9 @@ impl InteractiveMode {
                 let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                 st.pending_trackers.retain(|t| !Arc::ptr_eq(&t.component, &comp_arc));
             }
+            let exp_fn: Arc<dyn Expandable> = Arc::new(BashExecutionExpandable(bash_comp.clone()));
             let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| bash_comp.set_output_pad(p));
-            self.add_chat_component(comp_arc, None, None, Some(pad_fn));
+            self.add_chat_component(comp_arc, Some(exp_fn), None, Some(pad_fn));
         }
     }
 
@@ -1311,7 +1313,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) fn handle_thinking_command(&self, search_term: Option<&str>) {
+    pub fn handle_thinking_command(&self, search_term: Option<&str>) {
         let available_levels = self.session().get_available_thinking_levels();
         let Some(term) = search_term.filter(|s| !s.trim().is_empty()) else {
             self.show_thinking_selector();
@@ -1392,7 +1394,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) async fn handle_model_command(&self, search_term: Option<&str>) {
+    pub async fn handle_model_command(&self, search_term: Option<&str>) {
         let Some(term) = search_term.filter(|s| !s.trim().is_empty()) else {
             self.show_model_selector(None);
             return;
@@ -1479,7 +1481,7 @@ impl InteractiveMode {
             .set_available_provider_count(unique.len());
     }
 
-    pub(crate) async fn maybe_warn_about_anthropic_subscription_auth(&self, model: Option<&Model>) {
+    pub async fn maybe_warn_about_anthropic_subscription_auth(&self, model: Option<&Model>) {
         if self.settings_manager().get_warnings().anthropic_extra_usage == Some(false) {
             return;
         }
@@ -1596,7 +1598,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) fn show_model_selector(&self, initial_search_input: Option<&str>) {
+    pub fn show_model_selector(&self, initial_search_input: Option<&str>) {
         let initial_search = initial_search_input.map(str::to_string);
         let m = self.clone();
         self.show_selector(Box::new(move |done| {

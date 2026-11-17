@@ -258,6 +258,34 @@ impl ExtensionUiContext for InteractiveExtensionUiContextImpl {
     }
 }
 
+fn is_retryable_provider_error(lower: &str) -> bool {
+    lower.contains("overloaded")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+        || lower.contains("429")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("service unavailable")
+        || lower.contains("bad gateway")
+        || lower.contains("gateway timeout")
+        || lower.contains("internal server error")
+        || lower.contains("network")
+        || lower.contains("connection")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("econnreset")
+        || lower.contains("etimedout")
+        || lower.contains("enotfound")
+        || lower.contains("eai_again")
+        || lower.contains("fetch failed")
+        || lower.contains("socket hang up")
+        || lower.contains("other side closed")
+        || lower.contains("terminated")
+}
+
 struct ToolExpandableAdapter(ToolExecutionComponent);
 
 impl Expandable for ToolExpandableAdapter {
@@ -276,7 +304,7 @@ impl InteractiveMode {
             .as_component()
     }
 
-    pub(crate) fn active_editor(&self) -> ActiveEditor {
+    pub fn active_editor(&self) -> ActiveEditor {
         self.inner
             .state
             .lock()
@@ -423,7 +451,7 @@ impl InteractiveMode {
             });
     }
 
-    pub(crate) fn clear_pending_container(&self) {
+    pub fn clear_pending_container(&self) {
         self.inner.pending_messages_container.clear();
         self.inner
             .state
@@ -1516,13 +1544,13 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn maybe_suggest_bug_report(&self, message: &pi_ai::AssistantMessage) {
+    pub fn maybe_suggest_bug_report(&self, message: &pi_ai::AssistantMessage) {
         if message.stop_reason != pi_ai::StopReason::Error {
             return;
         }
         let err = message.error_message.as_deref().unwrap_or("");
         let lower = err.to_ascii_lowercase();
-        if lower.contains("abort") || lower.contains("cancel") {
+        if lower.contains("abort") || lower.contains("cancel") || is_retryable_provider_error(&lower) {
             return;
         }
         if self.maybe_show_install_change_warning() {
@@ -1531,7 +1559,10 @@ impl InteractiveMode {
         self.suggest_bug_report();
     }
 
-    pub(crate) fn maybe_show_install_change_warning(&self) -> bool {
+    pub fn maybe_show_install_change_warning(&self) -> bool {
+        if let Some(ref check) = self.inner.hooks.install_change_warning {
+            return check();
+        }
         self.inner
             .state
             .lock()
@@ -1539,7 +1570,7 @@ impl InteractiveMode {
             .install_change_warning_shown
     }
 
-    fn render_current_session_state(&self) {
+    pub fn render_current_session_state(&self) {
         self.clear_resource_container();
         self.clear_chat_container();
         self.clear_pending_container();
@@ -1606,7 +1637,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn set_editor_working_status_indicator(&self, indicator: Option<StatusIndicator>) -> bool {
+    pub fn set_editor_working_status_indicator(&self, indicator: Option<StatusIndicator>) -> bool {
         self.inner.default_editor.set_working_status_indicator(None);
         let editor = self.active_editor();
         if !editor.embed_working_status() {
@@ -1616,7 +1647,7 @@ impl InteractiveMode {
         true
     }
 
-    pub(crate) fn show_status_indicator(&self, indicator: StatusIndicator) {
+    pub fn show_status_indicator(&self, indicator: StatusIndicator) {
         let prev = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let prev = st.active_status_indicator.replace(indicator.clone());
@@ -1639,7 +1670,7 @@ impl InteractiveMode {
         self.inner.status_container.add_child(Arc::new(indicator));
     }
 
-    pub(crate) fn clear_status_indicator(
+    pub fn clear_status_indicator(
         &self,
         kind: Option<crate::modes::interactive::components::status_indicator::StatusIndicatorKind>,
     ) {

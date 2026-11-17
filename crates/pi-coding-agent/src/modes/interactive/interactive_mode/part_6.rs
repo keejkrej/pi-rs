@@ -354,7 +354,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) async fn handle_clone_command(&self) {
+    pub async fn handle_clone_command(&self) {
         let Some(leaf_id) = self.session_manager().get_leaf_id() else {
             self.show_status("Nothing to clone yet");
             return;
@@ -377,7 +377,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn show_tree_selector(&self, initial_selected_id: Option<&str>) {
+    pub fn show_tree_selector(&self, initial_selected_id: Option<&str>) {
         let tree = self.session_manager().get_tree();
         if tree.is_empty() {
             self.show_status("No entries in session");
@@ -1579,7 +1579,7 @@ impl InteractiveMode {
         }
     }
 
-    fn get_path_command_argument(&self, text: &str, command: &str) -> Option<String> {
+    pub fn get_path_command_argument(&self, text: &str, command: &str) -> Option<String> {
         if text == command {
             return None;
         }
@@ -1598,7 +1598,7 @@ impl InteractiveMode {
         Some(args[..end].to_string())
     }
 
-    pub(crate) async fn handle_import_command(&self, text: &str) {
+    pub async fn handle_import_command(&self, text: &str) {
         let Some(input_path) = self.get_path_command_argument(text, "/import") else {
             self.show_error("Usage: /import <path.jsonl>");
             return;
@@ -1624,9 +1624,13 @@ impl InteractiveMode {
                 }
             }
             Err(err) => {
+                let msg = err.to_string();
                 // WIRE(@tui-w3): Special-case typed MissingSessionCwdError / SessionImportFileNotFoundError once @mcp merges onto main.
-                self.handle_fatal_runtime_error("Failed to import session", &err.to_string())
-                    .await;
+                if msg.starts_with("File not found:") {
+                    self.show_error(&format!("Failed to import session: {msg}"));
+                    return;
+                }
+                self.handle_fatal_runtime_error("Failed to import session", &msg).await;
             }
         }
     }
@@ -1676,7 +1680,7 @@ impl InteractiveMode {
         (self.inner.hooks.clipboard_copy)(text).await
     }
 
-    pub(crate) async fn handle_copy_command(&self, flash_confirmation: bool, prefer_selection: bool) {
+    pub async fn handle_copy_command(&self, flash_confirmation: bool, prefer_selection: bool) {
         if prefer_selection {
             let alt_opt = self
                 .inner
@@ -2218,7 +2222,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) async fn handle_bash_command(&self, command: &str, exclude_from_context: bool) {
+    pub async fn handle_bash_command(&self, command: &str, exclude_from_context: bool) {
         let runner = self.session().extension_runner();
         let cwd = self.session_manager().get_cwd();
         let ext_res = if runner.has_user_bash_handlers() {
@@ -2239,6 +2243,7 @@ impl InteractiveMode {
             let comp = BashExecutionComponent::new(command, self.ui(), Some(exclude_from_context), Some(output_pad));
             comp.set_expanded(tool_expanded);
             let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
+            let exp_fn: Arc<dyn Expandable> = Arc::new(BashExecutionExpandable(comp.clone()));
             let pad_comp = comp.clone();
             let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| pad_comp.set_output_pad(p));
             if self.session().is_streaming() {
@@ -2248,9 +2253,9 @@ impl InteractiveMode {
                     .unwrap_or_else(|e| e.into_inner())
                     .pending_bash_components
                     .push((comp.clone(), Arc::clone(&comp_arc)));
-                self.add_pending_component(comp_arc, None, Some(pad_fn));
+                self.add_pending_component(comp_arc, Some(exp_fn), Some(pad_fn));
             } else {
-                self.add_chat_component(comp_arc, None, None, Some(pad_fn));
+                self.add_chat_component(comp_arc, Some(exp_fn), None, Some(pad_fn));
             }
             if !result.output.is_empty() {
                 comp.append_output(&result.output);
@@ -2295,12 +2300,13 @@ impl InteractiveMode {
                 st.pending_bash_components.push((comp.clone(), Arc::clone(&comp_arc)));
             }
         }
+        let exp_fn: Arc<dyn Expandable> = Arc::new(BashExecutionExpandable(comp.clone()));
         let pad_comp = comp.clone();
         let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| pad_comp.set_output_pad(p));
         if is_deferred {
-            self.add_pending_component(comp_arc, None, Some(pad_fn));
+            self.add_pending_component(comp_arc, Some(exp_fn), Some(pad_fn));
         } else {
-            self.add_chat_component(comp_arc, None, None, Some(pad_fn));
+            self.add_chat_component(comp_arc, Some(exp_fn), None, Some(pad_fn));
         }
         self.ui().request_render(None);
 
@@ -2375,7 +2381,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) async fn handle_compact_command(&self, custom_instructions: Option<&str>) {
+    pub async fn handle_compact_command(&self, custom_instructions: Option<&str>) {
         self.clear_status_indicator(None);
         let _ = self.session().compact(custom_instructions).await;
     }

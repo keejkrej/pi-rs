@@ -191,21 +191,21 @@ impl ReadonlyFooterDataProvider for FooterDataBridge {
     }
 }
 
-pub(crate) fn to_interactive_tui_mode(mode: SettingsTuiMode) -> InteractiveTuiMode {
+pub fn to_interactive_tui_mode(mode: SettingsTuiMode) -> InteractiveTuiMode {
     match mode {
         SettingsTuiMode::Regular => InteractiveTuiMode::Regular,
         SettingsTuiMode::Fullscreen => InteractiveTuiMode::Fullscreen,
     }
 }
 
-pub(crate) fn to_settings_tui_mode(mode: TuiMode) -> SettingsTuiMode {
+pub fn to_settings_tui_mode(mode: TuiMode) -> SettingsTuiMode {
     match mode {
         TuiMode::Regular => SettingsTuiMode::Regular,
         TuiMode::Fullscreen => SettingsTuiMode::Fullscreen,
     }
 }
 
-pub(crate) fn to_pi_tui_mode(mode: InteractiveTuiMode) -> TuiMode {
+pub fn to_pi_tui_mode(mode: InteractiveTuiMode) -> TuiMode {
     match mode {
         InteractiveTuiMode::Regular => TuiMode::Regular,
         InteractiveTuiMode::Fullscreen => TuiMode::Fullscreen,
@@ -275,6 +275,16 @@ impl InteractiveMode {
             }
         });
 
+        let copy_cb = Arc::clone(&hooks.clipboard_copy);
+        let copy_selection: pi_tui::tui_alt_screen::CopySelectionFn = Arc::new(move |text: String| {
+            let cb = Arc::clone(&copy_cb);
+            Box::pin(async move {
+                match cb(&text).await {
+                    Ok(()) => pi_tui::tui_alt_screen::CopySelectionResult::Bool(true),
+                    Err(err) => pi_tui::tui_alt_screen::CopySelectionResult::Message(err.to_string()),
+                }
+            })
+        });
         let renderer = create_interactive_tui(InteractiveTuiOptions {
             tui_mode: Some(to_interactive_tui_mode(tui_mode)),
             show_hardware_cursor: settings_manager.get_show_hardware_cursor(),
@@ -283,6 +293,7 @@ impl InteractiveMode {
             on_right_click_paste: Some(Arc::clone(&on_right_click_paste)),
             fullscreen_copy_on_select: Some(settings_manager.get_fullscreen_copy_on_select()),
             fullscreen_wheel_scroll_lines: Some(settings_manager.get_fullscreen_wheel_scroll_lines()),
+            copy_selection: Some(copy_selection),
         });
 
         let renderer_slot: Arc<Mutex<Option<Weak<InteractiveModeInner>>>> = Arc::clone(&weak_slot);
@@ -910,7 +921,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn stop_interactive_tui(&self, fullscreen_exit_output: FullscreenExitOutput) {
+    pub fn stop_interactive_tui(&self, fullscreen_exit_output: FullscreenExitOutput) {
         let renderer = self
             .inner
             .state
@@ -948,7 +959,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) fn switch_tui_mode(&self, mode: SettingsTuiMode, restore_progress: bool, start_renderer: bool) -> bool {
+    pub fn switch_tui_mode(&self, mode: SettingsTuiMode, restore_progress: bool, start_renderer: bool) -> bool {
         let previous_ui = self
             .inner
             .state
@@ -1007,6 +1018,16 @@ impl InteractiveMode {
             }
         });
 
+        let copy_cb = Arc::clone(&self.inner.hooks.clipboard_copy);
+        let copy_selection: pi_tui::tui_alt_screen::CopySelectionFn = Arc::new(move |text: String| {
+            let cb = Arc::clone(&copy_cb);
+            Box::pin(async move {
+                match cb(&text).await {
+                    Ok(()) => pi_tui::tui_alt_screen::CopySelectionResult::Bool(true),
+                    Err(err) => pi_tui::tui_alt_screen::CopySelectionResult::Message(err.to_string()),
+                }
+            })
+        });
         let next_ui = create_interactive_tui(InteractiveTuiOptions {
             tui_mode: Some(to_interactive_tui_mode(mode)),
             show_hardware_cursor,
@@ -1015,6 +1036,7 @@ impl InteractiveMode {
             on_right_click_paste: Some(on_right_click_paste),
             fullscreen_copy_on_select: Some(settings.get_fullscreen_copy_on_select()),
             fullscreen_wheel_scroll_lines: Some(settings.get_fullscreen_wheel_scroll_lines()),
+            copy_selection: Some(copy_selection),
         });
         next_ui.set_clear_on_shrink(clear_on_shrink);
         next_ui.set_on_debug(on_debug);

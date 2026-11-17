@@ -496,7 +496,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn set_custom_editor_component(&self, factory: Option<EditorFactory>) {
+    pub fn set_custom_editor_component(&self, factory: Option<EditorFactory>) {
         let (current_text, dialog_open, prev_autocomplete, border_color, padding_x, ac_max_vis, active_ind) = {
             let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let current_text = st.editor.get_text();
@@ -878,7 +878,7 @@ impl InteractiveMode {
         })));
     }
 
-    pub(crate) async fn handle_right_click_paste(&self) {
+    pub async fn handle_right_click_paste(&self) {
         let target = self
             .inner
             .state
@@ -922,12 +922,12 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn handle_startup_submit(&self, text: &str) {
+    pub fn handle_startup_submit(&self, text: &str) {
         self.active_editor().set_text(text);
         self.show_status("Startup is still in progress");
     }
 
-    pub(crate) fn setup_editor_submit_handler(&self) {
+    pub fn setup_editor_submit_handler(&self) {
         let m = self.clone();
         self.inner
             .default_editor
@@ -1172,7 +1172,7 @@ impl InteractiveMode {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).unsubscribe = Some(unsub);
     }
 
-    pub(crate) async fn handle_event(&self, event: &AgentSessionEvent) {
+    pub async fn handle_event(&self, event: &AgentSessionEvent) {
         if !self
             .inner
             .state
@@ -1863,8 +1863,7 @@ impl InteractiveMode {
         }
     }
 
-    #[allow(dead_code)] // WIRE(@tui-w3): used when tools_manager::ensure_tool lands on main.
-    pub(crate) fn show_managed_tool_status(&self, status: &ToolStatus) {
+    pub fn show_managed_tool_status(&self, status: &ToolStatus) {
         {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if !st.managed_tool_status_started {
@@ -1992,7 +1991,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn add_message_to_chat(&self, message: &AgentMessage, populate_history: bool) {
+    pub fn add_message_to_chat(&self, message: &AgentMessage, populate_history: bool) {
         let (tool_output_expanded, hide_thinking_block, hidden_thinking_label, output_pad) = {
             let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -2101,8 +2100,10 @@ impl InteractiveMode {
                     let full_path = val.get("fullOutputPath").and_then(Value::as_str);
                     comp.set_complete(exit_code, cancelled, trunc_arg, full_path);
                     let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
+                    let exp_comp = comp.clone();
+                    let exp_fn: Arc<dyn Expandable> = Arc::new(BashExecutionExpandable(exp_comp));
                     let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| comp.set_output_pad(p));
-                    self.add_chat_component(comp_arc, None, None, Some(pad_fn));
+                    self.add_chat_component(comp_arc, Some(exp_fn), None, Some(pad_fn));
                 }
                 Some("custom") => {
                     if let Ok(custom_msg) = serde_json::from_value::<CustomMessage>(val.clone())
@@ -2288,7 +2289,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn render_session_entries(&self, entries: &[SessionEntry], update_footer: bool, populate_history: bool) {
+    pub fn render_session_entries(&self, entries: &[SessionEntry], update_footer: bool, populate_history: bool) {
         // WIRE(@tui-w3): Reset fullscreen text selection on alt-screen once pi-tui exposes reset_text_selection().
         let mut items: Vec<RenderSessionItemLocal> = Vec::new();
         for entry in entries {
@@ -2438,7 +2439,7 @@ impl InteractiveMode {
         count
     }
 
-    fn maybe_show_thinking_drop_notice(&self, message: &AssistantMessage) {
+    pub fn maybe_show_thinking_drop_notice(&self, message: &AssistantMessage) {
         if !self.settings_manager().get_show_cache_miss_notices() {
             return;
         }
@@ -2662,10 +2663,27 @@ impl InteractiveMode {
 
     pub(crate) fn unregister_signal_handlers(&self) {}
 
-    pub(crate) fn handle_ctrl_z(&self) {
-        #[cfg(not(unix))]
-        {
+    pub fn handle_ctrl_z(&self) {
+        let is_windows = self.inner.hooks.platform_is_windows.unwrap_or(cfg!(not(unix)));
+        if is_windows {
             self.show_status("Suspend to background is not supported on Windows");
+            return;
+        }
+        if let Some(ref suspend_fn) = self.inner.hooks.suspend_process {
+            let m = self.clone();
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancelled_cb = Arc::clone(&cancelled);
+            let on_sigcont: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if !cancelled_cb.load(std::sync::atomic::Ordering::SeqCst) {
+                    m.ui().start();
+                    m.ui().request_render(Some(true));
+                }
+            });
+            self.ui().stop(None);
+            if let Err(err) = suspend_fn(on_sigcont) {
+                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                panic!("{err}");
+            }
             return;
         }
         #[cfg(unix)]
@@ -2685,7 +2703,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn handle_follow_up(&self) {
+    pub async fn handle_follow_up(&self) {
         let text = self.active_editor().get_expanded_text().trim().to_string();
         if text.is_empty() {
             return;
@@ -2722,7 +2740,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn handle_dequeue(&self) {
+    pub fn handle_dequeue(&self) {
         let restored = self.restore_queued_messages_to_editor(false);
         if restored == 0 {
             self.show_status("No queued messages to restore");
@@ -2754,7 +2772,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn cycle_thinking_level(&self) {
+    pub fn cycle_thinking_level(&self) {
         match self.session().cycle_thinking_level() {
             None => self.show_status("Current model does not support thinking"),
             Some(new_level) => {
@@ -2765,7 +2783,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn cycle_model(&self, direction: CycleDirection) {
+    pub async fn cycle_model(&self, direction: CycleDirection) {
         match self.session().cycle_model(direction).await {
             Ok(None) => {
                 let msg = if !self.session().scoped_models().is_empty() {
@@ -2802,7 +2820,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn toggle_tool_output_expansion(&self) {
+    pub fn toggle_tool_output_expansion(&self) {
         let current = self
             .inner
             .state
@@ -2812,7 +2830,7 @@ impl InteractiveMode {
         self.set_tools_expanded(!current);
     }
 
-    pub(crate) fn set_tools_expanded(&self, expanded: bool) {
+    pub fn set_tools_expanded(&self, expanded: bool) {
         let expandables = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if expanded == st.tool_output_expanded {
