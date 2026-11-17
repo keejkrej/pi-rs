@@ -1038,7 +1038,7 @@ const BUILTIN_LIGHT_JSON: &str = include_str!("light.json");
 static BUILTIN_THEMES: OnceLock<(ThemeJson, ThemeJson)> = OnceLock::new();
 
 fn parse_builtin_theme_str(label: &str, raw: &str) -> ThemeJson {
-    let val: Value = serde_json::from_str(strip_bom_local(raw)).unwrap_or(Value::Null);
+    let val: Value = pi_js::json::parse(strip_bom_local(raw)).unwrap_or(Value::Null);
     super::theme_json::validate_theme_json(label, &val).unwrap_or_else(|_| ThemeJson {
         schema: None,
         name: label.to_string(),
@@ -1181,7 +1181,7 @@ fn parse_theme_json(label: &str, json: &Value) -> pi_js::Result<ThemeJson> {
 }
 
 fn parse_theme_json_content(label: &str, content: &str) -> pi_js::Result<ThemeJson> {
-    let json: Value = serde_json::from_str(strip_bom_local(content))
+    let json: Value = pi_js::json::parse(strip_bom_local(content))
         .map_err(|e| pi_js::Error::msg(format!("Failed to parse theme {label}: {e}")))?;
     parse_theme_json(label, &json)
 }

@@ -583,13 +583,15 @@ async fn keeps_next_session_selected_when_progressive_reload_after_delete_starts
 
     list.handle_input(CTRL_D);
     list.handle_input("\r");
-    for _ in 0..20 {
-        if !std::path::Path::new(&sessions[0].path).exists() {
+    for _ in 0..100 {
+        if !std::path::Path::new(&sessions[0].path).exists()
+            && list.get_selected_session_path() == Some(sessions[1].path.clone())
+        {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        flush_promises().await;
     }
-    flush_promises().await;
 
     assert!(!std::path::Path::new(&sessions[0].path).exists());
     assert_eq!(list.get_selected_session_path(), Some(sessions[1].path.clone()));
