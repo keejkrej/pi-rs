@@ -162,9 +162,7 @@ impl ExtensionEditorComponent {
                 });
             } else {
                 std::thread::spawn(move || {
-                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                        rt.block_on(Self::open_external_editor_async(inner));
-                    }
+                    Self::open_external_editor_blocking(inner);
                 });
             }
             return;
@@ -172,14 +170,7 @@ impl ExtensionEditorComponent {
         self.inner.editor.handle_input(key_data);
     }
 
-    async fn open_external_editor_async(inner: Arc<ExtensionEditorInner>) {
-        let content = inner.editor.get_text();
-        inner.tui.stop(None);
-        let result = edit_in_external_editor(ExternalEditorOptions {
-            command: inner.external_editor_command.clone(),
-            content,
-        })
-        .await;
+    fn apply_external_editor_result(inner: &Arc<ExtensionEditorInner>, result: pi_js::Result<ExternalEditorResult>) {
         match result {
             Ok(ExternalEditorResult::Complete { content }) => {
                 inner.external_editor_status.set_text("");
@@ -198,6 +189,28 @@ impl ExtensionEditorComponent {
         }
         inner.tui.start();
         inner.tui.request_render(Some(true));
+    }
+
+    fn open_external_editor_blocking(inner: Arc<ExtensionEditorInner>) {
+        let content = inner.editor.get_text();
+        inner.tui.stop(None);
+        let result =
+            crate::modes::interactive::external_editor::edit_in_external_editor_blocking(ExternalEditorOptions {
+                command: inner.external_editor_command.clone(),
+                content,
+            });
+        Self::apply_external_editor_result(&inner, result);
+    }
+
+    async fn open_external_editor_async(inner: Arc<ExtensionEditorInner>) {
+        let content = inner.editor.get_text();
+        inner.tui.stop(None);
+        let result = edit_in_external_editor(ExternalEditorOptions {
+            command: inner.external_editor_command.clone(),
+            content,
+        })
+        .await;
+        Self::apply_external_editor_result(&inner, result);
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {

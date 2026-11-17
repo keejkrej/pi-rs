@@ -27,10 +27,18 @@ fn strip_bom_local(s: &str) -> &str {
     s.strip_prefix('\u{FEFF}').unwrap_or(s)
 }
 
-pub async fn edit_in_external_editor(options: ExternalEditorOptions) -> pi_js::Result<ExternalEditorResult> {
+struct PreparedExternalEditor {
+    _cleanup: TempDirCleanup,
+    file_path: String,
+    command: String,
+    args: Vec<String>,
+    program: String,
+}
+
+fn prepare_external_editor(options: ExternalEditorOptions) -> pi_js::Result<PreparedExternalEditor> {
     let prefix = pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-editor-"]);
     let directory = pi_js::fs::mkdtemp(&prefix)?;
-    let _cleanup = TempDirCleanup(directory.clone());
+    let cleanup = TempDirCleanup(directory.clone());
     let file_path = pi_js::path::join(&[&directory, "prompt.md"]);
 
     pi_js::fs::write_file(&file_path, options.content.as_bytes(), None)?;
@@ -44,34 +52,36 @@ pub async fn edit_in_external_editor(options: ExternalEditorOptions) -> pi_js::R
         options.command
     ));
 
-    // Do not use synchronous blocking process spawning across stdin reads.
-    // On Windows, `shell: true` matches Node's child_process spawn option.
-    let mut cmd = if pi_js::env::platform() == "win32" {
+    let (program, args) = if pi_js::env::platform() == "win32" {
         let mut line_parts = Vec::with_capacity(editor_args.len() + 2);
         line_parts.push(editor);
         line_parts.extend(editor_args.iter().copied());
         line_parts.push(&file_path);
-        let joined = line_parts.join(" ");
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(joined);
-        c
+        ("cmd".to_string(), vec!["/C".to_string(), line_parts.join(" ")])
     } else {
-        let mut c = tokio::process::Command::new(editor);
-        c.args(&editor_args).arg(&file_path);
-        c
+        let mut args: Vec<String> = editor_args.into_iter().map(str::to_string).collect();
+        args.push(file_path.clone());
+        (editor.to_string(), args)
     };
 
-    cmd.env_clear()
-        .envs(pi_js::env::vars())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+    Ok(PreparedExternalEditor {
+        _cleanup: cleanup,
+        file_path,
+        command: options.command,
+        args,
+        program,
+    })
+}
 
-    let status = match cmd.status().await {
+fn finish_external_editor_status(
+    prepared: &PreparedExternalEditor,
+    status_res: std::io::Result<std::process::ExitStatus>,
+) -> pi_js::Result<ExternalEditorResult> {
+    let status = match status_res {
         Ok(s) => s,
         Err(_) => {
             return Ok(ExternalEditorResult::Failed {
-                message: format!("Failed to launch external editor: {}", options.command),
+                message: format!("Failed to launch external editor: {}", prepared.command),
             });
         }
     };
@@ -95,10 +105,37 @@ pub async fn edit_in_external_editor(options: ExternalEditorOptions) -> pi_js::R
         });
     }
 
-    let updated = pi_js::fs::read_to_string(&file_path)?;
+    let updated = pi_js::fs::read_to_string(&prepared.file_path)?;
     let stripped = strip_bom_local(&updated);
     let trimmed = stripped.strip_suffix('\n').unwrap_or(stripped);
     Ok(ExternalEditorResult::Complete {
         content: trimmed.to_string(),
     })
+}
+
+pub async fn edit_in_external_editor(options: ExternalEditorOptions) -> pi_js::Result<ExternalEditorResult> {
+    let prepared = prepare_external_editor(options)?;
+    // Do not use synchronous blocking process spawning across async tasks.
+    let mut cmd = tokio::process::Command::new(&prepared.program);
+    cmd.args(&prepared.args)
+        .env_clear()
+        .envs(pi_js::env::vars())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status_res = cmd.status().await;
+    finish_external_editor_status(&prepared, status_res)
+}
+
+pub(crate) fn edit_in_external_editor_blocking(options: ExternalEditorOptions) -> pi_js::Result<ExternalEditorResult> {
+    let prepared = prepare_external_editor(options)?;
+    let mut cmd = std::process::Command::new(&prepared.program);
+    cmd.args(&prepared.args)
+        .env_clear()
+        .envs(pi_js::env::vars())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status_res = cmd.status();
+    finish_external_editor_status(&prepared, status_res)
 }
