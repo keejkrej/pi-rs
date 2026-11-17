@@ -377,7 +377,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn show_tree_selector(&self, initial_selected_id: Option<&str>) {
+    pub fn show_tree_selector(&self, initial_selected_id: Option<&str>) {
         let tree = self.session_manager().get_tree();
         if tree.is_empty() {
             self.show_status("No entries in session");
@@ -2381,7 +2381,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) async fn handle_compact_command(&self, custom_instructions: Option<&str>) {
+    pub async fn handle_compact_command(&self, custom_instructions: Option<&str>) {
         self.clear_status_indicator(None);
         let _ = self.session().compact(custom_instructions).await;
     }

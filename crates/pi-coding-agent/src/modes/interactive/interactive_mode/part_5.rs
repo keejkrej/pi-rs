@@ -442,7 +442,7 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn toggle_thinking_block_visibility(&self) {
+    pub fn toggle_thinking_block_visibility(&self) {
         let next = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.hide_thinking_block = !st.hide_thinking_block;
@@ -673,7 +673,7 @@ impl InteractiveMode {
         (steering, follow_up)
     }
 
-    pub(crate) fn update_pending_messages_display(&self) {
+    pub fn update_pending_messages_display(&self) {
         self.clear_pending_container();
         let pending_bash = self
             .inner
@@ -736,7 +736,7 @@ impl InteractiveMode {
         all_queued.len()
     }
 
-    pub(crate) fn queue_compaction_message(&self, text: &str, mode: CompactionQueueMode) {
+    pub fn queue_compaction_message(&self, text: &str, mode: CompactionQueueMode) {
         {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.compaction_queued_messages.push(CompactionQueuedMessage {
@@ -758,7 +758,7 @@ impl InteractiveMode {
         self.session().extension_runner().has_command(command_name)
     }
 
-    pub(crate) async fn flush_compaction_queue(&self, will_retry: bool) {
+    pub async fn flush_compaction_queue(&self, will_retry: bool) {
         let queued_messages = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.compaction_queued_messages.is_empty() {
@@ -862,7 +862,7 @@ impl InteractiveMode {
         self.update_pending_messages_display();
     }
 
-    pub(crate) fn flush_pending_bash_components(&self) {
+    pub fn flush_pending_bash_components(&self) {
         let pending = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut st.pending_bash_components)

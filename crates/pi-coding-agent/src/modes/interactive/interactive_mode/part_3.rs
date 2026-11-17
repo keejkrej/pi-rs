@@ -451,7 +451,7 @@ impl InteractiveMode {
             });
     }
 
-    pub(crate) fn clear_pending_container(&self) {
+    pub fn clear_pending_container(&self) {
         self.inner.pending_messages_container.clear();
         self.inner
             .state
@@ -1570,7 +1570,7 @@ impl InteractiveMode {
             .install_change_warning_shown
     }
 
-    fn render_current_session_state(&self) {
+    pub fn render_current_session_state(&self) {
         self.clear_resource_container();
         self.clear_chat_container();
         self.clear_pending_container();

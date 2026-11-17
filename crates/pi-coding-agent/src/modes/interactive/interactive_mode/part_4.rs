@@ -1172,7 +1172,7 @@ impl InteractiveMode {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).unsubscribe = Some(unsub);
     }
 
-    pub(crate) async fn handle_event(&self, event: &AgentSessionEvent) {
+    pub async fn handle_event(&self, event: &AgentSessionEvent) {
         if !self
             .inner
             .state
@@ -1991,7 +1991,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn add_message_to_chat(&self, message: &AgentMessage, populate_history: bool) {
+    pub fn add_message_to_chat(&self, message: &AgentMessage, populate_history: bool) {
         let (tool_output_expanded, hide_thinking_block, hidden_thinking_label, output_pad) = {
             let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -2703,7 +2703,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn handle_follow_up(&self) {
+    pub async fn handle_follow_up(&self) {
         let text = self.active_editor().get_expanded_text().trim().to_string();
         if text.is_empty() {
             return;
@@ -2740,7 +2740,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn handle_dequeue(&self) {
+    pub fn handle_dequeue(&self) {
         let restored = self.restore_queued_messages_to_editor(false);
         if restored == 0 {
             self.show_status("No queued messages to restore");
@@ -2783,7 +2783,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn cycle_model(&self, direction: CycleDirection) {
+    pub async fn cycle_model(&self, direction: CycleDirection) {
         match self.session().cycle_model(direction).await {
             Ok(None) => {
                 let msg = if !self.session().scoped_models().is_empty() {
