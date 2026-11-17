@@ -93,11 +93,13 @@ pub struct PrintModeHooks {
 impl Default for PrintModeHooks {
     fn default() -> Self {
         Self {
-            write_stdout: Arc::new(|text| pi_js::console::stdout_write(text)),
+            write_stdout: Arc::new(|text| crate::core::output_guard::write_raw_stdout(text)),
             write_stderr: Arc::new(|msg| pi_js::console::error(msg)),
-            wait_backpressure: Arc::new(|| Box::pin(async {})),
-            flush_stdout: Arc::new(|| Box::pin(async { Ok(()) })),
-            kill_detached_children: Arc::new(|| {}),
+            wait_backpressure: Arc::new(|| Box::pin(crate::core::output_guard::wait_for_raw_stdout_backpressure())),
+            flush_stdout: Arc::new(|| Box::pin(crate::core::output_guard::flush_raw_stdout())),
+            kill_detached_children: Arc::new(|| {
+                crate::utils::shell::kill_tracked_detached_children();
+            }),
             exit_process: Arc::new(|code| std::process::exit(code)),
             register_signal_handler: Arc::new(|trigger| register_os_signals(trigger)),
         }

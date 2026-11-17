@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
+pub use crate::core::bug_report::BUG_REPORT_CUSTOM_ENTRY_TYPE;
 use crate::core::keybindings::KeybindingsManager;
-use pi_ai::providers::radius_config::DEFAULT_RADIUS_GATEWAY;
+use crate::core::radius::get_radius_gateway_url;
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result};
 use pi_tui::{Component, Container, TUI};
@@ -16,11 +17,9 @@ use super::components::extension_editor::{ExtensionEditorComponent, ExtensionEdi
 use super::components::extension_selector::{ExtensionSelectorComponent, ExtensionSelectorOptions};
 use super::theme::theme::theme;
 
-// WIRE(@tui-w3): Replace BugReportSession trait and local Radius/archive helpers with concrete
+// WIRE(@tui-w3): Replace BugReportSession trait and local archive helpers with concrete
 // crate::core::agent_session::AgentSession, crate::core::bug_report, crate::core::bug_report_upload,
-// crate::core::crash_log, crate::core::radius, and crate::core::session_export once @mcp & @ca-cli land on main.
-
-pub const BUG_REPORT_CUSTOM_ENTRY_TYPE: &str = "pi.bug-report";
+// crate::core::crash_log, and crate::core::session_export once @ca-cli lands on main.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BugReportDelivery {
@@ -74,9 +73,7 @@ const DISCLAIMER: &str = "This report goes to the Pi developers (Earendil) and i
 const TRANSCRIPT_NOTE: &str = "The transcript contains your messages, model output, tool calls and their results, including file contents and command output read during this session.";
 
 fn radius_gateway_host() -> String {
-    let raw = pi_js::env::var("PI_RADIUS_GATEWAY")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_RADIUS_GATEWAY.to_string());
+    let raw = get_radius_gateway_url();
     Url::parse(&raw)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))

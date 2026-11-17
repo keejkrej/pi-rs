@@ -2,18 +2,20 @@
 
 use std::sync::Arc;
 
-use pi_ai::providers::radius_config::DEFAULT_RADIUS_GATEWAY;
 use pi_js::{BoxFuture, Result};
 use pi_tui::{Component, Container, TUI, hyperlink};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::config::get_share_viewer_url;
+use crate::core::radius::get_radius_gateway_url;
+
 use super::components::bordered_loader::BorderedLoader;
 use super::theme::theme::theme;
 
 // WIRE(@tui-w3): Replace ShareSession trait with concrete crate::core::agent_session::AgentSession,
-// crate::cli::auth_command::get_auth_credential, crate::config::get_share_viewer_url, and
-// crate::core::session_export::export_session_to_jsonl once @mcp & @ca-cli land on main.
+// crate::cli::auth_command::get_auth_credential, and crate::core::session_export::export_session_to_jsonl
+// once @ca-cli lands on main.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionShareDestination {
@@ -51,13 +53,6 @@ pub struct SessionShareContext {
     pub editor: Arc<dyn Component>,
     pub show_status: Arc<dyn Fn(&str) + Send + Sync>,
     pub show_error: Arc<dyn Fn(&str) + Send + Sync>,
-}
-
-fn get_share_viewer_url(gist_id: &str) -> String {
-    let base_url = pi_js::env::var("PI_SHARE_VIEWER_URL")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "https://pi.dev/session/".to_string());
-    format!("{base_url}#{gist_id}")
 }
 
 /// Trailing `pi.share` entry carrying the system prompt and tool schemas for the session viewer.
@@ -192,7 +187,7 @@ async fn try_share_via_radius(tmp_file: &str, context: &SessionShareContext) -> 
         }
     };
 
-    let Ok(mut url) = Url::parse(DEFAULT_RADIUS_GATEWAY).and_then(|u| u.join("/v1/artifacts")) else {
+    let Ok(mut url) = Url::parse(&get_radius_gateway_url()).and_then(|u| u.join("/v1/artifacts")) else {
         restore_editor(&loader, &context.editor_container, &context.editor, &context.ui);
         (context.show_error)("Failed to upload Radius artifact: invalid gateway URL");
         return true;
