@@ -52,7 +52,10 @@ async fn clears_branch_summary_state_when_session_before_tree_cancels_navigation
         .unwrap();
     let current_leaf_id = harness.session_manager.append_message(user_msg("second")).unwrap();
 
-    assert_eq!(harness.session_manager.get_leaf_id().as_deref(), Some(current_leaf_id.as_str()));
+    assert_eq!(
+        harness.session_manager.get_leaf_id().as_deref(),
+        Some(current_leaf_id.as_str())
+    );
 
     let result = harness
         .session
@@ -68,6 +71,9 @@ async fn clears_branch_summary_state_when_session_before_tree_cancels_navigation
 
     assert!(result.cancelled);
     assert!(!harness.session.is_compacting());
-    assert_eq!(harness.session_manager.get_leaf_id().as_deref(), Some(current_leaf_id.as_str()));
+    assert_eq!(
+        harness.session_manager.get_leaf_id().as_deref(),
+        Some(current_leaf_id.as_str())
+    );
     harness.cleanup();
 }

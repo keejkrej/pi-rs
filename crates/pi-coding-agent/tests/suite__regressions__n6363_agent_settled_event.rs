@@ -180,9 +180,7 @@ async fn settles_only_after_follow_ups_queued_by_agent_end_handlers_run() {
             pi.on::<AgentSettledEvent>(move |_ev, ctx| {
                 let sis = Arc::clone(&sis);
                 Box::pin(async move {
-                    sis.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(ctx.is_idle()?);
+                    sis.lock().unwrap_or_else(PoisonError::into_inner).push(ctx.is_idle()?);
                     Ok(None)
                 })
             });

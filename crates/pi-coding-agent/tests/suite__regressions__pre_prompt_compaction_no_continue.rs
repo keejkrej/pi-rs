@@ -10,7 +10,9 @@ use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep,
     faux_assistant_message,
 };
-use pi_ai::types::{Message, StopReason, TextContent, Usage, UsageCost, UserContentBlock, UserMessage, UserMessageContent};
+use pi_ai::types::{
+    Message, StopReason, TextContent, Usage, UsageCost, UserContentBlock, UserMessage, UserMessageContent,
+};
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, CompactionReason};
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult,
@@ -70,9 +72,7 @@ async fn compacts_length_stop_overflow_before_new_prompt_without_continuing_from
     harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "previous prompt",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("previous prompt"))]),
             timestamp: now - 1000,
         })))
         .unwrap();

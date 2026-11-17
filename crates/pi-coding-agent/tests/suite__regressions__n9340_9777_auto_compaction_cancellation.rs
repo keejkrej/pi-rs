@@ -33,9 +33,7 @@ fn seed_compactable_session(harness: &Harness) {
     harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                &"x".repeat(500),
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(&"x".repeat(500)))]),
             timestamp: 1,
         })))
         .unwrap();
@@ -285,7 +283,11 @@ async fn cancels_summarization_authentication_on_session_abort() {
             oauth: None,
         },
     });
-    harness.session.model_runtime().register_native_provider(provider).unwrap();
+    harness
+        .session
+        .model_runtime()
+        .register_native_provider(provider)
+        .unwrap();
     seed_compactable_session(&harness);
 
     let started_wait = auth_started.notified();
@@ -390,7 +392,11 @@ async fn assert_auth_failure_not_treated_as_abort(is_abort_error: bool, expected
             oauth: None,
         },
     });
-    harness.session.model_runtime().register_native_provider(provider).unwrap();
+    harness
+        .session
+        .model_runtime()
+        .register_native_provider(provider)
+        .unwrap();
     seed_compactable_session(&harness);
 
     harness

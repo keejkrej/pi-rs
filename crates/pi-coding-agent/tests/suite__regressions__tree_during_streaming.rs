@@ -33,35 +33,37 @@ async fn rejects_tree_navigation_during_active_response_without_changing_leaf() 
     let err_c = Arc::clone(&nav_error);
     let leaf_c = Arc::clone(&leaf_unchanged);
 
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |_ctx, _opts, _st, _mdl| {
-        let session = session_c.clone();
-        let sm = sm_c.clone();
-        let target = target_c.clone();
-        let err_slot = Arc::clone(&err_c);
-        let leaf_slot = Arc::clone(&leaf_c);
-        Box::pin(async move {
-            let active_leaf_id = sm.get_leaf_id();
-            if let Err(err) = session
-                .navigate_tree(
-                    &target,
-                    Some(NavigateTreeOptions {
-                        summarize: Some(false),
-                        ..Default::default()
-                    }),
-                )
-                .await
-            {
-                *err_slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(err.to_string());
-            }
-            let same_leaf = active_leaf_id.as_deref() != Some(target.as_str())
-                && sm.get_leaf_id() == active_leaf_id;
-            leaf_slot.store(same_leaf, Ordering::SeqCst);
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("response".to_string()),
-                None,
-            ))
-        })
-    }))]);
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |_ctx, _opts, _st, _mdl| {
+            let session = session_c.clone();
+            let sm = sm_c.clone();
+            let target = target_c.clone();
+            let err_slot = Arc::clone(&err_c);
+            let leaf_slot = Arc::clone(&leaf_c);
+            Box::pin(async move {
+                let active_leaf_id = sm.get_leaf_id();
+                if let Err(err) = session
+                    .navigate_tree(
+                        &target,
+                        Some(NavigateTreeOptions {
+                            summarize: Some(false),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                {
+                    *err_slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(err.to_string());
+                }
+                let same_leaf =
+                    active_leaf_id.as_deref() != Some(target.as_str()) && sm.get_leaf_id() == active_leaf_id;
+                leaf_slot.store(same_leaf, Ordering::SeqCst);
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("response".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("second", None).await.unwrap();
 

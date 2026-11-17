@@ -10,9 +10,7 @@ use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, TextContent, UserContentBlock};
-use pi_coding_agent::core::agent_session::{
-    AgentSessionEvent, SendCustomMessageDraft, SendCustomMessageOptions,
-};
+use pi_coding_agent::core::agent_session::{AgentSessionEvent, SendCustomMessageDraft, SendCustomMessageOptions};
 use pi_coding_agent::core::extensions::types::{CustomMessageContent, SessionEntry};
 use pi_coding_agent::core::messages::convert_to_llm;
 use pi_js::vendor::typebox::t;

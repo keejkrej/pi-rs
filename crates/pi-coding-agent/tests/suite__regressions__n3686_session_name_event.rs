@@ -16,7 +16,10 @@ async fn emits_session_info_changed_when_agent_session_set_session_name_is_calle
 
     harness.session.set_session_name("hello world");
 
-    assert_eq!(harness.session_manager.get_session_name().as_deref(), Some("hello world"));
+    assert_eq!(
+        harness.session_manager.get_session_name().as_deref(),
+        Some("hello world")
+    );
     let names: Vec<Option<String>> = harness
         .events()
         .into_iter()

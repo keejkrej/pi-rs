@@ -11,9 +11,7 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::{Message, StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
-use pi_coding_agent::core::extensions::types::{
-    ExtensionApi, InlineExtension, ToolCallEvent, ToolResultEvent,
-};
+use pi_coding_agent::core::extensions::types::{ExtensionApi, InlineExtension, ToolCallEvent, ToolResultEvent};
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -138,10 +136,7 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
 
     assert_eq!(starts.len(), 2);
     assert_eq!(ends.len(), 2);
-    assert_eq!(
-        ends.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-        starts
-    );
+    assert_eq!(ends.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), starts);
     assert!(ends.iter().all(|(_, is_err)| *is_err));
 
     let tool_result_texts: Vec<String> = harness

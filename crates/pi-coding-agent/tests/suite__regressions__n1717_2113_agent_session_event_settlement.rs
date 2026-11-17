@@ -161,11 +161,7 @@ async fn runs_tool_call_handlers_after_the_assistant_tool_use_message_is_settled
 
     assert_eq!(
         *branch_roles_at_tool_call.lock().unwrap_or_else(PoisonError::into_inner),
-        vec![vec![
-            "system".to_string(),
-            "user".to_string(),
-            "assistant".to_string()
-        ]]
+        vec![vec!["system".to_string(), "user".to_string(), "assistant".to_string()]]
     );
     harness.cleanup();
 }

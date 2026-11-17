@@ -18,11 +18,11 @@ use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{
-    AfterProviderResponseEvent, AutocompleteProviderFactory, CustomUiFactory, EditorFactory,
-    ExtensionCustomOptions, ExtensionRunnerRef, ExtensionUIContext, ExtensionUIDialogOptions,
-    ExtensionWidgetOptions, FooterFactory, HeaderFactory, InlineExtension, NotifyType,
-    ProviderChatModelConfig, ProviderConfig, ProviderModelConfig, SetThemeResult, TerminalInputHandler, Theme,
-    ThemeInfo, WidgetFactory, WorkingIndicatorOptions, create_extension_runner_ref,
+    AfterProviderResponseEvent, AutocompleteProviderFactory, CustomUiFactory, EditorFactory, ExtensionCustomOptions,
+    ExtensionRunnerRef, ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions, FooterFactory,
+    HeaderFactory, InlineExtension, NotifyType, ProviderChatModelConfig, ProviderConfig, ProviderModelConfig,
+    SetThemeResult, TerminalInputHandler, Theme, ThemeInfo, WidgetFactory, WorkingIndicatorOptions,
+    create_extension_runner_ref,
 };
 use pi_coding_agent::core::messages::convert_to_llm;
 use pi_coding_agent::core::resource_loader::ResourceLoader;
@@ -34,9 +34,7 @@ use serde_json::Value;
 use super::super::model_runtime_test_utils::{
     create_in_memory_model_registry, create_model_registry, get_model_runtime,
 };
-use super::super::utilities::{
-    TestExtensionInput, create_test_extensions_result, create_test_resource_loader,
-};
+use super::super::utilities::{TestExtensionInput, create_test_extensions_result, create_test_resource_loader};
 
 pub fn get_message_text(message: &AgentMessage) -> String {
     match message {
@@ -187,7 +185,11 @@ impl ExtensionUIContext for TestUiContext {
 
     fn set_title(&self, _title: &str) {}
 
-    async fn custom(&self, _factory: CustomUiFactory, _options: Option<ExtensionCustomOptions>) -> pi_js::Result<Value> {
+    async fn custom(
+        &self,
+        _factory: CustomUiFactory,
+        _options: Option<ExtensionCustomOptions>,
+    ) -> pi_js::Result<Value> {
         Ok(Value::Null)
     }
 

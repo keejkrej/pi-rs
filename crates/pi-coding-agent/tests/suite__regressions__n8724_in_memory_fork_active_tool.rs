@@ -133,30 +133,31 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
     };
 
     let model = harness.get_model();
-    let create_runtime: CreateAgentSessionRuntimeFactory = Arc::new(move |opts: CreateAgentSessionRuntimeFactoryOptions| {
-        let model_c = model.clone();
-        let services_c = services.clone();
-        Box::pin(async move {
-            let created = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
-                services: services_c.clone(),
-                session_manager: opts.session_manager,
-                session_start_event: opts.session_start_event,
-                model: Some(model_c),
-                thinking_level: None,
-                scoped_models: None,
-                tools: None,
-                exclude_tools: None,
-                no_tools: Some(NoToolsMode::All),
-                custom_tools: None,
+    let create_runtime: CreateAgentSessionRuntimeFactory =
+        Arc::new(move |opts: CreateAgentSessionRuntimeFactoryOptions| {
+            let model_c = model.clone();
+            let services_c = services.clone();
+            Box::pin(async move {
+                let created = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
+                    services: services_c.clone(),
+                    session_manager: opts.session_manager,
+                    session_start_event: opts.session_start_event,
+                    model: Some(model_c),
+                    thinking_level: None,
+                    scoped_models: None,
+                    tools: None,
+                    exclude_tools: None,
+                    no_tools: Some(NoToolsMode::All),
+                    custom_tools: None,
+                })
+                .await?;
+                Ok(CreateAgentSessionRuntimeResult::from_session_result(
+                    created,
+                    services_c,
+                    vec![],
+                ))
             })
-            .await?;
-            Ok(CreateAgentSessionRuntimeResult::from_session_result(
-                created,
-                services_c,
-                vec![],
-            ))
-        })
-    });
+        });
 
     let runtime = AgentSessionRuntime::new(
         harness.session.clone(),
@@ -173,14 +174,10 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
         None,
     );
 
-    let first_user_entry_id = harness
-        .session_manager
-        .get_entries()
-        .iter()
-        .find_map(|e| match e {
-            SessionEntry::Message(m) if m.message.role() == Some("user") => Some(m.id.clone()),
-            _ => None,
-        });
+    let first_user_entry_id = harness.session_manager.get_entries().iter().find_map(|e| match e {
+        SessionEntry::Message(m) if m.message.role() == Some("user") => Some(m.id.clone()),
+        _ => None,
+    });
 
     let started_wait = tool_started.notified();
     let initial_session = harness.session.clone();

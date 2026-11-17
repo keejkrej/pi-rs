@@ -112,7 +112,9 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
     let session_manager = SessionManager::create(&temp_dir, Some(&session_dir), None).unwrap();
 
     let agent = Agent::new(AgentOptions {
-        get_api_key: Some(Arc::new(|_provider| Box::pin(async { Ok(Some("faux-key".to_string())) }))),
+        get_api_key: Some(Arc::new(|_provider| {
+            Box::pin(async { Ok(Some("faux-key".to_string())) })
+        })),
         initial_state: Some(AgentInitialState {
             model: Some(model.clone()),
             system_prompt: Some("You are a test assistant.".to_string()),

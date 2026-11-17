@@ -9,9 +9,7 @@ use pi_agent_core::types::AgentMessage;
 use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message};
 use pi_ai::types::Message;
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
-use pi_coding_agent::core::extensions::types::{
-    ExtensionApi, InlineExtension, MessageEndEvent, MessageEndEventResult,
-};
+use pi_coding_agent::core::extensions::types::{ExtensionApi, InlineExtension, MessageEndEvent, MessageEndEventResult};
 use pretty_assertions::assert_eq;
 use support::suite::harness::{HarnessOptions, create_harness};
 

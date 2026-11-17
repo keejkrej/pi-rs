@@ -11,9 +11,8 @@ use indexmap::IndexMap;
 use pi_ai::providers::faux::{FauxModelDefinition, RegisterFauxProviderOptions, register_faux_provider};
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session_runtime::{
-    CreateAgentSessionFromServicesOptions, CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeOptions, create_agent_session_from_services,
-    create_agent_session_runtime, create_agent_session_services,
+    CreateAgentSessionFromServicesOptions, CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeOptions,
+    create_agent_session_from_services, create_agent_session_runtime, create_agent_session_services,
 };
 use pi_coding_agent::core::agent_session_services::CreateAgentSessionServicesOptions;
 use pi_coding_agent::core::auth_storage::AuthStorage;
@@ -32,7 +31,12 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     let prompts_dir = pi_js::path::join(&[&agent_dir, "prompts"]);
     pi_js::fs::mkdir(&prompts_dir, true).unwrap();
-    pi_js::fs::write_file(&pi_js::path::join(&[&prompts_dir, "test.md"]), b"Echo test prompt\n", None).unwrap();
+    pi_js::fs::write_file(
+        &pi_js::path::join(&[&prompts_dir, "test.md"]),
+        b"Echo test prompt\n",
+        None,
+    )
+    .unwrap();
 
     let faux = register_faux_provider(Some(RegisterFauxProviderOptions {
         models: Some(vec![FauxModelDefinition {
@@ -156,11 +160,13 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
             .await?;
 
             let diagnostics = services.diagnostics.clone();
-            Ok(pi_coding_agent::core::agent_session_runtime::CreateAgentSessionRuntimeResult::from_session_result(
-                created,
-                services,
-                diagnostics,
-            ))
+            Ok(
+                pi_coding_agent::core::agent_session_runtime::CreateAgentSessionRuntimeResult::from_session_result(
+                    created,
+                    services,
+                    diagnostics,
+                ),
+            )
         })
     });
 

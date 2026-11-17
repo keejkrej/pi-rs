@@ -7,8 +7,8 @@ mod support;
 #[path = "../examples/extensions__subagent/main.rs"]
 mod subagent_example;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pi_agent_core::types::AgentMessage;
 use pi_ai::providers::faux::{
@@ -148,7 +148,8 @@ impl ExtensionUIContext for ConfirmUi {
 async fn run_project_agent(trusted: bool, confirm_result: bool) -> (usize, String) {
     let missing_home = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-8261-home-"])).unwrap();
     let _home_guard = pi_js::env::testing::set("HOME", &missing_home);
-    let _agent_dir_guard = pi_js::env::testing::set("PI_CODING_AGENT_DIR", &pi_js::path::join(&[&missing_home, "agent"]));
+    let _agent_dir_guard =
+        pi_js::env::testing::set("PI_CODING_AGENT_DIR", &pi_js::path::join(&[&missing_home, "agent"]));
 
     let harness = create_harness(HarnessOptions {
         extension_factories: Some(vec![InlineExtension::Factory(subagent_example::create_extension())]),

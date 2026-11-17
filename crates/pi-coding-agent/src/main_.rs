@@ -55,6 +55,10 @@ use crate::core::settings_diagnostics::{collect_settings_diagnostics, deduplicat
 use crate::core::settings_manager::SettingsManager;
 use crate::core::timings::{TimingNamespaceKind, print_timings, reset_timings, time};
 use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
+use crate::experimental::coordinator::run_coordinator_process;
+use crate::experimental::process::{InternalProcessRole, consume_internal_process_role};
+use crate::experimental::server::run_server_process;
+use crate::experimental::session_worker::run_session_worker_process;
 use crate::extensions::built_in_extensions;
 use crate::extensions::mcp::cli::{McpCommandOptions, run_mcp_command};
 use crate::migrations::{run_migrations, show_deprecation_warnings};
@@ -726,6 +730,13 @@ fn convert_unknown_flags(flags: &IndexMap<String, UnknownFlagValue>) -> IndexMap
 }
 
 pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Result<()> {
+    if let Some(role) = consume_internal_process_role()? {
+        return match role {
+            InternalProcessRole::Coordinator => run_coordinator_process(args).await,
+            InternalProcessRole::Server => run_server_process(args).await,
+            InternalProcessRole::SessionWorker => run_session_worker_process(args).await,
+        };
+    }
     reset_timings(TimingNamespaceKind::Main);
     let mut extension_factories = built_in_extensions();
     if let Some(extra) = options.and_then(|o| o.extension_factories) {

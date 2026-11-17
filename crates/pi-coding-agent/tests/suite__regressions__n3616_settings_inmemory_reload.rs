@@ -26,7 +26,10 @@ async fn preserves_initial_settings_after_direct_reload() {
 
     settings_manager.reload().await;
 
-    assert_eq!(settings_manager.get_default_thinking_level(), Some(ModelThinkingLevel::High));
+    assert_eq!(
+        settings_manager.get_default_thinking_level(),
+        Some(ModelThinkingLevel::High)
+    );
     assert!(!settings_manager.get_image_auto_resize());
     assert!(!settings_manager.get_compaction_enabled());
     assert_eq!(settings_manager.get_global_settings(), settings);
@@ -67,7 +70,10 @@ async fn preserves_initial_settings_when_default_resource_loader_reloads() {
 
     resource_loader.reload(None).await.unwrap();
 
-    assert_eq!(settings_manager.get_default_thinking_level(), Some(ModelThinkingLevel::High));
+    assert_eq!(
+        settings_manager.get_default_thinking_level(),
+        Some(ModelThinkingLevel::High)
+    );
     assert!(!settings_manager.get_image_auto_resize());
     assert!(!settings_manager.get_compaction_enabled());
 

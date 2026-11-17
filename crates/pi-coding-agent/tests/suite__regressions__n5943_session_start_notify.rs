@@ -216,7 +216,9 @@ async fn runs_the_reload_render_hook_before_reload_session_start_handlers_can_no
                 let hc = Arc::clone(&hc_c);
                 Box::pin(async move {
                     hc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    ev.lock().unwrap_or_else(PoisonError::into_inner).push("render".to_string());
+                    ev.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push("render".to_string());
                     Ok(())
                 })
             })),

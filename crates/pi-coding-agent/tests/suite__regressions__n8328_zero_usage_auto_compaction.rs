@@ -54,10 +54,14 @@ async fn falls_back_to_context_token_estimation_when_provider_reports_zero_usage
 
     harness.session.check_compaction_for_test(&assistant, true).await;
 
-    let started = harness
-        .events()
-        .into_iter()
-        .any(|e| matches!(e, AgentSessionEvent::CompactionStart { reason: CompactionReason::Threshold }));
+    let started = harness.events().into_iter().any(|e| {
+        matches!(
+            e,
+            AgentSessionEvent::CompactionStart {
+                reason: CompactionReason::Threshold
+            }
+        )
+    });
     assert_eq!(started, true);
     harness.cleanup();
 }

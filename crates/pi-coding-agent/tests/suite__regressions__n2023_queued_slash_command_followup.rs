@@ -22,8 +22,7 @@ use support::suite::harness::{HarnessOptions, create_harness, get_assistant_text
 use tokio::sync::Notify;
 
 #[tokio::test]
-async fn treats_extension_origin_queued_slash_command_follow_ups_as_raw_user_text_instead_of_dispatching_the_command()
-{
+async fn treats_extension_origin_queued_slash_command_follow_ups_as_raw_user_text_instead_of_dispatching_the_command() {
     let api_slot = Arc::new(Mutex::new(Option::<ExtensionApi>::None));
     let command_runs = Arc::new(Mutex::new(Vec::<String>::new()));
     let tool_release = Arc::new(Notify::new());

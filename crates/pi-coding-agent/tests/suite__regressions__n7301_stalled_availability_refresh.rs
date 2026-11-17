@@ -6,9 +6,7 @@ mod support;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use pi_ai::{
-    ApiKeyCredential, AuthOperationOptions, Credential, CredentialInfo, CredentialStore, ModifyCredentialFn,
-};
+use pi_ai::{ApiKeyCredential, AuthOperationOptions, Credential, CredentialInfo, CredentialStore, ModifyCredentialFn};
 use pi_coding_agent::core::agent_session_services::CreateAgentSessionServicesOptions;
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::model_runtime::{
@@ -47,7 +45,10 @@ impl StalledCredentialStore {
     }
 
     fn arm_read_stall(&self, provider: &str, err: &str) {
-        *self.should_stall_read_provider.lock().unwrap_or_else(PoisonError::into_inner) = Some(provider.to_string());
+        *self
+            .should_stall_read_provider
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(provider.to_string());
         *self.fail_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(err.to_string());
     }
 
@@ -63,7 +64,11 @@ impl StalledCredentialStore {
 
 #[async_trait::async_trait]
 impl CredentialStore for StalledCredentialStore {
-    async fn read(&self, provider_id: &str, options: Option<AuthOperationOptions>) -> pi_js::Result<Option<Credential>> {
+    async fn read(
+        &self,
+        provider_id: &str,
+        options: Option<AuthOperationOptions>,
+    ) -> pi_js::Result<Option<Credential>> {
         let should_stall = {
             let mut slot = self
                 .should_stall_read_provider
@@ -80,12 +85,7 @@ impl CredentialStore for StalledCredentialStore {
             let wait = self.gate.notified();
             self.started.notify_one();
             wait.await;
-            if let Some(err) = self
-                .fail_error
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
-            {
+            if let Some(err) = self.fail_error.lock().unwrap_or_else(PoisonError::into_inner).take() {
                 return Err(pi_js::Error::msg(err));
             }
         }
@@ -99,12 +99,7 @@ impl CredentialStore for StalledCredentialStore {
             let wait = self.gate.notified();
             self.started.notify_one();
             wait.await;
-            if let Some(err) = self
-                .fail_error
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
-            {
+            if let Some(err) = self.fail_error.lock().unwrap_or_else(PoisonError::into_inner).take() {
                 return Err(pi_js::Error::msg(err));
             }
         }
