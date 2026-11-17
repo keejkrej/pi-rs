@@ -1,7 +1,7 @@
 //! Port of packages/coding-agent/src/utils/image-resize-core.ts
 
 use crate::utils::exif_orientation::apply_exif_orientation;
-use crate::utils::photon::{PhotonImage, SamplingFilter, load_photon, resize};
+use crate::utils::photon::{PhotonBackend, PhotonImage, SamplingFilter, load_photon, resize};
 
 // 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
 const DEFAULT_MAX_BYTES: usize = 4_718_592; // 4.5 * 1024 * 1024
@@ -41,8 +41,8 @@ fn encode_candidate(buffer: &[u8], mime_type: &'static str) -> EncodedCandidate 
     }
 }
 
-/// Resize an image to fit within the specified max dimensions and encoded file size.
-pub async fn resize_image_in_process(
+/// Synchronously resize an image to fit within the specified max dimensions and encoded file size.
+pub fn resize_image_in_process_sync(
     input_bytes: &[u8],
     mime_type: &str,
     options: Option<ImageResizeOptions>,
@@ -54,7 +54,7 @@ pub async fn resize_image_in_process(
     let jpeg_quality = opts.jpeg_quality.unwrap_or(80);
 
     let input_base64_size = input_bytes.len().div_ceil(3) * 4;
-    let photon = load_photon().await?;
+    let photon = PhotonBackend;
 
     let raw_image = PhotonImage::new_from_byteslice(input_bytes).ok()?;
     let image = apply_exif_orientation(&photon, raw_image, input_bytes);
@@ -168,4 +168,14 @@ pub async fn resize_image_in_process(
     }
 
     None
+}
+
+/// Resize an image to fit within the specified max dimensions and encoded file size.
+pub async fn resize_image_in_process(
+    input_bytes: &[u8],
+    mime_type: &str,
+    options: Option<ImageResizeOptions>,
+) -> Option<ResizedImage> {
+    let _photon = load_photon().await?;
+    resize_image_in_process_sync(input_bytes, mime_type, options)
 }

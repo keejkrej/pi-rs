@@ -874,7 +874,7 @@ impl SettingsManager {
             && !settings.contains_key("steeringMode")
         {
             settings.insert("steeringMode".to_owned(), queue_mode);
-            settings.remove("queueMode");
+            settings.shift_remove("queueMode");
         }
 
         if !settings.contains_key("transport")
@@ -884,7 +884,7 @@ impl SettingsManager {
                 "transport".to_owned(),
                 Value::String(if *websockets { "websocket" } else { "sse" }.to_owned()),
             );
-            settings.remove("websockets");
+            settings.shift_remove("websockets");
         }
 
         if let Some(Value::Object(skills_obj)) = settings.get("skills").cloned() {
@@ -898,7 +898,7 @@ impl SettingsManager {
                     settings.insert("skills".to_owned(), Value::Array(dirs.clone()));
                 }
                 _ => {
-                    settings.remove("skills");
+                    settings.shift_remove("skills");
                 }
             }
         }
@@ -922,7 +922,7 @@ impl SettingsManager {
                 }
                 retry_obj.insert("provider".to_owned(), Value::Object(next_provider));
             }
-            retry_obj.remove("maxDelayMs");
+            retry_obj.shift_remove("maxDelayMs");
             settings.insert("retry".to_owned(), Value::Object(retry_obj));
         }
 
@@ -1094,14 +1094,14 @@ impl SettingsManager {
                         if let Some(nv) = in_memory_nested.get(nk) {
                             merged_nested.insert(nk.clone(), nv.clone());
                         } else {
-                            merged_nested.remove(nk);
+                            merged_nested.shift_remove(nk);
                         }
                     }
                     merged_map.insert(field.clone(), Value::Object(merged_nested));
                 } else if let Some(val) = snapshot_map.get(field) {
                     merged_map.insert(field.clone(), val.clone());
                 } else {
-                    merged_map.remove(field);
+                    merged_map.shift_remove(field);
                 }
             }
 

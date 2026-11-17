@@ -231,19 +231,43 @@ struct FooterDataState {
     disposed: bool,
 }
 
+struct DetachedWatchers {
+    watchers: [Option<Arc<FsWatcher>>; 3],
+    poll_tasks: Vec<tokio::task::JoinHandle<()>>,
+    retry_timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DetachedWatchers {
+    fn close(self) {
+        // Close watchers outside the state lock so FSEvents callbacks never AB-BA deadlock on `state`.
+        for watcher in self.watchers.into_iter().flatten() {
+            close_watcher(Some(&watcher));
+        }
+        for task in self.poll_tasks {
+            task.abort();
+        }
+        if let Some(handle) = self.retry_timer {
+            handle.abort();
+        }
+    }
+}
+
 struct FooterDataInner {
     state: Mutex<FooterDataState>,
 }
 
 impl Drop for FooterDataInner {
     fn drop(&mut self) {
-        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        st.disposed = true;
-        if let Some(handle) = st.refresh_timer.take() {
-            handle.abort();
-        }
-        FooterDataProvider::clear_git_watchers_locked(&mut st);
-        st.branch_change_callbacks.clear();
+        let detached = {
+            let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            st.disposed = true;
+            if let Some(handle) = st.refresh_timer.take() {
+                handle.abort();
+            }
+            st.branch_change_callbacks.clear();
+            FooterDataProvider::take_git_watchers_locked(&mut st)
+        };
+        detached.close();
     }
 }
 
@@ -360,7 +384,7 @@ impl FooterDataProvider {
     }
 
     pub fn set_cwd(&self, cwd: &str) {
-        let callbacks = {
+        let (callbacks, detached) = {
             let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
             if st.cwd == cwd {
                 return;
@@ -369,11 +393,13 @@ impl FooterDataProvider {
             if let Some(handle) = st.refresh_timer.take() {
                 handle.abort();
             }
-            Self::clear_git_watchers_locked(&mut st);
+            let detached = Self::take_git_watchers_locked(&mut st);
             st.cached_branch = None;
             st.git_paths = find_git_paths(cwd);
-            st.branch_change_callbacks.values().cloned().collect::<Vec<_>>()
+            let callbacks = st.branch_change_callbacks.values().cloned().collect::<Vec<_>>();
+            (callbacks, detached)
         };
+        detached.close();
         self.setup_git_watcher();
         for cb in callbacks {
             cb();
@@ -381,13 +407,16 @@ impl FooterDataProvider {
     }
 
     pub fn dispose(&self) {
-        let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-        st.disposed = true;
-        if let Some(handle) = st.refresh_timer.take() {
-            handle.abort();
-        }
-        Self::clear_git_watchers_locked(&mut st);
-        st.branch_change_callbacks.clear();
+        let detached = {
+            let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+            st.disposed = true;
+            if let Some(handle) = st.refresh_timer.take() {
+                handle.abort();
+            }
+            st.branch_change_callbacks.clear();
+            Self::take_git_watchers_locked(&mut st)
+        };
+        detached.close();
     }
 
     fn notify_branch_change(&self) {
@@ -405,18 +434,15 @@ impl FooterDataProvider {
         }
     }
 
-    fn clear_git_watchers_locked(st: &mut FooterDataState) {
-        close_watcher(st.head_watcher.as_deref());
-        st.head_watcher = None;
-        close_watcher(st.reftable_watcher.as_deref());
-        st.reftable_watcher = None;
-        close_watcher(st.reftable_tables_list_watcher.as_deref());
-        st.reftable_tables_list_watcher = None;
-        for task in st.poll_tasks.drain(..) {
-            task.abort();
-        }
-        if let Some(handle) = st.git_watcher_retry_timer.take() {
-            handle.abort();
+    fn take_git_watchers_locked(st: &mut FooterDataState) -> DetachedWatchers {
+        DetachedWatchers {
+            watchers: [
+                st.head_watcher.take(),
+                st.reftable_watcher.take(),
+                st.reftable_tables_list_watcher.take(),
+            ],
+            poll_tasks: st.poll_tasks.drain(..).collect(),
+            retry_timer: st.git_watcher_retry_timer.take(),
         }
     }
 
@@ -530,10 +556,11 @@ impl FooterDataProvider {
     }
 
     fn handle_git_watcher_error(&self) {
-        {
+        let detached = {
             let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-            Self::clear_git_watchers_locked(&mut st);
-        }
+            Self::take_git_watchers_locked(&mut st)
+        };
+        detached.close();
         self.schedule_git_watcher_retry();
     }
 
@@ -565,21 +592,23 @@ impl FooterDataProvider {
     }
 
     fn setup_git_watcher(&self) {
-        let (git_paths, runtime_handle) = {
+        let (detached, git_paths, runtime_handle) = {
             let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-            Self::clear_git_watchers_locked(&mut st);
+            let detached = Self::take_git_watchers_locked(&mut st);
             if st.disposed {
-                return;
+                (detached, None, None)
+            } else {
+                if st.runtime_handle.is_none()
+                    && let Ok(h) = tokio::runtime::Handle::try_current()
+                {
+                    st.runtime_handle = Some(h);
+                }
+                (detached, st.git_paths.clone(), st.runtime_handle.clone())
             }
-            if st.runtime_handle.is_none()
-                && let Ok(h) = tokio::runtime::Handle::try_current()
-            {
-                st.runtime_handle = Some(h);
-            }
-            match st.git_paths.clone() {
-                Some(gp) => (gp, st.runtime_handle.clone()),
-                None => return,
-            }
+        };
+        detached.close();
+        let Some(git_paths) = git_paths else {
+            return;
         };
 
         let poll_git_head = should_poll_git_head(&git_paths.repo_dir);
@@ -660,11 +689,24 @@ impl FooterDataProvider {
             }
         }
 
-        let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-        st.head_watcher = head_watcher;
-        st.reftable_watcher = reftable_watcher;
-        st.reftable_tables_list_watcher = reftable_tables_list_watcher;
-        st.poll_tasks = poll_tasks;
+        let obsolete = {
+            let mut st = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if st.disposed {
+                DetachedWatchers {
+                    watchers: [head_watcher, reftable_watcher, reftable_tables_list_watcher],
+                    poll_tasks,
+                    retry_timer: None,
+                }
+            } else {
+                let prev = Self::take_git_watchers_locked(&mut st);
+                st.head_watcher = head_watcher;
+                st.reftable_watcher = reftable_watcher;
+                st.reftable_tables_list_watcher = reftable_tables_list_watcher;
+                st.poll_tasks = poll_tasks;
+                prev
+            }
+        };
+        obsolete.close();
     }
 }
 

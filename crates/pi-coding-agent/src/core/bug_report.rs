@@ -123,8 +123,8 @@ fn redact_settings(settings: &Settings) -> Value {
     let raw_json = pi_js::json::stringify(settings);
     let mut parsed = pi_js::json::parse(&raw_json).unwrap_or(Value::Object(Map::new()));
     if let Value::Object(ref mut map) = parsed {
-        map.remove("trackingId");
-        map.remove("deviceId");
+        map.shift_remove("trackingId");
+        map.shift_remove("deviceId");
     }
     redact_json_value(&parsed)
 }

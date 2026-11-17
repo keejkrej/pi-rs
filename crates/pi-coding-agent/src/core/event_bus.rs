@@ -32,6 +32,7 @@ enum Listener {
 struct EventBusInner {
     next_id: AtomicU64,
     listeners: Mutex<IndexMap<String, Vec<(u64, Listener)>>>,
+    runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
 }
 
 impl LocalEventBus {
@@ -40,8 +41,21 @@ impl LocalEventBus {
             inner: Arc::new(EventBusInner {
                 next_id: AtomicU64::new(1),
                 listeners: Mutex::new(IndexMap::new()),
+                runtime_handle: Mutex::new(tokio::runtime::Handle::try_current().ok()),
             }),
         }
+    }
+
+    fn resolve_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if let Ok(mut guard) = self.inner.runtime_handle.lock()
+                && guard.is_none()
+            {
+                *guard = Some(handle.clone());
+            }
+            return Some(handle);
+        }
+        self.inner.runtime_handle.lock().ok().and_then(|guard| guard.clone())
     }
 
     pub fn emit(&self, channel: &str, data: Value) {
@@ -57,12 +71,16 @@ impl LocalEventBus {
             match listener {
                 Listener::Sync(handler) => handler(payload),
                 Listener::Async(handler) => {
-                    if tokio::runtime::Handle::try_current().is_ok() {
-                        tokio::spawn(async move {
+                    if let Some(handle) = self.resolve_runtime_handle() {
+                        handle.spawn(async move {
                             handler(payload).await;
                         });
                     } else {
-                        futures::executor::block_on(handler(payload));
+                        // Drive synchronous prefix without creating a runtime or calling `block_on`.
+                        let mut fut = handler(payload);
+                        let waker = std::task::Waker::noop();
+                        let mut cx = std::task::Context::from_waker(waker);
+                        let _ = fut.as_mut().poll(&mut cx);
                     }
                 }
             }
