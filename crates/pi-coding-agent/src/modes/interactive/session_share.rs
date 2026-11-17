@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pi_js::{BoxFuture, Result};
 use pi_tui::{Component, Container, TUI, hyperlink};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -13,11 +14,8 @@ use crate::core::radius::get_radius_gateway_url;
 use super::components::bordered_loader::BorderedLoader;
 use super::theme::theme::theme;
 
-// WIRE(@tui-w3): Replace ShareSession trait with concrete crate::core::agent_session::AgentSession,
-// crate::cli::auth_command::get_auth_credential, and crate::core::session_export::export_session_to_jsonl
-// once @ca-cli lands on main.
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SessionShareDestination {
     #[default]
     Auto,
@@ -352,4 +350,77 @@ fn restore_editor(
     container.clear();
     container.add_child(Arc::clone(editor));
     ui.set_focus(Some(Arc::clone(editor)));
+}
+
+impl ShareSession for crate::core::agent_session::AgentSession {
+    fn system_prompt(&self) -> String {
+        self.system_prompt()
+    }
+
+    fn state_tools(&self) -> Vec<ShareToolSummary> {
+        self.state()
+            .tools
+            .into_iter()
+            .map(|t| ShareToolSummary {
+                name: t.name,
+                description: t.description,
+                parameters: serde_json::to_value(&t.parameters).unwrap_or(Value::Null),
+            })
+            .collect()
+    }
+
+    fn export_session_jsonl(
+        &self,
+        file_path: &str,
+        trailing_entries_fn: Arc<dyn Fn(Option<&str>, &str) -> Vec<Value> + Send + Sync>,
+    ) -> Result<()> {
+        let cb = |parent_id: Option<&str>, timestamp: &str| trailing_entries_fn(parent_id, timestamp);
+        crate::core::session_export::export_session_to_jsonl(&self.session_manager(), Some(file_path), Some(&cb))
+            .map(|_| ())
+    }
+
+    fn export_to_html(&self, html_path: &str, theme_name: &str) -> BoxFuture<Result<()>> {
+        let session = self.clone();
+        let html_path = html_path.to_owned();
+        let theme_name = theme_name.to_owned();
+        Box::pin(async move {
+            session
+                .export_to_html(
+                    Some(&html_path),
+                    Some(crate::core::agent_session::ExportHtmlOptions {
+                        theme_name: Some(theme_name),
+                    }),
+                )
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn session_share_destination(&self) -> SessionShareDestination {
+        self.settings_manager().get_session_share_destination()
+    }
+
+    fn has_radius_provider(&self) -> bool {
+        self.model_runtime()
+            .get_provider(crate::core::radius::RADIUS_PROVIDER_ID)
+            .is_some()
+    }
+
+    fn get_radius_auth_token(&self, min_oauth_validity_ms: i64) -> BoxFuture<Option<String>> {
+        let runtime = self.model_runtime().clone();
+        Box::pin(async move {
+            let auth = runtime
+                .get_auth_provider_id(
+                    crate::core::radius::RADIUS_PROVIDER_ID,
+                    Some(crate::core::model_runtime::ModelRuntimeAuthOverrides {
+                        min_oauth_validity_ms: Some(min_oauth_validity_ms),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .ok()
+                .flatten();
+            crate::cli::auth_command::get_auth_credential(auth.as_ref())
+        })
+    }
 }

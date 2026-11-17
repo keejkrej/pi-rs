@@ -25,17 +25,14 @@ use super::rpc_types::{
     ForkMessagesResponseData, ForkResult, GetCommandsResponseData, GetEntriesResult, GetMessagesResponseData,
     GetTreeResult, LastAssistantTextResponseData, NotifyType, PromptDisposition, PromptResponseData,
     QueuedInputDisposition, QueuedInputResponseData, RpcCommandType, RpcExtensionErrorEvent, RpcSlashCommand,
-    RpcStreamingBehavior, SessionEntry, SessionStats, SessionTreeNode, ThinkingLevel, session_entry_id,
+    RpcSlashCommandSource, RpcStreamingBehavior, SessionEntry, SessionStats, SessionTreeNode, ThinkingLevel,
+    session_entry_id, session_tree_node_to_rpc,
 };
 pub use super::rpc_types::{RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, RpcSessionState};
 
 // ============================================================================
-// WIRE(@tui-w3) Runtime / Session / IO Seams
+// Runtime / Session / IO Seams
 // ============================================================================
-// Core modules (`agent_session`, `agent_session_runtime`, `extensions/types`,
-// `output_guard`) are still stubs in `swarm/tui-w3`. These traits/structs
-// define the exact contract needed by RPC mode and will be bridged directly
-// in Stage 3B-2 once `@mcp`, `@codemode`, and `@ca-cli` merge onto `main`.
 
 /// Dialog options passed to RPC extension UI prompts.
 pub type RpcExtensionDialogOptions = crate::core::extensions::types::ExtensionUIDialogOptions;
@@ -50,23 +47,20 @@ pub type RpcExtensionError = crate::core::extensions::types::ExtensionError;
 pub type RpcForkPosition = crate::core::extensions::types::ForkPosition;
 
 /// Options for `RpcSessionRuntime::new_session`.
-// WIRE(@tui-w3): map to crate::core::agent_session_runtime::RuntimeNewSessionOptions.
 #[derive(Clone, Default)]
 pub struct RpcNewSessionOptions {
     pub parent_session: Option<String>,
-    /// Opaque runtime setup/withSession closures bridged by Stage 3B-2 adapter.
+    /// Opaque runtime setup/withSession closures bridged by runtime adapters.
     pub opaque: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Options for `RpcSessionRuntime::switch_session`.
-// WIRE(@tui-w3): map to crate::core::agent_session_runtime::SwitchSessionOptions.
 #[derive(Clone, Default)]
 pub struct RpcSwitchSessionOptions {
     pub opaque: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Options for `RpcSessionRuntime::fork`.
-// WIRE(@tui-w3): map to crate::core::agent_session_runtime::RuntimeForkOptions.
 #[derive(Clone, Default)]
 pub struct RpcForkOptions {
     pub position: Option<RpcForkPosition>,
@@ -74,7 +68,6 @@ pub struct RpcForkOptions {
 }
 
 /// Result returned by `RpcSessionRuntime::fork`.
-// WIRE(@tui-w3): map from crate::core::agent_session_runtime::RuntimeForkResult.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RpcForkResult {
     pub cancelled: bool,
@@ -82,7 +75,6 @@ pub struct RpcForkResult {
 }
 
 /// Options for `RpcSession::navigate_tree`.
-// WIRE(@tui-w3): map to crate::core::agent_session::NavigateTreeOptions.
 #[derive(Clone, Debug, Default)]
 pub struct RpcNavigateTreeOptions {
     pub summarize: Option<bool>,
@@ -92,7 +84,6 @@ pub struct RpcNavigateTreeOptions {
 }
 
 /// Options for `RpcSession::prompt`.
-// WIRE(@tui-w3): map to crate::core::agent_session::PromptOptions (with InputSource::Rpc).
 #[derive(Clone)]
 pub struct RpcPromptOptions {
     pub images: Option<Vec<ImageContent>>,
@@ -120,7 +111,6 @@ impl From<crate::core::extensions::types::UserBashEventResult> for RpcUserBashOu
 }
 
 /// Options for `RpcSession::execute_bash`.
-// WIRE(@tui-w3): map to crate::core::agent_session::ExecuteBashOptions.
 #[derive(Clone, Default)]
 pub struct RpcExecuteBashOptions {
     pub exclude_from_context: Option<bool>,
@@ -129,7 +119,6 @@ pub struct RpcExecuteBashOptions {
 }
 
 /// Extension UI context interface implemented by RPC mode.
-// WIRE(@tui-w3): bridge to crate::core::extensions::types::ExtensionUIContext once @codemode merges.
 #[async_trait]
 pub trait RpcExtensionUiContext: Send + Sync {
     async fn select(
@@ -195,7 +184,6 @@ pub trait RpcExtensionUiContext: Send + Sync {
 }
 
 /// Actions exposed to extension commands via `ctx.*`.
-// WIRE(@tui-w3): map to crate::core::extensions::types::ExtensionCommandContextActions.
 #[derive(Clone)]
 pub struct RpcCommandContextActions {
     pub wait_for_idle: Arc<dyn Fn() -> BoxFuture<pi_js::Result<()>> + Send + Sync>,
@@ -210,7 +198,6 @@ pub struct RpcCommandContextActions {
 }
 
 /// Bindings passed to `RpcSession::bind_extensions`.
-// WIRE(@tui-w3): map to crate::core::agent_session::ExtensionBindings.
 #[derive(Clone)]
 pub struct RpcExtensionBindings {
     pub ui_context: Arc<dyn RpcExtensionUiContext>,
@@ -221,7 +208,6 @@ pub struct RpcExtensionBindings {
 }
 
 /// Session operations consumed by RPC mode.
-// WIRE(@tui-w3): implement for crate::core::agent_session::AgentSession once @ca-cli merges.
 #[async_trait]
 pub trait RpcSession: Send + Sync + 'static {
     async fn bind_extensions(&self, bindings: RpcExtensionBindings) -> pi_js::Result<()>;
@@ -339,7 +325,6 @@ pub trait RpcSession: Send + Sync + 'static {
 }
 
 /// Runtime host abstraction consumed by RPC mode.
-// WIRE(@tui-w3): implement for crate::core::agent_session_runtime::AgentSessionRuntime once @ca-cli merges.
 #[async_trait]
 pub trait RpcSessionRuntime: Send + Sync + 'static {
     fn session(&self) -> Arc<dyn RpcSession>;
@@ -1564,4 +1549,613 @@ pub async fn run_rpc_mode_with_io(runtime_host: Arc<dyn RpcSessionRuntime>, io: 
 /// Listens for JSON commands on stdin, outputs events and responses on stdout.
 pub async fn run_rpc_mode(runtime_host: Arc<dyn RpcSessionRuntime>) -> pi_js::Result<()> {
     run_rpc_mode_with_io(runtime_host, Arc::new(StdioRpcIo)).await
+}
+
+struct RpcUiContextAdapter(Arc<dyn RpcExtensionUiContext>);
+
+#[async_trait]
+impl crate::core::extensions::types::ExtensionUIContext for RpcUiContextAdapter {
+    async fn select(
+        &self,
+        title: &str,
+        options: Vec<String>,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> pi_js::Result<Option<String>> {
+        self.0.select(title, options, opts).await
+    }
+
+    async fn confirm(
+        &self,
+        title: &str,
+        message: &str,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> pi_js::Result<bool> {
+        self.0.confirm(title, message, opts).await
+    }
+
+    async fn input(
+        &self,
+        title: &str,
+        placeholder: Option<&str>,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> pi_js::Result<Option<String>> {
+        self.0.input(title, placeholder, opts).await
+    }
+
+    fn notify(&self, message: &str, notify_type: Option<NotifyType>) {
+        self.0.notify(message, notify_type);
+    }
+
+    fn on_terminal_input(&self, _handler: crate::core::extensions::types::TerminalInputHandler) -> Unsubscribe {
+        self.0.on_terminal_input()
+    }
+
+    fn set_status(&self, key: &str, text: Option<&str>) {
+        self.0.set_status(key, text);
+    }
+
+    fn set_working_message(&self, message: Option<&str>) {
+        self.0.set_working_message(message);
+    }
+
+    fn set_working_visible(&self, visible: bool) {
+        self.0.set_working_visible(visible);
+    }
+
+    fn set_working_indicator(&self, _options: Option<crate::core::extensions::types::WorkingIndicatorOptions>) {}
+
+    fn set_hidden_thinking_label(&self, label: Option<&str>) {
+        self.0.set_hidden_thinking_label(label);
+    }
+
+    fn set_widget_lines(&self, key: &str, content: Option<Vec<String>>, options: Option<RpcExtensionWidgetOptions>) {
+        self.0.set_widget_lines(key, content, options);
+    }
+
+    fn set_widget_factory(
+        &self,
+        _key: &str,
+        _factory: Option<crate::core::extensions::types::WidgetFactory>,
+        _options: Option<RpcExtensionWidgetOptions>,
+    ) {
+        self.0.set_widget_factory_unsupported();
+    }
+
+    fn set_footer(&self, _factory: Option<crate::core::extensions::types::FooterFactory>) {
+        self.0.set_footer_unsupported();
+    }
+
+    fn set_header(&self, _factory: Option<crate::core::extensions::types::HeaderFactory>) {
+        self.0.set_header_unsupported();
+    }
+
+    fn set_title(&self, title: &str) {
+        self.0.set_title(title);
+    }
+
+    async fn custom(
+        &self,
+        _factory: crate::core::extensions::types::CustomUiFactory,
+        _options: Option<crate::core::extensions::types::ExtensionCustomOptions>,
+    ) -> pi_js::Result<Value> {
+        self.0.custom_unsupported().await
+    }
+
+    fn paste_to_editor(&self, text: &str) {
+        self.0.paste_to_editor(text);
+    }
+
+    fn set_editor_text(&self, text: &str) {
+        self.0.set_editor_text(text);
+    }
+
+    fn get_editor_text(&self) -> String {
+        self.0.get_editor_text()
+    }
+
+    async fn editor(&self, title: &str, prefill: Option<&str>) -> pi_js::Result<Option<String>> {
+        self.0.editor(title, prefill).await
+    }
+
+    fn add_autocomplete_provider(&self, _factory: crate::core::extensions::types::AutocompleteProviderFactory) {}
+
+    fn set_editor_component(&self, _factory: Option<crate::core::extensions::types::EditorFactory>) {}
+
+    fn get_editor_component(&self) -> Option<crate::core::extensions::types::EditorFactory> {
+        None
+    }
+
+    fn theme(&self) -> crate::core::extensions::types::Theme {
+        crate::core::extensions::types::Theme::new(Arc::new(self.0.theme()))
+    }
+
+    fn get_all_themes(&self) -> Vec<crate::core::extensions::types::ThemeInfo> {
+        self.0
+            .get_all_themes()
+            .into_iter()
+            .map(|info| crate::core::extensions::types::ThemeInfo {
+                name: info.name,
+                path: info.path,
+            })
+            .collect()
+    }
+
+    fn get_theme(&self, name: &str) -> Option<crate::core::extensions::types::Theme> {
+        self.0
+            .get_theme(name)
+            .map(|t| crate::core::extensions::types::Theme::new(Arc::new(t)))
+    }
+
+    fn set_theme_by_name(&self, name: &str) -> crate::core::extensions::types::SetThemeResult {
+        let res = self.0.set_theme(name);
+        crate::core::extensions::types::SetThemeResult {
+            success: res.success,
+            error: res.error,
+        }
+    }
+
+    fn set_theme(
+        &self,
+        _theme: crate::core::extensions::types::Theme,
+    ) -> crate::core::extensions::types::SetThemeResult {
+        crate::core::extensions::types::SetThemeResult {
+            success: false,
+            error: Some("Theme switching not supported in RPC mode".to_string()),
+        }
+    }
+
+    fn get_tools_expanded(&self) -> bool {
+        self.0.get_tools_expanded()
+    }
+
+    fn set_tools_expanded(&self, expanded: bool) {
+        self.0.set_tools_expanded(expanded);
+    }
+}
+
+#[async_trait]
+impl RpcSession for crate::core::agent_session::AgentSession {
+    async fn bind_extensions(&self, bindings: RpcExtensionBindings) -> pi_js::Result<()> {
+        let ext_mode = match bindings.mode {
+            "tui" => crate::core::extensions::types::ExtensionMode::Tui,
+            "json" => crate::core::extensions::types::ExtensionMode::Json,
+            "print" => crate::core::extensions::types::ExtensionMode::Print,
+            _ => crate::core::extensions::types::ExtensionMode::Rpc,
+        };
+        let cmd_actions = bindings.command_context_actions;
+        let actions = crate::core::extensions::types::ExtensionCommandContextActions {
+            wait_for_idle: cmd_actions.wait_for_idle,
+            new_session: {
+                let f = cmd_actions.new_session;
+                Arc::new(move |opts| {
+                    let mapped = opts.map(|o| RpcNewSessionOptions {
+                        parent_session: o.parent_session,
+                        opaque: None,
+                    });
+                    let f = Arc::clone(&f);
+                    Box::pin(async move {
+                        let r = f(mapped).await?;
+                        Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                    })
+                })
+            },
+            fork: {
+                let f = cmd_actions.fork;
+                Arc::new(move |entry_id, opts| {
+                    let mapped = opts.map(|o| RpcForkOptions {
+                        position: o.position,
+                        opaque: None,
+                    });
+                    let entry_id = entry_id.to_owned();
+                    let f = Arc::clone(&f);
+                    Box::pin(async move {
+                        let r = f(entry_id, mapped).await?;
+                        Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                    })
+                })
+            },
+            navigate_tree: {
+                let f = cmd_actions.navigate_tree;
+                Arc::new(move |target_id, opts| {
+                    let mapped = opts.map(|o| RpcNavigateTreeOptions {
+                        summarize: o.summarize,
+                        custom_instructions: o.custom_instructions,
+                        replace_instructions: o.replace_instructions,
+                        label: o.label,
+                    });
+                    let target_id = target_id.to_owned();
+                    let f = Arc::clone(&f);
+                    Box::pin(async move {
+                        let r = f(target_id, mapped).await?;
+                        Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                    })
+                })
+            },
+            switch_session: {
+                let f = cmd_actions.switch_session;
+                Arc::new(move |session_path, opts| {
+                    let mapped = opts.map(|_| RpcSwitchSessionOptions::default());
+                    let session_path = session_path.to_owned();
+                    let f = Arc::clone(&f);
+                    Box::pin(async move {
+                        let r = f(session_path, mapped).await?;
+                        Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                    })
+                })
+            },
+            reload: cmd_actions.reload,
+        };
+        let shutdown_handler = bindings.shutdown_handler;
+        self.bind_extensions(crate::core::agent_session::ExtensionBindings {
+            ui_context: Some(Arc::new(RpcUiContextAdapter(bindings.ui_context))),
+            mode: Some(ext_mode),
+            command_context_actions: Some(actions),
+            abort_handler: None,
+            shutdown_handler: Some(Arc::new(move || shutdown_handler())),
+            on_error: Some(bindings.on_error),
+        })
+        .await
+    }
+
+    fn subscribe(&self, listener: Arc<dyn Fn(AgentSessionEvent) + Send + Sync>) -> Unsubscribe {
+        self.subscribe(move |ev| listener(ev))
+    }
+
+    fn subscribe_agent_backpressure(&self, listener: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>) -> Unsubscribe {
+        self.agent().subscribe_async(move |_ev, _sig| listener())
+    }
+
+    async fn prompt(&self, message: &str, options: RpcPromptOptions) -> pi_js::Result<()> {
+        let source = match options.source {
+            "interactive" => crate::core::extensions::types::InputSource::Interactive,
+            "extension" => crate::core::extensions::types::InputSource::Extension,
+            _ => crate::core::extensions::types::InputSource::Rpc,
+        };
+        let preflight_cb = options.preflight_result;
+        self.prompt(
+            message,
+            Some(crate::core::agent_session::PromptOptions {
+                expand_prompt_templates: None,
+                streaming_behavior: options.streaming_behavior.map(Into::into),
+                images: options.images,
+                source: Some(source),
+                preflight_result: Some(Arc::new(move |outcome| preflight_cb(outcome.into()))),
+            }),
+        )
+        .await
+    }
+
+    async fn steer(&self, message: &str, images: Option<Vec<ImageContent>>) -> pi_js::Result<QueuedInputDisposition> {
+        self.steer(
+            message,
+            images,
+            Some(crate::core::agent_session::QueueInputOptions {
+                source: Some(crate::core::extensions::types::InputSource::Rpc),
+            }),
+        )
+        .await
+        .map(Into::into)
+    }
+
+    async fn follow_up(
+        &self,
+        message: &str,
+        images: Option<Vec<ImageContent>>,
+    ) -> pi_js::Result<QueuedInputDisposition> {
+        self.follow_up(
+            message,
+            images,
+            Some(crate::core::agent_session::QueueInputOptions {
+                source: Some(crate::core::extensions::types::InputSource::Rpc),
+            }),
+        )
+        .await
+        .map(Into::into)
+    }
+
+    async fn abort(&self) {
+        self.abort().await;
+    }
+
+    fn clear_queue(&self) -> ClearQueueResult {
+        let res = self.clear_queue();
+        ClearQueueResult {
+            steering: res.steering,
+            follow_up: res.follow_up,
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.is_idle()
+    }
+
+    async fn wait_for_idle(&self) {
+        self.wait_for_idle().await;
+    }
+
+    fn model(&self) -> Option<Model> {
+        self.model()
+    }
+
+    fn thinking_level(&self) -> ThinkingLevel {
+        self.thinking_level()
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.is_streaming()
+    }
+
+    fn is_compacting(&self) -> bool {
+        self.is_compacting()
+    }
+
+    fn steering_mode(&self) -> QueueMode {
+        self.steering_mode()
+    }
+
+    fn follow_up_mode(&self) -> QueueMode {
+        self.follow_up_mode()
+    }
+
+    fn session_file(&self) -> Option<String> {
+        self.session_file()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id()
+    }
+
+    fn session_name(&self) -> Option<String> {
+        self.session_name()
+    }
+
+    fn auto_compaction_enabled(&self) -> bool {
+        self.auto_compaction_enabled()
+    }
+
+    fn messages(&self) -> Vec<AgentMessage> {
+        self.messages()
+    }
+
+    fn pending_message_count(&self) -> usize {
+        self.pending_message_count()
+    }
+
+    fn get_available_models(&self) -> Vec<Model> {
+        self.model_runtime().get_available_snapshot()
+    }
+
+    async fn set_model(&self, model: Model) -> pi_js::Result<()> {
+        self.set_model(model, None).await
+    }
+
+    async fn cycle_model(&self) -> pi_js::Result<Option<CycleModelResponseData>> {
+        self.cycle_model(None, None).await.map(|opt| {
+            opt.map(|r| CycleModelResponseData {
+                model: r.model,
+                thinking_level: r.thinking_level,
+                is_scoped: r.is_scoped,
+            })
+        })
+    }
+
+    fn set_thinking_level(&self, level: ThinkingLevel) {
+        self.set_thinking_level(level, None);
+    }
+
+    fn cycle_thinking_level(&self) -> Option<ThinkingLevel> {
+        self.cycle_thinking_level(None)
+    }
+
+    fn get_available_thinking_levels(&self) -> Vec<ThinkingLevel> {
+        self.get_available_thinking_levels()
+    }
+
+    fn set_steering_mode(&self, mode: QueueMode) {
+        self.set_steering_mode(mode);
+    }
+
+    fn set_follow_up_mode(&self, mode: QueueMode) {
+        self.set_follow_up_mode(mode);
+    }
+
+    async fn compact(&self, custom_instructions: Option<&str>) -> pi_js::Result<CompactionResult> {
+        self.compact(custom_instructions).await
+    }
+
+    fn set_auto_compaction_enabled(&self, enabled: bool) {
+        self.set_auto_compaction_enabled(enabled);
+    }
+
+    fn set_auto_retry_enabled(&self, enabled: bool) {
+        self.set_auto_retry_enabled(enabled);
+    }
+
+    fn abort_retry(&self) {
+        self.abort_retry();
+    }
+
+    fn cwd(&self) -> String {
+        self.session_manager().get_cwd()
+    }
+
+    async fn emit_user_bash(
+        &self,
+        command: &str,
+        exclude_from_context: bool,
+        cwd: &str,
+    ) -> pi_js::Result<Option<RpcUserBashOutcome>> {
+        let Some(runner) = self.extension_runner() else {
+            return Ok(None);
+        };
+        runner
+            .emit_user_bash(crate::core::extensions::types::UserBashEvent {
+                command: command.to_owned(),
+                exclude_from_context,
+                cwd: cwd.to_owned(),
+            })
+            .await
+            .map(|opt| opt.map(Into::into))
+    }
+
+    fn record_bash_result(&self, command: &str, result: &BashResult, exclude_from_context: Option<bool>) {
+        self.record_bash_result(
+            command,
+            &result.into(),
+            Some(crate::core::agent_session::RecordBashOptions { exclude_from_context }),
+        );
+    }
+
+    async fn execute_bash(&self, command: &str, options: RpcExecuteBashOptions) -> pi_js::Result<BashResult> {
+        self.execute_bash(
+            command,
+            None,
+            Some(crate::core::agent_session::ExecuteBashOptions {
+                exclude_from_context: options.exclude_from_context,
+                id: options.id,
+                operations: options.operations,
+            }),
+        )
+        .await
+        .map(Into::into)
+    }
+
+    fn abort_bash(&self) {
+        self.abort_bash();
+    }
+
+    fn get_session_stats(&self) -> SessionStats {
+        self.get_session_stats()
+    }
+
+    async fn export_to_html(&self, output_path: Option<&str>) -> pi_js::Result<String> {
+        self.export_to_html(output_path, None).await
+    }
+
+    fn leaf_id(&self) -> Option<String> {
+        self.session_manager().get_leaf_id()
+    }
+
+    fn get_user_messages_for_forking(&self) -> Vec<ForkMessage> {
+        self.get_user_messages_for_forking()
+            .into_iter()
+            .map(|m| ForkMessage {
+                entry_id: m.entry_id,
+                text: m.text,
+            })
+            .collect()
+    }
+
+    fn get_entries(&self) -> Vec<SessionEntry> {
+        self.session_manager()
+            .get_entries()
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect()
+    }
+
+    fn get_tree(&self) -> Vec<SessionTreeNode> {
+        self.session_manager()
+            .get_tree()
+            .iter()
+            .filter_map(|n| session_tree_node_to_rpc(n).ok())
+            .collect()
+    }
+
+    fn get_last_assistant_text(&self) -> Option<String> {
+        self.get_last_assistant_text()
+    }
+
+    fn set_session_name(&self, name: &str) {
+        self.set_session_name(name);
+    }
+
+    fn get_commands(&self) -> Vec<RpcSlashCommand> {
+        self.get_commands()
+            .into_iter()
+            .map(|c| RpcSlashCommand {
+                name: c.name,
+                description: c.description,
+                source: match c.source {
+                    crate::core::extensions::types::SlashCommandSource::Extension => RpcSlashCommandSource::Extension,
+                    crate::core::extensions::types::SlashCommandSource::Prompt => RpcSlashCommandSource::Prompt,
+                    crate::core::extensions::types::SlashCommandSource::Skill => RpcSlashCommandSource::Skill,
+                },
+                source_info: c.source_info,
+            })
+            .collect()
+    }
+
+    async fn navigate_tree(
+        &self,
+        target_id: &str,
+        options: Option<RpcNavigateTreeOptions>,
+    ) -> pi_js::Result<CancelledResult> {
+        let mapped = options.map(|o| crate::core::agent_session::NavigateTreeOptions {
+            summarize: o.summarize,
+            custom_instructions: o.custom_instructions,
+            replace_instructions: o.replace_instructions,
+            label: o.label,
+        });
+        let res = self.navigate_tree(target_id, mapped).await?;
+        Ok(CancelledResult {
+            cancelled: res.cancelled,
+        })
+    }
+
+    async fn reload(&self) -> pi_js::Result<()> {
+        self.reload(None).await
+    }
+}
+
+#[async_trait]
+impl RpcSessionRuntime for crate::core::agent_session_runtime::AgentSessionRuntime {
+    fn session(&self) -> Arc<dyn RpcSession> {
+        Arc::new(self.session())
+    }
+
+    fn set_rebind_session(&self, rebind: Option<Arc<dyn Fn() -> BoxFuture<pi_js::Result<()>> + Send + Sync>>) {
+        self.set_rebind_session(
+            rebind.map(|cb| Arc::new(move |_sess| cb()) as crate::core::agent_session_runtime::RebindSessionFn),
+        );
+    }
+
+    async fn new_session(&self, options: Option<RpcNewSessionOptions>) -> pi_js::Result<CancelledResult> {
+        let mapped = options.map(|o| crate::core::agent_session_runtime::RuntimeNewSessionOptions {
+            parent_session: o.parent_session,
+            setup: None,
+            with_session: None,
+        });
+        let res = self.new_session(mapped).await?;
+        Ok(CancelledResult {
+            cancelled: res.cancelled,
+        })
+    }
+
+    async fn switch_session(
+        &self,
+        session_path: &str,
+        _options: Option<RpcSwitchSessionOptions>,
+    ) -> pi_js::Result<CancelledResult> {
+        let res = self.switch_session(session_path, None).await?;
+        Ok(CancelledResult {
+            cancelled: res.cancelled,
+        })
+    }
+
+    async fn fork(&self, entry_id: &str, options: Option<RpcForkOptions>) -> pi_js::Result<RpcForkResult> {
+        let mapped = options.map(|o| crate::core::agent_session_runtime::RuntimeForkOptions {
+            position: o.position,
+            with_session: None,
+        });
+        let res = self.fork(entry_id, mapped).await?;
+        Ok(RpcForkResult {
+            cancelled: res.cancelled,
+            selected_text: res.selected_text,
+        })
+    }
+
+    async fn dispose(&self) {
+        self.dispose().await;
+    }
 }

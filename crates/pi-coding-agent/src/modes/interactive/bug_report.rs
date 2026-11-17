@@ -17,10 +17,6 @@ use super::components::extension_editor::{ExtensionEditorComponent, ExtensionEdi
 use super::components::extension_selector::{ExtensionSelectorComponent, ExtensionSelectorOptions};
 use super::theme::theme::theme;
 
-// WIRE(@tui-w3): Replace BugReportSession trait and local archive helpers with concrete
-// crate::core::agent_session::AgentSession, crate::core::bug_report, crate::core::bug_report_upload,
-// crate::core::crash_log, and crate::core::session_export once @ca-cli lands on main.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BugReportDelivery {
     Upload,
@@ -394,4 +390,194 @@ fn restore_editor(context: &BugReportContext) {
     context.editor_container.add_child(Arc::clone(&context.editor));
     context.ui.set_focus(Some(Arc::clone(&context.editor)));
     context.ui.request_render(None);
+}
+
+impl BugReportSession for crate::core::agent_session::AgentSession {
+    fn model_name(&self) -> Option<String> {
+        self.model().map(|m| m.name)
+    }
+
+    fn model_provider(&self) -> Option<String> {
+        self.model().map(|m| m.provider)
+    }
+
+    fn external_editor_command(&self) -> Option<String> {
+        let cmd = self.settings_manager().get_external_editor_command();
+        (!cmd.is_empty()).then_some(cmd)
+    }
+
+    fn summarize_for_bug_report(&self, hint: Option<&str>, signal: AbortSignal) -> BoxFuture<Result<String>> {
+        let session = self.clone();
+        let hint = hint.map(str::to_owned);
+        Box::pin(async move {
+            session
+                .summarize_for_bug_report(crate::core::agent_session::SummarizeBugReportOptions { hint, signal })
+                .await
+        })
+    }
+
+    fn build_bundle(&self, options: &BugReportOptions, summary: Option<&str>) -> Result<BugReportBundleData> {
+        let crash_path = self
+            .settings_manager()
+            .get_agent_dir()
+            .map(|d| crate::core::crash_log::crash_log_path(Some(&d)));
+        let crashes = crate::core::crash_log::read_crash_log(crash_path.as_deref());
+        let ext_res = self.resource_loader().get_extensions();
+        let extensions = ext_res
+            .extensions
+            .into_iter()
+            .map(|ext| crate::core::bug_report::BugReportExtensionInput {
+                path: ext.path,
+                source: ext.source_info.source,
+                scope: match ext.source_info.scope {
+                    crate::core::source_info::SourceScope::User => "user",
+                    crate::core::source_info::SourceScope::Project => "project",
+                    crate::core::source_info::SourceScope::Temporary => "temporary",
+                }
+                .to_owned(),
+                origin: match ext.source_info.origin {
+                    crate::core::source_info::SourceOrigin::Package => "package",
+                    crate::core::source_info::SourceOrigin::TopLevel => "top-level",
+                }
+                .to_owned(),
+                hidden: ext.hidden,
+            })
+            .collect();
+        let extension_errors = ext_res
+            .errors
+            .into_iter()
+            .map(|err| crate::core::bug_report::BugReportExtensionError {
+                path: err.path,
+                error: err.error,
+            })
+            .collect();
+        let metadata = crate::core::bug_report::collect_bug_report_metadata(
+            crate::core::bug_report::CollectBugReportMetadataOptions {
+                id: None,
+                hint: options.hint.clone(),
+                session_id: self.session_id(),
+                cwd: self.session_manager().get_cwd(),
+                include_session: options.include_session,
+                include_summary: options.include_summary,
+                message_count: self.messages().len(),
+                model: self.model(),
+                provider_info: None,
+                provider_source: Some(Arc::new(self.model_runtime().clone())),
+                thinking_level: crate::core::defaults::to_agent_thinking_level(self.thinking_level()),
+                extensions,
+                extension_errors,
+                global_settings: self.settings_manager().get_global_settings(),
+                project_settings: self.settings_manager().get_project_settings(),
+            },
+        );
+        let diagnostics = crate::core::bug_report::collect_bug_report_diagnostics(&self.session_manager(), &crashes);
+        let session_jsonl = if options.include_session {
+            let share_session: Arc<dyn crate::modes::interactive::session_share::ShareSession> = Arc::new(self.clone());
+            let trailing = |parent_id: Option<&str>, ts: &str| {
+                crate::modes::interactive::session_share::create_share_trailing_entries(
+                    share_session.as_ref(),
+                    parent_id,
+                    ts,
+                )
+            };
+            Some(crate::core::session_export::serialize_session_branch(
+                &self.session_manager(),
+                Some(&trailing),
+            )?)
+        } else {
+            None
+        };
+        let bundle = crate::core::bug_report::BugReportBundle {
+            metadata: metadata.clone(),
+            diagnostics,
+            session_jsonl,
+            summary: summary.map(str::to_owned),
+        };
+        let payload = serde_json::to_value(&bundle).map_err(|e| pi_js::Error::msg(e.to_string()))?;
+        Ok(BugReportBundleData {
+            id: metadata.id,
+            created_at: metadata.created_at,
+            hint: metadata.hint,
+            session_included: metadata.session.included,
+            summary_included: metadata.session.summary_included,
+            crash_count: crashes.len(),
+            payload,
+        })
+    }
+
+    fn upload_bundle(&self, bundle: &BugReportBundleData, signal: AbortSignal) -> BoxFuture<Result<String>> {
+        let payload = bundle.payload.clone();
+        let runtime = self.model_runtime().clone();
+        Box::pin(async move {
+            let parsed: crate::core::bug_report::BugReportBundle =
+                serde_json::from_value(payload).map_err(|e| pi_js::Error::msg(e.to_string()))?;
+            let token = if runtime.get_provider(crate::core::radius::RADIUS_PROVIDER_ID).is_some() {
+                let auth = runtime
+                    .get_auth_provider_id(
+                        crate::core::radius::RADIUS_PROVIDER_ID,
+                        Some(crate::core::model_runtime::ModelRuntimeAuthOverrides {
+                            min_oauth_validity_ms: Some(5 * 60_000),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                crate::cli::auth_command::get_auth_credential(auth.as_ref())
+            } else {
+                None
+            };
+            let res = crate::core::bug_report_upload::upload_bug_report(
+                &parsed,
+                Some(crate::core::bug_report_upload::UploadBugReportOptions {
+                    token,
+                    signal: Some(signal),
+                    gateway_url: None,
+                }),
+            )
+            .await?;
+            Ok(res.id)
+        })
+    }
+
+    fn write_archive(&self, bundle: &BugReportBundleData, archive_path: &str) -> BoxFuture<Result<()>> {
+        let payload = bundle.payload.clone();
+        let archive_path = archive_path.to_owned();
+        Box::pin(async move {
+            let parsed: crate::core::bug_report::BugReportBundle =
+                serde_json::from_value(payload).map_err(|e| pi_js::Error::msg(e.to_string()))?;
+            crate::core::bug_report::write_bug_report_archive(&parsed, &archive_path).await
+        })
+    }
+
+    fn archive_file_name(&self, id: &str) -> String {
+        crate::core::bug_report::bug_report_archive_file_name(id)
+    }
+
+    fn record_in_session(&self, bundle: &BugReportBundleData, delivery: BugReportDelivery, archive_path: Option<&str>) {
+        let data = serde_json::to_value(crate::core::bug_report::BugReportSessionEntryData {
+            id: bundle.id.clone(),
+            created_at: bundle.created_at.clone(),
+            hint: bundle.hint.clone(),
+            session_included: bundle.session_included,
+            summary_included: bundle.summary_included,
+            delivery: match delivery {
+                BugReportDelivery::Upload => crate::core::bug_report::BugReportDelivery::Upload,
+                BugReportDelivery::Zip => crate::core::bug_report::BugReportDelivery::Zip,
+            },
+            path: archive_path.map(str::to_owned),
+        })
+        .ok();
+        let _ = self
+            .session_manager()
+            .append_custom_entry(BUG_REPORT_CUSTOM_ENTRY_TYPE, data);
+    }
+
+    fn clear_crash_log(&self) {
+        let crash_path = self
+            .settings_manager()
+            .get_agent_dir()
+            .map(|d| crate::core::crash_log::crash_log_path(Some(&d)));
+        crate::core::crash_log::clear_crash_log(crash_path.as_deref());
+    }
 }

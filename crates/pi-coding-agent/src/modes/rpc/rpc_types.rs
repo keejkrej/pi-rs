@@ -11,14 +11,10 @@ use serde_json::Value;
 pub type ThinkingLevel = ModelThinkingLevel;
 
 // ============================================================================
-// WIRE(@tui-w3) Shared Core Wire Types
+// Shared Core / Wire Types
 // ============================================================================
-// These structs/enums mirror the core types owned by @mcp / @codemode / @ca-cli
-// (which are still stubs in `swarm/tui-w3`). Replace with direct re-exports from
-// `crate::core::*` once those branches merge onto `main`.
 
 /// Outcome of a queued user input (`steer` or `follow_up`).
-// WIRE(@tui-w3): replace with crate::core::agent_session::QueuedInputDisposition once @ca-cli merges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QueuedInputDisposition {
@@ -26,8 +22,16 @@ pub enum QueuedInputDisposition {
     Queued,
 }
 
+impl From<crate::core::agent_session::QueuedInputDisposition> for QueuedInputDisposition {
+    fn from(value: crate::core::agent_session::QueuedInputDisposition) -> Self {
+        match value {
+            crate::core::agent_session::QueuedInputDisposition::Handled => Self::Handled,
+            crate::core::agent_session::QueuedInputDisposition::Queued => Self::Queued,
+        }
+    }
+}
+
 /// Disposition reported in a successful `prompt` RPC response.
-// WIRE(@tui-w3): align with crate::core::agent_session::PromptPreflightOutcome once @ca-cli merges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptDisposition {
@@ -36,14 +40,32 @@ pub enum PromptDisposition {
     Started,
 }
 
+impl From<crate::core::agent_session::PromptPreflightOutcome> for PromptDisposition {
+    fn from(value: crate::core::agent_session::PromptPreflightOutcome) -> Self {
+        match value {
+            crate::core::agent_session::PromptPreflightOutcome::Handled => Self::Handled,
+            crate::core::agent_session::PromptPreflightOutcome::Queued => Self::Queued,
+            crate::core::agent_session::PromptPreflightOutcome::Started => Self::Started,
+        }
+    }
+}
+
 /// Queue behavior for `prompt` when the agent is already streaming.
-// WIRE(@tui-w3): align with crate::core::agent_session::StreamingBehavior once @ca-cli merges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RpcStreamingBehavior {
     #[serde(rename = "steer")]
     Steer,
     #[serde(rename = "followUp")]
     FollowUp,
+}
+
+impl From<RpcStreamingBehavior> for crate::core::agent_session::StreamingBehavior {
+    fn from(value: RpcStreamingBehavior) -> Self {
+        match value {
+            RpcStreamingBehavior::Steer => Self::Steer,
+            RpcStreamingBehavior::FollowUp => Self::FollowUp,
+        }
+    }
 }
 
 /// Scope, origin, and metadata for a loaded resource.
@@ -92,39 +114,10 @@ pub type CompactionResult = crate::core::compaction::compaction::CompactionResul
 /// Context window utilization reported inside [`SessionStats`].
 pub use crate::core::extensions::types::ContextUsage;
 
-/// Aggregated token counts in [`SessionStats`].
-// WIRE(@tui-w3): replace with crate::core::agent_session::SessionTokenStats once @ca-cli merges.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionTokenStats {
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub total: i64,
-}
+/// Aggregated token counts and session statistics for `/session` and `get_session_stats`.
+pub use crate::core::agent_session::{SessionStats, SessionTokenStats};
 
-/// Session statistics for `/session` and `get_session_stats`.
-// WIRE(@tui-w3): replace with crate::core::agent_session::SessionStats once @ca-cli merges.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionStats {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_file: Option<String>,
-    pub session_id: String,
-    pub user_messages: i64,
-    pub assistant_messages: i64,
-    pub tool_calls: i64,
-    pub tool_results: i64,
-    pub total_messages: i64,
-    pub tokens: SessionTokenStats,
-    pub cost: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_usage: Option<ContextUsage>,
-}
-
-/// Session entry on the RPC wire.
-// WIRE(@tui-w3): replace with crate::core::session_manager::SessionEntry once @mcp merges.
+/// Serialized session entry on the RPC wire.
 pub type SessionEntry = Value;
 
 /// Extract the `id` field from a serialized [`SessionEntry`].
@@ -132,8 +125,7 @@ pub fn session_entry_id(entry: &SessionEntry) -> Option<&str> {
     entry.get("id").and_then(Value::as_str)
 }
 
-/// Node in a session entry tree.
-// WIRE(@tui-w3): replace with crate::core::session_manager::SessionTreeNode once @mcp merges.
+/// Node in a session entry tree serialized on the RPC wire.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTreeNode {
@@ -143,6 +135,24 @@ pub struct SessionTreeNode {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_timestamp: Option<String>,
+}
+
+/// Convert a core [`crate::core::session_manager::SessionTreeNode`] to its RPC wire node.
+pub fn session_tree_node_to_rpc(
+    node: &crate::core::session_manager::SessionTreeNode,
+) -> pi_js::Result<SessionTreeNode> {
+    let entry = serde_json::to_value(&node.entry).map_err(|e| pi_js::Error::msg(e.to_string()))?;
+    let children = node
+        .children
+        .iter()
+        .map(session_tree_node_to_rpc)
+        .collect::<pi_js::Result<Vec<_>>>()?;
+    Ok(SessionTreeNode {
+        entry,
+        children,
+        label: node.label.clone(),
+        label_timestamp: node.label_timestamp.clone(),
+    })
 }
 
 /// Notification severity for `notify` extension UI requests.

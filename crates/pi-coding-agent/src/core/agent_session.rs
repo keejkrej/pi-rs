@@ -748,6 +748,10 @@ impl AgentSession {
         &self.inner.model_runtime
     }
 
+    pub fn ptr_key(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
     pub(crate) async fn _get_required_request_auth(
         &self,
         model: &Model,

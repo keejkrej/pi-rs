@@ -12,8 +12,6 @@ pub use crate::core::usage_totals::UsageTotals;
 
 use super::super::theme::theme::{ThemeColor, theme};
 
-// WIRE(@tui-w3): Replace local FooterSession / traits with `crate::core::agent_session::AgentSession`
-// once @ca-cli merges onto main.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FooterContextUsage {
     pub context_window: i64,
@@ -442,5 +440,104 @@ impl Component for FooterComponent {
 
     fn invalidate(&self) {
         FooterComponent::invalidate(self)
+    }
+}
+
+fn footer_thinking_level_str(level: pi_ai::ModelThinkingLevel) -> &'static str {
+    match level {
+        pi_ai::ModelThinkingLevel::Off => "off",
+        pi_ai::ModelThinkingLevel::Minimal => "minimal",
+        pi_ai::ModelThinkingLevel::Low => "low",
+        pi_ai::ModelThinkingLevel::Medium => "medium",
+        pi_ai::ModelThinkingLevel::High => "high",
+        pi_ai::ModelThinkingLevel::XHigh => "xhigh",
+        pi_ai::ModelThinkingLevel::Max => "max",
+    }
+}
+
+impl FooterSession for crate::core::agent_session::AgentSession {
+    fn session_ptr_key(&self) -> usize {
+        self.ptr_key()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id()
+    }
+
+    fn leaf_id(&self) -> Option<String> {
+        self.session_manager().get_leaf_id()
+    }
+
+    fn entry_count(&self) -> usize {
+        self.session_manager().get_entries().len()
+    }
+
+    fn cwd(&self) -> String {
+        self.session_manager().get_cwd()
+    }
+
+    fn session_name(&self) -> Option<String> {
+        self.session_name()
+    }
+
+    fn model(&self) -> Option<Model> {
+        self.model()
+    }
+
+    fn routed_model(&self) -> Option<FooterRoutedModel> {
+        self.routed_model().map(|routed| FooterRoutedModel {
+            model_id: routed.model.id,
+            context_window: routed.model.context_window,
+            thinking_level: routed
+                .thinking_level
+                .map(|lvl| footer_thinking_level_str(lvl).to_string()),
+        })
+    }
+
+    fn thinking_level(&self) -> String {
+        footer_thinking_level_str(self.thinking_level()).to_string()
+    }
+
+    fn get_context_usage(&self) -> Option<FooterContextUsage> {
+        self.get_context_usage().map(|usage| FooterContextUsage {
+            context_window: usage.context_window,
+            percent: usage.percent.map(|p| p.round() as i64),
+            percent_f64: usage.percent,
+        })
+    }
+
+    fn is_using_subscription(&self, provider: &str) -> bool {
+        self.model_runtime().is_using_subscription(provider)
+    }
+
+    fn usage_records(&self) -> Vec<FooterUsageRecord> {
+        use crate::core::session_manager::SessionEntry;
+        let mut records = Vec::new();
+        for entry in self.session_manager().get_entries() {
+            match entry {
+                SessionEntry::Usage(u) => records.push(FooterUsageRecord::Usage(u.usage)),
+                SessionEntry::BranchSummary(bs) => {
+                    if let Some(u) = bs.usage {
+                        records.push(FooterUsageRecord::SummaryUsage(u));
+                    }
+                }
+                SessionEntry::Compaction(c) => {
+                    if let Some(u) = c.usage {
+                        records.push(FooterUsageRecord::SummaryUsage(u));
+                    }
+                }
+                SessionEntry::Message(m) => {
+                    if let Some(tr) = m.message.as_tool_result()
+                        && let Some(u) = tr.usage
+                    {
+                        records.push(FooterUsageRecord::ToolResultUsage(u));
+                    } else if let Some(a) = m.message.as_assistant() {
+                        records.push(FooterUsageRecord::AssistantUsage(a.usage));
+                    }
+                }
+                _ => {}
+            }
+        }
+        records
     }
 }

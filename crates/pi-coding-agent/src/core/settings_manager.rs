@@ -391,6 +391,8 @@ pub struct Settings {
     pub fullscreen_copy_on_select: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fullscreen_wheel_scroll_lines: Option<WheelScrollLines>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_share_destination: Option<crate::modes::interactive::session_share::SessionShareDestination>,
     #[serde(flatten, default, skip_serializing_if = "IndexMap::is_empty")]
     pub extra: IndexMap<String, Value>,
 }
@@ -2105,5 +2107,23 @@ impl SettingsManager {
         st.global_settings.warnings = Some(warnings);
         Self::mark_modified_locked(&mut st, "warnings", None);
         self.save_locked(st);
+    }
+
+    pub fn get_session_share_destination(&self) -> crate::modes::interactive::session_share::SessionShareDestination {
+        self.get_settings().session_share_destination.unwrap_or_default()
+    }
+
+    pub fn set_session_share_destination(
+        &self,
+        destination: crate::modes::interactive::session_share::SessionShareDestination,
+    ) {
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        st.global_settings.session_share_destination = Some(destination);
+        Self::mark_modified_locked(&mut st, "sessionShareDestination", None);
+        self.save_locked(st);
+    }
+
+    pub fn get_agent_dir(&self) -> Option<String> {
+        self.settings_paths.global.as_deref().map(pi_js::path::dirname)
     }
 }

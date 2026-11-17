@@ -134,6 +134,52 @@ impl Drop for BranchSummaryControllerGuard {
     }
 }
 
+fn collect_slash_commands(
+    runner: Option<&ExtensionRunner>,
+    resource_loader: &Arc<dyn crate::core::resource_loader::ResourceLoader>,
+) -> Vec<SlashCommandInfo> {
+    let ext_cmds: Vec<SlashCommandInfo> = runner
+        .map(|r| {
+            r.get_registered_commands()
+                .into_iter()
+                .map(|c| SlashCommandInfo {
+                    name: c.invocation_name,
+                    description: c.command.description,
+                    source: SlashCommandSource::Extension,
+                    source_info: c.command.source_info,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let templates: Vec<SlashCommandInfo> = resource_loader
+        .get_prompts()
+        .0
+        .into_iter()
+        .map(|t| SlashCommandInfo {
+            name: t.name,
+            description: Some(t.description),
+            source: SlashCommandSource::Prompt,
+            source_info: t.source_info,
+        })
+        .collect();
+    let skills: Vec<SlashCommandInfo> = resource_loader
+        .get_skills()
+        .0
+        .into_iter()
+        .map(|s| SlashCommandInfo {
+            name: format!("skill:{}", s.name),
+            description: Some(s.description),
+            source: SlashCommandSource::Skill,
+            source_info: s.source_info,
+        })
+        .collect();
+    let mut all = Vec::with_capacity(ext_cmds.len() + templates.len() + skills.len());
+    all.extend(ext_cmds);
+    all.extend(templates);
+    all.extend(skills);
+    all
+}
+
 impl AgentSession {
     // =========================================================================
     // Compaction
@@ -885,47 +931,16 @@ impl AgentSession {
         self.inner.agent.set_model(refreshed);
     }
 
+    pub fn get_commands(&self) -> Vec<SlashCommandInfo> {
+        let runner = self.extension_runner();
+        collect_slash_commands(runner.as_ref(), &self.inner.resource_loader)
+    }
+
     fn _bind_extension_core(&self, runner: &ExtensionRunner) {
         let runner_for_cmds = runner.clone();
         let resource_loader = Arc::clone(&self.inner.resource_loader);
         let get_commands = Arc::new(move || -> Vec<SlashCommandInfo> {
-            let ext_cmds: Vec<SlashCommandInfo> = runner_for_cmds
-                .get_registered_commands()
-                .into_iter()
-                .map(|c| SlashCommandInfo {
-                    name: c.invocation_name,
-                    description: c.command.description,
-                    source: SlashCommandSource::Extension,
-                    source_info: c.command.source_info,
-                })
-                .collect();
-            let templates: Vec<SlashCommandInfo> = resource_loader
-                .get_prompts()
-                .0
-                .into_iter()
-                .map(|t| SlashCommandInfo {
-                    name: t.name,
-                    description: Some(t.description),
-                    source: SlashCommandSource::Prompt,
-                    source_info: t.source_info,
-                })
-                .collect();
-            let skills: Vec<SlashCommandInfo> = resource_loader
-                .get_skills()
-                .0
-                .into_iter()
-                .map(|s| SlashCommandInfo {
-                    name: format!("skill:{}", s.name),
-                    description: Some(s.description),
-                    source: SlashCommandSource::Skill,
-                    source_info: s.source_info,
-                })
-                .collect();
-            let mut all = Vec::with_capacity(ext_cmds.len() + templates.len() + skills.len());
-            all.extend(ext_cmds);
-            all.extend(templates);
-            all.extend(skills);
-            all
+            collect_slash_commands(Some(&runner_for_cmds), &resource_loader)
         });
 
         let weak = Arc::downgrade(&self.inner);

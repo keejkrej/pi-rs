@@ -12,10 +12,6 @@ use tokio::sync::{Notify, OnceCell};
 
 use crate::modes::json_event::{AgentSessionEvent, to_json_event};
 
-// WIRE(@tui-w3): Replace PrintSession / PrintSessionRuntime trait adapters with concrete
-// crate::core::agent_session::AgentSession / AgentSessionRuntime, crate::core::output_guard,
-// and crate::utils::shell::kill_tracked_detached_children once @mcp & @ca-cli land on main.
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrintModeKind {
     #[default]
@@ -387,4 +383,116 @@ pub async fn run_print_mode_with_hooks(
     let _ = (hooks.flush_stdout)().await;
     let _ = &None::<AbortSignal>;
     result_code
+}
+
+impl PrintSession for crate::core::agent_session::AgentSession {
+    fn session_header_json(&self) -> Option<Value> {
+        self.session_manager()
+            .get_header()
+            .and_then(|h| serde_json::to_value(h).ok())
+    }
+
+    fn bind_extensions(&self, mode: &str, on_error: Arc<dyn Fn(&str, &str) + Send + Sync>) -> BoxFuture<Result<()>> {
+        let session = self.clone();
+        let ext_mode = match mode {
+            "json" => crate::core::extensions::types::ExtensionMode::Json,
+            "rpc" => crate::core::extensions::types::ExtensionMode::Rpc,
+            "tui" => crate::core::extensions::types::ExtensionMode::Tui,
+            _ => crate::core::extensions::types::ExtensionMode::Print,
+        };
+        Box::pin(async move {
+            session
+                .bind_extensions(crate::core::agent_session::ExtensionBindings {
+                    mode: Some(ext_mode),
+                    on_error: Some(Arc::new(move |err| {
+                        on_error(&err.extension_path, &err.error);
+                    })),
+                    ..Default::default()
+                })
+                .await
+        })
+    }
+
+    fn subscribe(&self, listener: Arc<dyn Fn(AgentSessionEvent) + Send + Sync>) -> Unsubscribe {
+        self.subscribe(move |ev| listener(ev))
+    }
+
+    fn subscribe_backpressure(&self, listener: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>) -> Unsubscribe {
+        self.agent().subscribe_async(move |_ev, _sig| listener())
+    }
+
+    fn prompt(&self, text: &str, options: Option<PrintPromptOptions>) -> BoxFuture<Result<()>> {
+        let session = self.clone();
+        let text = text.to_owned();
+        let opts = options.map(|o| crate::core::agent_session::PromptOptions {
+            images: o.images,
+            ..Default::default()
+        });
+        Box::pin(async move { session.prompt(&text, opts).await })
+    }
+
+    fn messages(&self) -> Vec<AgentMessage> {
+        self.messages()
+    }
+
+    fn wait_for_idle(&self) -> BoxFuture<()> {
+        let session = self.clone();
+        Box::pin(async move { session.wait_for_idle().await })
+    }
+
+    fn reload(&self) -> BoxFuture<Result<()>> {
+        let session = self.clone();
+        Box::pin(async move { session.reload(None).await })
+    }
+
+    fn navigate_tree(&self, target_id: &str) -> BoxFuture<Result<bool>> {
+        let session = self.clone();
+        let target_id = target_id.to_owned();
+        Box::pin(async move { session.navigate_tree(&target_id, None).await.map(|r| r.cancelled) })
+    }
+}
+
+impl PrintSessionRuntime for crate::core::agent_session_runtime::AgentSessionRuntime {
+    fn session(&self) -> Arc<dyn PrintSession> {
+        Arc::new(self.session())
+    }
+
+    fn set_rebind_session(&self, cb: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>) {
+        self.set_rebind_session(Some(Arc::new(move |_sess| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+                cb().await;
+                Ok(())
+            })
+        })));
+    }
+
+    fn new_session(&self, parent_session: Option<String>) -> BoxFuture<Result<bool>> {
+        let rt = self.clone();
+        Box::pin(async move {
+            rt.new_session(Some(crate::core::agent_session_runtime::RuntimeNewSessionOptions {
+                parent_session,
+                ..Default::default()
+            }))
+            .await
+            .map(|r| r.cancelled)
+        })
+    }
+
+    fn fork(&self, entry_id: &str) -> BoxFuture<Result<bool>> {
+        let rt = self.clone();
+        let entry_id = entry_id.to_owned();
+        Box::pin(async move { rt.fork(&entry_id, None).await.map(|r| r.cancelled) })
+    }
+
+    fn switch_session(&self, session_path: &str) -> BoxFuture<Result<bool>> {
+        let rt = self.clone();
+        let session_path = session_path.to_owned();
+        Box::pin(async move { rt.switch_session(&session_path, None).await.map(|r| r.cancelled) })
+    }
+
+    fn dispose(&self) -> BoxFuture<()> {
+        let rt = self.clone();
+        Box::pin(async move { rt.dispose().await })
+    }
 }
