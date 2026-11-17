@@ -24,6 +24,15 @@ struct BorderedLoaderInner {
     loader: InnerLoader,
 }
 
+impl Drop for BorderedLoaderInner {
+    fn drop(&mut self) {
+        match &self.loader {
+            InnerLoader::Cancellable(cl) => cl.dispose(),
+            InnerLoader::NonCancellable(l, _) => l.stop(),
+        }
+    }
+}
+
 /// Loader wrapped with borders for extension UI.
 #[derive(Clone)]
 pub struct BorderedLoader {

@@ -13,6 +13,7 @@ use pi_coding_agent::core::extensions::types::{
     FlagOptions, FlagType, FlagValue, InlineExtension, NotifyType, RegisteredCommandOptions, SessionStartEvent,
     ShortcutOptions, Theme, TurnStartEvent,
 };
+use pi_coding_agent::modes::interactive::components::dynamic_border::DynamicBorder;
 use pi_tui::components::select_list::{SelectItem, SelectList, SelectListTheme};
 use pi_tui::{Component, Container, Key, Text};
 use serde::{Deserialize, Serialize};
@@ -45,25 +46,6 @@ struct SharedState {
     active_preset_name: Option<String>,
     active_preset: Option<Preset>,
     original_state: Option<OriginalState>,
-}
-
-struct FallbackDynamicBorder {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::components::DynamicBorder once @tui merges.
-    color: Arc<dyn Fn(&str) -> String + Send + Sync>,
-}
-
-impl FallbackDynamicBorder {
-    fn new(color: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Self {
-        Self { color }
-    }
-}
-
-impl Component for FallbackDynamicBorder {
-    fn render(&self, width: usize) -> Vec<String> {
-        vec![(self.color)(&"─".repeat(width.max(1)))]
-    }
-
-    fn invalidate(&self) {}
 }
 
 struct PresetSelectorModal {
@@ -336,9 +318,9 @@ async fn show_preset_selector(
                 Box::pin(async move {
                     let container = Container::new();
                     let t1 = theme.clone();
-                    container.add_child(Arc::new(FallbackDynamicBorder::new(Arc::new(move |s| {
+                    container.add_child(Arc::new(DynamicBorder::new(Some(Arc::new(move |s| {
                         t1.fg("accent", s)
-                    }))));
+                    })))));
                     container.add_child(Arc::new(Text::new(
                         Some(&theme.fg("accent", &theme.bold("Select Preset"))),
                         None,
@@ -382,9 +364,9 @@ async fn show_preset_selector(
                         None,
                     )));
                     let t2 = theme.clone();
-                    container.add_child(Arc::new(FallbackDynamicBorder::new(Arc::new(move |s| {
+                    container.add_child(Arc::new(DynamicBorder::new(Some(Arc::new(move |s| {
                         t2.fg("accent", s)
-                    }))));
+                    })))));
 
                     Ok(Arc::new(PresetSelectorModal {
                         container,

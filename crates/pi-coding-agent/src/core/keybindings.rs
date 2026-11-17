@@ -417,4 +417,11 @@ impl KeybindingsManager {
     pub fn to_tui_manager(&self) -> TuiKeybindingsManager {
         (*self.inner).clone()
     }
+
+    pub fn from_tui_manager(inner: TuiKeybindingsManager) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            config_path: Arc::new(Mutex::new(None)),
+        }
+    }
 }

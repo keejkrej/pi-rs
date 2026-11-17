@@ -12,10 +12,10 @@ use pi_ai::types::{
 };
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, ExtensionMode, InlineExtension, NotifyType, RegisteredCommandOptions,
-    Theme,
 };
-use pi_tui::components::cancellable_loader::CancellableLoader;
-use pi_tui::{Component, Container, Text};
+use pi_coding_agent::modes::interactive::components::bordered_loader::BorderedLoader;
+use pi_coding_agent::modes::interactive::theme::theme::theme as current_interactive_theme;
+use pi_tui::Component;
 use serde_json::Value;
 
 const SYSTEM_PROMPT: &str = "You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.\n\n\
@@ -29,79 +29,6 @@ A: \n\n\
 Q: Should we use TypeScript or JavaScript?\n\
 A: \n\n\
 Keep questions in the order they appeared. Be concise.";
-
-struct FallbackDynamicBorder {
-    color: Arc<dyn Fn(&str) -> String + Send + Sync>,
-}
-
-impl Component for FallbackDynamicBorder {
-    fn render(&self, width: usize) -> Vec<String> {
-        vec![(self.color)(&"─".repeat(width.max(1)))]
-    }
-
-    fn invalidate(&self) {}
-}
-
-struct FallbackBorderedLoader {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::components::BorderedLoader once @tui merges.
-    container: Container,
-    loader: CancellableLoader,
-}
-
-impl FallbackBorderedLoader {
-    fn new(tui: Arc<dyn pi_tui::TUI>, theme: &Theme, message: &str) -> Self {
-        let container = Container::new();
-        let t_border1 = theme.clone();
-        container.add_child(Arc::new(FallbackDynamicBorder {
-            color: Arc::new(move |s| t_border1.fg("border", s)),
-        }));
-        let t_spin = theme.clone();
-        let t_msg = theme.clone();
-        let loader = CancellableLoader::new(
-            tui,
-            Arc::new(move |s| t_spin.fg("accent", s)),
-            Arc::new(move |s| t_msg.fg("muted", s)),
-            Some(message),
-            None,
-        );
-        container.add_child(Arc::new(loader.clone()));
-        container.add_child(Arc::new(Text::new(
-            Some(&theme.fg("dim", "esc cancel")),
-            Some(1),
-            Some(0),
-            None,
-        )));
-        let t_border2 = theme.clone();
-        container.add_child(Arc::new(FallbackDynamicBorder {
-            color: Arc::new(move |s| t_border2.fg("border", s)),
-        }));
-        Self { container, loader }
-    }
-}
-
-impl Drop for FallbackBorderedLoader {
-    fn drop(&mut self) {
-        self.loader.dispose();
-    }
-}
-
-impl Component for FallbackBorderedLoader {
-    fn render(&self, width: usize) -> Vec<String> {
-        self.container.render(width)
-    }
-
-    fn handle_input(&self, data: &str) {
-        self.loader.handle_input(data);
-    }
-
-    fn has_handle_input(&self) -> bool {
-        true
-    }
-
-    fn invalidate(&self) {
-        self.container.invalidate();
-    }
-}
 
 fn stop_reason_name(reason: StopReason) -> &'static str {
     match reason {
@@ -183,14 +110,17 @@ impl Extension for QnaExtension {
                             .custom(
                                 Box::new(move |tui, theme, _kb, done| {
                                     Box::pin(async move {
-                                        let loader = FallbackBorderedLoader::new(
+                                        let interactive_theme =
+                                            theme.0.to_interactive_theme().unwrap_or_else(current_interactive_theme);
+                                        let loader = BorderedLoader::new(
                                             tui,
-                                            &theme,
+                                            &interactive_theme,
                                             &format!("Extracting questions using {}...", model_for_ui.id),
+                                            None,
                                         );
-                                        let signal = loader.loader.signal();
+                                        let signal = loader.signal();
                                         let done_abort = Arc::clone(&done);
-                                        loader.loader.set_on_abort(Some(Arc::new(move || {
+                                        loader.set_on_abort(Some(Arc::new(move || {
                                             done_abort(Value::Null);
                                         })));
 

@@ -8,8 +8,9 @@ use pi_agent_core::types::AgentMessage;
 use pi_ai::types::Message;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, MessageEndEvent, NotifyType, ProviderStreamEvent,
-    RegisteredCommandOptions, Theme, TurnEndEvent, TurnStartEvent,
+    RegisteredCommandOptions, TurnEndEvent, TurnStartEvent,
 };
+use pi_coding_agent::modes::interactive::components::keybinding_hints::key_hint;
 use pi_tui::{Box as TuiBox, Component, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,15 +30,6 @@ struct DebugState {
     enabled: bool,
     active_events: Option<Vec<Value>>,
     completed_entry: Option<ProviderDebugEntry>,
-}
-
-fn fallback_key_hint(theme: &Theme, description: &str) -> String {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::components::keybinding_hints::key_hint once @tui merges.
-    format!(
-        "{}{}",
-        theme.fg("dim", "ctrl+o"),
-        theme.fg("muted", &format!(" {description}"))
-    )
 }
 
 pub struct DebugProviderExtension;
@@ -78,7 +70,7 @@ impl Extension for DebugProviderExtension {
                 let expand_hint = if opts.expanded {
                     String::new()
                 } else {
-                    format!(" ({})", fallback_key_hint(&theme, "to view events"))
+                    format!(" ({})", key_hint(&"app.tools.expand".to_string(), "to view events"))
                 };
                 tui_box.add_child(Arc::new(Text::new(
                     Some(&format!(

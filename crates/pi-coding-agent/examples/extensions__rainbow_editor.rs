@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, KeybindingsManager, SessionStartEvent,
 };
+use pi_coding_agent::modes::interactive::components::custom_editor::CustomEditor;
 use pi_js::time::{Interval, set_interval};
 use pi_tui::autocomplete::AutocompleteProvider;
-use pi_tui::components::editor::{Editor, EditorTheme};
+use pi_tui::components::editor::EditorTheme;
 use pi_tui::editor_component::{EditorBorderColor, EditorComponent, EditorTextCallback};
 use pi_tui::{Component, Focusable, TUI};
 
@@ -55,17 +56,21 @@ fn colorize(text: &str, shine_pos: isize) -> String {
 }
 
 struct RainbowEditor {
-    // WIRE(@tui-w3): switch inner Editor to CustomEditor once @tui merges.
-    inner: Editor,
+    inner: CustomEditor,
     tui: Arc<dyn TUI + Send + Sync>,
     animation_timer: Mutex<Option<Interval>>,
     frame: Arc<AtomicUsize>,
 }
 
 impl RainbowEditor {
-    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: EditorTheme, _kb: KeybindingsManager) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: EditorTheme, kb: KeybindingsManager) -> Self {
         Self {
-            inner: Editor::new(Arc::clone(&tui), theme, None),
+            inner: CustomEditor::new(
+                Arc::clone(&tui),
+                theme,
+                pi_coding_agent::core::keybindings::KeybindingsManager::from_tui_manager(kb),
+                None,
+            ),
             tui,
             animation_timer: Mutex::new(None),
             frame: Arc::new(AtomicUsize::new(0)),

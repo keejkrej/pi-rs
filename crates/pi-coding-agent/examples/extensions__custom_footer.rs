@@ -1,8 +1,8 @@
 //! Port of packages/coding-agent/examples/extensions/custom-footer.ts
 
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_agent_core::types::AgentMessage;
@@ -12,12 +12,22 @@ use pi_coding_agent::core::extensions::types::{
     ReadonlyFooterDataProvider, RegisteredCommandOptions, Theme,
 };
 use pi_coding_agent::core::session_manager::SessionEntry;
+use pi_js::Unsubscribe;
 use pi_tui::{Component, truncate_to_width, visible_width};
 
 struct CustomFooterComponent {
     ctx: ExtensionContext,
     theme: Theme,
     footer_data: Arc<dyn ReadonlyFooterDataProvider>,
+    branch_unsub: Mutex<Option<Unsubscribe>>,
+}
+
+impl Drop for CustomFooterComponent {
+    fn drop(&mut self) {
+        if let Some(unsub) = self.branch_unsub.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            unsub.call();
+        }
+    }
 }
 
 impl Component for CustomFooterComponent {
@@ -97,12 +107,15 @@ impl Extension for CustomFooterExtension {
                         let base = ctx.as_context().clone();
                         let ui = base.ui()?;
                         if next {
-                            ui.set_footer(Some(Arc::new(move |_tui, theme, footer_data| {
-                                // WIRE(@tui-w3): subscribe via footer_data.on_branch_change(...) once @tui merges.
+                            ui.set_footer(Some(Arc::new(move |tui, theme, footer_data| {
+                                let unsub = footer_data.on_branch_change(Arc::new(move || {
+                                    tui.request_render(None);
+                                }));
                                 Arc::new(CustomFooterComponent {
                                     ctx: base.clone(),
                                     theme,
                                     footer_data,
+                                    branch_unsub: Mutex::new(Some(unsub)),
                                 })
                             })));
                             ui.notify("Custom footer enabled", Some(NotifyType::Info));
