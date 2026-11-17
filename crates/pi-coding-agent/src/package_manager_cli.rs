@@ -30,10 +30,10 @@ use crate::core::package_manager::{
 };
 use crate::core::project_trust::{
     AppMode, ProjectTrustContext, ProjectTrustExtensionHost, ProjectTrustUi, ResolveProjectTrustedOptions,
-    resolve_project_trusted,
+    RunnerProjectTrustExtensionHost, resolve_project_trusted,
 };
 use crate::core::resource_loader::{
-    DefaultResourceLoader, DefaultResourceLoaderOptions, InlineExtension, is_builtin_extension,
+    CoreExtensionLoaderHost, DefaultResourceLoader, DefaultResourceLoaderOptions, InlineExtension, is_builtin_extension,
 };
 use crate::core::settings_manager::{SettingsManager, SettingsManagerCreateOptions, SettingsScope};
 use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
@@ -121,7 +121,6 @@ pub type CreateProjectTrustContextFn =
 ///
 /// // WIRE(@ca-cli-w3): supply `select_config` from `cli::config_selector::select_config`
 /// //   and `create_project_trust_context` from `cli::project_trust::create_project_trust_context`.
-/// // WIRE(@codemode-w3): supply `trust_extension_host` backed by `extensions/runner.rs`.
 #[derive(Clone, Default)]
 pub struct PackageCommandRuntimeOptions {
     pub extension_factories: Vec<InlineExtension>,
@@ -144,7 +143,7 @@ impl ProjectTrustUi for NoopProjectTrustUi {
 struct DefaultCommandProjectTrustContext {
     mode: AppMode,
     has_ui: bool,
-    ui: NoopProjectTrustUi,
+    ui: Arc<NoopProjectTrustUi>,
 }
 
 #[async_trait::async_trait]
@@ -154,7 +153,11 @@ impl ProjectTrustContext for DefaultCommandProjectTrustContext {
     }
 
     fn ui(&self) -> &dyn ProjectTrustUi {
-        &self.ui
+        self.ui.as_ref()
+    }
+
+    fn ui_arc(&self) -> Option<Arc<dyn ProjectTrustUi>> {
+        Some(self.ui.clone())
     }
 
     fn mode(&self) -> AppMode {
@@ -171,7 +174,7 @@ fn default_create_project_trust_context(
     Arc::new(DefaultCommandProjectTrustContext {
         mode,
         has_ui,
-        ui: NoopProjectTrustUi,
+        ui: Arc::new(NoopProjectTrustUi),
     })
 }
 
@@ -1103,18 +1106,24 @@ async fn create_command_settings_manager(
     }
 
     let app_mode = get_command_app_mode();
+    let mut default_trust_host: Option<Arc<dyn ProjectTrustExtensionHost>> = None;
     if project_trust_override.is_none() && has_trust_requiring_project_resources(cwd) {
+        let core_host = Arc::new(CoreExtensionLoaderHost::new());
         let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
             cwd: cwd.to_owned(),
             agent_dir: agent_dir.to_owned(),
             settings_manager: Some(settings_manager.clone()),
             extension_factories: runtime_options.extension_factories.clone(),
+            extension_host: Some(core_host.clone()),
             ..Default::default()
         });
         match loader.load_project_trust_extensions().await {
             Ok(ext_res) => {
                 for err in ext_res.errors {
                     project_trust_warnings.push(format!("Failed to load extension \"{}\": {}", err.path, err.error));
+                }
+                if let Some(real_ext_res) = core_host.loaded_extensions_result() {
+                    default_trust_host = Some(Arc::new(RunnerProjectTrustExtensionHost::new(real_ext_res)));
                 }
             }
             Err(err) => {
@@ -1137,7 +1146,10 @@ async fn create_command_settings_manager(
         trust_store: &trust_store,
         trust_override: project_trust_override,
         default_project_trust: Some(settings_manager.get_default_project_trust()),
-        extension_host: runtime_options.trust_extension_host.as_deref(),
+        extension_host: runtime_options
+            .trust_extension_host
+            .as_deref()
+            .or(default_trust_host.as_deref()),
         project_trust_context: ctx.as_ref(),
         on_extension_error: Some(&on_err),
     })

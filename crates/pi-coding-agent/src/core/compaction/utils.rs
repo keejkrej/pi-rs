@@ -13,7 +13,8 @@ use serde_json::Value;
 // ============================================================================
 
 /// Cumulative read/written/edited file sets tracked across compacted turns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileOperations {
     pub read: IndexSet<String>,
     pub written: IndexSet<String>,

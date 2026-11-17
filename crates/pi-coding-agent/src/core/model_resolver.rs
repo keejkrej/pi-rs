@@ -155,7 +155,8 @@ impl ModelResolverRuntime for ModelRegistry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScopedModel {
     pub model: Model,
     pub thinking_level: Option<ModelThinkingLevel>,

@@ -190,8 +190,6 @@ impl ThemeLoaderHook for BasicThemeLoader {
 }
 
 /// Minimal tool registration metadata tracked for extension conflict / replacement checks.
-///
-/// // WIRE(@codemode-w3): align/bridge with `crate::core::extensions::types::RegisteredTool`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredTool {
     pub name: String,
@@ -199,14 +197,32 @@ pub struct RegisteredTool {
     pub source_info: SourceInfo,
 }
 
+impl From<&crate::core::extensions::types::RegisteredTool> for RegisteredTool {
+    fn from(tool: &crate::core::extensions::types::RegisteredTool) -> Self {
+        Self {
+            name: tool.definition.name.clone(),
+            description: tool.definition.description.clone(),
+            source_info: tool.source_info.clone(),
+        }
+    }
+}
+
 /// Minimal slash command registration metadata tracked for extension conflict / replacement checks.
-///
-/// // WIRE(@codemode-w3): align/bridge with `crate::core::extensions::types::RegisteredCommand`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredCommand {
     pub name: String,
     pub description: Option<String>,
     pub source_info: SourceInfo,
+}
+
+impl From<&crate::core::extensions::types::RegisteredCommand> for RegisteredCommand {
+    fn from(cmd: &crate::core::extensions::types::RegisteredCommand) -> Self {
+        Self {
+            name: cmd.name.clone(),
+            description: cmd.description.clone(),
+            source_info: cmd.source_info.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,15 +231,49 @@ pub enum ExtensionFlagType {
     String,
 }
 
+impl From<crate::core::extensions::types::FlagType> for ExtensionFlagType {
+    fn from(flag_type: crate::core::extensions::types::FlagType) -> Self {
+        match flag_type {
+            crate::core::extensions::types::FlagType::Boolean => Self::Boolean,
+            crate::core::extensions::types::FlagType::String => Self::String,
+        }
+    }
+}
+
+impl From<ExtensionFlagType> for crate::core::extensions::types::FlagType {
+    fn from(flag_type: ExtensionFlagType) -> Self {
+        match flag_type {
+            ExtensionFlagType::Boolean => Self::Boolean,
+            ExtensionFlagType::String => Self::String,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionFlagDefault {
     Boolean(bool),
     String(String),
 }
 
+impl From<&crate::core::extensions::types::FlagValue> for ExtensionFlagDefault {
+    fn from(val: &crate::core::extensions::types::FlagValue) -> Self {
+        match val {
+            crate::core::extensions::types::FlagValue::Bool(b) => Self::Boolean(*b),
+            crate::core::extensions::types::FlagValue::String(s) => Self::String(s.clone()),
+        }
+    }
+}
+
+impl From<&ExtensionFlagDefault> for crate::core::extensions::types::FlagValue {
+    fn from(val: &ExtensionFlagDefault) -> Self {
+        match val {
+            ExtensionFlagDefault::Boolean(b) => Self::Bool(*b),
+            ExtensionFlagDefault::String(s) => Self::String(s.clone()),
+        }
+    }
+}
+
 /// CLI flag registered by an extension.
-///
-/// // WIRE(@codemode-w3): align/bridge with `crate::core::extensions::types::ExtensionFlag`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionFlag {
     pub name: String,
@@ -231,6 +281,18 @@ pub struct ExtensionFlag {
     pub flag_type: ExtensionFlagType,
     pub default: Option<ExtensionFlagDefault>,
     pub extension_path: String,
+}
+
+impl From<&crate::core::extensions::types::ExtensionFlag> for ExtensionFlag {
+    fn from(flag: &crate::core::extensions::types::ExtensionFlag) -> Self {
+        Self {
+            name: flag.name.clone(),
+            description: flag.description.clone(),
+            flag_type: flag.r#type.into(),
+            default: flag.default.as_ref().map(Into::into),
+            extension_path: flag.extension_path.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,8 +308,6 @@ pub struct ExtensionLoadWarning {
 }
 
 /// Loaded extension handle tracked by `DefaultResourceLoader`.
-///
-/// // WIRE(@codemode-w3): align/bridge with `crate::core::extensions::types::Extension`.
 #[derive(Clone, Debug)]
 pub struct Extension {
     pub path: String,
@@ -260,9 +320,43 @@ pub struct Extension {
     pub flags: IndexMap<String, ExtensionFlag>,
 }
 
+impl From<&crate::core::extensions::types::LoadedExtension> for Extension {
+    fn from(ext: &crate::core::extensions::types::LoadedExtension) -> Self {
+        let tools = ext
+            .tools
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(k, v)| (k.clone(), RegisteredTool::from(v)))
+            .collect();
+        let commands = ext
+            .commands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(k, v)| (k.clone(), RegisteredCommand::from(v)))
+            .collect();
+        let flags = ext
+            .flags
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(k, v)| (k.clone(), ExtensionFlag::from(v)))
+            .collect();
+        Self {
+            path: ext.path.clone(),
+            resolved_path: ext.resolved_path.clone(),
+            hidden: ext.hidden,
+            replaceable: ext.replaceable,
+            source_info: ext.source_info.clone(),
+            tools,
+            commands,
+            flags,
+        }
+    }
+}
+
 /// Shared runtime handle created when loading extensions.
-///
-/// // WIRE(@codemode-w3): bridge with `crate::core::extensions::types::ExtensionRuntime`.
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionRuntime {
     pub flag_values: IndexMap<String, ExtensionFlagDefault>,
@@ -401,8 +495,6 @@ pub fn is_builtin_extension(input: &InlineExtension) -> bool {
 }
 
 /// Extension loading seam connecting `DefaultResourceLoader` to the extension runtime.
-///
-/// // WIRE(@codemode-w3): wire to `crate::core::extensions::loader::{clear_extension_cache, create_extension_runtime, load_extension_from_factory, load_extensions_cached}`.
 pub trait ExtensionLoaderHost: Send + Sync {
     fn clear_cache(&self);
     fn create_runtime(&self) -> ExtensionRuntime;
@@ -421,6 +513,218 @@ pub trait ExtensionLoaderHost: Send + Sync {
         runtime: ExtensionRuntime,
         extension_path: String,
     ) -> BoxFuture<Result<Extension>>;
+}
+
+/// Live extension loader host backed by [`crate::core::extensions::loader`].
+#[derive(Default)]
+pub struct CoreExtensionLoaderHost {
+    runtime: Arc<Mutex<Option<crate::core::extensions::types::ExtensionRuntime>>>,
+    loaded: Arc<Mutex<Vec<crate::core::extensions::types::LoadedExtension>>>,
+}
+
+impl CoreExtensionLoaderHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn loaded_extensions_result(&self) -> Option<crate::core::extensions::types::LoadExtensionsResult> {
+        let runtime = self.runtime.lock().unwrap_or_else(PoisonError::into_inner).clone()?;
+        let extensions = self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Some(crate::core::extensions::types::LoadExtensionsResult {
+            extensions,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            runtime,
+        })
+    }
+
+    fn ensure_runtime(&self) -> crate::core::extensions::types::ExtensionRuntime {
+        let mut guard = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
+        guard
+            .get_or_insert_with(crate::core::extensions::loader::create_extension_runtime)
+            .clone()
+    }
+}
+
+impl ExtensionLoaderHost for CoreExtensionLoaderHost {
+    fn clear_cache(&self) {
+        crate::core::extensions::loader::clear_extension_cache();
+        *self.runtime.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
+    fn create_runtime(&self) -> ExtensionRuntime {
+        let rt = crate::core::extensions::loader::create_extension_runtime();
+        *self.runtime.lock().unwrap_or_else(PoisonError::into_inner) = Some(rt);
+        self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        ExtensionRuntime {
+            flag_values: IndexMap::new(),
+            active: true,
+        }
+    }
+
+    fn load_extensions_cached(
+        &self,
+        paths: Vec<String>,
+        cwd: String,
+        event_bus: Arc<dyn EventBus>,
+        runtime: Option<ExtensionRuntime>,
+    ) -> BoxFuture<LoadExtensionsResult> {
+        let real_rt = self.ensure_runtime();
+        if let Some(ref rt) = runtime {
+            let mut flags = real_rt.inner.flag_values.lock().unwrap_or_else(PoisonError::into_inner);
+            for (k, v) in &rt.flag_values {
+                flags.insert(k.clone(), v.into());
+            }
+        }
+        let host_runtime_store = Arc::clone(&self.runtime);
+        let host_loaded_store = Arc::clone(&self.loaded);
+        Box::pin(async move {
+            let res =
+                crate::core::extensions::loader::load_extensions_cached(&paths, &cwd, Some(event_bus), Some(real_rt))
+                    .await;
+            *host_runtime_store.lock().unwrap_or_else(PoisonError::into_inner) = Some(res.runtime.clone());
+            host_loaded_store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(res.extensions.iter().cloned());
+            let flag_values = res
+                .runtime
+                .inner
+                .flag_values
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|(k, v)| (k.clone(), ExtensionFlagDefault::from(v)))
+                .collect();
+            LoadExtensionsResult {
+                extensions: res.extensions.iter().map(Extension::from).collect(),
+                errors: res
+                    .errors
+                    .into_iter()
+                    .map(|e| ExtensionLoadError {
+                        path: e.path,
+                        error: e.error,
+                    })
+                    .collect(),
+                warnings: res
+                    .warnings
+                    .into_iter()
+                    .map(|w| ExtensionLoadWarning {
+                        path: w.path,
+                        warning: w.warning,
+                    })
+                    .collect(),
+                runtime: ExtensionRuntime {
+                    flag_values,
+                    active: true,
+                },
+            }
+        })
+    }
+
+    fn load_extension_from_factory(
+        &self,
+        factory: ExtensionFactory,
+        cwd: String,
+        event_bus: Arc<dyn EventBus>,
+        _runtime: ExtensionRuntime,
+        extension_path: String,
+    ) -> BoxFuture<Result<Extension>> {
+        let real_rt = self.ensure_runtime();
+        let host_loaded_store = Arc::clone(&self.loaded);
+        let path_for_source = extension_path.clone();
+        let source = get_synthetic_path_source(&path_for_source).unwrap_or_else(|| "local".to_owned());
+        let base_dir = if is_synthetic_path(&path_for_source) {
+            None
+        } else {
+            Some(dirname(&path_for_source))
+        };
+        let source_info = create_synthetic_source_info(
+            &path_for_source,
+            SyntheticSourceOptions {
+                source,
+                scope: Some(SourceScope::Temporary),
+                origin: Some(SourceOrigin::TopLevel),
+                base_dir,
+                changelog_path: None,
+            },
+        );
+        let ext_factory: crate::core::extensions::types::ExtensionFactory =
+            Arc::new(move |api: crate::core::extensions::types::ExtensionApi| {
+                let factory = Arc::clone(&factory);
+                let reg_path = path_for_source.clone();
+                let reg_source = source_info.clone();
+                Box::pin(async move {
+                    let mut registrar = ExtensionRegistrar::new(reg_path, reg_source);
+                    factory(&mut registrar).await?;
+                    for (_name, t) in registrar.tools {
+                        api.register_tool(crate::core::extensions::types::ToolDefinition {
+                            name: t.name.clone(),
+                            label: t.name,
+                            description: t.description,
+                            prompt_snippet: None,
+                            prompt_guidelines: None,
+                            parameters: pi_js::vendor::typebox::t::object::<
+                                [(&str, pi_js::vendor::typebox::Schema); 0],
+                                &str,
+                            >([]),
+                            constrained_sampling: None,
+                            render_shell: None,
+                            prepare_arguments: None,
+                            output_schema: None,
+                            exposure: None,
+                            namespace: None,
+                            annotations: None,
+                            default_active: None,
+                            prepare_loadout: None,
+                            execution_mode: None,
+                            execute: Arc::new(|_, _, _, _, _| {
+                                Box::pin(async { Ok(pi_agent_core::AgentToolResult::text("")) })
+                            }),
+                            render_call: None,
+                            render_result: None,
+                        })?;
+                    }
+                    for (_name, c) in registrar.commands {
+                        api.register_command(
+                            &c.name,
+                            crate::core::extensions::types::RegisteredCommandOptions {
+                                description: c.description,
+                                get_argument_completions: None,
+                                handler: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+                            },
+                        )?;
+                    }
+                    for (_name, f) in registrar.flags {
+                        api.register_flag(
+                            &f.name,
+                            crate::core::extensions::types::FlagOptions {
+                                description: f.description,
+                                r#type: Some(f.flag_type.into()),
+                                default: f.default.as_ref().map(Into::into),
+                            },
+                        )?;
+                    }
+                    Ok(())
+                })
+            });
+        Box::pin(async move {
+            let loaded = crate::core::extensions::loader::load_extension_from_factory(
+                ext_factory,
+                &cwd,
+                event_bus,
+                real_rt,
+                Some(&extension_path),
+            )
+            .await?;
+            host_loaded_store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(loaded.clone());
+            Ok(Extension::from(&loaded))
+        })
+    }
 }
 
 /// Fallback extension host supporting inline factories, builtins, and lightweight disk stubs.
@@ -1008,7 +1312,7 @@ impl DefaultResourceLoader {
 
         let extension_host: Arc<dyn ExtensionLoaderHost> = options
             .extension_host
-            .unwrap_or_else(|| Arc::new(BasicExtensionLoaderHost::new()));
+            .unwrap_or_else(|| Arc::new(CoreExtensionLoaderHost::new()));
         let prompt_loader: Arc<dyn PromptLoaderHook> =
             options.prompt_loader.unwrap_or_else(|| Arc::new(BasicPromptLoader));
         let theme_loader: Arc<dyn ThemeLoaderHook> = options.theme_loader.unwrap_or_else(|| Arc::new(BasicThemeLoader));

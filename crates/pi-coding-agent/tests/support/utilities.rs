@@ -329,7 +329,7 @@ pub fn create_test_resource_loader(options: Option<CreateTestResourceLoaderOptio
     TestResourceLoader { extensions_result }
 }
 
-// WIRE(@codemode-w3): swap `TestSessionContext` / `create_test_session` to real `AgentSession` once `@codemode-w3` lands.
+// WIRE(@ca-cli-w3): swap `TestSessionContext` / `create_test_session` to real `AgentSession` once `@ca-cli-w3` lands.
 pub struct TestSessionContext {
     pub session_manager: SessionManager,
     pub settings_manager: SettingsManager,

@@ -12,7 +12,7 @@ const WRAPPED_DNS_LOOKUP_ERROR: &str =
 
 #[tokio::test(flavor = "current_thread")]
 async fn retries_a_transient_dns_lookup_failure() {
-    // WIRE(@codemode-w3): switches from HarnessSession adapter to `pi_coding_agent::core::agent_session::AgentSession`
+    // WIRE(@ca-cli-w3): switches from HarnessSession adapter to `pi_coding_agent::core::agent_session::AgentSession`
     // once `core-session` lands; verifies retry policy handles DNS lookup failures.
     let harness = create_harness(Some(HarnessOptions {
         settings: Some(Settings {
