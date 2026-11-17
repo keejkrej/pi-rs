@@ -1,9 +1,11 @@
 # PORTING.md: pi v1.0.0 (TypeScript) to Rust
 
+> Historical porting specification for the initial v1.0.0 port. All 14 parity crates are implemented; post-port additions include QuickJS WASM plugin execution (see [../extensions.md](../extensions.md)) and the Rune desktop client `pi-gui` (see [../gui.md](../gui.md)). For current repository rules, see [../../AGENTS.md](../../AGENTS.md).
+
 Every porting agent must follow these conventions. In this document:
 
-- `$TS` is `/Users/jack/.t3/worktrees/pi/t3code-ef43beb3`, the TS monorepo at v1.0.0. It is read-only and is the behavioral source of truth.
-- `$RS` is `/Users/jack/workspace/pi-rs`, the target.
+- `$TS` is `<pi-ts-checkout>`, the TS monorepo at v1.0.0. It is read-only and is the behavioral source of truth.
+- `$RS` is `<pi-rs-root>`, this target repository root.
 
 When something is observable (bytes on disk or on the wire, CLI behavior, terminal output, error messages), TS behavior overrides this document. Where Rust idiom conflicts with this document, this document wins.
 
