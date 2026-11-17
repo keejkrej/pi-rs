@@ -952,6 +952,9 @@ pub trait TUI: Component {
     fn as_viewport(&self) -> Option<&dyn ViewportTUI> {
         None
     }
+
+    /// Drop the text selection and multi-click history, e.g. before the host replaces the transcript.
+    fn reset_text_selection(&self) {}
 }
 
 pub fn is_viewport_tui(tui: &dyn TUI) -> bool {
