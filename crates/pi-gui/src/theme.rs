@@ -40,6 +40,30 @@ impl ThemePreference {
     }
 }
 
+/// Spacing scale matching Waku desktop views (`4pt` base rhythm).
+pub struct WakuSpacing;
+
+impl WakuSpacing {
+    pub const XS: f32 = 4.0;
+    pub const SM: f32 = 8.0;
+    pub const MD: f32 = 12.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 20.0;
+    pub const XXL: f32 = 24.0;
+    pub const CARD_GAP: f32 = 12.0;
+    pub const COMPOSER_PADDING: f32 = 12.0;
+}
+
+/// Corner radii aligned with Waku surfaces and modal cards.
+pub struct WakuRadius;
+
+impl WakuRadius {
+    pub const SM: f32 = 6.0;
+    pub const MD: f32 = 8.0;
+    pub const LG: f32 = 12.0;
+    pub const PILL: f32 = 999.0;
+}
+
 /// Shared layout constants matching Waku's desktop geometry.
 pub struct LayoutMetrics;
 
@@ -249,6 +273,36 @@ impl WakuPalette {
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.52, 0.10),
         }
     }
+
+    /// Subtle translucent green row fill for added lines in diff views.
+    #[must_use]
+    pub fn diff_added_bg(self) -> Color {
+        if self.is_dark {
+            srgba(0.18, 0.56, 0.34, 0.16)
+        } else {
+            srgba(0.16, 0.55, 0.31, 0.12)
+        }
+    }
+
+    /// Subtle translucent red row fill for removed lines in diff views.
+    #[must_use]
+    pub fn diff_removed_bg(self) -> Color {
+        if self.is_dark {
+            srgba(0.75, 0.25, 0.22, 0.16)
+        } else {
+            srgba(0.76, 0.22, 0.19, 0.12)
+        }
+    }
+
+    /// Subtle header wash for diff hunk markers.
+    #[must_use]
+    pub fn diff_hunk_bg(self) -> Color {
+        if self.is_dark {
+            srgba(0.23, 0.51, 0.96, 0.10)
+        } else {
+            srgba(0.15, 0.39, 0.92, 0.08)
+        }
+    }
 }
 
 /// Returns the cached [`WakuPalette`] for dark or light mode.
@@ -277,16 +331,56 @@ pub fn waku_kit(dark: bool) -> &'static Kit {
         kit.c.layer_01 = pal.sidebar;
         kit.c.layer_02 = pal.composer;
         kit.c.layer_03 = pal.raised;
+        kit.c.layer_04 = pal.raised;
+        kit.c.bg_inverse = pal.inverse;
+        kit.c.bg_accent = pal.accent;
         kit.c.text_base = pal.text;
+        kit.c.text_strong = pal.text;
+        kit.c.text_weak = pal.text_secondary;
         kit.c.text_muted = pal.text_secondary;
         kit.c.text_faint = pal.text_tertiary;
+        kit.c.text_inverse = pal.on_inverse;
         kit.c.text_accent = pal.accent;
+        kit.c.icon_base = pal.text;
+        kit.c.icon_muted = pal.text_secondary;
+        kit.c.icon_faint = pal.text_tertiary;
+        kit.c.icon_inverse = pal.on_inverse;
+        kit.c.icon_accent = pal.accent;
         kit.c.border_muted = pal.border;
         kit.c.border_base = pal.border;
+        kit.c.border_weak = pal.border;
         kit.c.border_strong = pal.border_strong;
+        kit.c.border_focus = pal.gauge;
+        kit.c.hover = pal.overlay;
+        kit.c.pressed = pal.overlay_strong;
         kit.c.surface_base = pal.surface;
+        kit.c.surface_weak = pal.inset;
+        kit.c.surface_hover = pal.overlay;
         kit.c.surface_raised = pal.raised;
+        kit.c.surface_raised_base = pal.raised;
+        kit.c.surface_raised_hover = pal.overlay_strong;
         kit.c.surface_float = pal.raised;
+        kit.c.success.icon = pal.success;
+        kit.c.warning.icon = pal.warning;
+        kit.c.danger.icon = pal.danger;
+        kit.c.info.icon = pal.gauge;
         kit
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dark_and_light_palettes_resolve_distinct_surfaces() {
+        let dark = palette(true);
+        let light = palette(false);
+        assert!(dark.is_dark);
+        assert!(!light.is_dark);
+        assert_ne!(dark.canvas, light.canvas);
+        assert_ne!(dark.accent, light.accent);
+        assert_eq!(waku_kit(true).c.page, dark.canvas);
+        assert_eq!(waku_kit(false).c.page, light.canvas);
+    }
 }

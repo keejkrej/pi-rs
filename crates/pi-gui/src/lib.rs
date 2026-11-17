@@ -22,7 +22,7 @@ pub use state::{
     DiffHunkViewModel, DiffLineKind, DiffLineViewModel, DiffSummary, ExtensionDialogView, FileTreeEntryView,
     InspectorTab, LaunchConfig, MessageRoleView, MessageViewModel, ModelUsageSummary, ModelViewModel, NavRailTab,
     OpenFileView, OverlayKind, PiGuiAction, PiGuiError, PiGuiState, PluginKind, PluginOrigin, PluginViewModel,
-    SteeringQueueItem, TerminalOutputLine, TerminalSessionView, ThreadGroup, ThreadSummary, ToastMessage, ToastTone,
-    ToolCallStatus, ToolCallViewModel,
+    SCENE_ENTRIES, SteeringQueueItem, TerminalOutputLine, TerminalSessionView, ThreadGroup, ThreadSummary,
+    ToastMessage, ToastTone, ToolCallStatus, ToolCallViewModel,
 };
 pub use theme::{LayoutMetrics, ThemePreference, WakuPalette, palette, sp, waku_kit};
