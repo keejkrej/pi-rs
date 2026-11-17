@@ -104,8 +104,8 @@ pub fn parse_auth_command<S: AsRef<str>>(args: &[S]) -> pi_js::Result<Option<Aut
     let mut no_refresh = false;
     let mut min_expiry_ms: Option<i64> = None;
 
-    static DURATION_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^(\d+)(ms|s|m|h)$").expect("valid duration regex"));
+    static DURATION_RE: std::sync::LazyLock<Option<regex::Regex>> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^(\d+)(ms|s|m|h)$").ok());
 
     let mut index = 2;
     while index < args.len() {
@@ -116,7 +116,7 @@ pub fn parse_auth_command<S: AsRef<str>>(args: &[S]) -> pi_js::Result<Option<Aut
             }
             index += 1;
             let value = args.get(index).map(AsRef::as_ref);
-            let Some(caps) = value.and_then(|v| DURATION_RE.captures(v)) else {
+            let Some(caps) = value.and_then(|v| DURATION_RE.as_ref().and_then(|re| re.captures(v))) else {
                 return Err(AuthCommandError::new("--min-expiry must use a duration such as 30m or 1h").into_error());
             };
             let amount: i64 = caps[1].parse().map_err(|_| {
@@ -218,9 +218,10 @@ pub fn get_auth_credential(auth: Option<&AuthResult>) -> Option<String> {
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
         .map(|(_, val)| val.as_str())?;
-    static BEARER_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^Bearer\s+(.+)$").expect("valid bearer regex"));
+    static BEARER_RE: std::sync::LazyLock<Option<regex::Regex>> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^Bearer\s+(.+)$").ok());
     BEARER_RE
+        .as_ref()?
         .captures(authorization)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())

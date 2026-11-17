@@ -77,11 +77,10 @@ pub struct ParsedSkillBlock {
 /// Parse a skill block from message text.
 /// Returns `None` if the text doesn't contain a skill block.
 pub fn parse_skill_block(text: &str) -> Option<ParsedSkillBlock> {
-    static SKILL_BLOCK_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r#"(?s)^<skill name="([^"]+)" location="([^"]+)">\n(.*?)\n</skill>(?:\n\n(.+))?$"#)
-            .expect("valid skill block regex")
+    static SKILL_BLOCK_RE: std::sync::LazyLock<Option<Regex>> = std::sync::LazyLock::new(|| {
+        Regex::new(r#"(?s)^<skill name="([^"]+)" location="([^"]+)">\n(.*?)\n</skill>(?:\n\n(.+))?$"#).ok()
     });
-    let caps = SKILL_BLOCK_RE.captures(text)?;
+    let caps = SKILL_BLOCK_RE.as_ref()?.captures(text)?;
     let name = caps.get(1)?.as_str().to_string();
     let location = caps.get(2)?.as_str().to_string();
     let content = caps.get(3)?.as_str().to_string();

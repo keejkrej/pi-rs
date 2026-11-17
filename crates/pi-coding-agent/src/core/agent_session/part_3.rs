@@ -2452,7 +2452,11 @@ impl AgentSession {
     }
 
     #[doc(hidden)]
-    pub async fn check_compaction_for_test(&self, assistant_message: &AssistantMessage, skip_aborted_check: bool) -> bool {
+    pub async fn check_compaction_for_test(
+        &self,
+        assistant_message: &AssistantMessage,
+        skip_aborted_check: bool,
+    ) -> bool {
         self._check_compaction(assistant_message, skip_aborted_check, &[]).await
     }
 
