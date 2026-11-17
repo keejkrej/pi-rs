@@ -6,7 +6,7 @@ use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
 
 use crate::models::{DiffFileViewModel, DiffHunkViewModel, DiffLineKind, DiffLineViewModel};
 use crate::state::{OverlayKind, PiGuiAction, PiGuiState};
-use crate::theme::{WakuPalette, srgba};
+use crate::theme::WakuPalette;
 
 /// Renders the workspace git diff summary and line-numbered unified diff viewer.
 pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, _cx: &mut Cx<PiGuiState>) -> El {
@@ -20,8 +20,9 @@ pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, _cx: &mut Cx<PiGuiState>
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], pal.border);
 
+    let file_word = if s.diff.files.len() == 1 { "file" } else { "files" };
     let mut left_info = row().gap(6.0).center_y().child(
-        text(format!("{} changed files", s.diff.files.len()))
+        text(format!("{} changed {file_word}", s.diff.files.len()))
             .font(k.ty.ui_medium)
             .color(pal.text),
     );
@@ -313,7 +314,7 @@ fn render_hunk(
             el().w_full()
                 .px(10.0)
                 .py(4.0)
-                .fill(pal.overlay)
+                .fill(pal.diff_hunk_bg())
                 .child(text(&hunk.header).font(k.ty.mono).color(pal.text_tertiary)),
         );
 
@@ -331,29 +332,42 @@ fn render_diff_line(
     line_idx: usize,
     line: &DiffLineViewModel,
 ) -> El {
-    let add_tint = if pal.is_dark {
-        srgba(0.18, 0.65, 0.36, 0.14)
-    } else {
-        srgba(0.16, 0.60, 0.34, 0.12)
-    };
-    let (row_bg, marker, marker_color, text_fallback) = match line.kind {
-        DiffLineKind::Added => (add_tint, "+", pal.success, pal.text),
-        DiffLineKind::Removed => (pal.danger_soft, "-", pal.danger, pal.text),
-        DiffLineKind::Context => (Color::TRANSPARENT, " ", pal.text_ghost, pal.text_secondary),
+    let (row_bg, marker, marker_color, text_fallback, display_text) = match line.kind {
+        DiffLineKind::Added => (
+            pal.diff_added_bg(),
+            "+",
+            pal.success,
+            pal.text,
+            line.text.strip_prefix('+').unwrap_or(&line.text),
+        ),
+        DiffLineKind::Removed => (
+            pal.diff_removed_bg(),
+            "-",
+            pal.danger,
+            pal.text,
+            line.text.strip_prefix('-').unwrap_or(&line.text),
+        ),
+        DiffLineKind::Context => (
+            Color::TRANSPARENT,
+            " ",
+            pal.text_ghost,
+            pal.text_secondary,
+            line.text.strip_prefix(' ').unwrap_or(&line.text),
+        ),
     };
     let old_num = line.old_line.map_or_else(String::new, |n| n.to_string());
     let new_num = line.new_line.map_or_else(String::new, |n| n.to_string());
 
     let code_el = if let Some(lang_name) = lang {
-        let found = highlight(Some(lang_name), &line.text);
+        let found = highlight(Some(lang_name), display_text);
         if found.is_empty() {
-            text(&line.text).font(k.ty.mono).color(text_fallback)
+            text(display_text).font(k.ty.mono).color(text_fallback)
         } else {
             let spans = syntax_theme.spans(&found, 0);
-            rich(&line.text, spans).font(k.ty.mono).color(text_fallback)
+            rich(display_text, spans).font(k.ty.mono).color(text_fallback)
         }
     } else {
-        text(&line.text).font(k.ty.mono).color(text_fallback)
+        text(display_text).font(k.ty.mono).color(text_fallback)
     };
 
     row()

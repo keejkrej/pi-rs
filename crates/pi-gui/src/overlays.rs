@@ -36,17 +36,13 @@ pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, cx: &mut Cx<PiGuiState>)
 
         layers.push(
             el().key("overlay-scrim")
-                .absolute(0.0, 0.0)
-                .w_full()
-                .h_full()
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .fill(k.c.scrim)
                 .a11y_hidden(),
         );
         layers.push(
             el().key("overlay-backdrop")
-                .absolute(0.0, 0.0)
-                .w_full()
-                .h_full()
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .padding(24.0)
                 .center()
                 .child(modal_panel),
@@ -97,6 +93,13 @@ fn palette_commands(s: &PiGuiState) -> Vec<PaletteCommand> {
             category: "Session",
             shortcut: &["⌘", "N"],
             action: PiGuiAction::NewThread,
+        },
+        PaletteCommand {
+            id: "compact-session",
+            title: "Compact Session Context",
+            category: "Session",
+            shortcut: &[],
+            action: PiGuiAction::CompactSession,
         },
         PaletteCommand {
             id: "toggle-theme",
