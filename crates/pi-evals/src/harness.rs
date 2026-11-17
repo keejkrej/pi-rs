@@ -1622,7 +1622,7 @@ async fn run_pi_coding_agent(
         }
 
         let sessions_dir = pi_js::path::join(&[&root, "sessions"]);
-        let mgr = SessionManager::create(&workspace, Some(&sessions_dir))?;
+        let mgr = SessionManager::create(&workspace, Some(&sessions_dir), None)?;
         ctx.set_artifact("runId", Value::String(mgr.get_session_id()));
         session_manager = Some(mgr.clone());
 

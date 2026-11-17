@@ -250,7 +250,7 @@ async fn inspect_context_footer(session: &AgentSession, agent_dir: &str) -> Resu
     };
     let oracle_session = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
         services: services.clone(),
-        session_manager: SessionManager::in_memory(Some(&cwd)),
+        session_manager: SessionManager::in_memory(Some(&cwd), None, None)?,
         model: Some(model.clone()),
         thinking_level: Some(ThinkingLevel::High),
         no_tools: Some(NoToolsMode::All),
