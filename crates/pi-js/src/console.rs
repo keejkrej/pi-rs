@@ -11,12 +11,15 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 struct Buffers {
     stdout: String,
     stderr: String,
 }
+
+static STDOUT_REDIRECTED_TO_STDERR: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static CAPTURES: RefCell<Vec<(u64, Rc<RefCell<Buffers>>)>> = const { RefCell::new(Vec::new()) };
@@ -29,7 +32,7 @@ enum Stream {
     Stderr,
 }
 
-fn write(stream: Stream, s: &str) {
+fn write_unredirected(stream: Stream, s: &str) {
     let captured = CAPTURES.with(|c| {
         let captures = c.borrow();
         match captures.last() {
@@ -59,6 +62,24 @@ fn write(stream: Stream, s: &str) {
             let _ = err.flush();
         }
     }
+}
+
+fn write(stream: Stream, s: &str) {
+    let effective = match stream {
+        Stream::Stdout if STDOUT_REDIRECTED_TO_STDERR.load(Ordering::Acquire) => Stream::Stderr,
+        other => other,
+    };
+    write_unredirected(effective, s);
+}
+
+/// Redirects [`log`], [`info`], [`debug`], and [`stdout_write`] to stderr (`takeOverStdout`).
+pub fn set_stdout_redirect_to_stderr(enabled: bool) {
+    STDOUT_REDIRECTED_TO_STDERR.store(enabled, Ordering::Release);
+}
+
+/// Writes directly to stdout, bypassing [`set_stdout_redirect_to_stderr`] (`writeRawStdout`).
+pub fn raw_stdout_write(s: &str) {
+    write_unredirected(Stream::Stdout, s);
 }
 
 /// `console.log(s)`: `s` plus `\n` on stdout.
@@ -148,10 +169,15 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static REDIRECT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn capture_splits_stdout_and_stderr_and_nests() {
+        let _guard = REDIRECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let outer = testing::capture();
         log("out");
         info("info");
@@ -181,5 +207,24 @@ mod tests {
         assert_eq!(outer.stderr(), "");
         stdout_write("only");
         assert_eq!(outer.stdout(), "only");
+    }
+
+    #[test]
+    fn redirect_routes_normal_stdout_to_stderr_while_raw_stdout_bypasses() {
+        let _guard = REDIRECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct ResetRedirect;
+        impl Drop for ResetRedirect {
+            fn drop(&mut self) {
+                set_stdout_redirect_to_stderr(false);
+            }
+        }
+        let _reset = ResetRedirect;
+        let cap = testing::capture();
+        set_stdout_redirect_to_stderr(true);
+        log("chatter");
+        stdout_write("normal");
+        raw_stdout_write("json-event\n");
+        assert_eq!(cap.stdout(), "json-event\n");
+        assert_eq!(cap.stderr(), "chatter\nnormal");
     }
 }

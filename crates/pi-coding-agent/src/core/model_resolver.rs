@@ -16,7 +16,9 @@ use crate::vendor::minimatch::{MinimatchOptions, minimatch};
 
 static DATE_SUFFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d{8}$").expect("valid regex"));
 
-// WIRE(@ca-cli-w3): share with cli::args::is_valid_thinking_level once cli/args.rs lands
+pub const VALID_THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Parse a string into a [`ModelThinkingLevel`] (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
 pub fn parse_valid_thinking_level(value: &str) -> Option<ModelThinkingLevel> {
     match value {
         "off" => Some(ModelThinkingLevel::Off),

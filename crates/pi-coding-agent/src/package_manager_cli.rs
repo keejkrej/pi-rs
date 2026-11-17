@@ -118,9 +118,6 @@ pub type CreateProjectTrustContextFn =
     Arc<dyn Fn(&str, AppMode, &SettingsManager, bool) -> Arc<dyn ProjectTrustContext> + Send + Sync>;
 
 /// Optional hooks and injected extensions for CLI package & config commands.
-///
-/// // WIRE(@ca-cli-w3): supply `select_config` from `cli::config_selector::select_config`
-/// //   and `create_project_trust_context` from `cli::project_trust::create_project_trust_context`.
 #[derive(Clone, Default)]
 pub struct PackageCommandRuntimeOptions {
     pub extension_factories: Vec<InlineExtension>,
@@ -1220,7 +1217,10 @@ pub async fn handle_config_command(args: &[String], runtime_options: PackageComm
         .filter(|ext| is_builtin_extension(ext))
         .filter_map(|ext| match ext {
             InlineExtension::Named(named) => Some(named.name.clone()),
-            InlineExtension::Factory(_) => None,
+            InlineExtension::Core(crate::core::extensions::types::InlineExtension::Named(named)) => {
+                Some(named.name.clone())
+            }
+            InlineExtension::Factory(_) | InlineExtension::Core(_) => None,
         })
         .collect();
 

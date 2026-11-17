@@ -9,15 +9,32 @@ use pi_ai::{
     AssistantContentBlock, AssistantMessage, Credential, Message, StopReason, TextContent, Usage, UsageCost,
     UserMessage, UserMessageContent,
 };
+use pi_coding_agent::core::agent_session::AgentSession;
 use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::diagnostics::ResourceDiagnostic;
 use pi_coding_agent::core::event_bus::{LocalEventBus, create_event_bus};
+use pi_coding_agent::core::extensions::loader::{create_extension_runtime, load_extension_from_factory};
+use pi_coding_agent::core::extensions::runner::ExtensionRunner;
+use pi_coding_agent::core::extensions::types::{
+    ExtensionApi, ExtensionCommandContext, ExtensionFactory, LoadExtensionsResult as CoreLoadExtensionsResult,
+    RegisteredCommandOptions,
+};
+use pi_coding_agent::core::prompt_templates::PromptTemplate;
+use pi_coding_agent::core::resource_loader::{
+    ContextFile, LoadExtensionsResult as LoaderLoadExtensionsResult, PromptSource, ResourceExtensionPaths,
+    ResourceLoader, ResourceLoaderReloadOptions, Theme as LoaderTheme,
+};
+use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::SettingsManager;
-use pi_coding_agent::core::source_info::{SourceInfo, SourceOrigin, SourceScope};
+use pi_coding_agent::core::skills::Skill;
+use pi_coding_agent::core::source_info::SourceInfo;
 use pi_js::{BoxFuture, Error, Result};
 use serde_json::Value;
 
-use super::model_runtime_test_utils::{ModelRuntime, create_model_registry, get_model_runtime};
+use super::model_runtime_test_utils::{
+    ModelRuntime, create_in_memory_model_registry, create_model_registry, get_model_runtime,
+};
 
 /// API key for authenticated tests (not used in offline unit tests).
 pub fn api_key() -> Option<String> {
@@ -137,12 +154,7 @@ pub struct TestSessionOptions {
     pub settings_overrides: Option<Value>,
 }
 
-// WIRE(@ca-cli-w3): replace local extension/resource-loader test types with
-// `pi_coding_agent::core::extensions::*` and `pi_coding_agent::core::resource_loader::ResourceLoader`
-// once `@ca-cli-w3` merges those modules.
-
-#[derive(Clone)]
-pub struct TestCommandContext;
+pub type TestCommandContext = ExtensionCommandContext;
 
 pub type TestCommandHandler = Arc<dyn Fn(String, TestCommandContext) -> BoxFuture<Result<()>> + Send + Sync>;
 
@@ -163,8 +175,7 @@ pub struct TestRegisteredCommand {
 
 #[derive(Clone)]
 pub struct TestExtensionApi {
-    path: String,
-    state: Arc<Mutex<TestExtensionRuntimeState>>,
+    api: ExtensionApi,
 }
 
 impl TestExtensionApi {
@@ -173,68 +184,51 @@ impl TestExtensionApi {
         F: Fn(String, TestCommandContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let count = st.commands.iter().filter(|c| c.name == name).count();
-        let invocation_name = if count == 0 {
-            // Check if another with same name will arrive or disambiguate retroactively.
-            name.to_owned()
-        } else {
-            format!("{name}:{}", count + 1)
-        };
-        if count == 1
-            && let Some(first) = st.commands.iter_mut().find(|c| c.name == name)
-            && first.invocation_name == name
-        {
-            first.invocation_name = format!("{name}:1");
-        }
-        st.commands.push(TestRegisteredCommand {
-            name: name.to_owned(),
-            invocation_name,
-            description: description.to_owned(),
-            source_info: SourceInfo {
-                path: self.path.clone(),
-                source: "inline".to_owned(),
-                scope: SourceScope::Temporary,
-                origin: SourceOrigin::TopLevel,
-                base_dir: None,
-                changelog_path: None,
+        let _ = self.api.register_command(
+            name,
+            RegisteredCommandOptions {
+                description: Some(description.to_owned()),
+                get_argument_completions: None,
+                handler: Arc::new(move |args, ctx| Box::pin(handler(args, ctx))),
             },
-            handler: Arc::new(move |args, ctx| Box::pin(handler(args, ctx))),
-        });
+        );
     }
-}
-
-#[derive(Default)]
-pub struct TestExtensionRuntimeState {
-    pub commands: Vec<TestRegisteredCommand>,
 }
 
 #[derive(Clone)]
 pub struct TestExtensionRunner {
-    state: Arc<Mutex<TestExtensionRuntimeState>>,
+    pub inner: ExtensionRunner,
 }
 
 impl TestExtensionRunner {
     pub fn get_registered_commands(&self) -> Vec<TestRegisteredCommand> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .commands
-            .clone()
+        self.inner
+            .get_registered_commands()
+            .into_iter()
+            .map(|resolved| TestRegisteredCommand {
+                name: resolved.command.name,
+                invocation_name: resolved.invocation_name,
+                description: resolved.command.description.unwrap_or_default(),
+                source_info: resolved.command.source_info,
+                handler: resolved.command.handler,
+            })
+            .collect()
     }
 
     pub fn get_command(&self, invocation_name: &str) -> Option<TestRegisteredCommand> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .commands
-            .iter()
-            .find(|c| c.invocation_name == invocation_name)
-            .cloned()
+        self.inner
+            .get_command(invocation_name)
+            .map(|resolved| TestRegisteredCommand {
+                name: resolved.command.name,
+                invocation_name: resolved.invocation_name,
+                description: resolved.command.description.unwrap_or_default(),
+                source_info: resolved.command.source_info,
+                handler: resolved.command.handler,
+            })
     }
 
     pub fn create_command_context(&self) -> TestCommandContext {
-        TestCommandContext
+        self.inner.create_command_context()
     }
 }
 
@@ -258,16 +252,21 @@ pub struct LoadExtensionsResult {
     pub extensions: Vec<String>,
     pub errors: Vec<String>,
     pub event_bus: Arc<LocalEventBus>,
+    pub core: CoreLoadExtensionsResult,
     pub runner: TestExtensionRunner,
 }
 
 pub async fn create_test_extensions_result(
     inputs: Vec<TestExtensionInput>,
-    _cwd: Option<&str>,
+    cwd: Option<&str>,
 ) -> Result<LoadExtensionsResult> {
     let event_bus = create_event_bus();
-    let state = Arc::new(Mutex::new(TestExtensionRuntimeState::default()));
+    let bus_dyn: Arc<dyn pi_coding_agent::core::event_bus::EventBus> = event_bus.clone();
+    let runtime = create_extension_runtime();
+    let cwd_str = cwd.unwrap_or(".");
+    let mut loaded_extensions = Vec::new();
     let mut extensions = Vec::new();
+    let mut errors = Vec::new();
 
     for (index, input) in inputs.into_iter().enumerate() {
         let (factory, extension_path) = match input {
@@ -283,19 +282,44 @@ pub async fn create_test_extensions_result(
                 (n.factory, p)
             }
         };
-        let api = TestExtensionApi {
-            path: extension_path.clone(),
-            state: state.clone(),
-        };
-        factory(api).await?;
-        extensions.push(extension_path);
+        let ext_factory: ExtensionFactory = Arc::new(move |api: ExtensionApi| {
+            let f = Arc::clone(&factory);
+            Box::pin(async move { f(TestExtensionApi { api }).await })
+        });
+        match load_extension_from_factory(
+            ext_factory,
+            cwd_str,
+            Arc::clone(&bus_dyn),
+            runtime.clone(),
+            Some(&extension_path),
+        )
+        .await
+        {
+            Ok(loaded) => {
+                extensions.push(loaded.path.clone());
+                loaded_extensions.push(loaded);
+            }
+            Err(err) => errors.push(err.to_string()),
+        }
     }
+
+    let core = CoreLoadExtensionsResult {
+        extensions: loaded_extensions.clone(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        runtime: runtime.clone(),
+    };
+    let auth_storage = Arc::new(AuthStorage::in_memory(None));
+    let model_registry = create_in_memory_model_registry(auth_storage).await?;
+    let sm = SessionManager::in_memory(Some(cwd_str), None, None)?;
+    let runner = ExtensionRunner::new(loaded_extensions, runtime, cwd_str, sm, model_registry);
 
     Ok(LoadExtensionsResult {
         extensions,
-        errors: Vec::new(),
+        errors,
         event_bus,
-        runner: TestExtensionRunner { state },
+        core,
+        runner: TestExtensionRunner { inner: runner },
     })
 }
 
@@ -315,22 +339,79 @@ impl TestResourceLoader {
     }
 }
 
+impl ResourceLoader for TestResourceLoader {
+    fn get_extensions(&self) -> LoaderLoadExtensionsResult {
+        LoaderLoadExtensionsResult::default()
+    }
+
+    fn get_core_extensions(&self) -> CoreLoadExtensionsResult {
+        self.extensions_result.core.clone()
+    }
+
+    fn get_skills(&self) -> (Vec<Skill>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_prompts(&self) -> (Vec<PromptTemplate>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_themes(&self) -> (Vec<LoaderTheme>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_agents_files(&self) -> Vec<ContextFile> {
+        Vec::new()
+    }
+
+    fn get_system_prompt(&self) -> Option<String> {
+        None
+    }
+
+    fn get_system_prompt_source(&self) -> Option<PromptSource> {
+        None
+    }
+
+    fn get_append_system_prompt(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn get_append_system_prompt_sources(&self) -> Vec<PromptSource> {
+        Vec::new()
+    }
+
+    fn extend_resources(&self, _paths: ResourceExtensionPaths) {}
+
+    fn reload(&self, _options: Option<ResourceLoaderReloadOptions>) -> BoxFuture<pi_coding_agent::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 pub fn create_test_resource_loader(options: Option<CreateTestResourceLoaderOptions>) -> TestResourceLoader {
-    let extensions_result = options
-        .and_then(|o| o.extensions_result)
-        .unwrap_or_else(|| LoadExtensionsResult {
+    let extensions_result = options.and_then(|o| o.extensions_result).unwrap_or_else(|| {
+        let runtime = create_extension_runtime();
+        let core = CoreLoadExtensionsResult {
+            extensions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            runtime: runtime.clone(),
+        };
+        let model_registry = pi_coding_agent::core::model_registry::ModelRegistry::in_memory();
+        let sm = SessionManager::in_memory(None, None, None).unwrap_or_else(|e| panic!("in-memory session: {e}"));
+        let runner = ExtensionRunner::new(Vec::new(), runtime, ".", sm, model_registry);
+        LoadExtensionsResult {
             extensions: Vec::new(),
             errors: Vec::new(),
             event_bus: create_event_bus(),
-            runner: TestExtensionRunner {
-                state: Arc::new(Mutex::new(TestExtensionRuntimeState::default())),
-            },
-        });
+            core,
+            runner: TestExtensionRunner { inner: runner },
+        }
+    });
     TestResourceLoader { extensions_result }
 }
 
-// WIRE(@ca-cli-w3): swap `TestSessionContext` / `create_test_session` to real `AgentSession` once `@ca-cli-w3` lands.
 pub struct TestSessionContext {
+    pub session: AgentSession,
     pub session_manager: SessionManager,
     pub settings_manager: SettingsManager,
     pub model_runtime: ModelRuntime,
@@ -340,6 +421,7 @@ pub struct TestSessionContext {
 
 impl TestSessionContext {
     pub fn cleanup(&self) {
+        self.session.dispose();
         if pi_js::fs::exists(&self.temp_dir) {
             let _ = pi_js::fs::rm(&self.temp_dir, true, true);
         }
@@ -361,8 +443,19 @@ pub async fn create_test_session(options: Option<TestSessionOptions>) -> Result<
     let model_registry = create_model_registry(auth_storage, Some(&models_path)).await?;
     let model_runtime = get_model_runtime(&model_registry);
     let resource_loader = create_test_resource_loader(None);
+    let created = create_agent_session(Some(CreateAgentSessionOptions {
+        cwd: Some(temp_dir.clone()),
+        agent_dir: Some(temp_dir.clone()),
+        session_manager: Some(session_manager.clone()),
+        settings_manager: Some(settings_manager.clone()),
+        model_runtime: Some(model_runtime.clone()),
+        resource_loader: Some(Arc::new(resource_loader.clone())),
+        ..Default::default()
+    }))
+    .await?;
 
     Ok(TestSessionContext {
+        session: created.session,
         session_manager,
         settings_manager,
         model_runtime,

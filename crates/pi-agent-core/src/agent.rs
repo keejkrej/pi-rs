@@ -348,6 +348,14 @@ impl Agent {
         self.lock().after_tool_call = value;
     }
 
+    pub fn transform_context(&self) -> Option<TransformContextFn> {
+        self.lock().transform_context.clone()
+    }
+
+    pub fn set_transform_context(&self, value: Option<TransformContextFn>) {
+        self.lock().transform_context = value;
+    }
+
     pub fn finish_turn(&self) -> Option<FinishTurnFn> {
         self.lock().finish_turn.clone()
     }

@@ -1,5 +1,6 @@
 .git
 **/.eval
+target
 **/node_modules
 **/dist
 **/coverage

@@ -1,16 +1,24 @@
 //! Port of `packages/coding-agent/test/export-jsonl-share.test.ts`.
-// WIRE(@ca-cli-w3): full `createAgentSession` / `session.exportToJsonl` orchestration requires `core::sdk` / `core::agent_session`.
 // WIRE(@tui-w3): `exportSessionForShare` UI helper resides in `modes::interactive::session_share`.
 
-use pi_agent_core::AgentMessage;
+use std::sync::Arc;
+
+use pi_agent_core::{AgentMessage, AgentToolResult};
+use pi_ai::compat::get_model;
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, JsonObject, Message, StopReason, ToolResultMessage, Usage,
     UserContentBlock, UserMessage, UserMessageContent, faux_text, faux_tool_call,
 };
+use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::extensions::types::ToolDefinition;
+use pi_coding_agent::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
+use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_export::export_session_to_jsonl;
 use pi_coding_agent::core::session_manager::{
     SessionEntry, SessionManager, build_session_context, parse_session_entries,
 };
+use pi_coding_agent::core::settings_manager::SettingsManager;
+use pi_js::vendor::typebox::t;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -159,4 +167,80 @@ fn adds_presentation_data_without_changing_conversation_ids_or_links() {
     let ctx = build_session_context(&parsed, None, None);
     let roles: Vec<Option<&str>> = ctx.messages.iter().map(|m| m.role()).collect();
     assert_eq!(roles, vec![Some("user"), Some("assistant"), Some("toolResult")]);
+}
+
+#[tokio::test]
+async fn agent_session_exports_to_jsonl_with_create_agent_session() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let agent_dir = tmp.path().join("agent").to_string_lossy().into_owned();
+    let sm = SessionManager::in_memory(Some(&cwd), None, None).unwrap();
+    let settings_manager = SettingsManager::in_memory(None, None);
+    let model = get_model("anthropic", "claude-sonnet-4-5");
+    let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
+        credentials: Some(Arc::new(AuthStorage::in_memory(None))),
+        allow_model_network: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let created = create_agent_session(Some(CreateAgentSessionOptions {
+        cwd: Some(cwd.clone()),
+        agent_dir: Some(agent_dir),
+        model,
+        settings_manager: Some(settings_manager),
+        session_manager: Some(sm.clone()),
+        model_runtime: Some(model_runtime),
+        tools: Some(vec![]),
+        custom_tools: Some(vec![ToolDefinition {
+            name: "share_tool".to_owned(),
+            label: "Share Tool".to_owned(),
+            description: "Render a value for sharing".to_owned(),
+            prompt_snippet: None,
+            prompt_guidelines: None,
+            parameters: t::object([("value", t::string().with("description", "Value to render"))]),
+            constrained_sampling: None,
+            render_shell: None,
+            prepare_arguments: None,
+            output_schema: None,
+            exposure: None,
+            namespace: None,
+            annotations: None,
+            default_active: None,
+            prepare_loadout: None,
+            execution_mode: None,
+            execute: Arc::new(|_id, _params, _sig, _upd, _ctx| {
+                Box::pin(async move {
+                    Ok(AgentToolResult {
+                        content: vec![UserContentBlock::Text(faux_text("done"))],
+                        details: Some(json!({})),
+                        ..Default::default()
+                    })
+                })
+            }),
+            render_call: None,
+            render_result: None,
+        }]),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    sm.append_message(AgentMessage::Message(Message::User(UserMessage {
+        content: UserMessageContent::Text("hello".to_owned()),
+        timestamp: 1,
+    })))
+    .unwrap();
+
+    let exported = tmp.path().join("session-export.jsonl");
+    let out_path = created
+        .session
+        .export_to_jsonl(Some(exported.to_str().unwrap()))
+        .unwrap();
+    assert_eq!(out_path, exported.to_string_lossy());
+    let content = std::fs::read_to_string(&exported).unwrap();
+    assert!(content.contains("\"type\":\"session\""));
+    assert!(content.contains("\"hello\""));
+    created.session.dispose();
 }

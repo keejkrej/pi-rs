@@ -1,8 +1,10 @@
 //! Port of packages/coding-agent/test/virtual-models.test.ts
 //!
 //! Covers `get_branch_selection`, `find_latest_response`, `get_virtual_model_state`,
-//! and `ModelRuntime` virtual-model routing & stream behavior.
-//! // WIRE(@core-session-w3): add `create_agent_session` session-restore tests once `core::sdk` and `core::agent_session` land.
+//! `ModelRuntime` virtual-model routing & stream behavior, and `create_agent_session` restore.
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::sync::{Arc, Mutex};
 
@@ -688,4 +690,72 @@ async fn fails_unrouted_stream_calls_on_virtual_models() {
             .unwrap_or("")
             .contains("must be routed before streaming")
     );
+}
+
+#[tokio::test]
+async fn create_agent_session_restores_persisted_virtual_model_and_thinking_level() {
+    use pi_coding_agent::core::extensions::types::{ExtensionApi, ExtensionVirtualModel, InlineExtension};
+    use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
+    use pi_coding_agent::core::settings_manager::SettingsManager;
+    use support::suite::harness::HarnessOptions;
+    use support::suite::harness::create_harness;
+
+    let harness = create_harness(HarnessOptions {
+        extension_factories: Some(vec![InlineExtension::Factory(Arc::new(
+            |pi: ExtensionApi| async move {
+                pi.register_virtual_model(ExtensionVirtualModel {
+                    provider: "router".to_owned(),
+                    id: "auto".to_owned(),
+                    name: "Auto".to_owned(),
+                    thinking_levels: Some(vec![ModelThinkingLevel::Low, ModelThinkingLevel::High]),
+                    route: Arc::new(|req, ctx| {
+                        Box::pin(async move {
+                            let m = ctx
+                                .model_registry()?
+                                .get_available()
+                                .into_iter()
+                                .find(|m| m.provider.starts_with("faux"))
+                                .ok_or_else(|| pi_js::Error::msg("missing target faux model"))?;
+                            Ok(ModelRoute {
+                                model: m,
+                                thinking_level: req.thinking_level,
+                                state: None,
+                            })
+                        })
+                    }),
+                })?;
+                Ok(())
+            },
+        ))]),
+        ..Default::default()
+    })
+    .await;
+
+    let sm = harness.session_manager.clone();
+    let vmodel = harness.session.model_runtime().get_model("router", "auto").unwrap();
+    sm.append_model_change(&vmodel.provider, &vmodel.id).unwrap();
+    sm.append_thinking_level_change("high").unwrap();
+    sm.append_message(AgentMessage::Message(Message::User(UserMessage {
+        content: UserMessageContent::Text("persisted".to_owned()),
+        timestamp: 1,
+    })))
+    .unwrap();
+
+    let restored = create_agent_session(Some(CreateAgentSessionOptions {
+        cwd: Some(harness.temp_dir.clone()),
+        agent_dir: Some(harness.temp_dir.clone()),
+        session_manager: Some(sm),
+        settings_manager: Some(SettingsManager::in_memory(None, None)),
+        model_runtime: Some(harness.session.model_runtime().clone()),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        restored.session.model().map(|m| (m.provider, m.id)),
+        Some(("router".to_owned(), "auto".to_owned()))
+    );
+    assert_eq!(restored.session.thinking_level(), ModelThinkingLevel::High);
+    restored.session.dispose();
+    harness.cleanup();
 }

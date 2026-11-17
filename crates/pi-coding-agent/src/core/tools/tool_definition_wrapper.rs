@@ -261,6 +261,9 @@ impl crate::core::extensions::types::ExtensionContextBackend for NoopStandaloneB
     fn has_ui(&self) -> bool {
         false
     }
+    fn has_session_environment(&self) -> bool {
+        false
+    }
     fn cwd(&self) -> String {
         String::new()
     }

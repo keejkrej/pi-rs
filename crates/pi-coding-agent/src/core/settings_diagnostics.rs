@@ -2,7 +2,6 @@
 
 use indexmap::IndexSet;
 
-// WIRE(@ca-cli-w3): Re-export AgentSessionRuntimeDiagnostic from crate::core::agent_session_services once landed.
 pub use crate::core::diagnostics::{AgentSessionRuntimeDiagnostic, AgentSessionRuntimeDiagnosticLevel};
 use crate::core::settings_manager::SettingsManager;
 

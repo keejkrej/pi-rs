@@ -465,6 +465,13 @@ pub struct BuiltinExtension {
 pub enum InlineExtension {
     Factory(ExtensionFactory),
     Named(BuiltinExtension),
+    Core(crate::core::extensions::types::InlineExtension),
+}
+
+impl From<crate::core::extensions::types::InlineExtension> for InlineExtension {
+    fn from(ext: crate::core::extensions::types::InlineExtension) -> Self {
+        Self::Core(ext)
+    }
 }
 
 impl InlineExtension {
@@ -492,6 +499,10 @@ impl InlineExtension {
 /// Built-in extensions supply the code of `builtin:<name>` extension paths.
 pub fn is_builtin_extension(input: &InlineExtension) -> bool {
     matches!(input, InlineExtension::Named(ext) if ext.builtin)
+        || matches!(
+            input,
+            InlineExtension::Core(crate::core::extensions::types::InlineExtension::Named(ext)) if ext.builtin
+        )
 }
 
 /// Extension loading seam connecting `DefaultResourceLoader` to the extension runtime.
@@ -513,6 +524,48 @@ pub trait ExtensionLoaderHost: Send + Sync {
         runtime: ExtensionRuntime,
         extension_path: String,
     ) -> BoxFuture<Result<Extension>>;
+    fn load_core_extension_from_factory(
+        &self,
+        _factory: crate::core::extensions::types::ExtensionFactory,
+        _cwd: String,
+        _event_bus: Arc<dyn EventBus>,
+        extension_path: String,
+        hidden: bool,
+        replaceable: bool,
+    ) -> BoxFuture<Result<Extension>> {
+        let source = get_synthetic_path_source(&extension_path).unwrap_or_else(|| "local".to_owned());
+        let base_dir = if is_synthetic_path(&extension_path) {
+            None
+        } else {
+            Some(dirname(&extension_path))
+        };
+        let source_info = create_synthetic_source_info(
+            &extension_path,
+            SyntheticSourceOptions {
+                source,
+                scope: Some(SourceScope::Temporary),
+                origin: Some(SourceOrigin::TopLevel),
+                base_dir,
+                changelog_path: None,
+            },
+        );
+        Box::pin(async move {
+            Ok(Extension {
+                path: extension_path.clone(),
+                resolved_path: extension_path,
+                hidden,
+                replaceable,
+                source_info,
+                tools: IndexMap::new(),
+                commands: IndexMap::new(),
+                flags: IndexMap::new(),
+            })
+        })
+    }
+    fn loaded_extensions_result(&self) -> Option<crate::core::extensions::types::LoadExtensionsResult> {
+        None
+    }
+    fn sync_core_extensions(&self, _final_result: &LoadExtensionsResult) {}
 }
 
 /// Live extension loader host backed by [`crate::core::extensions::loader`].
@@ -520,6 +573,8 @@ pub trait ExtensionLoaderHost: Send + Sync {
 pub struct CoreExtensionLoaderHost {
     runtime: Arc<Mutex<Option<crate::core::extensions::types::ExtensionRuntime>>>,
     loaded: Arc<Mutex<Vec<crate::core::extensions::types::LoadedExtension>>>,
+    errors: Arc<Mutex<Vec<crate::core::extensions::types::LoadExtensionErrorEntry>>>,
+    warnings: Arc<Mutex<Vec<crate::core::extensions::types::LoadExtensionWarningEntry>>>,
 }
 
 impl CoreExtensionLoaderHost {
@@ -530,10 +585,12 @@ impl CoreExtensionLoaderHost {
     pub fn loaded_extensions_result(&self) -> Option<crate::core::extensions::types::LoadExtensionsResult> {
         let runtime = self.runtime.lock().unwrap_or_else(PoisonError::into_inner).clone()?;
         let extensions = self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let errors = self.errors.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let warnings = self.warnings.lock().unwrap_or_else(PoisonError::into_inner).clone();
         Some(crate::core::extensions::types::LoadExtensionsResult {
             extensions,
-            errors: Vec::new(),
-            warnings: Vec::new(),
+            errors,
+            warnings,
             runtime,
         })
     }
@@ -551,12 +608,16 @@ impl ExtensionLoaderHost for CoreExtensionLoaderHost {
         crate::core::extensions::loader::clear_extension_cache();
         *self.runtime.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.errors.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.warnings.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
     fn create_runtime(&self) -> ExtensionRuntime {
         let rt = crate::core::extensions::loader::create_extension_runtime();
         *self.runtime.lock().unwrap_or_else(PoisonError::into_inner) = Some(rt);
         self.loaded.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.errors.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.warnings.lock().unwrap_or_else(PoisonError::into_inner).clear();
         ExtensionRuntime {
             flag_values: IndexMap::new(),
             active: true,
@@ -724,6 +785,79 @@ impl ExtensionLoaderHost for CoreExtensionLoaderHost {
                 .push(loaded.clone());
             Ok(Extension::from(&loaded))
         })
+    }
+
+    fn load_core_extension_from_factory(
+        &self,
+        factory: crate::core::extensions::types::ExtensionFactory,
+        cwd: String,
+        event_bus: Arc<dyn EventBus>,
+        extension_path: String,
+        hidden: bool,
+        replaceable: bool,
+    ) -> BoxFuture<Result<Extension>> {
+        let real_rt = self.ensure_runtime();
+        let host_loaded_store = Arc::clone(&self.loaded);
+        Box::pin(async move {
+            let mut loaded = crate::core::extensions::loader::load_extension_from_factory(
+                factory,
+                &cwd,
+                event_bus,
+                real_rt,
+                Some(&extension_path),
+            )
+            .await?;
+            loaded.hidden = hidden;
+            loaded.replaceable = replaceable;
+            host_loaded_store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(loaded.clone());
+            Ok(Extension::from(&loaded))
+        })
+    }
+
+    fn loaded_extensions_result(&self) -> Option<crate::core::extensions::types::LoadExtensionsResult> {
+        CoreExtensionLoaderHost::loaded_extensions_result(self)
+    }
+
+    fn sync_core_extensions(&self, final_result: &LoadExtensionsResult) {
+        let mut ext_by_resolved: IndexMap<String, &Extension> = IndexMap::new();
+        for ext in &final_result.extensions {
+            ext_by_resolved.insert(ext.resolved_path.clone(), ext);
+        }
+        {
+            let mut loaded_guard = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut seen_resolved = IndexSet::new();
+            let mut kept = Vec::new();
+            for mut item in std::mem::take(&mut *loaded_guard) {
+                if let Some(ext) = ext_by_resolved.get(&item.resolved_path)
+                    && seen_resolved.insert(item.resolved_path.clone())
+                {
+                    item.source_info = ext.source_info.clone();
+                    item.hidden = ext.hidden;
+                    item.replaceable = ext.replaceable;
+                    kept.push(item);
+                }
+            }
+            *loaded_guard = kept;
+        }
+        *self.errors.lock().unwrap_or_else(PoisonError::into_inner) = final_result
+            .errors
+            .iter()
+            .map(|e| crate::core::extensions::types::LoadExtensionErrorEntry {
+                path: e.path.clone(),
+                error: e.error.clone(),
+            })
+            .collect();
+        *self.warnings.lock().unwrap_or_else(PoisonError::into_inner) = final_result
+            .warnings
+            .iter()
+            .map(|w| crate::core::extensions::types::LoadExtensionWarningEntry {
+                path: w.path.clone(),
+                warning: w.warning.clone(),
+            })
+            .collect();
     }
 }
 
@@ -1039,6 +1173,14 @@ fn omit_replaced_extensions(extensions: Vec<Extension>, warnings: &mut Vec<Exten
 
 pub trait ResourceLoader: Send + Sync {
     fn get_extensions(&self) -> LoadExtensionsResult;
+    fn get_core_extensions(&self) -> crate::core::extensions::types::LoadExtensionsResult {
+        crate::core::extensions::types::LoadExtensionsResult {
+            extensions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            runtime: crate::core::extensions::loader::create_extension_runtime(),
+        }
+    }
     fn get_skills(&self) -> (Vec<Skill>, Vec<ResourceDiagnostic>);
     fn get_prompts(&self) -> (Vec<PromptTemplate>, Vec<ResourceDiagnostic>);
     fn get_themes(&self) -> (Vec<Theme>, Vec<ResourceDiagnostic>);
@@ -1261,6 +1403,7 @@ struct ResourceLoaderInner {
     additional_theme_paths: Vec<String>,
     extension_factories: Vec<InlineExtension>,
     builtin_extensions: IndexMap<String, BuiltinExtension>,
+    builtin_core_extensions: IndexMap<String, crate::core::extensions::types::NamedInlineExtension>,
     no_extensions: bool,
     no_skills: bool,
     no_prompt_templates: bool,
@@ -1294,10 +1437,17 @@ impl DefaultResourceLoader {
 
         let mut extension_factories = Vec::new();
         let mut builtin_extensions = IndexMap::new();
+        let mut builtin_core_extensions = IndexMap::new();
+        let mut builtin_names = Vec::new();
         for item in options.extension_factories {
             match item {
                 InlineExtension::Named(ext) if ext.builtin => {
+                    builtin_names.push(ext.name.clone());
                     builtin_extensions.insert(ext.name.clone(), ext);
+                }
+                InlineExtension::Core(crate::core::extensions::types::InlineExtension::Named(ext)) if ext.builtin => {
+                    builtin_names.push(ext.name.clone());
+                    builtin_core_extensions.insert(ext.name.clone(), ext);
                 }
                 other => extension_factories.push(other),
             }
@@ -1307,7 +1457,7 @@ impl DefaultResourceLoader {
             cwd: cwd.clone(),
             agent_dir: agent_dir.clone(),
             settings_manager: settings_manager.clone(),
-            builtin_extensions: builtin_extensions.keys().cloned().collect(),
+            builtin_extensions: builtin_names,
         });
 
         let extension_host: Arc<dyn ExtensionLoaderHost> = options
@@ -1359,6 +1509,7 @@ impl DefaultResourceLoader {
                 additional_theme_paths: options.additional_theme_paths,
                 extension_factories,
                 builtin_extensions,
+                builtin_core_extensions,
                 no_extensions: options.no_extensions,
                 no_skills: options.no_skills,
                 no_prompt_templates: options.no_prompt_templates,
@@ -1800,7 +1951,8 @@ impl DefaultResourceLoader {
         guard.extension_skill_source_infos.clear();
         guard.extension_prompt_source_infos.clear();
         guard.extension_theme_source_infos.clear();
-        guard.extensions_result = final_extensions_result;
+        guard.extensions_result = final_extensions_result.clone();
+        self.inner.extension_host.sync_core_extensions(&final_extensions_result);
         guard.last_skill_paths = skill_paths;
         guard.skills = skills_res.skills;
         guard.skill_diagnostics = skills_res.diagnostics;
@@ -1921,6 +2073,34 @@ impl DefaultResourceLoader {
 
         for p in paths.iter().filter(|p| p.starts_with(BUILTIN_PATH_PREFIX)) {
             let builtin_name = &p[BUILTIN_PATH_PREFIX.len()..];
+            if let Some(builtin) = self.inner.builtin_core_extensions.get(builtin_name) {
+                match self
+                    .inner
+                    .extension_host
+                    .load_core_extension_from_factory(
+                        builtin.factory.clone(),
+                        self.inner.cwd.clone(),
+                        self.inner.event_bus.clone(),
+                        p.clone(),
+                        true,
+                        builtin.replaceable,
+                    )
+                    .await
+                {
+                    Ok(mut extension) => {
+                        extension.hidden = true;
+                        extension.replaceable = builtin.replaceable;
+                        result.extensions.push(extension);
+                    }
+                    Err(error) => {
+                        result.errors.push(ExtensionLoadError {
+                            path: p.clone(),
+                            error: error.to_string(),
+                        });
+                    }
+                }
+                continue;
+            }
             let Some(builtin) = self.inner.builtin_extensions.get(builtin_name) else {
                 result.errors.push(ExtensionLoadError {
                     path: p.clone(),
@@ -2491,6 +2671,48 @@ impl DefaultResourceLoader {
         let mut errors = Vec::new();
 
         for (index, input) in self.inner.extension_factories.iter().enumerate() {
+            match input {
+                InlineExtension::Core(core_ext) => {
+                    let (extension_path, factory, hidden, replaceable) = match core_ext {
+                        crate::core::extensions::types::InlineExtension::Factory(f) => {
+                            (format!("<inline:{}>", index + 1), f.clone(), false, false)
+                        }
+                        crate::core::extensions::types::InlineExtension::Named(named) => (
+                            format!("<inline:{}>", named.name),
+                            named.factory.clone(),
+                            named.hidden,
+                            named.replaceable,
+                        ),
+                    };
+                    match self
+                        .inner
+                        .extension_host
+                        .load_core_extension_from_factory(
+                            factory,
+                            self.inner.cwd.clone(),
+                            self.inner.event_bus.clone(),
+                            extension_path.clone(),
+                            hidden,
+                            replaceable,
+                        )
+                        .await
+                    {
+                        Ok(mut extension) => {
+                            extension.hidden = hidden;
+                            extension.replaceable = replaceable;
+                            extensions.push(extension);
+                        }
+                        Err(error) => {
+                            errors.push(ExtensionLoadError {
+                                path: extension_path,
+                                error: error.to_string(),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                InlineExtension::Factory(_) | InlineExtension::Named(_) => {}
+            }
             let (extension_path, factory, hidden, replaceable) = match input {
                 InlineExtension::Factory(f) => (format!("<inline:{}>", index + 1), f.clone(), false, false),
                 InlineExtension::Named(named) => (
@@ -2499,6 +2721,7 @@ impl DefaultResourceLoader {
                     named.hidden,
                     named.replaceable,
                 ),
+                InlineExtension::Core(_) => continue,
             };
 
             match self
@@ -2667,6 +2890,17 @@ impl DefaultResourceLoader {
 impl ResourceLoader for DefaultResourceLoader {
     fn get_extensions(&self) -> LoadExtensionsResult {
         DefaultResourceLoader::get_extensions(self)
+    }
+
+    fn get_core_extensions(&self) -> crate::core::extensions::types::LoadExtensionsResult {
+        self.inner.extension_host.loaded_extensions_result().unwrap_or_else(|| {
+            crate::core::extensions::types::LoadExtensionsResult {
+                extensions: Vec::new(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+                runtime: crate::core::extensions::loader::create_extension_runtime(),
+            }
+        })
     }
 
     fn get_skills(&self) -> (Vec<Skill>, Vec<ResourceDiagnostic>) {

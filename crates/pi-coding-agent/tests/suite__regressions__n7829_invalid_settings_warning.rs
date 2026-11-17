@@ -49,7 +49,7 @@ async fn renders_startup_diagnostics_inside_the_transcript() {
         render_container(&chat_container).contains("Warning: Invalid settings file /tmp/settings.json: malformed JSON")
     );
 
-    // WIRE(@tui-w3, @ca-cli-w3): once `modes::interactive::theme::theme::init_theme` and
+    // WIRE(@tui-w3): once `modes::interactive::theme::theme::init_theme` and
     // `modes::interactive::interactive_mode::InteractiveMode::{show_warning, run}` land, run
     // InteractiveMode with `startupDiagnostics` and assert rendered chat container output directly.
     harness.cleanup();

@@ -1,15 +1,22 @@
 //! Port of `packages/coding-agent/test/suite/regressions/7048-compaction-truncated-summary.test.ts`.
-// WIRE(@ca-cli-w3): end-to-end `AgentSession::compact()` entry non-persistence belongs in session integration tests once `core::agent_session` lands.
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::sync::Arc;
 
 use pi_agent_core::{AgentMessage, StreamFn};
+use pi_ai::providers::faux::{
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message,
+};
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Message, Model,
     ModelCost, ModelInput, StopReason, Usage, UserMessage, UserMessageContent, faux_text,
 };
 use pi_coding_agent::core::compaction::{CompactOptions, CompactionSettings, compact, prepare_compaction};
 use pi_coding_agent::core::session_manager::{SessionEntry, SessionManager};
+use pi_coding_agent::core::settings_manager::{CompactionSettings as ManagerCompactionSettings, Settings};
+use support::suite::harness::{HarnessOptions, create_harness};
 
 fn test_model() -> Model {
     Model {
@@ -133,4 +140,46 @@ async fn does_not_persist_a_length_limited_summary() {
             .count(),
         0
     );
+}
+
+#[tokio::test]
+async fn agent_session_compact_does_not_persist_a_length_limited_summary() {
+    let harness = create_harness(HarnessOptions {
+        settings: Some(Settings {
+            compaction: Some(ManagerCompactionSettings {
+                keep_recent_tokens: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    harness.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("assistant response to compact".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("partial summar".to_owned()),
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::Length),
+                ..Default::default()
+            }),
+        )),
+    ]);
+
+    harness.session.prompt("message to compact", None).await.unwrap();
+    let err = harness.session.compact(None).await.unwrap_err();
+    assert!(err.to_string().contains("generation hit the token cap"), "{err}");
+    assert_eq!(
+        harness
+            .session_manager
+            .get_entries()
+            .into_iter()
+            .filter(|e| matches!(e, SessionEntry::Compaction(_)))
+            .count(),
+        0
+    );
+    harness.cleanup();
 }

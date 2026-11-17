@@ -167,6 +167,27 @@ fn check_classifier_context(context: Option<&Value>) -> Result<Value> {
             describe_value(obj.get("state"))
         )));
     }
+    if let Some(images) = obj.get("images") {
+        let Some(arr) = images.as_array() else {
+            return Err(fail(format!(
+                "context.images must be an array, got {}",
+                describe_value(Some(images))
+            )));
+        };
+        for (index, image) in arr.iter().enumerate() {
+            let valid = image.as_object().is_some_and(|img| {
+                img.get("type").and_then(Value::as_str) == Some("image")
+                    && img.get("data").is_some_and(Value::is_string)
+                    && img.get("mimeType").is_some_and(Value::is_string)
+            });
+            if !valid {
+                return Err(fail(format!(
+                    "context.images[{index}] must be an image block, got {}",
+                    describe_value(Some(image))
+                )));
+            }
+        }
+    }
     let Some(questions) = obj.get("questions").and_then(Value::as_object) else {
         return Err(fail(format!(
             "context.questions must map question IDs to questions, got {}",
@@ -658,6 +679,23 @@ impl CodemodeModelRuntime for RegistryCodemodeModelRuntime {
 
     async fn classify(&self, model: Value, context: Value, signal: Option<AbortSignal>) -> Result<Value> {
         let parsed_model: ClassifierModel = pi_js::json::parse_as(&pi_js::json::stringify(&model))?;
+        if context
+            .get("images")
+            .and_then(Value::as_array)
+            .is_some_and(|images| !images.is_empty())
+            && !parsed_model.input.contains(&pi_ai::types::ModelInput::Image)
+        {
+            let aborted = signal.as_ref().is_some_and(AbortSignal::aborted);
+            let res = pi_ai::utils::model_operations::classifier_error_result(
+                &parsed_model,
+                &Error::msg(format!(
+                    "Model {}/{} does not accept image input",
+                    parsed_model.provider, parsed_model.id
+                )),
+                aborted,
+            );
+            return pi_js::json::parse(&pi_js::json::stringify(&res));
+        }
         let parsed_ctx: ClassifierContext = pi_js::json::parse_as(&pi_js::json::stringify(&context))?;
         let mut base = ClassifierOptions::default();
         base.base.signal = signal;
