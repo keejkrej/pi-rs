@@ -39,12 +39,12 @@ pi-server = { path = "crates/pi-server" }
 pi-durable = { path = "crates/pi-durable" }
 pi-coding-agent = { path = "crates/pi-coding-agent" }
 # rune GUI framework
-rune = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune", features = ["keys-overlay"] }
-rune-kit = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-kit", features = ["markdown", "mermaid"] }
-rune-motion = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-motion" }
-rune-highlights = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-highlights" }
-rune-mermaid = { path = "/Volumes/SSD/mac-offload/workspace/rune/crates/rune-mermaid" }
-rune-theme-opencode = { path = "/Volumes/SSD/mac-offload/workspace/rune/themes/opencode" }
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75", features = ["keys-overlay"] }
+rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75", features = ["markdown", "mermaid"] }
+rune-motion = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+rune-highlights = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+rune-mermaid = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
 # async
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec", "io", "rt"] }
@@ -124,9 +124,11 @@ x11rb = "0.14.0"
 pretty_assertions = "1.4.1"
 serial_test = "4.0.1"
 
+# The crates Rune patches in its own workspace (Cargo does not inherit a dependency's [patch]);
+# keep this rev in sync with the rune pin above.
 [patch.crates-io]
-wgpu-hal = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/wgpu-hal" }
-winit = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/winit" }
-parley_engine = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/parley_engine" }
-accesskit_windows = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/accesskit_windows" }
-accesskit_macos = { path = "/Volumes/SSD/mac-offload/workspace/rune/vendor/accesskit_macos" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+winit = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "bc05f817ed19488a10a6f1a928cc0521c1c70c75" }
