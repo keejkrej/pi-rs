@@ -150,16 +150,53 @@ pub fn spawn_process_sync(command: &str, args: &[&str], options: SpawnProcessOpt
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChildProcessExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl ChildProcessExit {
+    /// Exit code, mapping a signal termination on Unix to `128 + sig`.
+    #[must_use]
+    pub fn into_shell_code(self) -> Option<i32> {
+        self.code.or_else(|| self.signal.map(|sig| 128 + sig))
+    }
+}
+
+fn exit_status_to_child_exit(status: &std::process::ExitStatus) -> ChildProcessExit {
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(status);
+    #[cfg(not(unix))]
+    let signal = None;
+    ChildProcessExit {
+        code: status.code(),
+        signal,
+    }
+}
+
 /// Wait for a child process to terminate without hanging on inherited stdio handles.
 ///
 /// A short-lived child can `exit` while a detached descendant keeps its stdout/stderr
 /// pipe open. After `exit`, waits for pipes to fall idle with a re-armed 100ms grace
 /// timer on every received chunk.
 pub async fn wait_for_child_process(
-    mut child: Child,
+    child: Child,
     on_stdout: Option<Box<dyn FnMut(&[u8]) + Send>>,
     on_stderr: Option<Box<dyn FnMut(&[u8]) + Send>>,
 ) -> Result<Option<i32>> {
+    wait_for_child_process_status(child, on_stdout, on_stderr)
+        .await
+        .map(|status| status.code)
+}
+
+/// Wait for a child process to terminate without hanging on inherited stdio handles,
+/// returning both exit code and (on Unix) terminating signal.
+pub async fn wait_for_child_process_status(
+    mut child: Child,
+    on_stdout: Option<Box<dyn FnMut(&[u8]) + Send>>,
+    on_stderr: Option<Box<dyn FnMut(&[u8]) + Send>>,
+) -> Result<ChildProcessExit> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -197,7 +234,7 @@ pub async fn wait_for_child_process(
     let mut on_stdout = on_stdout;
     let mut on_stderr = on_stderr;
     let mut exited = false;
-    let mut exit_code: Option<i32> = None;
+    let mut exit_status = ChildProcessExit::default();
     let grace = tokio::time::sleep(Duration::from_millis(EXIT_STDIO_GRACE_MS));
     tokio::pin!(grace);
 
@@ -206,9 +243,9 @@ pub async fn wait_for_child_process(
             status_res = child.wait(), if !exited => {
                 let status = status_res.map_err(|err| Error::from_io(err, "wait", None, None))?;
                 exited = true;
-                exit_code = status.code();
+                exit_status = exit_status_to_child_exit(&status);
                 if stdout_ended && stderr_ended {
-                    return Ok(exit_code);
+                    return Ok(exit_status);
                 }
                 grace.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(EXIT_STDIO_GRACE_MS));
             }
@@ -218,7 +255,7 @@ pub async fn wait_for_child_process(
                         if chunk.is_empty() {
                             if is_stdout { stdout_ended = true; } else { stderr_ended = true; }
                             if exited && stdout_ended && stderr_ended {
-                                return Ok(exit_code);
+                                return Ok(exit_status);
                             }
                         } else {
                             if is_stdout {
@@ -235,14 +272,39 @@ pub async fn wait_for_child_process(
                         stdout_ended = true;
                         stderr_ended = true;
                         if exited {
-                            return Ok(exit_code);
+                            return Ok(exit_status);
                         }
                     }
                 }
             }
             () = &mut grace, if exited => {
-                return Ok(exit_code);
+                return Ok(exit_status);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wait_for_child_process_status_captures_unix_signal() {
+        let child = spawn_process(
+            "sh",
+            &["-c", "kill -KILL $$"],
+            SpawnProcessOptions {
+                stdout_piped: true,
+                stderr_piped: true,
+                ..Default::default()
+            },
+        )
+        .expect("spawn sh");
+        let status = wait_for_child_process_status(child, None, None)
+            .await
+            .expect("wait status");
+        assert_eq!(status.code, None);
+        assert_eq!(status.signal, Some(9));
+        assert_eq!(status.into_shell_code(), Some(137));
     }
 }
