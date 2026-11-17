@@ -649,7 +649,7 @@ impl InteractiveSession for MockSession {
     async fn execute_bash(
         &self,
         _command: &str,
-        _on_chunk: Arc<dyn Fn(&str) + Send + Sync>,
+        _on_chunk: Arc<dyn for<'a> Fn(&'a str) + Send + Sync>,
         _exclude_from_context: bool,
     ) -> Result<BashExecutionResult> {
         Ok(BashExecutionResult::default())

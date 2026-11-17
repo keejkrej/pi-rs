@@ -266,6 +266,10 @@ pub struct ModelRuntime {
 }
 
 impl ModelRuntime {
+    pub fn ptr_key(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
     fn from_parts(
         credentials: Arc<RuntimeCredentials>,
         config: ModelConfig,

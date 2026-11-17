@@ -413,4 +413,8 @@ impl KeybindingsManager {
     pub fn get_resolved_bindings(&self) -> KeybindingsConfig {
         self.inner.get_resolved_bindings()
     }
+
+    pub fn to_tui_manager(&self) -> TuiKeybindingsManager {
+        (*self.inner).clone()
+    }
 }

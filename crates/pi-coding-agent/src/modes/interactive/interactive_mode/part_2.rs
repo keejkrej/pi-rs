@@ -479,6 +479,7 @@ impl InteractiveMode {
                 is_shutting_down: false,
                 on_input_callback: None,
                 pending_user_inputs: std::collections::VecDeque::new(),
+                signal_handles: Vec::new(),
                 active_status_indicator: None,
                 active_working_indicator_embedded: false,
                 working_message: None,
@@ -1377,7 +1378,29 @@ impl InteractiveMode {
                 this_ver.show_new_version_notification(&new_release);
             }
         });
-        // WIRE(@tui-w3): spawn check_for_package_updates once SettingsManager is concrete on @ca-cli.
+        if !crate::core::package_manager::is_offline_mode_enabled()
+            && let Some(core_sm) = self.session().settings_manager().as_core_settings_manager().cloned()
+        {
+            let this_pkg = self.clone();
+            let cwd = self.session_manager().get_cwd();
+            let agent_dir = self.inner.runtime_host.agent_dir();
+            tokio::spawn(async move {
+                let pkg_mgr = crate::core::package_manager::DefaultPackageManager::new(
+                    crate::core::package_manager::PackageManagerOptions {
+                        cwd,
+                        agent_dir,
+                        settings_manager: core_sm,
+                        builtin_extensions: Vec::new(),
+                    },
+                );
+                if let Ok(updates) = pkg_mgr.check_for_available_updates().await
+                    && !updates.is_empty()
+                {
+                    let names: Vec<String> = updates.into_iter().map(|u| u.display_name).collect();
+                    this_pkg.show_package_update_notification(&names);
+                }
+            });
+        }
         let this_tmux = self.clone();
         tokio::spawn(async move {
             if let Some(warning) = this_tmux.check_tmux_keyboard_setup().await {

@@ -424,8 +424,89 @@ impl InteractiveMode {
                 res
             }
             Err(err) => {
-                // WIRE(@tui-w3): Special-case typed MissingSessionCwdError -> prompt_for_missing_session_cwd once @mcp merges onto main.
+                if let Some(missing) = err.downcast_ref::<crate::core::session_cwd::MissingSessionCwdError>() {
+                    match self.prompt_missing_session_cwd_issue(&missing.issue).await {
+                        Some(MissingSessionCwdChoice::Continue) => {
+                            let opts = SwitchSessionOptions {
+                                cwd_override: Some(missing.issue.fallback_cwd.clone()),
+                            };
+                            match self.inner.runtime_host.switch_session(session_path, Some(opts)).await {
+                                Ok(res) => {
+                                    if !res.cancelled {
+                                        self.show_status(&format!("Resumed session in {}", missing.issue.fallback_cwd));
+                                    }
+                                    return res;
+                                }
+                                Err(e2) => {
+                                    self.handle_fatal_runtime_error("Failed to resume session", &e2.to_string())
+                                        .await;
+                                    return CancelledResult { cancelled: true };
+                                }
+                            }
+                        }
+                        Some(MissingSessionCwdChoice::Fork) => {
+                            return self
+                                .switch_to_forked_session(session_path, &missing.issue.fallback_cwd)
+                                .await;
+                        }
+                        None => {
+                            self.show_status("Resume cancelled");
+                            return CancelledResult { cancelled: true };
+                        }
+                    }
+                }
                 self.handle_fatal_runtime_error("Failed to resume session", &err.to_string())
+                    .await;
+                CancelledResult { cancelled: true }
+            }
+        }
+    }
+
+    async fn prompt_missing_session_cwd_issue(
+        &self,
+        issue: &crate::core::session_cwd::SessionCwdIssue,
+    ) -> Option<MissingSessionCwdChoice> {
+        let prompt = crate::core::session_cwd::format_missing_session_cwd_prompt(issue);
+        let options = vec![
+            (
+                format!("Continue in {} (asks again next time)", issue.fallback_cwd),
+                Some(MissingSessionCwdChoice::Continue),
+            ),
+            (
+                format!("Fork into {} (new session ID, original kept)", issue.fallback_cwd),
+                Some(MissingSessionCwdChoice::Fork),
+            ),
+            ("Cancel".to_string(), None),
+        ];
+        self.prompt_for_missing_session_cwd(&prompt, options).await
+    }
+
+    async fn switch_to_forked_session(&self, source_path: &str, cwd: &str) -> CancelledResult {
+        let session_dir = self.session_manager().get_session_dir();
+        let fork =
+            match crate::core::session_manager::SessionManager::fork_from(source_path, cwd, Some(&session_dir), None) {
+                Ok(f) => f,
+                Err(err) => {
+                    self.handle_fatal_runtime_error("Failed to fork session", &err.to_string())
+                        .await;
+                    return CancelledResult { cancelled: true };
+                }
+            };
+        let Some(fork_path) = fork.get_session_file() else {
+            return CancelledResult { cancelled: true };
+        };
+        match self.inner.runtime_host.switch_session(&fork_path, None).await {
+            Ok(res) => {
+                if res.cancelled {
+                    let _ = pi_js::fs::rm(&fork_path, false, true);
+                    return res;
+                }
+                self.show_status(&format!("Forked into new session {} in {cwd}", fork.get_session_id()));
+                res
+            }
+            Err(err) => {
+                let _ = pi_js::fs::rm(&fork_path, false, true);
+                self.handle_fatal_runtime_error("Failed to resume forked session", &err.to_string())
                     .await;
                 CancelledResult { cancelled: true }
             }
@@ -1377,7 +1458,7 @@ impl InteractiveMode {
     // Command Handlers
     // =========================================================================
 
-    pub(crate) async fn handle_reload_command(&self) {
+    pub async fn handle_reload_command(&self) {
         let sess = self.session();
         if sess.is_streaming() {
             self.show_warning("Wait for the current response to finish before reloading.");
@@ -1545,9 +1626,51 @@ impl InteractiveMode {
                 }
             }
             Err(err) => {
+                if let Some(missing) = err.downcast_ref::<crate::core::session_cwd::MissingSessionCwdError>() {
+                    match self.prompt_missing_session_cwd_issue(&missing.issue).await {
+                        Some(MissingSessionCwdChoice::Continue) => {
+                            match self
+                                .inner
+                                .runtime_host
+                                .import_from_jsonl(&input_path, Some(&missing.issue.fallback_cwd))
+                                .await
+                            {
+                                Ok(result) => {
+                                    if result.cancelled {
+                                        self.show_status("Import cancelled");
+                                    } else {
+                                        self.show_status(&format!("Session imported from: {input_path}"));
+                                    }
+                                    return;
+                                }
+                                Err(e2) => {
+                                    self.handle_fatal_runtime_error("Failed to import session", &e2.to_string())
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        Some(MissingSessionCwdChoice::Fork) => {
+                            let res = self
+                                .switch_to_forked_session(&input_path, &missing.issue.fallback_cwd)
+                                .await;
+                            if res.cancelled {
+                                self.show_status("Import cancelled");
+                            }
+                            return;
+                        }
+                        None => {
+                            self.show_status("Import cancelled");
+                            return;
+                        }
+                    }
+                }
                 let msg = err.to_string();
-                // WIRE(@tui-w3): Special-case typed MissingSessionCwdError / SessionImportFileNotFoundError once @mcp merges onto main.
-                if msg.starts_with("File not found:") {
+                if err
+                    .downcast_ref::<crate::core::agent_session_runtime::SessionImportFileNotFoundError>()
+                    .is_some()
+                    || msg.starts_with("File not found:")
+                {
                     self.show_error(&format!("Failed to import session: {msg}"));
                     return;
                 }

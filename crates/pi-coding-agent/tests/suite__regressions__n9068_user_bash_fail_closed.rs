@@ -736,7 +736,7 @@ impl InteractiveSession for FakeSession {
     async fn execute_bash(
         &self,
         _command: &str,
-        _on_chunk: Arc<dyn Fn(&str) + Send + Sync>,
+        _on_chunk: Arc<dyn for<'a> Fn(&'a str) + Send + Sync>,
         _exclude_from_context: bool,
     ) -> Result<BashExecutionResult> {
         self.execute_bash_calls.fetch_add(1, Ordering::SeqCst);

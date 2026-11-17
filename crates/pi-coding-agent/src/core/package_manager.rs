@@ -44,7 +44,7 @@ static REMOTE_COMMIT_RE: LazyLock<Regex> =
 static REMOTE_HEAD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^([0-9a-f]{40})\s+HEAD$").expect("valid regex"));
 
-fn is_offline_mode_enabled() -> bool {
+pub(crate) fn is_offline_mode_enabled() -> bool {
     let Some(value) = pi_js::env::var("PI_OFFLINE") else {
         return false;
     };

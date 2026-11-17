@@ -28,7 +28,7 @@ pub trait ModelCatalogRuntime: Send + Sync {
 
 impl ModelCatalogRuntime for Arc<ModelRuntime> {
     fn runtime_ptr_key(&self) -> usize {
-        Arc::as_ptr(self) as usize
+        ModelRuntime::ptr_key(self)
     }
 
     fn refresh(&self, signal: AbortSignal) -> BoxFuture<Result<ModelCatalogRefreshResult>> {

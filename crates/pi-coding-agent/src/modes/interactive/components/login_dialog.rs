@@ -55,7 +55,6 @@ async fn copy_to_clipboard_with_override(text: &str, override_fn: Option<Arc<Cop
     crate::utils::clipboard::copy_to_clipboard(text).await
 }
 
-// WIRE(@tui-w3): Replace with `pi_tui::replace_control_characters` if exported from pi-tui.
 /// Replace each run of C0 and C1 control characters (ESC, BEL, newlines, ...) with one space.
 fn replace_control_characters_local(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -75,7 +74,6 @@ fn replace_control_characters_local(value: &str) -> String {
     out
 }
 
-// WIRE(@tui-w3): Replace with `crate::utils::web_url::web_url` if `utils/web_url.rs` is added to coding-agent.
 /// The `http:` or `https:` URL `value` names, normalized, or None. The shared launcher also opens files and custom
 /// protocols, so login only opens web URLs. Normalizing percent-encodes control characters, which would otherwise end a
 /// terminal hyperlink early.
@@ -88,7 +86,6 @@ pub fn web_url(value: &str) -> Option<String> {
     }
 }
 
-// WIRE(@tui-w3): Replace with `crate::utils::web_url::display_url` if `utils/web_url.rs` is added to coding-agent.
 /// `value` normalized as a web URL, else with control characters replaced: an untrusted string printed as is could end a
 /// hyperlink early or send its own escape sequences to the terminal.
 pub fn display_url(value: &str) -> String {
@@ -210,9 +207,8 @@ impl Component for AuthUrlComponent {
     }
 }
 
-// WIRE(@tui-w3): Add `open_browser_on_confirm` / `copy_code_on_confirm` to `pi_ai::OAuthDeviceCodeInfo` when synced with TS HEAD.
 /// Device-code payload for `LoginDialogComponent::show_device_code`, extending `pi_ai::OAuthDeviceCodeInfo`
-/// with TS HEAD confirmation flags (`open_browser_on_confirm`, `copy_code_on_confirm`).
+/// with optional browser/clipboard confirmation flags (`open_browser_on_confirm`, `copy_code_on_confirm`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeviceCodeInfo {
     pub user_code: String,

@@ -24,21 +24,7 @@ use serde_json::Value;
 use super::super::theme::theme::{ThemeBg, ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{KeyTextFormatOptions, format_key_text, key_hint};
-
-// WIRE(@tui-w3): Replace format_read_line_range with crate::core::tools::render_utils::format_read_line_range once @codemode lands.
-
-fn format_read_line_range(offset: Option<&Value>, limit: Option<&Value>) -> String {
-    let offset_num = offset.and_then(|v| v.as_i64());
-    let limit_num = limit.and_then(|v| v.as_i64());
-    if offset_num.is_none() && limit_num.is_none() {
-        return String::new();
-    }
-    let start = offset_num.unwrap_or(1);
-    match limit_num {
-        Some(lim) => format!(":{start}-{}", start + lim - 1),
-        None => format!(":{start}"),
-    }
-}
+use crate::core::tools::render_utils::format_read_line_range;
 
 #[derive(Clone, Debug)]
 struct GutterInfo {

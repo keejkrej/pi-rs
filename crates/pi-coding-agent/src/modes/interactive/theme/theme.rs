@@ -1043,6 +1043,10 @@ impl crate::core::extensions::types::ExtensionTheme for Theme {
         ThemeColor::from_token_str(color).map_or_else(|_| String::new(), |c| Self::get_fg_ansi(self, c))
     }
 
+    fn to_interactive_theme(&self) -> Option<Theme> {
+        Some(self.clone())
+    }
+
     fn get_bg_ansi(&self, bg: &str) -> String {
         ThemeBg::from_token_str(bg).map_or_else(|_| String::new(), |b| Self::get_bg_ansi(self, b))
     }

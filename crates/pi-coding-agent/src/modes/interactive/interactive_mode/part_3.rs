@@ -1511,7 +1511,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn rebind_current_session(&self, render_before_bind: bool) {
+    pub async fn rebind_current_session(&self, render_before_bind: bool) {
         let previous_session = self.session();
         let unsub = self
             .inner
@@ -2308,15 +2308,14 @@ impl InteractiveMode {
         result.as_deref() == Some("Yes")
     }
 
-    #[allow(dead_code)] // WIRE(@tui-w3): used when MissingSessionCwdError lands on main.
     pub(crate) async fn prompt_for_missing_session_cwd(
         &self,
         prompt: &str,
-        options: Vec<(String, MissingSessionCwdChoice)>,
+        options: Vec<(String, Option<MissingSessionCwdChoice>)>,
     ) -> Option<MissingSessionCwdChoice> {
         let labels: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
         let selected = self.show_extension_selector(prompt, labels, None, None).await?;
-        options.into_iter().find(|(l, _)| *l == selected).map(|(_, v)| v)
+        options.into_iter().find(|(l, _)| *l == selected).and_then(|(_, v)| v)
     }
 
     pub async fn show_extension_input(

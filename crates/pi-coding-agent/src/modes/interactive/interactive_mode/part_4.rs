@@ -2425,7 +2425,7 @@ impl InteractiveMode {
         tokio::spawn(async move { m.shutdown(false).await });
     }
 
-    pub(crate) async fn shutdown(&self, from_signal: bool) {
+    pub async fn shutdown(&self, from_signal: bool) {
         {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.is_shutting_down {
@@ -2474,12 +2474,43 @@ impl InteractiveMode {
     pub(crate) fn register_signal_handlers(&self) {
         self.unregister_signal_handlers();
         #[cfg(unix)]
-        {
-            // WIRE(@tui-w3): Hook SIGTERM / SIGHUP into tokio::signal::unix -> shutdown(true) once wired into CLI binary.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let this = self.clone();
+            let join = handle.spawn(async move {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm = match signal(SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let sighup = signal(SignalKind::hangup()).ok();
+                if let Some(mut hup) = sighup {
+                    tokio::select! {
+                        _ = sigterm.recv() => {}
+                        _ = hup.recv() => {}
+                    }
+                } else {
+                    let _ = sigterm.recv().await;
+                }
+                this.shutdown(true).await;
+            });
+            self.inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .signal_handles
+                .push(join);
         }
     }
 
-    pub(crate) fn unregister_signal_handlers(&self) {}
+    pub(crate) fn unregister_signal_handlers(&self) {
+        let handles = {
+            let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut st.signal_handles)
+        };
+        for handle in handles {
+            handle.abort();
+        }
+    }
 
     pub fn handle_ctrl_z(&self) {
         let is_windows = self.inner.hooks.platform_is_windows.unwrap_or(cfg!(not(unix)));

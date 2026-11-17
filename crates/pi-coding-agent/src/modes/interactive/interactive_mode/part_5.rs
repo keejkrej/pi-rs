@@ -1371,7 +1371,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) fn show_models_selector(&self) {
+    pub fn show_models_selector(&self) {
         let initial_models = self.session().model_runtime().get_available_snapshot();
         let initial_model_ids: IndexSet<String> = initial_models
             .iter()

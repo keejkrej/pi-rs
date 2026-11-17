@@ -114,6 +114,9 @@ pub trait ExtensionTheme: Send + Sync {
     fn strikethrough(&self, text: &str) -> String;
     fn get_fg_ansi(&self, color: &str) -> String;
     fn get_bg_ansi(&self, bg: &str) -> String;
+    fn to_interactive_theme(&self) -> Option<crate::modes::interactive::theme::theme::Theme> {
+        None
+    }
 }
 
 #[derive(Default)]

@@ -63,9 +63,6 @@ use crate::modes::interactive::theme::theme_controller::{InteractiveThemeControl
 use crate::modes::interactive::tui_renderer::{InteractiveTui, InteractiveTuiReference};
 use crate::modes::json_event::{AgentSessionEvent, CompactionReason};
 
-// WIRE(@tui-w3): Replace local runtime/session/config/settings/extension mirror traits with concrete
-// crate::{core::*, utils::*, extensions::mcp::config} imports once Stage 3 merges onto main.
-
 pub(crate) use crate::config::{
     APP_NAME, APP_TITLE, CONFIG_DIR_NAME, VERSION, get_agent_dir, get_auth_path, get_debug_log_path, get_docs_path,
 };
@@ -1044,6 +1041,9 @@ pub trait InteractiveSettingsManager: ThemeSettingsSource + Send + Sync {
     fn get_external_editor_command(&self) -> Option<String>;
     fn get_or_create_device_id(&self) -> String;
     fn is_project_trusted(&self) -> bool;
+    fn as_core_settings_manager(&self) -> Option<&crate::core::settings_manager::SettingsManager> {
+        None
+    }
 }
 
 pub trait InteractiveSessionManager: Send + Sync {
@@ -1223,7 +1223,7 @@ pub trait InteractiveSession: FooterSession + Send + Sync {
     async fn execute_bash(
         &self,
         command: &str,
-        on_chunk: Arc<dyn Fn(&str) + Send + Sync>,
+        on_chunk: Arc<dyn for<'a> Fn(&'a str) + Send + Sync>,
         exclude_from_context: bool,
     ) -> Result<BashExecutionResult>;
     fn record_bash_result(&self, command: &str, result: &BashExecutionResult, exclude_from_context: bool);
@@ -1281,7 +1281,9 @@ impl Default for InteractiveModeHooks {
     fn default() -> Self {
         Self {
             exit_process: Arc::new(|code| std::process::exit(code)),
-            create_footer_data_provider: Arc::new(|cwd| Arc::new(DefaultFooterDataProvider::new(cwd))),
+            create_footer_data_provider: Arc::new(|cwd| {
+                Arc::new(crate::core::footer_data_provider::FooterDataProvider::new(cwd))
+            }),
             keybindings: None,
             keybindings_reload: Arc::new(|kb| {
                 kb.reload();
@@ -1304,80 +1306,6 @@ impl Default for InteractiveModeHooks {
             suspend_process: None,
             install_change_warning: None,
         }
-    }
-}
-
-struct DefaultFooterDataProvider {
-    cwd: Mutex<String>,
-    extension_statuses: Mutex<IndexMap<String, String>>,
-    available_provider_count: Mutex<usize>,
-    branch_listeners: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
-}
-
-impl DefaultFooterDataProvider {
-    fn new(cwd: &str) -> Self {
-        Self {
-            cwd: Mutex::new(cwd.to_string()),
-            extension_statuses: Mutex::new(IndexMap::new()),
-            available_provider_count: Mutex::new(0),
-            branch_listeners: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl ReadonlyFooterDataProvider for DefaultFooterDataProvider {
-    fn get_git_branch(&self) -> Option<String> {
-        let _cwd = self.cwd.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        None
-    }
-
-    fn get_extension_statuses(&self) -> IndexMap<String, String> {
-        self.extension_statuses
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn get_available_provider_count(&self) -> usize {
-        *self.available_provider_count.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn on_branch_change(&self, cb: Arc<dyn Fn() + Send + Sync>) -> Unsubscribe {
-        self.branch_listeners.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
-        Unsubscribe::noop()
-    }
-}
-
-impl InteractiveFooterDataProvider for DefaultFooterDataProvider {
-    fn set_cwd(&self, cwd: &str) {
-        *self.cwd.lock().unwrap_or_else(|e| e.into_inner()) = cwd.to_string();
-    }
-
-    fn set_extension_status(&self, key: &str, text: Option<&str>) {
-        let mut map = self.extension_statuses.lock().unwrap_or_else(|e| e.into_inner());
-        match text {
-            Some(t) => {
-                map.insert(key.to_string(), t.to_string());
-            }
-            None => {
-                map.shift_remove(key);
-            }
-        }
-    }
-
-    fn clear_extension_statuses(&self) {
-        self.extension_statuses
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-    }
-
-    fn set_available_provider_count(&self, count: usize) {
-        *self.available_provider_count.lock().unwrap_or_else(|e| e.into_inner()) = count;
-    }
-
-    fn dispose(&self) {
-        self.branch_listeners.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -1819,6 +1747,7 @@ pub(crate) struct InteractiveModeState {
     pub(crate) is_shutting_down: bool,
     pub(crate) on_input_callback: Option<tokio::sync::oneshot::Sender<String>>,
     pub(crate) pending_user_inputs: std::collections::VecDeque<String>,
+    pub(crate) signal_handles: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) active_status_indicator: Option<StatusIndicator>,
     pub(crate) active_working_indicator_embedded: bool,
     pub(crate) working_message: Option<String>,
@@ -1998,5 +1927,2131 @@ impl InteractiveMode {
             .iter()
             .cloned()
             .collect()
+    }
+}
+
+// ============================================================================
+// Concrete Core Implementations for Interactive Traits
+// ============================================================================
+
+impl InteractiveFooterDataProvider for crate::core::footer_data_provider::FooterDataProvider {
+    fn set_cwd(&self, cwd: &str) {
+        crate::core::footer_data_provider::FooterDataProvider::set_cwd(self, cwd);
+    }
+
+    fn set_extension_status(&self, key: &str, text: Option<&str>) {
+        crate::core::footer_data_provider::FooterDataProvider::set_extension_status(self, key, text);
+    }
+
+    fn clear_extension_statuses(&self) {
+        crate::core::footer_data_provider::FooterDataProvider::clear_extension_statuses(self);
+    }
+
+    fn set_available_provider_count(&self, count: usize) {
+        crate::core::footer_data_provider::FooterDataProvider::set_available_provider_count(self, count);
+    }
+
+    fn dispose(&self) {
+        crate::core::footer_data_provider::FooterDataProvider::dispose(self);
+    }
+}
+
+impl InteractiveSettingsManager for crate::core::settings_manager::SettingsManager {
+    fn get_terminal_capability_overrides(&self) -> pi_tui::terminal_image::TerminalCapabilityOverrides {
+        crate::core::settings_manager::SettingsManager::get_terminal_capability_overrides(self)
+    }
+
+    fn get_tui_mode(&self) -> TuiMode {
+        crate::core::settings_manager::SettingsManager::get_tui_mode(self)
+    }
+
+    fn set_tui_mode(&self, mode: TuiMode) {
+        crate::core::settings_manager::SettingsManager::set_tui_mode(self, mode);
+    }
+
+    fn get_show_hardware_cursor(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_show_hardware_cursor(self)
+    }
+
+    fn set_show_hardware_cursor(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_show_hardware_cursor(self, enabled);
+    }
+
+    fn get_clear_on_shrink(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_clear_on_shrink(self)
+    }
+
+    fn set_clear_on_shrink(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_clear_on_shrink(self, enabled);
+    }
+
+    fn get_fullscreen_copy_on_select(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_fullscreen_copy_on_select(self)
+    }
+
+    fn set_fullscreen_copy_on_select(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_fullscreen_copy_on_select(self, enabled);
+    }
+
+    fn get_fullscreen_wheel_scroll_lines(&self) -> WheelScrollLines {
+        crate::core::settings_manager::SettingsManager::get_fullscreen_wheel_scroll_lines(self)
+    }
+
+    fn set_fullscreen_wheel_scroll_lines(&self, lines: WheelScrollLines) {
+        crate::core::settings_manager::SettingsManager::set_fullscreen_wheel_scroll_lines(self, lines);
+    }
+
+    fn get_fullscreen_exit_output(&self) -> FullscreenExitOutput {
+        crate::core::settings_manager::SettingsManager::get_fullscreen_exit_output(self)
+    }
+
+    fn set_fullscreen_exit_output(&self, output: FullscreenExitOutput) {
+        crate::core::settings_manager::SettingsManager::set_fullscreen_exit_output(self, output);
+    }
+
+    fn get_fullscreen_scrollbar(&self) -> ScrollViewScrollbar {
+        crate::core::settings_manager::SettingsManager::get_fullscreen_scrollbar(self)
+    }
+
+    fn set_fullscreen_scrollbar(&self, mode: ScrollViewScrollbar) {
+        crate::core::settings_manager::SettingsManager::set_fullscreen_scrollbar(self, mode);
+    }
+
+    fn get_editor_padding_x(&self) -> i64 {
+        crate::core::settings_manager::SettingsManager::get_editor_padding_x(self)
+    }
+
+    fn set_editor_padding_x(&self, padding: i64) {
+        crate::core::settings_manager::SettingsManager::set_editor_padding_x(self, padding);
+    }
+
+    fn get_autocomplete_max_visible(&self) -> i64 {
+        crate::core::settings_manager::SettingsManager::get_autocomplete_max_visible(self)
+    }
+
+    fn set_autocomplete_max_visible(&self, max_visible: i64) {
+        crate::core::settings_manager::SettingsManager::set_autocomplete_max_visible(self, max_visible);
+    }
+
+    fn get_hide_thinking_block(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_hide_thinking_block(self)
+    }
+
+    fn set_hide_thinking_block(&self, hidden: bool) {
+        crate::core::settings_manager::SettingsManager::set_hide_thinking_block(self, hidden);
+    }
+
+    fn get_output_pad(&self) -> i64 {
+        i64::from(crate::core::settings_manager::SettingsManager::get_output_pad(self))
+    }
+
+    fn set_output_pad(&self, pad: i64) {
+        crate::core::settings_manager::SettingsManager::set_output_pad(self, u8::try_from(pad.max(0)).unwrap_or(1));
+    }
+
+    fn get_enable_skill_commands(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_enable_skill_commands(self)
+    }
+
+    fn set_enable_skill_commands(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_enable_skill_commands(self, enabled);
+    }
+
+    fn get_collapse_changelog(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_collapse_changelog(self)
+    }
+
+    fn set_collapse_changelog(&self, collapsed: bool) {
+        crate::core::settings_manager::SettingsManager::set_collapse_changelog(self, collapsed);
+    }
+
+    fn get_code_block_indent(&self) -> usize {
+        crate::core::settings_manager::SettingsManager::get_code_block_indent(self)
+            .chars()
+            .count()
+    }
+
+    fn get_quiet_startup(&self) -> QuietStartup {
+        crate::core::settings_manager::SettingsManager::get_quiet_startup(self).into()
+    }
+
+    fn set_quiet_startup(&self, quiet: QuietStartup) {
+        crate::core::settings_manager::SettingsManager::set_quiet_startup(self, quiet.into());
+    }
+
+    fn get_mermaid_rendering_mode(&self) -> MermaidRenderingMode {
+        crate::core::settings_manager::SettingsManager::get_mermaid_rendering_mode(self)
+    }
+
+    fn set_mermaid_rendering_mode(&self, mode: MermaidRenderingMode) {
+        crate::core::settings_manager::SettingsManager::set_mermaid_rendering_mode(self, mode);
+    }
+
+    fn get_show_cache_miss_notices(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_show_cache_miss_notices(self)
+    }
+
+    fn set_show_cache_miss_notices(&self, shown: bool) {
+        crate::core::settings_manager::SettingsManager::set_show_cache_miss_notices(self, shown);
+    }
+
+    fn get_show_terminal_progress(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_show_terminal_progress(self)
+    }
+
+    fn set_show_terminal_progress(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_show_terminal_progress(self, enabled);
+    }
+
+    fn get_show_images(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_show_images(self)
+    }
+
+    fn set_show_images(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_show_images(self, enabled);
+    }
+
+    fn get_image_width_cells(&self) -> Option<i64> {
+        self.get_settings()
+            .terminal
+            .and_then(|t| t.image_width_cells)
+            .and_then(|v| v.as_f64())
+            .filter(|n| n.is_finite())
+            .map(|w| (w.floor() as i64).max(1))
+    }
+
+    fn set_image_width_cells(&self, width: Option<i64>) {
+        self.set_image_width_cells_opt(width);
+    }
+
+    fn get_image_auto_resize(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_image_auto_resize(self)
+    }
+
+    fn set_image_auto_resize(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_image_auto_resize(self, enabled);
+    }
+
+    fn get_block_images(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_block_images(self)
+    }
+
+    fn set_block_images(&self, blocked: bool) {
+        crate::core::settings_manager::SettingsManager::set_block_images(self, blocked);
+    }
+
+    fn get_theme(&self) -> Option<String> {
+        crate::core::settings_manager::SettingsManager::get_theme(self)
+    }
+
+    fn set_theme(&self, theme: &str) {
+        crate::core::settings_manager::SettingsManager::set_theme(self, theme);
+    }
+
+    fn get_last_changelog_version(&self) -> Option<String> {
+        crate::core::settings_manager::SettingsManager::get_last_changelog_version(self)
+    }
+
+    fn set_last_changelog_version(&self, version: &str) {
+        crate::core::settings_manager::SettingsManager::set_last_changelog_version(self, version);
+    }
+
+    fn get_extension_changelog_version(&self, key: &str) -> Option<String> {
+        crate::core::settings_manager::SettingsManager::get_extension_changelog_version(self, key)
+    }
+
+    fn set_extension_changelog_version(&self, key: &str, version: &str) {
+        crate::core::settings_manager::SettingsManager::set_extension_changelog_version(self, key, version);
+    }
+
+    fn get_http_idle_timeout_ms(&self) -> u64 {
+        crate::core::settings_manager::SettingsManager::get_http_idle_timeout_ms(self)
+            .unwrap_or(crate::core::http_dispatcher::DEFAULT_HTTP_IDLE_TIMEOUT_MS)
+    }
+
+    fn set_http_idle_timeout_ms(&self, timeout_ms: u64) {
+        let _ = crate::core::settings_manager::SettingsManager::set_http_idle_timeout_ms(self, timeout_ms as f64);
+    }
+
+    fn get_cache_warming_mode(&self) -> CacheWarmingMode {
+        crate::core::settings_manager::SettingsManager::get_cache_warming_mode(self)
+    }
+
+    fn set_cache_warming_mode(&self, mode: CacheWarmingMode) {
+        crate::core::settings_manager::SettingsManager::set_cache_warming_mode(self, mode);
+    }
+
+    fn get_transport(&self) -> pi_ai::Transport {
+        crate::core::settings_manager::SettingsManager::get_transport(self)
+    }
+
+    fn set_transport(&self, transport: pi_ai::Transport) {
+        crate::core::settings_manager::SettingsManager::set_transport(self, transport);
+    }
+
+    fn get_session_share_destination(&self) -> SessionShareDestination {
+        crate::core::settings_manager::SettingsManager::get_session_share_destination(self)
+    }
+
+    fn set_session_share_destination(&self, destination: SessionShareDestination) {
+        crate::core::settings_manager::SettingsManager::set_session_share_destination(self, destination);
+    }
+
+    fn get_default_provider(&self) -> Option<String> {
+        crate::core::settings_manager::SettingsManager::get_default_provider(self)
+    }
+
+    fn get_default_model(&self) -> Option<String> {
+        crate::core::settings_manager::SettingsManager::get_default_model(self)
+    }
+
+    fn get_default_thinking_level(&self) -> Option<ModelThinkingLevel> {
+        crate::core::settings_manager::SettingsManager::get_default_thinking_level(self)
+    }
+
+    fn get_all_model_thinking_levels(&self) -> IndexMap<String, ModelThinkingLevel> {
+        crate::core::settings_manager::SettingsManager::get_all_model_thinking_levels(self)
+    }
+
+    fn set_model_thinking_level(&self, provider: &str, model_id: &str, level: ModelThinkingLevel) {
+        crate::core::settings_manager::SettingsManager::set_model_thinking_level(self, provider, model_id, level);
+    }
+
+    fn remove_model_thinking_level(&self, provider: &str, model_id: &str) {
+        crate::core::settings_manager::SettingsManager::remove_model_thinking_level(self, provider, model_id);
+    }
+
+    fn get_enabled_models(&self) -> Option<Vec<String>> {
+        crate::core::settings_manager::SettingsManager::get_enabled_models(self)
+    }
+
+    fn set_enabled_models(&self, patterns: Option<Vec<String>>) {
+        crate::core::settings_manager::SettingsManager::set_enabled_models(self, patterns);
+    }
+
+    fn get_warnings(&self) -> WarningSettings {
+        crate::core::settings_manager::SettingsManager::get_warnings(self)
+    }
+
+    fn set_warnings(&self, warnings: WarningSettings) {
+        crate::core::settings_manager::SettingsManager::set_warnings(self, warnings);
+    }
+
+    fn get_enable_install_telemetry(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_enable_install_telemetry(self)
+    }
+
+    fn set_enable_install_telemetry(&self, enabled: bool) {
+        crate::core::settings_manager::SettingsManager::set_enable_install_telemetry(self, enabled);
+    }
+
+    fn get_default_project_trust(&self) -> DefaultProjectTrust {
+        crate::core::settings_manager::SettingsManager::get_default_project_trust(self)
+    }
+
+    fn set_default_project_trust(&self, trust: DefaultProjectTrust) {
+        crate::core::settings_manager::SettingsManager::set_default_project_trust(self, trust);
+    }
+
+    fn get_double_escape_action(&self) -> DoubleEscapeAction {
+        crate::core::settings_manager::SettingsManager::get_double_escape_action(self)
+    }
+
+    fn set_double_escape_action(&self, action: DoubleEscapeAction) {
+        crate::core::settings_manager::SettingsManager::set_double_escape_action(self, action);
+    }
+
+    fn get_tree_filter_mode(&self) -> TreeFilterMode {
+        crate::core::settings_manager::SettingsManager::get_tree_filter_mode(self)
+    }
+
+    fn set_tree_filter_mode(&self, mode: TreeFilterMode) {
+        crate::core::settings_manager::SettingsManager::set_tree_filter_mode(self, mode);
+    }
+
+    fn get_branch_summary_skip_prompt(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::get_branch_summary_skip_prompt(self)
+    }
+
+    fn get_external_editor_command(&self) -> Option<String> {
+        self.get_settings()
+            .external_editor
+            .map(|s| pi_js::str16::trim(&s).to_owned())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn get_or_create_device_id(&self) -> String {
+        crate::core::settings_manager::SettingsManager::get_or_create_device_id(self)
+    }
+
+    fn is_project_trusted(&self) -> bool {
+        crate::core::settings_manager::SettingsManager::is_project_trusted(self)
+    }
+
+    fn as_core_settings_manager(&self) -> Option<&crate::core::settings_manager::SettingsManager> {
+        Some(self)
+    }
+}
+
+impl InteractiveSessionManager for crate::core::session_manager::SessionManager {
+    fn get_cwd(&self) -> String {
+        crate::core::session_manager::SessionManager::get_cwd(self)
+    }
+
+    fn get_session_dir(&self) -> String {
+        crate::core::session_manager::SessionManager::get_session_dir(self)
+    }
+
+    fn get_session_id(&self) -> String {
+        crate::core::session_manager::SessionManager::get_session_id(self)
+    }
+
+    fn get_session_file(&self) -> Option<String> {
+        crate::core::session_manager::SessionManager::get_session_file(self)
+    }
+
+    fn get_session_name(&self) -> Option<String> {
+        crate::core::session_manager::SessionManager::get_session_name(self)
+    }
+
+    fn is_persisted(&self) -> bool {
+        crate::core::session_manager::SessionManager::is_persisted(self)
+    }
+
+    fn uses_default_session_dir(&self) -> bool {
+        crate::core::session_manager::SessionManager::uses_default_session_dir(self)
+    }
+
+    fn get_leaf_id(&self) -> Option<String> {
+        crate::core::session_manager::SessionManager::get_leaf_id(self)
+    }
+
+    fn get_tree(&self) -> Vec<SessionTreeNode> {
+        crate::core::session_manager::SessionManager::get_tree(self)
+    }
+
+    fn get_entries(&self) -> Vec<SessionEntry> {
+        crate::core::session_manager::SessionManager::get_entries(self)
+    }
+
+    fn get_branch(&self) -> Vec<SessionEntry> {
+        crate::core::session_manager::SessionManager::get_branch(self, None)
+    }
+
+    fn build_context_entries(&self) -> Vec<SessionEntry> {
+        crate::core::session_manager::SessionManager::build_context_entries(self)
+    }
+
+    fn append_label_change(&self, entry_id: &str, label: Option<&str>) {
+        let _ = crate::core::session_manager::SessionManager::append_label_change(self, entry_id, label);
+    }
+
+    fn list_current_sessions(
+        &self,
+        on_progress: Option<SessionListProgress>,
+        signal: AbortSignal,
+    ) -> BoxFuture<Result<Vec<SessionInfo>>> {
+        let cwd = self.get_cwd();
+        let session_dir = self.get_session_dir();
+        Box::pin(async move {
+            Self::list(
+                &cwd,
+                Some(&session_dir),
+                on_progress
+                    .as_deref()
+                    .map(|cb| cb as crate::core::session_manager::SessionListProgress<'_>),
+                Some(&signal),
+            )
+            .await
+        })
+    }
+
+    fn list_all_sessions(
+        &self,
+        on_progress: Option<SessionListProgress>,
+        signal: AbortSignal,
+    ) -> BoxFuture<Result<Vec<SessionInfo>>> {
+        let custom_dir = if self.uses_default_session_dir() {
+            None
+        } else {
+            Some(self.get_session_dir())
+        };
+        Box::pin(async move {
+            Self::list_all(
+                custom_dir.as_deref(),
+                on_progress
+                    .as_deref()
+                    .map(|cb| cb as crate::core::session_manager::SessionListProgress<'_>),
+                Some(&signal),
+            )
+            .await
+        })
+    }
+
+    fn rename_session(&self, session_file: &str, next_name: Option<&str>) -> BoxFuture<Result<()>> {
+        let sm = self.clone();
+        let path = session_file.to_string();
+        let name = next_name.unwrap_or("").to_string();
+        Box::pin(async move {
+            if sm.get_session_file().as_deref() == Some(path.as_str()) {
+                sm.append_session_info(&name)?;
+            } else {
+                let opened = Self::open(&path, None, None)?;
+                opened.append_session_info(&name)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+struct SignalAuthInteraction {
+    inner: Arc<dyn pi_ai::auth::types::AuthInteraction>,
+    signal: AbortSignal,
+}
+
+#[async_trait]
+impl pi_ai::auth::types::AuthInteraction for SignalAuthInteraction {
+    fn signal(&self) -> Option<&AbortSignal> {
+        Some(&self.signal)
+    }
+
+    async fn prompt(&self, prompt: pi_ai::auth::types::AuthPrompt) -> Result<String> {
+        self.inner.prompt(prompt).await
+    }
+
+    fn notify(&self, event: pi_ai::auth::types::AuthEvent) {
+        self.inner.notify(event);
+    }
+}
+
+#[async_trait]
+impl InteractiveModelRuntime for Arc<crate::core::model_runtime::ModelRuntime> {
+    fn get_providers(&self) -> Vec<ProviderAuthInfo> {
+        crate::core::model_runtime::ModelRuntime::get_providers(self)
+            .into_iter()
+            .map(|p| {
+                let auth = p.auth();
+                let oauth = auth.oauth.as_ref();
+                let api_key = auth.api_key.as_ref();
+                ProviderAuthInfo {
+                    id: p.id().to_owned(),
+                    name: p.name().to_owned(),
+                    has_oauth: oauth.is_some(),
+                    oauth_method_name: oauth.map(|o| o.name().to_owned()),
+                    oauth_login_label: oauth.and_then(|o| o.login_label().map(str::to_owned)),
+                    oauth_is_subscription: oauth.is_some_and(|o| o.is_subscription()),
+                    has_api_key: api_key.is_some(),
+                    api_key_method_name: api_key.map(|a| a.name().to_owned()),
+                    api_key_has_login: api_key.is_some_and(|a| a.supports_login()),
+                }
+            })
+            .collect()
+    }
+
+    fn get_provider_auth_status(&self, provider_id: &str) -> ProviderAuthStatusInfo {
+        let status = crate::core::model_runtime::ModelRuntime::get_provider_auth_status(self, provider_id);
+        let source = status.source.map(|src| {
+            match src {
+                crate::core::provider_composer::AuthStatusSource::Stored => "stored",
+                crate::core::provider_composer::AuthStatusSource::Runtime => "runtime",
+                crate::core::provider_composer::AuthStatusSource::Environment => "environment",
+                crate::core::provider_composer::AuthStatusSource::Fallback => "fallback",
+                crate::core::provider_composer::AuthStatusSource::ModelsJsonKey => "models_json_key",
+                crate::core::provider_composer::AuthStatusSource::ModelsJsonCommand => "models_json_command",
+            }
+            .to_owned()
+        });
+        ProviderAuthStatusInfo {
+            configured: status.configured,
+            label: status.label,
+            source,
+        }
+    }
+
+    fn is_using_oauth(&self, provider_id: &str) -> bool {
+        crate::core::model_runtime::ModelRuntime::is_using_oauth(self, provider_id)
+    }
+
+    async fn check_auth_type(&self, provider_id: &str) -> Option<AuthType> {
+        self.check_auth(provider_id, None)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.auth_type)
+    }
+
+    async fn get_api_key(&self, provider_id: &str) -> Option<String> {
+        let auth = self.get_auth_provider_id(provider_id, None).await.ok().flatten()?;
+        crate::cli::auth_command::get_auth_credential(Some(&auth))
+    }
+
+    async fn list_credentials(&self, signal: AbortSignal) -> Result<Vec<StoredCredentialInfo>> {
+        let creds = crate::core::model_runtime::ModelRuntime::list_credentials(
+            self,
+            Some(pi_ai::AuthOperationOptions { signal: Some(signal) }),
+        )
+        .await?;
+        Ok(creds
+            .into_iter()
+            .map(|c| StoredCredentialInfo {
+                provider_id: c.provider_id,
+                auth_type: c.credential_type,
+            })
+            .collect())
+    }
+
+    async fn logout(&self, provider_id: &str, signal: AbortSignal) -> Result<()> {
+        crate::core::model_runtime::ModelRuntime::logout(
+            self,
+            provider_id,
+            Some(pi_ai::AuthOperationOptions { signal: Some(signal) }),
+        )
+        .await
+    }
+
+    async fn refresh_providers(
+        &self,
+        providers: Vec<String>,
+        signal: AbortSignal,
+    ) -> Result<crate::modes::interactive::model_catalog_refresh::ModelCatalogRefreshResult> {
+        let res = crate::core::model_runtime::ModelRuntime::refresh(
+            self,
+            Some(pi_ai::ModelsRefreshOptions {
+                allow_network: Some(true),
+                providers: Some(providers),
+                force: Some(true),
+                signal: Some(signal),
+            }),
+        )
+        .await?;
+        Ok(
+            crate::modes::interactive::model_catalog_refresh::ModelCatalogRefreshResult {
+                aborted: res.aborted,
+                errors: res.errors.into_iter().map(|(k, e)| (k, e.to_string())).collect(),
+            },
+        )
+    }
+
+    async fn login(
+        &self,
+        provider_id: &str,
+        auth_type: AuthType,
+        interaction: Arc<dyn pi_ai::auth::types::AuthInteraction>,
+        signal: AbortSignal,
+        device_id: String,
+    ) -> Result<()> {
+        let wrapped = Arc::new(SignalAuthInteraction {
+            inner: interaction,
+            signal,
+        });
+        let options = pi_ai::auth::types::LoginOptions {
+            get_device_id: Some(Arc::new(move || device_id.clone())),
+        };
+        crate::core::model_runtime::ModelRuntime::login(self, provider_id, auth_type, wrapped, Some(options)).await?;
+        Ok(())
+    }
+}
+
+pub(crate) fn core_source_info_to_interactive(info: &crate::core::source_info::SourceInfo) -> SourceInfo {
+    let scope = match info.scope {
+        crate::core::source_info::SourceScope::User => "user",
+        crate::core::source_info::SourceScope::Project => "project",
+        crate::core::source_info::SourceScope::Temporary => "temporary",
+    };
+    let origin = match info.origin {
+        crate::core::source_info::SourceOrigin::Package => "package",
+        crate::core::source_info::SourceOrigin::TopLevel => "top-level",
+    };
+    SourceInfo {
+        path: info.path.clone(),
+        source: info.source.clone(),
+        scope: scope.to_owned(),
+        origin: origin.to_owned(),
+        base_dir: info.base_dir.clone(),
+        changelog_path: info.changelog_path.clone(),
+    }
+}
+
+pub(crate) fn core_diag_to_interactive(diag: &crate::core::diagnostics::ResourceDiagnostic) -> ResourceDiagnostic {
+    let diagnostic_type = match diag.r#type {
+        crate::core::diagnostics::ResourceDiagnosticType::Warning => DiagnosticLevel::Warning,
+        crate::core::diagnostics::ResourceDiagnosticType::Error => DiagnosticLevel::Error,
+        crate::core::diagnostics::ResourceDiagnosticType::Collision => DiagnosticLevel::Collision,
+    };
+    ResourceDiagnostic {
+        diagnostic_type,
+        message: diag.message.clone(),
+        path: diag.path.clone(),
+        collision: diag.collision.as_ref().map(|c| ResourceCollision {
+            name: c.name.clone(),
+            winner_path: c.winner_path.clone(),
+            loser_path: c.loser_path.clone(),
+        }),
+    }
+}
+
+fn core_loader_skills(
+    loader: &dyn crate::core::resource_loader::ResourceLoader,
+) -> (Vec<SkillInfo>, Vec<ResourceDiagnostic>) {
+    let (skills, diagnostics) = loader.get_skills();
+    (
+        skills
+            .into_iter()
+            .map(|s| SkillInfo {
+                name: s.name,
+                description: s.description,
+                file_path: s.file_path,
+                source_info: Some(core_source_info_to_interactive(&s.source_info)),
+            })
+            .collect(),
+        diagnostics.iter().map(core_diag_to_interactive).collect(),
+    )
+}
+
+fn core_loader_prompts(
+    loader: &dyn crate::core::resource_loader::ResourceLoader,
+) -> (Vec<PromptTemplateInfo>, Vec<ResourceDiagnostic>) {
+    let (prompts, diagnostics) = loader.get_prompts();
+    (
+        prompts
+            .into_iter()
+            .map(|p| PromptTemplateInfo {
+                name: p.name,
+                description: if p.description.is_empty() {
+                    None
+                } else {
+                    Some(p.description)
+                },
+                argument_hint: p.argument_hint,
+                file_path: p.file_path,
+                source_info: Some(core_source_info_to_interactive(&p.source_info)),
+            })
+            .collect(),
+        diagnostics.iter().map(core_diag_to_interactive).collect(),
+    )
+}
+
+fn core_loader_themes(
+    loader: &dyn crate::core::resource_loader::ResourceLoader,
+) -> (Vec<Theme>, Vec<LoadedThemeResource>, Vec<ResourceDiagnostic>) {
+    let (core_themes, diagnostics) = loader.get_themes();
+    let mut themes = Vec::new();
+    let mut resources = Vec::new();
+    for ct in core_themes {
+        if let Some(tui_theme) = ct.to_tui_theme() {
+            themes.push(tui_theme.clone());
+            resources.push(LoadedThemeResource {
+                theme: tui_theme,
+                source_path: ct.source_path,
+                source_info: ct.source_info.as_ref().map(core_source_info_to_interactive),
+            });
+        }
+    }
+    (
+        themes,
+        resources,
+        diagnostics.iter().map(core_diag_to_interactive).collect(),
+    )
+}
+
+fn core_loader_extensions(loader: &dyn crate::core::resource_loader::ResourceLoader) -> LoadedExtensionsResult {
+    let ext_res = loader.get_extensions();
+    LoadedExtensionsResult {
+        extensions: ext_res
+            .extensions
+            .into_iter()
+            .map(|ext| LoadedExtensionInfo {
+                path: ext.path,
+                hidden: ext.hidden,
+                source_info: Some(core_source_info_to_interactive(&ext.source_info)),
+            })
+            .collect(),
+        errors: ext_res
+            .errors
+            .into_iter()
+            .map(|e| ExtensionLoadMessage {
+                path: e.path,
+                message: e.error,
+            })
+            .collect(),
+        warnings: ext_res
+            .warnings
+            .into_iter()
+            .map(|w| ExtensionLoadMessage {
+                path: w.path,
+                message: w.warning,
+            })
+            .collect(),
+    }
+}
+
+pub struct InteractiveResourceLoaderAdapter(pub Arc<dyn crate::core::resource_loader::ResourceLoader>);
+
+impl InteractiveResourceLoader for InteractiveResourceLoaderAdapter {
+    fn get_skills(&self) -> (Vec<SkillInfo>, Vec<ResourceDiagnostic>) {
+        core_loader_skills(self.0.as_ref())
+    }
+
+    fn get_prompts(&self) -> (Vec<PromptTemplateInfo>, Vec<ResourceDiagnostic>) {
+        core_loader_prompts(self.0.as_ref())
+    }
+
+    fn get_themes(&self) -> (Vec<Theme>, Vec<LoadedThemeResource>, Vec<ResourceDiagnostic>) {
+        core_loader_themes(self.0.as_ref())
+    }
+
+    fn get_extensions(&self) -> LoadedExtensionsResult {
+        core_loader_extensions(self.0.as_ref())
+    }
+
+    fn get_system_prompt_source(&self) -> Option<SourceInfo> {
+        self.0.get_system_prompt_source().map(|p| SourceInfo {
+            path: p.path,
+            ..SourceInfo::default()
+        })
+    }
+
+    fn get_append_system_prompt_sources(&self) -> Vec<SourceInfo> {
+        self.0
+            .get_append_system_prompt_sources()
+            .into_iter()
+            .map(|p| SourceInfo {
+                path: p.path,
+                ..SourceInfo::default()
+            })
+            .collect()
+    }
+
+    fn get_agents_files(&self) -> Vec<SourceInfo> {
+        self.0
+            .get_agents_files()
+            .into_iter()
+            .map(|f| SourceInfo {
+                path: f.path,
+                ..SourceInfo::default()
+            })
+            .collect()
+    }
+}
+
+impl InteractiveResourceLoader for crate::core::resource_loader::DefaultResourceLoader {
+    fn get_skills(&self) -> (Vec<SkillInfo>, Vec<ResourceDiagnostic>) {
+        core_loader_skills(self)
+    }
+
+    fn get_prompts(&self) -> (Vec<PromptTemplateInfo>, Vec<ResourceDiagnostic>) {
+        core_loader_prompts(self)
+    }
+
+    fn get_themes(&self) -> (Vec<Theme>, Vec<LoadedThemeResource>, Vec<ResourceDiagnostic>) {
+        core_loader_themes(self)
+    }
+
+    fn get_extensions(&self) -> LoadedExtensionsResult {
+        core_loader_extensions(self)
+    }
+
+    fn get_system_prompt_source(&self) -> Option<SourceInfo> {
+        crate::core::resource_loader::ResourceLoader::get_system_prompt_source(self).map(|p| SourceInfo {
+            path: p.path,
+            ..SourceInfo::default()
+        })
+    }
+
+    fn get_append_system_prompt_sources(&self) -> Vec<SourceInfo> {
+        crate::core::resource_loader::ResourceLoader::get_append_system_prompt_sources(self)
+            .into_iter()
+            .map(|p| SourceInfo {
+                path: p.path,
+                ..SourceInfo::default()
+            })
+            .collect()
+    }
+
+    fn get_agents_files(&self) -> Vec<SourceInfo> {
+        crate::core::resource_loader::ResourceLoader::get_agents_files(self)
+            .into_iter()
+            .map(|f| SourceInfo {
+                path: f.path,
+                ..SourceInfo::default()
+            })
+            .collect()
+    }
+}
+
+struct InteractiveExtensionRunnerAdapter {
+    runner: Option<crate::core::extensions::runner::ExtensionRunner>,
+    session: crate::core::agent_session::AgentSession,
+}
+
+impl InteractiveExtensionRunner for InteractiveExtensionRunnerAdapter {
+    fn get_registered_commands(&self) -> Vec<RegisteredExtensionCommand> {
+        let Some(ref runner) = self.runner else {
+            return Vec::new();
+        };
+        runner
+            .get_registered_commands()
+            .into_iter()
+            .map(|c| RegisteredExtensionCommand {
+                name: c.command.name,
+                invocation_name: c.invocation_name,
+                description: c.command.description,
+                source_info: core_source_info_to_interactive(&c.command.source_info),
+                get_argument_completions: c.command.get_argument_completions,
+            })
+            .collect()
+    }
+
+    fn has_command(&self, name: &str) -> bool {
+        self.runner.as_ref().is_some_and(|r| r.get_command(name).is_some())
+    }
+
+    fn get_command_diagnostics(&self) -> Vec<ResourceDiagnostic> {
+        self.runner
+            .as_ref()
+            .map(|r| {
+                r.get_command_diagnostics()
+                    .iter()
+                    .map(core_diag_to_interactive)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn get_shortcut_diagnostics(&self) -> Vec<ResourceDiagnostic> {
+        self.runner
+            .as_ref()
+            .map(|r| {
+                r.get_shortcut_diagnostics()
+                    .iter()
+                    .map(core_diag_to_interactive)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn get_shortcuts(&self) -> IndexMap<String, RegisteredExtensionShortcut> {
+        let Some(ref runner) = self.runner else {
+            return IndexMap::new();
+        };
+        let agent_dir = self.session.settings_manager().get_agent_dir();
+        let kb = KeybindingsManager::create(agent_dir.as_deref());
+        let resolved = kb.get_resolved_bindings();
+        runner
+            .get_shortcuts(&resolved)
+            .into_iter()
+            .map(|(k, sc)| {
+                let runner_c = runner.clone();
+                let ext_path = sc.extension_path.clone();
+                let handler_inner = sc.handler;
+                let handler: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync> = Arc::new(move || {
+                    let runner_call = runner_c.clone();
+                    let ext_path_call = ext_path.clone();
+                    let h = Arc::clone(&handler_inner);
+                    Box::pin(async move {
+                        let ctx = runner_call.create_context();
+                        if let Err(err) = h(ctx).await {
+                            runner_call.emit_error(crate::core::extensions::types::ExtensionError {
+                                extension_path: ext_path_call,
+                                event: "shortcut".to_owned(),
+                                error: err.to_string(),
+                                stack: None,
+                            });
+                        }
+                    })
+                });
+                (
+                    k.clone(),
+                    RegisteredExtensionShortcut {
+                        key: sc.shortcut,
+                        description: sc.description,
+                        extension_path: sc.extension_path,
+                        handler,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn get_markdown_transformers(&self) -> Vec<MarkdownTransformer> {
+        self.runner
+            .as_ref()
+            .map(crate::core::extensions::runner::ExtensionRunner::get_markdown_transformers)
+            .unwrap_or_default()
+    }
+
+    fn get_entry_renderer(&self, custom_type: &str) -> Option<EntryRenderer> {
+        self.runner.as_ref().and_then(|r| r.get_entry_renderer(custom_type))
+    }
+
+    fn get_message_renderer(&self, custom_type: &str) -> Option<MessageRenderer> {
+        self.runner.as_ref().and_then(|r| r.get_message_renderer(custom_type))
+    }
+
+    fn has_user_bash_handlers(&self) -> bool {
+        self.runner.as_ref().is_some_and(|r| r.has_handlers("user_bash"))
+    }
+
+    fn emit_user_bash(
+        &self,
+        command: &str,
+        exclude_from_context: bool,
+        cwd: &str,
+    ) -> BoxFuture<Result<Option<BashExecutionResult>>> {
+        let Some(runner) = self.runner.clone() else {
+            return Box::pin(async { Ok(None) });
+        };
+        let session = self.session.clone();
+        let command = command.to_owned();
+        let cwd = cwd.to_owned();
+        Box::pin(async move {
+            let res = runner
+                .emit_user_bash(crate::core::extensions::types::UserBashEvent {
+                    command,
+                    exclude_from_context,
+                    cwd,
+                })
+                .await?;
+            match res {
+                None => Ok(None),
+                Some(crate::core::extensions::types::UserBashEventResult::Result { result }) => {
+                    Ok(Some(BashExecutionResult {
+                        output: result.output,
+                        exit_code: result.exit_code.map(i64::from),
+                        cancelled: result.cancelled,
+                        truncated: result.truncated,
+                        full_output_path: result.full_output_path,
+                    }))
+                }
+                Some(crate::core::extensions::types::UserBashEventResult::Operations { operations }) => {
+                    session
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pending_user_bash_operations = Some(operations);
+                    Ok(None)
+                }
+            }
+        })
+    }
+}
+
+struct SendSyncTuiWrapper(Arc<dyn TUI>);
+
+impl Component for SendSyncTuiWrapper {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.0.render(width)
+    }
+
+    fn handle_input(&self, data: &str) {
+        self.0.handle_input(data);
+    }
+
+    fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
+        self.0.handle_mouse(event)
+    }
+
+    fn wants_key_release(&self) -> bool {
+        self.0.wants_key_release()
+    }
+
+    fn invalidate(&self) {
+        self.0.invalidate();
+    }
+
+    fn has_handle_input(&self) -> bool {
+        self.0.has_handle_input()
+    }
+
+    fn is_container_handle_mouse(&self) -> bool {
+        self.0.is_container_handle_mouse()
+    }
+
+    fn as_focusable(&self) -> Option<&dyn pi_tui::Focusable> {
+        self.0.as_focusable()
+    }
+
+    fn container_children(&self) -> Option<Vec<Arc<dyn Component>>> {
+        self.0.container_children()
+    }
+
+    fn as_layout_component(&self) -> Option<&dyn pi_tui::layout_node::LayoutComponent> {
+        self.0.as_layout_component()
+    }
+}
+
+#[async_trait]
+impl TUI for SendSyncTuiWrapper {
+    fn mode(&self) -> pi_tui::TuiMode {
+        self.0.mode()
+    }
+
+    fn children(&self) -> Vec<Arc<dyn Component>> {
+        self.0.children()
+    }
+
+    fn set_children(&self, children: Vec<Arc<dyn Component>>) {
+        self.0.set_children(children);
+    }
+
+    fn terminal(&self) -> Arc<dyn Terminal> {
+        self.0.terminal()
+    }
+
+    fn on_debug(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.0.on_debug()
+    }
+
+    fn set_on_debug(&self, on_debug: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.0.set_on_debug(on_debug);
+    }
+
+    fn full_redraws(&self) -> i64 {
+        self.0.full_redraws()
+    }
+
+    fn add_child(&self, component: Arc<dyn Component>) {
+        self.0.add_child(component);
+    }
+
+    fn remove_child(&self, component: &Arc<dyn Component>) {
+        self.0.remove_child(component);
+    }
+
+    fn clear(&self) {
+        self.0.clear();
+    }
+
+    fn get_show_hardware_cursor(&self) -> bool {
+        self.0.get_show_hardware_cursor()
+    }
+
+    fn set_show_hardware_cursor(&self, enabled: bool) {
+        self.0.set_show_hardware_cursor(enabled);
+    }
+
+    fn get_clear_on_shrink(&self) -> bool {
+        self.0.get_clear_on_shrink()
+    }
+
+    fn set_clear_on_shrink(&self, enabled: bool) {
+        self.0.set_clear_on_shrink(enabled);
+    }
+
+    fn set_focus(&self, component: Option<Arc<dyn Component>>) {
+        self.0.set_focus(component);
+    }
+
+    fn show_overlay(&self, component: Arc<dyn Component>, options: Option<OverlayOptions>) -> OverlayHandle {
+        self.0.show_overlay(component, options)
+    }
+
+    fn hide_overlay(&self) {
+        self.0.hide_overlay();
+    }
+
+    fn has_overlay(&self) -> bool {
+        self.0.has_overlay()
+    }
+
+    fn start(&self) {
+        self.0.start();
+    }
+
+    fn stop(&self, options: Option<pi_tui::tui::TuiStopOptions>) {
+        self.0.stop(options);
+    }
+
+    fn render_now(&self, force: Option<bool>) {
+        self.0.render_now(force);
+    }
+
+    fn request_render(&self, force: Option<bool>) {
+        self.0.request_render(force);
+    }
+
+    fn add_input_listener(&self, listener: pi_tui::tui::TuiInputListener) -> Unsubscribe {
+        self.0.add_input_listener(listener)
+    }
+
+    fn remove_input_listener(&self, listener: &pi_tui::tui::TuiInputListener) {
+        self.0.remove_input_listener(listener);
+    }
+
+    fn on_terminal_color_scheme_change(
+        &self,
+        cb: Arc<dyn Fn(pi_tui::TerminalColorScheme) + Send + Sync>,
+    ) -> Unsubscribe {
+        self.0.on_terminal_color_scheme_change(cb)
+    }
+
+    fn set_terminal_color_scheme_notifications(&self, enabled: bool) {
+        self.0.set_terminal_color_scheme_notifications(enabled);
+    }
+
+    async fn query_terminal_colors(&self, options: pi_tui::tui::QueryTerminalColorsOptions) -> pi_tui::TerminalColors {
+        self.0.query_terminal_colors(options).await
+    }
+}
+
+struct InteractiveUiContextAdapter(Arc<dyn ExtensionUiContext>);
+
+#[async_trait]
+impl crate::core::extensions::types::ExtensionUIContext for InteractiveUiContextAdapter {
+    async fn select(
+        &self,
+        title: &str,
+        options: Vec<String>,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> Result<Option<String>> {
+        let mapped = opts.map(|o| ExtensionUIDialogOptions {
+            timeout_ms: o.timeout.map(|v| v as i64),
+            signal: o.signal,
+        });
+        Ok(self.0.select(title.to_owned(), options, mapped).await)
+    }
+
+    async fn confirm(
+        &self,
+        title: &str,
+        message: &str,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> Result<bool> {
+        let mapped = opts.map(|o| ExtensionUIDialogOptions {
+            timeout_ms: o.timeout.map(|v| v as i64),
+            signal: o.signal,
+        });
+        Ok(self.0.confirm(title.to_owned(), message.to_owned(), mapped).await)
+    }
+
+    async fn input(
+        &self,
+        title: &str,
+        placeholder: Option<&str>,
+        opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    ) -> Result<Option<String>> {
+        let mapped = opts.map(|o| ExtensionUIDialogOptions {
+            timeout_ms: o.timeout.map(|v| v as i64),
+            signal: o.signal,
+        });
+        Ok(self
+            .0
+            .input(title.to_owned(), placeholder.map(str::to_owned), mapped)
+            .await)
+    }
+
+    fn notify(&self, message: &str, notify_type: Option<crate::core::extensions::types::NotifyType>) {
+        let kind = notify_type.map(|t| match t {
+            crate::core::extensions::types::NotifyType::Info => NotifyKind::Info,
+            crate::core::extensions::types::NotifyType::Warning => NotifyKind::Warning,
+            crate::core::extensions::types::NotifyType::Error => NotifyKind::Error,
+        });
+        self.0.notify(message, kind);
+    }
+
+    fn on_terminal_input(&self, handler: crate::core::extensions::types::TerminalInputHandler) -> Unsubscribe {
+        let wrapped: pi_tui::tui::TuiInputListener = Arc::new(move |data| {
+            let consume = handler(data).is_some_and(|r| r.consume.unwrap_or(false));
+            Some(pi_tui::tui::TuiInputListenerResult {
+                consume: Some(consume),
+                data: None,
+            })
+        });
+        self.0.on_terminal_input(wrapped)
+    }
+
+    fn set_status(&self, key: &str, text: Option<&str>) {
+        self.0.set_status(key, text);
+    }
+
+    fn set_working_message(&self, message: Option<&str>) {
+        self.0.set_working_message(message);
+    }
+
+    fn set_working_visible(&self, visible: bool) {
+        self.0.set_working_visible(visible);
+    }
+
+    fn set_working_indicator(&self, options: Option<crate::core::extensions::types::WorkingIndicatorOptions>) {
+        let mapped = options.map(|o| pi_tui::LoaderIndicatorOptions {
+            frames: o.frames,
+            interval_ms: o.interval_ms,
+        });
+        self.0.set_working_indicator(mapped);
+    }
+
+    fn set_hidden_thinking_label(&self, label: Option<&str>) {
+        self.0.set_hidden_thinking_label(label);
+    }
+
+    fn set_widget_lines(
+        &self,
+        key: &str,
+        content: Option<Vec<String>>,
+        options: Option<crate::core::extensions::types::ExtensionWidgetOptions>,
+    ) {
+        let mapped_opts = options.map(|o| ExtensionWidgetOptions {
+            placement: match o.placement {
+                Some(crate::core::extensions::types::WidgetPlacement::BelowEditor) => WidgetPlacement::BelowEditor,
+                _ => WidgetPlacement::AboveEditor,
+            },
+        });
+        self.0.set_widget(key, content.map(WidgetContent::Lines), mapped_opts);
+    }
+
+    fn set_widget_factory(
+        &self,
+        key: &str,
+        factory: Option<crate::core::extensions::types::WidgetFactory>,
+        options: Option<crate::core::extensions::types::ExtensionWidgetOptions>,
+    ) {
+        let mapped_opts = options.map(|o| ExtensionWidgetOptions {
+            placement: match o.placement {
+                Some(crate::core::extensions::types::WidgetPlacement::BelowEditor) => WidgetPlacement::BelowEditor,
+                _ => WidgetPlacement::AboveEditor,
+            },
+        });
+        let mapped_factory = factory.map(|f| {
+            WidgetContent::Factory(Arc::new(move |tui, th| {
+                f(
+                    tui as Arc<dyn TUI>,
+                    crate::core::extensions::types::Theme::new(Arc::new(th)),
+                )
+            }))
+        });
+        self.0.set_widget(key, mapped_factory, mapped_opts);
+    }
+
+    fn set_footer(&self, factory: Option<crate::core::extensions::types::FooterFactory>) {
+        let mapped = factory.map(|f| {
+            Arc::new(move |tui: Arc<dyn TUI + Send + Sync>, th, footer_data| {
+                f(
+                    tui as Arc<dyn TUI>,
+                    crate::core::extensions::types::Theme::new(Arc::new(th)),
+                    footer_data,
+                )
+            }) as FooterFactory
+        });
+        self.0.set_footer(mapped);
+    }
+
+    fn set_header(&self, factory: Option<crate::core::extensions::types::HeaderFactory>) {
+        let mapped = factory.map(|f| {
+            Arc::new(move |tui: Arc<dyn TUI + Send + Sync>, th| {
+                f(
+                    tui as Arc<dyn TUI>,
+                    crate::core::extensions::types::Theme::new(Arc::new(th)),
+                )
+            }) as HeaderFactory
+        });
+        self.0.set_header(mapped);
+    }
+
+    fn set_title(&self, title: &str) {
+        self.0.set_title(title);
+    }
+
+    async fn custom(
+        &self,
+        factory: crate::core::extensions::types::CustomUiFactory,
+        options: Option<crate::core::extensions::types::ExtensionCustomOptions>,
+    ) -> Result<Value> {
+        let mapped_factory: CustomUiFactory = Box::new(move |tui, th, kb, done| {
+            factory(
+                tui as Arc<dyn TUI>,
+                crate::core::extensions::types::Theme::new(Arc::new(th)),
+                kb.to_tui_manager(),
+                done,
+            )
+        });
+        let mapped_opts = options.map(|o| {
+            let resolved_overlay_options = o.overlay_options.map(|src| match src {
+                crate::core::extensions::types::OverlayOptionsSource::Static(opts) => opts,
+                crate::core::extensions::types::OverlayOptionsSource::Dynamic(f) => f(),
+            });
+            ExtensionCustomOptions {
+                overlay: o.overlay.unwrap_or(false),
+                overlay_options: resolved_overlay_options,
+                on_handle: o.on_handle,
+                blocked: None,
+            }
+        });
+        self.0.custom(mapped_factory, mapped_opts).await
+    }
+
+    fn paste_to_editor(&self, text: &str) {
+        self.0.paste_to_editor(text);
+    }
+
+    fn set_editor_text(&self, text: &str) {
+        self.0.set_editor_text(text);
+    }
+
+    fn get_editor_text(&self) -> String {
+        self.0.get_editor_text()
+    }
+
+    async fn editor(&self, title: &str, prefill: Option<&str>) -> Result<Option<String>> {
+        Ok(self.0.editor(title.to_owned(), prefill.map(str::to_owned)).await)
+    }
+
+    fn add_autocomplete_provider(&self, factory: crate::core::extensions::types::AutocompleteProviderFactory) {
+        struct AutocompleteBridge(Arc<dyn AutocompleteProvider>);
+
+        #[async_trait]
+        impl AutocompleteProvider for AutocompleteBridge {
+            fn trigger_characters(&self) -> Option<Vec<String>> {
+                self.0.trigger_characters()
+            }
+
+            fn set_trigger_characters(&self, trigger_characters: Option<Vec<String>>) {
+                self.0.set_trigger_characters(trigger_characters);
+            }
+
+            async fn get_suggestions(
+                &self,
+                lines: &[String],
+                cursor_line: i64,
+                cursor_col: i64,
+                options: pi_tui::autocomplete::GetSuggestionsOptions,
+            ) -> Option<pi_tui::autocomplete::AutocompleteSuggestions> {
+                self.0.get_suggestions(lines, cursor_line, cursor_col, options).await
+            }
+
+            fn apply_completion(
+                &self,
+                lines: &[String],
+                cursor_line: i64,
+                cursor_col: i64,
+                item: &AutocompleteItem,
+                prefix: &str,
+            ) -> pi_tui::autocomplete::ApplyCompletionResult {
+                self.0.apply_completion(lines, cursor_line, cursor_col, item, prefix)
+            }
+
+            fn should_trigger_file_completion(&self, lines: &[String], cursor_line: i64, cursor_col: i64) -> bool {
+                self.0.should_trigger_file_completion(lines, cursor_line, cursor_col)
+            }
+        }
+
+        let wrapped: AutocompleteProviderFactory = Arc::new(move |prev| {
+            let next = factory(prev as Arc<dyn AutocompleteProvider>);
+            Arc::new(AutocompleteBridge(next))
+        });
+        ExtensionUiContext::add_autocomplete_provider(&*self.0, wrapped);
+    }
+
+    fn set_editor_component(&self, factory: Option<crate::core::extensions::types::EditorFactory>) {
+        let mapped = factory.map(|f| {
+            Arc::new(
+                move |tui: Arc<dyn TUI + Send + Sync>, editor_theme, kb: KeybindingsManager| {
+                    f(tui as Arc<dyn TUI>, editor_theme, kb.to_tui_manager())
+                },
+            ) as EditorFactory
+        });
+        self.0.set_editor_component(mapped);
+    }
+
+    fn get_editor_component(&self) -> Option<crate::core::extensions::types::EditorFactory> {
+        let inner = self.0.get_editor_component()?;
+        Some(Arc::new(move |tui: Arc<dyn TUI>, editor_theme, tui_kb| {
+            let wrapped: Arc<dyn TUI + Send + Sync> = Arc::new(SendSyncTuiWrapper(tui));
+            let kb = KeybindingsManager::new(Some(tui_kb.get_user_bindings()), None);
+            inner(wrapped, editor_theme, kb)
+        }))
+    }
+
+    fn theme(&self) -> crate::core::extensions::types::Theme {
+        crate::core::extensions::types::Theme::new(Arc::new(self.0.theme()))
+    }
+
+    fn get_all_themes(&self) -> Vec<crate::core::extensions::types::ThemeInfo> {
+        self.0
+            .get_all_themes()
+            .into_iter()
+            .map(|t| crate::core::extensions::types::ThemeInfo {
+                name: t.name,
+                path: t.path,
+            })
+            .collect()
+    }
+
+    fn get_theme(&self, name: &str) -> Option<crate::core::extensions::types::Theme> {
+        self.0
+            .get_theme(name)
+            .map(|t| crate::core::extensions::types::Theme::new(Arc::new(t)))
+    }
+
+    fn set_theme_by_name(&self, name: &str) -> crate::core::extensions::types::SetThemeResult {
+        let res = self.0.set_theme_name(name);
+        crate::core::extensions::types::SetThemeResult {
+            success: res.success,
+            error: res.error,
+        }
+    }
+
+    fn set_theme(
+        &self,
+        theme: crate::core::extensions::types::Theme,
+    ) -> crate::core::extensions::types::SetThemeResult {
+        let Some(interactive_theme) = theme.0.to_interactive_theme() else {
+            return crate::core::extensions::types::SetThemeResult {
+                success: false,
+                error: Some("Theme object is not a TUI Theme instance".to_owned()),
+            };
+        };
+        let res = self.0.set_theme_instance(interactive_theme);
+        crate::core::extensions::types::SetThemeResult {
+            success: res.success,
+            error: res.error,
+        }
+    }
+
+    fn get_tools_expanded(&self) -> bool {
+        self.0.get_tools_expanded()
+    }
+
+    fn set_tools_expanded(&self, expanded: bool) {
+        self.0.set_tools_expanded(expanded);
+    }
+}
+
+#[async_trait]
+impl InteractiveSession for crate::core::agent_session::AgentSession {
+    fn session_manager(&self) -> Arc<dyn InteractiveSessionManager> {
+        Arc::new(self.session_manager().clone())
+    }
+
+    fn settings_manager(&self) -> Arc<dyn InteractiveSettingsManager> {
+        Arc::new(self.settings_manager().clone())
+    }
+
+    fn model_runtime(&self) -> Arc<dyn InteractiveModelRuntime> {
+        Arc::new(Arc::new(self.model_runtime().clone()))
+    }
+
+    fn resource_loader(&self) -> Arc<dyn InteractiveResourceLoader> {
+        Arc::new(InteractiveResourceLoaderAdapter(Arc::clone(self.resource_loader())))
+    }
+
+    fn extension_runner(&self) -> Arc<dyn InteractiveExtensionRunner> {
+        Arc::new(InteractiveExtensionRunnerAdapter {
+            runner: self.extension_runner(),
+            session: self.clone(),
+        })
+    }
+
+    fn as_footer_session(&self) -> Arc<dyn FooterSession> {
+        Arc::new(self.clone())
+    }
+
+    fn as_share_session(&self) -> Option<Arc<dyn ShareSession>> {
+        Some(Arc::new(self.clone()))
+    }
+
+    fn as_bug_report_session(&self) -> Option<Arc<dyn BugReportSession>> {
+        Some(Arc::new(self.clone()))
+    }
+
+    fn model_thinking_level(&self) -> ModelThinkingLevel {
+        self.thinking_level()
+    }
+
+    fn scoped_models(&self) -> Vec<ScopedModelItem> {
+        self.scoped_models()
+            .into_iter()
+            .map(|entry| ScopedModelItem {
+                model: entry.model,
+                thinking_level: entry.thinking_level.map(|lvl| lvl.to_string()),
+            })
+            .collect()
+    }
+
+    fn set_scoped_models(&self, models: Vec<ScopedModelItem>) {
+        let mapped = models
+            .into_iter()
+            .map(|item| crate::core::sdk::ScopedModelEntry {
+                model: item.model,
+                thinking_level: item
+                    .thinking_level
+                    .as_deref()
+                    .and_then(crate::cli::args::parse_thinking_level),
+            })
+            .collect();
+        crate::core::agent_session::AgentSession::set_scoped_models(self, mapped);
+    }
+
+    fn auto_compaction_enabled(&self) -> bool {
+        crate::core::agent_session::AgentSession::auto_compaction_enabled(self)
+    }
+
+    fn set_auto_compaction_enabled(&self, enabled: bool) {
+        crate::core::agent_session::AgentSession::set_auto_compaction_enabled(self, enabled);
+    }
+
+    fn steering_mode(&self) -> SteeringMode {
+        match crate::core::agent_session::AgentSession::steering_mode(self) {
+            pi_agent_core::QueueMode::All => SteeringMode::All,
+            pi_agent_core::QueueMode::OneAtATime => SteeringMode::OneAtATime,
+        }
+    }
+
+    fn set_steering_mode(&self, mode: SteeringMode) {
+        let mapped = match mode {
+            SteeringMode::All => pi_agent_core::QueueMode::All,
+            SteeringMode::OneAtATime => pi_agent_core::QueueMode::OneAtATime,
+        };
+        crate::core::agent_session::AgentSession::set_steering_mode(self, mapped);
+    }
+
+    fn follow_up_mode(&self) -> SteeringMode {
+        match crate::core::agent_session::AgentSession::follow_up_mode(self) {
+            pi_agent_core::QueueMode::All => SteeringMode::All,
+            pi_agent_core::QueueMode::OneAtATime => SteeringMode::OneAtATime,
+        }
+    }
+
+    fn set_follow_up_mode(&self, mode: SteeringMode) {
+        let mapped = match mode {
+            SteeringMode::All => pi_agent_core::QueueMode::All,
+            SteeringMode::OneAtATime => pi_agent_core::QueueMode::OneAtATime,
+        };
+        crate::core::agent_session::AgentSession::set_follow_up_mode(self, mapped);
+    }
+
+    fn set_transport(&self, transport: pi_ai::Transport) {
+        self.settings_manager().set_transport(transport);
+    }
+
+    fn set_cache_warming_mode(&self, mode: CacheWarmingMode) {
+        crate::core::agent_session::AgentSession::set_cache_warming_mode(self, mode);
+    }
+
+    fn cache_warming_status(&self) -> Option<CacheWarmingStatusSummary> {
+        let status = crate::core::agent_session::AgentSession::cache_warming_status(self)?;
+        let decision = status.decision;
+        Some(CacheWarmingStatusSummary {
+            status_text: crate::core::cache_warmer::format_cache_warming_status(&status, None),
+            economics_available: decision.is_some_and(|d| d.economics_available),
+            miss_cost: decision.map_or(0.0, |d| d.miss_cost),
+            warm_cost: decision.map_or(0.0, |d| d.warm_cost),
+        })
+    }
+
+    fn is_streaming(&self) -> bool {
+        crate::core::agent_session::AgentSession::is_streaming(self)
+    }
+
+    fn is_idle(&self) -> bool {
+        crate::core::agent_session::AgentSession::is_idle(self)
+    }
+
+    fn is_compacting(&self) -> bool {
+        crate::core::agent_session::AgentSession::is_compacting(self)
+    }
+
+    fn is_bash_running(&self) -> bool {
+        crate::core::agent_session::AgentSession::is_bash_running(self)
+    }
+
+    fn retry_attempt(&self) -> u32 {
+        crate::core::agent_session::AgentSession::retry_attempt(self)
+    }
+
+    fn pending_message_count(&self) -> usize {
+        crate::core::agent_session::AgentSession::pending_message_count(self)
+    }
+
+    fn get_steering_messages(&self) -> Vec<String> {
+        crate::core::agent_session::AgentSession::get_steering_messages(self)
+    }
+
+    fn get_follow_up_messages(&self) -> Vec<String> {
+        crate::core::agent_session::AgentSession::get_follow_up_messages(self)
+    }
+
+    fn clear_queue(&self) -> ClearQueueResult {
+        let res = crate::core::agent_session::AgentSession::clear_queue(self);
+        ClearQueueResult {
+            steering: res.steering,
+            follow_up: res.follow_up,
+        }
+    }
+
+    fn messages(&self) -> Vec<AgentMessage> {
+        crate::core::agent_session::AgentSession::messages(self)
+    }
+
+    fn prompt_templates(&self) -> Vec<PromptTemplateInfo> {
+        crate::core::agent_session::AgentSession::prompt_templates(self)
+            .into_iter()
+            .map(|p| PromptTemplateInfo {
+                name: p.name,
+                description: if p.description.is_empty() {
+                    None
+                } else {
+                    Some(p.description)
+                },
+                argument_hint: p.argument_hint,
+                file_path: p.file_path,
+                source_info: Some(core_source_info_to_interactive(&p.source_info)),
+            })
+            .collect()
+    }
+
+    fn session_file(&self) -> Option<String> {
+        crate::core::agent_session::AgentSession::session_file(self)
+    }
+
+    fn signal(&self) -> Option<AbortSignal> {
+        self.agent().signal()
+    }
+
+    fn get_available_thinking_levels(&self) -> Vec<ModelThinkingLevel> {
+        crate::core::agent_session::AgentSession::get_available_thinking_levels(self)
+    }
+
+    fn set_thinking_level(&self, level: ModelThinkingLevel, persist: bool) -> Result<()> {
+        crate::core::agent_session::AgentSession::set_thinking_level(
+            self,
+            level,
+            Some(crate::core::agent_session::ModelMutationOptions { persist: Some(persist) }),
+        );
+        Ok(())
+    }
+
+    fn cycle_thinking_level(&self) -> Option<ModelThinkingLevel> {
+        crate::core::agent_session::AgentSession::cycle_thinking_level(self, None)
+    }
+
+    async fn set_model(&self, model: Model, persist: bool) -> Result<()> {
+        crate::core::agent_session::AgentSession::set_model(
+            self,
+            model,
+            Some(crate::core::agent_session::ModelMutationOptions { persist: Some(persist) }),
+        )
+        .await
+    }
+
+    async fn cycle_model(&self, direction: CycleDirection) -> Result<Option<CycleModelResult>> {
+        let dir = match direction {
+            CycleDirection::Forward => crate::core::agent_session::CycleDirection::Forward,
+            CycleDirection::Backward => crate::core::agent_session::CycleDirection::Backward,
+        };
+        let res = crate::core::agent_session::AgentSession::cycle_model(self, Some(dir), None).await?;
+        Ok(res.map(|r| CycleModelResult {
+            model: r.model,
+            thinking_level: r.thinking_level,
+        }))
+    }
+
+    async fn prompt(&self, text: &str, options: Option<InteractivePromptOptions>) -> Result<()> {
+        let mapped = options.map(|o| crate::core::agent_session::PromptOptions {
+            expand_prompt_templates: None,
+            streaming_behavior: o.streaming_behavior.map(|b| match b {
+                CompactionQueueMode::Steer => crate::core::agent_session::StreamingBehavior::Steer,
+                CompactionQueueMode::FollowUp => crate::core::agent_session::StreamingBehavior::FollowUp,
+            }),
+            images: o.images,
+            source: Some(crate::core::extensions::types::InputSource::Interactive),
+            preflight_result: None,
+        });
+        crate::core::agent_session::AgentSession::prompt(self, text, mapped).await
+    }
+
+    async fn steer(&self, text: &str) -> Result<()> {
+        let opts = crate::core::agent_session::QueueInputOptions {
+            source: Some(crate::core::extensions::types::InputSource::Interactive),
+        };
+        crate::core::agent_session::AgentSession::steer(self, text, None, Some(opts))
+            .await
+            .map(|_| ())
+    }
+
+    async fn follow_up(&self, text: &str) -> Result<()> {
+        let opts = crate::core::agent_session::QueueInputOptions {
+            source: Some(crate::core::extensions::types::InputSource::Interactive),
+        };
+        crate::core::agent_session::AgentSession::follow_up(self, text, None, Some(opts))
+            .await
+            .map(|_| ())
+    }
+
+    async fn abort(&self) {
+        crate::core::agent_session::AgentSession::abort(self).await;
+    }
+
+    async fn wait_for_idle(&self) {
+        crate::core::agent_session::AgentSession::wait_for_idle(self).await;
+    }
+
+    fn abort_compaction(&self) {
+        crate::core::agent_session::AgentSession::abort_compaction(self);
+    }
+
+    fn abort_branch_summary(&self) {
+        crate::core::agent_session::AgentSession::abort_branch_summary(self);
+    }
+
+    fn abort_retry(&self) {
+        crate::core::agent_session::AgentSession::abort_retry(self);
+    }
+
+    fn abort_bash(&self) {
+        crate::core::agent_session::AgentSession::abort_bash(self);
+    }
+
+    fn subscribe(&self, listener: Arc<dyn Fn(AgentSessionEvent) -> BoxFuture<()> + Send + Sync>) -> Unsubscribe {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentSessionEvent>();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    listener(ev).await;
+                }
+            });
+        }
+        crate::core::agent_session::AgentSession::subscribe(self, move |ev| {
+            let _ = tx.send(ev);
+        })
+    }
+
+    async fn bind_extensions(&self, bindings: InteractiveExtensionBindings) -> Result<()> {
+        let on_error = bindings.on_error;
+        let wait_for_idle = bindings.wait_for_idle;
+        let new_session = bindings.new_session;
+        let fork = bindings.fork;
+        let navigate_tree = bindings.navigate_tree;
+        let switch_session = bindings.switch_session;
+        let reload = bindings.reload;
+
+        let actions = crate::core::extensions::types::ExtensionCommandContextActions {
+            wait_for_idle: Arc::new(move || {
+                let f = Arc::clone(&wait_for_idle);
+                Box::pin(async move {
+                    f().await;
+                    Ok(())
+                })
+            }),
+            new_session: Arc::new(move |_opts| {
+                let f = Arc::clone(&new_session);
+                Box::pin(async move {
+                    let r = f().await?;
+                    Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                })
+            }),
+            fork: Arc::new(move |entry_id, opts| {
+                let f = Arc::clone(&fork);
+                let id = entry_id.to_owned();
+                let mapped = opts.map(|o| RuntimeForkOptions {
+                    at_leaf: o.position == Some(crate::core::extensions::types::ForkPosition::At),
+                });
+                Box::pin(async move {
+                    let r = f(id, mapped).await?;
+                    Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                })
+            }),
+            navigate_tree: Arc::new(move |target_id, opts| {
+                let f = Arc::clone(&navigate_tree);
+                let id = target_id.to_owned();
+                let mapped = opts.map_or_else(NavigateTreeOptions::default, |o| NavigateTreeOptions {
+                    summarize: o.summarize.unwrap_or(false),
+                    custom_instructions: o.custom_instructions,
+                    replace_instructions: o.replace_instructions,
+                    label: o.label,
+                });
+                Box::pin(async move {
+                    let r = f(id, mapped).await?;
+                    Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                })
+            }),
+            switch_session: Arc::new(move |session_path, _opts| {
+                let f = Arc::clone(&switch_session);
+                let path = session_path.to_owned();
+                Box::pin(async move {
+                    let r = f(path).await?;
+                    Ok(crate::core::extensions::types::CancelledResult { cancelled: r.cancelled })
+                })
+            }),
+            reload: Arc::new(move || {
+                let f = Arc::clone(&reload);
+                Box::pin(async move { f().await })
+            }),
+        };
+
+        let ext_bindings = crate::core::agent_session::ExtensionBindings {
+            ui_context: Some(Arc::new(InteractiveUiContextAdapter(bindings.ui_context))),
+            mode: Some(crate::core::extensions::types::ExtensionMode::Tui),
+            command_context_actions: Some(actions),
+            abort_handler: Some(bindings.abort_handler),
+            shutdown_handler: Some(bindings.shutdown_handler),
+            on_error: Some(Arc::new(move |err| {
+                on_error(&err.extension_path, &err.error, err.stack.as_deref());
+            })),
+        };
+        crate::core::agent_session::AgentSession::bind_extensions(self, ext_bindings).await
+    }
+
+    async fn reload(&self, before_session_start: Option<Arc<dyn Fn() + Send + Sync>>) -> Result<()> {
+        let opts = before_session_start.map(|cb| crate::core::agent_session::ReloadOptions {
+            before_session_start: Some(Box::new(move || {
+                Box::pin(async move {
+                    cb();
+                    Ok(())
+                })
+            })),
+        });
+        crate::core::agent_session::AgentSession::reload(self, opts).await
+    }
+
+    async fn compact(&self, custom_instructions: Option<&str>) -> Result<CompactionSummaryResult> {
+        let res = crate::core::agent_session::AgentSession::compact(self, custom_instructions).await?;
+        Ok(CompactionSummaryResult {
+            summary: res.summary,
+            tokens_before: res.tokens_before,
+            usage: res.usage,
+        })
+    }
+
+    async fn navigate_tree(&self, target_id: &str, options: NavigateTreeOptions) -> Result<NavigateTreeResult> {
+        let res = crate::core::agent_session::AgentSession::navigate_tree(
+            self,
+            target_id,
+            Some(crate::core::agent_session::NavigateTreeOptions {
+                summarize: Some(options.summarize),
+                custom_instructions: options.custom_instructions,
+                replace_instructions: options.replace_instructions,
+                label: options.label,
+            }),
+        )
+        .await?;
+        Ok(NavigateTreeResult {
+            aborted: res.aborted.unwrap_or(false),
+            cancelled: res.cancelled,
+            editor_text: res.editor_text,
+        })
+    }
+
+    fn get_user_messages_for_forking(&self) -> Vec<UserMessageItem> {
+        crate::core::agent_session::AgentSession::get_user_messages_for_forking(self)
+            .into_iter()
+            .map(|m| UserMessageItem {
+                id: m.entry_id,
+                text: m.text,
+                timestamp: None,
+            })
+            .collect()
+    }
+
+    fn get_session_stats(&self) -> SessionStats {
+        let s = crate::core::agent_session::AgentSession::get_session_stats(self);
+        SessionStats {
+            session_file: s.session_file,
+            session_id: s.session_id,
+            total_messages: s.total_messages.max(0) as usize,
+            user_messages: s.user_messages.max(0) as usize,
+            assistant_messages: s.assistant_messages.max(0) as usize,
+            tool_calls: s.tool_calls.max(0) as usize,
+            tool_results: s.tool_results.max(0) as usize,
+            input_tokens: s.tokens.input,
+            output_tokens: s.tokens.output,
+            cache_read_tokens: s.tokens.cache_read,
+            cache_write_tokens: s.tokens.cache_write,
+            total_tokens: s.tokens.total,
+            cost: s.cost,
+        }
+    }
+
+    fn get_last_assistant_text(&self) -> Option<String> {
+        crate::core::agent_session::AgentSession::get_last_assistant_text(self)
+    }
+
+    fn set_session_name(&self, name: &str) {
+        crate::core::agent_session::AgentSession::set_session_name(self, name);
+    }
+
+    fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String> {
+        crate::core::agent_session::AgentSession::export_to_jsonl(self, output_path)
+    }
+
+    async fn export_to_html(&self, output_path: Option<&str>, theme_name: Option<&str>) -> Result<String> {
+        let opts = theme_name.map(|t| crate::core::agent_session::ExportHtmlOptions {
+            theme_name: Some(t.to_owned()),
+        });
+        crate::core::agent_session::AgentSession::export_to_html(self, output_path, opts).await
+    }
+
+    async fn execute_bash(
+        &self,
+        command: &str,
+        on_chunk: Arc<dyn for<'a> Fn(&'a str) + Send + Sync>,
+        exclude_from_context: bool,
+    ) -> Result<BashExecutionResult> {
+        let pending_ops = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_user_bash_operations
+            .take();
+        let res = crate::core::agent_session::AgentSession::execute_bash(
+            self,
+            command,
+            Some(on_chunk),
+            Some(crate::core::agent_session::ExecuteBashOptions {
+                exclude_from_context: Some(exclude_from_context),
+                id: None,
+                operations: pending_ops,
+            }),
+        )
+        .await?;
+        Ok(BashExecutionResult {
+            output: res.output,
+            exit_code: res.exit_code.map(i64::from),
+            cancelled: res.cancelled,
+            truncated: res.truncated,
+            full_output_path: res.full_output_path,
+        })
+    }
+
+    fn record_bash_result(&self, command: &str, result: &BashExecutionResult, exclude_from_context: bool) {
+        let core_res = crate::core::bash_executor::BashResult {
+            output: result.output.clone(),
+            exit_code: result.exit_code.and_then(|c| i32::try_from(c).ok()),
+            cancelled: result.cancelled,
+            truncated: result.truncated,
+            full_output_path: result.full_output_path.clone(),
+        };
+        crate::core::agent_session::AgentSession::record_bash_result(
+            self,
+            command,
+            &core_res,
+            Some(crate::core::agent_session::RecordBashOptions {
+                exclude_from_context: Some(exclude_from_context),
+            }),
+        );
+    }
+
+    fn detect_cache_miss(&self, message: &pi_ai::AssistantMessage) -> Option<CacheMissNotice> {
+        crate::core::cache_stats::detect_cache_miss(
+            &self.session_manager().get_entries(),
+            message,
+            self.model_runtime(),
+        )
+    }
+
+    fn compute_cache_waste(&self) -> (i64, usize, f64) {
+        let waste =
+            crate::core::cache_stats::compute_cache_waste(&self.session_manager().get_entries(), self.model_runtime());
+        (waste.missed_tokens, waste.miss_count, waste.missed_cost)
+    }
+
+    fn get_usage_cost_breakdown(&self) -> Vec<UsageBreakdownEntry> {
+        crate::core::usage_totals::get_usage_cost_breakdown(&self.session_manager().get_entries())
+            .into_iter()
+            .map(|e| UsageBreakdownEntry {
+                key: e.key,
+                cost: e.cost,
+                tokens: e.tokens,
+            })
+            .collect()
+    }
+
+    fn get_tool_renderers(&self, tool_name: &str) -> Option<ToolRenderers> {
+        self.get_tool_definition(tool_name)
+            .map(|def| ToolRenderers::from_tool_definition(&def))
+    }
+}
+
+#[async_trait]
+impl InteractiveRuntimeHost for crate::core::agent_session_runtime::AgentSessionRuntime {
+    fn session(&self) -> Arc<dyn InteractiveSession> {
+        Arc::new(crate::core::agent_session_runtime::AgentSessionRuntime::session(self))
+    }
+
+    fn agent_dir(&self) -> String {
+        self.services().agent_dir
+    }
+
+    fn diagnostics(&self) -> Vec<AgentSessionRuntimeDiagnostic> {
+        crate::core::agent_session_runtime::AgentSessionRuntime::diagnostics(self)
+            .into_iter()
+            .map(|d| AgentSessionRuntimeDiagnostic {
+                diagnostic_type: match d.r#type {
+                    crate::core::diagnostics::AgentSessionRuntimeDiagnosticLevel::Info => DiagnosticLevel::Info,
+                    crate::core::diagnostics::AgentSessionRuntimeDiagnosticLevel::Warning => DiagnosticLevel::Warning,
+                    crate::core::diagnostics::AgentSessionRuntimeDiagnosticLevel::Error => DiagnosticLevel::Error,
+                },
+                message: d.message,
+            })
+            .collect()
+    }
+
+    fn model_fallback_message(&self) -> Option<String> {
+        crate::core::agent_session_runtime::AgentSessionRuntime::model_fallback_message(self)
+    }
+
+    fn set_before_session_invalidate(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        crate::core::agent_session_runtime::AgentSessionRuntime::set_before_session_invalidate(self, Some(cb));
+    }
+
+    fn set_rebind_session(&self, cb: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>) {
+        crate::core::agent_session_runtime::AgentSessionRuntime::set_rebind_session(
+            self,
+            Some(Arc::new(move |_session| {
+                let cb = Arc::clone(&cb);
+                Box::pin(async move {
+                    cb().await;
+                    Ok(())
+                })
+            })),
+        );
+    }
+
+    async fn new_session(&self) -> Result<CancelledResult> {
+        let r = crate::core::agent_session_runtime::AgentSessionRuntime::new_session(self, None).await?;
+        Ok(CancelledResult { cancelled: r.cancelled })
+    }
+
+    async fn fork(&self, entry_id: &str, options: Option<RuntimeForkOptions>) -> Result<RuntimeForkResult> {
+        let mapped = options.map(|o| crate::core::agent_session_runtime::RuntimeForkOptions {
+            position: Some(if o.at_leaf {
+                crate::core::extensions::types::ForkPosition::At
+            } else {
+                crate::core::extensions::types::ForkPosition::Before
+            }),
+            with_session: None,
+        });
+        let r = crate::core::agent_session_runtime::AgentSessionRuntime::fork(self, entry_id, mapped).await?;
+        Ok(RuntimeForkResult {
+            cancelled: r.cancelled,
+            selected_text: r.selected_text,
+        })
+    }
+
+    async fn switch_session(
+        &self,
+        session_path: &str,
+        options: Option<SwitchSessionOptions>,
+    ) -> Result<CancelledResult> {
+        let mapped = options.map(|o| crate::core::agent_session_runtime::SwitchSessionOptions {
+            cwd_override: o.cwd_override,
+            with_session: None,
+            project_trust_context_factory: None,
+        });
+        let r =
+            crate::core::agent_session_runtime::AgentSessionRuntime::switch_session(self, session_path, mapped).await?;
+        Ok(CancelledResult { cancelled: r.cancelled })
+    }
+
+    async fn import_from_jsonl(&self, input_path: &str, cwd_override: Option<&str>) -> Result<CancelledResult> {
+        let r =
+            crate::core::agent_session_runtime::AgentSessionRuntime::import_from_jsonl(self, input_path, cwd_override)
+                .await?;
+        Ok(CancelledResult { cancelled: r.cancelled })
+    }
+
+    async fn dispose(&self) {
+        crate::core::agent_session_runtime::AgentSessionRuntime::dispose(self).await;
     }
 }
