@@ -2,26 +2,7 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
-// WIRE(@tui-w3): Replace these local mirror types with `crate::core::extensions::types::{MarkdownMessageType, MarkdownTransformContext, MarkdownTransformer}` once @codemode merges onto main.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MarkdownMessageType {
-    User,
-    Assistant,
-    AssistantThinking,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownTransformContext {
-    pub message_type: MarkdownMessageType,
-    pub is_streaming: bool,
-    pub available_width: i64,
-}
-
-pub type MarkdownTransformer = Arc<dyn Fn(&str, MarkdownTransformContext) -> String + Send + Sync>;
+pub use crate::core::extensions::types::{MarkdownMessageType, MarkdownTransformContext, MarkdownTransformer};
 
 pub fn create_markdown_transform(
     message_type: MarkdownMessageType,

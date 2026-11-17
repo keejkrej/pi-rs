@@ -2,26 +2,14 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::extensions::types::{MessageRenderOptions, MessageRenderer};
 pub use crate::core::messages::{CustomMessage, CustomMessageContent};
 use pi_ai::UserContentBlock;
 use pi_tui::components::box_::TuiBox;
 use pi_tui::components::markdown::DefaultTextStyle;
 use pi_tui::{Component, Container, Markdown, MarkdownTheme, Spacer, Text, TuiMouseEvent, TuiMouseEventResult};
-use serde::{Deserialize, Serialize};
 
-use super::super::theme::theme::{Theme, ThemeBg, ThemeColor, get_markdown_theme, theme};
-
-// WIRE(@tui-w3): Replace local `MessageRenderOptions`/`MessageRenderer` with `crate::core::extensions::types::{MessageRenderOptions, MessageRenderer}` once @codemode merges.
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MessageRenderOptions {
-    pub expanded: bool,
-    pub output_pad: i64,
-}
-
-pub type MessageRenderer =
-    Arc<dyn Fn(CustomMessage, MessageRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
+use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
 
 struct CustomMessageState {
     custom_component: Option<Arc<dyn Component>>,
@@ -125,7 +113,7 @@ impl CustomMessageComponent {
             && let Some(component) = renderer(
                 self.inner.message.clone(),
                 MessageRenderOptions { expanded, output_pad },
-                theme(),
+                crate::core::extensions::types::Theme::new(Arc::new(theme())),
             )
         {
             self.inner.state.lock().unwrap().custom_component = Some(Arc::clone(&component));

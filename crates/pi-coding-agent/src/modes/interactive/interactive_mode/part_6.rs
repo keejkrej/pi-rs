@@ -1259,8 +1259,118 @@ impl InteractiveMode {
         }
     }
 
-    fn offer_radius_mcp_server(&self, _provider_id: &str, _provider_name: &str) {
-        // WIRE(@tui-w3): Wire crate::extensions::mcp::config::{plan_radius_mcp_server, add_mcp_server_config} once @mcp merges onto main.
+    fn offer_radius_mcp_server(&self, provider_id: &str, provider_name: &str) {
+        let agent_dir = crate::config::get_agent_dir();
+        let cwd = self.session().session_manager().get_cwd();
+        let loaded =
+            crate::extensions::mcp::config::load_mcp_config(&crate::extensions::mcp::config::LoadMcpConfigOptions {
+                agent_dir: agent_dir.clone(),
+                cwd,
+                project_trusted: false,
+            });
+        let target_url = crate::core::radius::RADIUS_MCP_URL.trim_end_matches('/');
+        let existing = loaded.servers.iter().find(|server| {
+            matches!(
+                &server.config,
+                crate::core::mcp_servers::McpServerConfig::Http(h) if h.url.trim_end_matches('/') == target_url
+            )
+        });
+        if let Some(srv) = existing
+            && matches!(
+                &srv.config,
+                crate::core::mcp_servers::McpServerConfig::Http(h)
+                    if h.auth.as_ref().map(|a| a.provider.as_str()) == Some(provider_id)
+            )
+        {
+            return;
+        }
+
+        let name = if let Some(srv) = existing {
+            srv.name.clone()
+        } else {
+            let namespaces: IndexSet<String> = loaded
+                .servers
+                .iter()
+                .map(|s| crate::core::mcp_servers::mcp_namespace(&s.name))
+                .collect();
+            let mut candidate = "radius".to_owned();
+            let mut suffix = 1usize;
+            while namespaces.contains(&crate::core::mcp_servers::mcp_namespace(&candidate)) {
+                candidate = if suffix == 1 {
+                    "radius-mcp".to_owned()
+                } else {
+                    format!("radius-mcp-{suffix}")
+                };
+                suffix += 1;
+            }
+            candidate
+        };
+
+        let mut http_cfg = match existing.map(|s| &s.config) {
+            Some(crate::core::mcp_servers::McpServerConfig::Http(h)) => h.clone(),
+            _ => crate::core::mcp_servers::McpHttpServerConfig {
+                r#type: None,
+                exposure: None,
+                description: None,
+                tool_exposure: None,
+                enabled: None,
+                timeout: None,
+                url: crate::core::radius::RADIUS_MCP_URL.clone(),
+                headers: None,
+                oauth: None,
+                auth: None,
+            },
+        };
+        http_cfg.auth = Some(crate::core::mcp_servers::McpProviderAuthConfig {
+            provider: provider_id.to_owned(),
+        });
+        http_cfg.oauth = None;
+        let config = crate::core::mcp_servers::McpServerConfig::Http(http_cfg);
+        let mcp_path = pi_js::path::join(&[&agent_dir, "mcp.json"]);
+        let title = format!("Configure {provider_name} MCP in {mcp_path}?");
+        let m_sel = self.clone();
+        let m_can = self.clone();
+
+        self.show_selector(Box::new(move |done| {
+            let done_sel = Arc::clone(&done);
+            let done_can = Arc::clone(&done);
+            let m_yes = m_sel.clone();
+            let mcp_path_yes = mcp_path.clone();
+            let name_yes = name.clone();
+            let cfg_yes = config.clone();
+            let on_select: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |option: &str| {
+                done_sel();
+                if option != "Yes" {
+                    return;
+                }
+                if let Err(err) =
+                    crate::extensions::mcp::config::add_mcp_server_config(&mcp_path_yes, &name_yes, &cfg_yes)
+                {
+                    m_yes.show_error(&format!("Could not update {mcp_path_yes}: {err}"));
+                    return;
+                }
+                let m_reload = m_yes.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        m_reload.handle_reload_command().await;
+                    });
+                }
+            });
+            let on_cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                done_can();
+                m_can.ui().request_render(None);
+            });
+            let selector = ExtensionSelectorComponent::new(
+                &title,
+                vec!["Yes".to_owned(), "No".to_owned()],
+                on_select,
+                on_cancel,
+                None,
+            );
+            let comp: Arc<dyn Component> = Arc::new(selector.clone());
+            let dispose: Arc<dyn Fn() + Send + Sync> = Arc::new(move || selector.dispose());
+            (Arc::clone(&comp), comp, Some(dispose))
+        }));
     }
 
     // =========================================================================

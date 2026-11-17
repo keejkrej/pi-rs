@@ -1010,6 +1010,44 @@ impl Theme {
     }
 }
 
+impl crate::core::extensions::types::ExtensionTheme for Theme {
+    fn fg(&self, color: &str, text: &str) -> String {
+        ThemeColor::from_token_str(color).map_or_else(|_| text.to_owned(), |c| Self::fg(self, c, text))
+    }
+
+    fn bg(&self, bg: &str, text: &str) -> String {
+        ThemeBg::from_token_str(bg).map_or_else(|_| text.to_owned(), |b| Self::bg(self, b, text))
+    }
+
+    fn bold(&self, text: &str) -> String {
+        Self::bold(self, text)
+    }
+
+    fn italic(&self, text: &str) -> String {
+        Self::italic(self, text)
+    }
+
+    fn underline(&self, text: &str) -> String {
+        Self::underline(self, text)
+    }
+
+    fn inverse(&self, text: &str) -> String {
+        Self::inverse(self, text)
+    }
+
+    fn strikethrough(&self, text: &str) -> String {
+        Self::strikethrough(self, text)
+    }
+
+    fn get_fg_ansi(&self, color: &str) -> String {
+        ThemeColor::from_token_str(color).map_or_else(|_| String::new(), |c| Self::get_fg_ansi(self, c))
+    }
+
+    fn get_bg_ansi(&self, bg: &str) -> String {
+        ThemeBg::from_token_str(bg).map_or_else(|_| String::new(), |b| Self::get_bg_ansi(self, b))
+    }
+}
+
 // ============================================================================
 // Theme Loading
 // ============================================================================

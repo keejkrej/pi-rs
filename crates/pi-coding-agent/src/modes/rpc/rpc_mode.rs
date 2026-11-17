@@ -25,8 +25,7 @@ use super::rpc_types::{
     ForkMessagesResponseData, ForkResult, GetCommandsResponseData, GetEntriesResult, GetMessagesResponseData,
     GetTreeResult, LastAssistantTextResponseData, NotifyType, PromptDisposition, PromptResponseData,
     QueuedInputDisposition, QueuedInputResponseData, RpcCommandType, RpcExtensionErrorEvent, RpcSlashCommand,
-    RpcStreamingBehavior, SessionEntry, SessionStats, SessionTreeNode, ThinkingLevel, WidgetPlacement,
-    session_entry_id,
+    RpcStreamingBehavior, SessionEntry, SessionStats, SessionTreeNode, ThinkingLevel, session_entry_id,
 };
 pub use super::rpc_types::{RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, RpcSessionState};
 
@@ -39,37 +38,16 @@ pub use super::rpc_types::{RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResp
 // in Stage 3B-2 once `@mcp`, `@codemode`, and `@ca-cli` merge onto `main`.
 
 /// Dialog options passed to RPC extension UI prompts.
-// WIRE(@tui-w3): map from crate::core::extensions::types::ExtensionUIDialogOptions.
-#[derive(Clone, Debug, Default)]
-pub struct RpcExtensionDialogOptions {
-    pub signal: Option<AbortSignal>,
-    pub timeout: Option<u64>,
-}
+pub type RpcExtensionDialogOptions = crate::core::extensions::types::ExtensionUIDialogOptions;
 
 /// Widget options passed to RPC extension UI `set_widget_lines`.
-// WIRE(@tui-w3): map from crate::core::extensions::types::ExtensionWidgetOptions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RpcExtensionWidgetOptions {
-    pub placement: Option<WidgetPlacement>,
-}
+pub type RpcExtensionWidgetOptions = crate::core::extensions::types::ExtensionWidgetOptions;
 
 /// Extension error payload forwarded onto the RPC wire.
-// WIRE(@tui-w3): map from crate::core::extensions::types::ExtensionError.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RpcExtensionError {
-    pub extension_path: String,
-    pub event: String,
-    pub error: String,
-    pub stack: Option<String>,
-}
+pub type RpcExtensionError = crate::core::extensions::types::ExtensionError;
 
 /// Fork placement for extension/RPC fork requests.
-// WIRE(@tui-w3): map to crate::core::extensions::types::ForkPosition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RpcForkPosition {
-    Before,
-    At,
-}
+pub type RpcForkPosition = crate::core::extensions::types::ForkPosition;
 
 /// Options for `RpcSessionRuntime::new_session`.
 // WIRE(@tui-w3): map to crate::core::agent_session_runtime::RuntimeNewSessionOptions.
@@ -124,11 +102,21 @@ pub struct RpcPromptOptions {
 }
 
 /// Result of emitting `user_bash` extension event.
-// WIRE(@tui-w3): map from crate::core::extensions::types::UserBashEventResult.
 #[derive(Clone)]
 pub enum RpcUserBashOutcome {
     Result(BashResult),
-    Operations(Arc<dyn Any + Send + Sync>),
+    Operations(Arc<dyn crate::core::tools::bash::BashOperations>),
+}
+
+impl From<crate::core::extensions::types::UserBashEventResult> for RpcUserBashOutcome {
+    fn from(res: crate::core::extensions::types::UserBashEventResult) -> Self {
+        match res {
+            crate::core::extensions::types::UserBashEventResult::Result { result } => Self::Result(result.into()),
+            crate::core::extensions::types::UserBashEventResult::Operations { operations } => {
+                Self::Operations(operations)
+            }
+        }
+    }
 }
 
 /// Options for `RpcSession::execute_bash`.
@@ -137,7 +125,7 @@ pub enum RpcUserBashOutcome {
 pub struct RpcExecuteBashOptions {
     pub exclude_from_context: Option<bool>,
     pub id: Option<String>,
-    pub operations: Option<Arc<dyn Any + Send + Sync>>,
+    pub operations: Option<Arc<dyn crate::core::tools::bash::BashOperations>>,
 }
 
 /// Extension UI context interface implemented by RPC mode.

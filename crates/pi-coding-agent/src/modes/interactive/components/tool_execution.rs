@@ -7,13 +7,14 @@ use std::sync::{Arc, LazyLock, Mutex};
 use crate::utils::exif_orientation::apply_exif_orientation;
 use crate::utils::photon::{PhotonBackend, PhotonImage};
 
+pub use crate::core::extensions::types::{RenderShell, ToolRenderResultOptions};
 use pi_agent_core::AgentToolResult;
 use pi_ai::UserContentBlock;
 use pi_tui::components::box_::TuiBox;
 use pi_tui::components::image::{Image, ImageOptions, ImageTheme, set_image_transcoder};
 use pi_tui::{
     Component, Container, ImageProtocol, MouseRegion, Spacer, TUI, Text, TuiMouseButton, TuiMouseEvent,
-    TuiMouseEventResult, TuiMouseEventType, get_capabilities, get_image_dimensions, image_fallback,
+    TuiMouseEventResult, TuiMouseEventType, get_capabilities,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,25 +23,10 @@ use super::super::theme::theme::{Theme, ThemeBg, ThemeColor, theme};
 use super::keybinding_hints::{key_hint, key_text};
 
 const FALLBACK_PREVIEW_LINES: usize = 10;
-const COLLAPSED_ARGS_CHARS: usize = 100;
 
-// WIRE(@tui-w3): Replace local mirror types (`RenderShell`, `ToolRenderResultOptions`, `ToolExecutionRenderContext`, `ToolRenderers`) with `crate::core::extensions::types::{RenderShell, ToolRenderContext, ToolRenderResultOptions, ToolRenderers}` (once `duration_ms`, `output_pad`, `key_text`, `key_hint` land on `ToolRenderContext` and `@codemode` merges onto main).
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RenderShell {
-    #[default]
-    Default,
-    #[serde(rename = "self")]
-    Self_,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolRenderResultOptions {
-    pub expanded: bool,
-    pub is_partial: bool,
-}
+// Note: `ToolExecutionRenderContext` retains `duration_ms`, `output_pad`, `key_text`, and `key_hint`
+// alongside the fields of `crate::core::extensions::types::ToolRenderContext`, and
+// `ToolRenderers::from_tool_definition` bridges `core::extensions::types::ToolDefinition` directly.
 
 #[derive(Clone)]
 pub struct ToolExecutionRenderContext {
@@ -77,6 +63,47 @@ pub struct ToolRenderers {
     pub render_result: Option<RenderResultFn>,
 }
 
+impl ToolRenderers {
+    pub fn from_tool_definition(def: &crate::core::extensions::types::ToolDefinition) -> Self {
+        let to_core_ctx = |ctx: ToolExecutionRenderContext| crate::core::extensions::types::ToolRenderContext {
+            args: ctx.args,
+            tool_call_id: ctx.tool_call_id,
+            invalidate: ctx.invalidate,
+            last_component: ctx.last_component,
+            state: ctx.state,
+            cwd: ctx.cwd,
+            execution_started: ctx.execution_started,
+            args_complete: ctx.args_complete,
+            is_partial: ctx.is_partial,
+            expanded: ctx.expanded,
+            show_images: ctx.show_images,
+            is_error: ctx.is_error,
+        };
+        Self {
+            render_shell: def.render_shell,
+            render_call: def.render_call.as_ref().map(|f| {
+                let f = Arc::clone(f);
+                Arc::new(move |args: Value, th: Theme, ctx: ToolExecutionRenderContext| {
+                    let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(th));
+                    f(args, ext_theme, to_core_ctx(ctx))
+                }) as RenderCallFn
+            }),
+            render_result: def.render_result.as_ref().map(|f| {
+                let f = Arc::clone(f);
+                Arc::new(
+                    move |res: AgentToolResult,
+                          opts: ToolRenderResultOptions,
+                          th: Theme,
+                          ctx: ToolExecutionRenderContext| {
+                        let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(th));
+                        f(res, opts, ext_theme, to_core_ctx(ctx))
+                    },
+                ) as RenderResultFn
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ToolExecutionOptions {
     pub show_images: Option<bool>,
@@ -106,114 +133,24 @@ impl From<AgentToolResult> for ToolExecutionResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// WIRE(@tui-w3): Local fallback helper mirroring core/tools/render_utils until @codemode merges.
-// ---------------------------------------------------------------------------
-
-fn replace_tabs(text: &str) -> String {
-    text.replace('\t', "   ")
-}
-
-// WIRE(@tui-w3): Replace with `crate::core::tools::render_utils::get_text_output` once @codemode merges onto main.
 pub fn get_text_output(result: Option<&ToolExecutionResult>, show_images: bool) -> String {
     let Some(res) = result else {
         return String::new();
     };
-
-    let mut text_parts: Vec<String> = Vec::new();
-    let mut image_parts: Vec<(&str, &str)> = Vec::new();
-
-    for block in &res.content {
-        match block {
-            UserContentBlock::Text(text) => {
-                let clean = crate::utils::shell::sanitize_binary_output(&crate::utils::ansi::strip_ansi(&text.text))
-                    .replace('\r', "");
-                text_parts.push(clean);
-            }
-            UserContentBlock::Image(img) => {
-                image_parts.push((&img.data, &img.mime_type));
-            }
-        }
-    }
-
-    let mut output = text_parts.join("\n");
-    let caps = get_capabilities();
-    if !image_parts.is_empty() && (caps.images.is_none() || !show_images) {
-        let indicators: Vec<String> = image_parts
-            .into_iter()
-            .map(|(data, mime)| {
-                let dims = if !data.is_empty() && !mime.is_empty() {
-                    get_image_dimensions(data, mime)
-                } else {
-                    None
-                };
-                let mime_label = if mime.is_empty() { "image/unknown" } else { mime };
-                image_fallback(mime_label, dims, None)
-            })
-            .collect();
-        let joined = indicators.join("\n");
-        if output.is_empty() {
-            output = joined;
-        } else {
-            output = format!("{output}\n{joined}");
-        }
-    }
-    output
+    let vals: Vec<Value> = res
+        .content
+        .iter()
+        .filter_map(|b| serde_json::to_value(b).ok())
+        .collect();
+    crate::core::tools::render_utils::get_text_output(&vals, show_images)
 }
 
-// WIRE(@tui-w3): Replace with `crate::core::tools::render_utils::format_tool_call_with_args` once @codemode merges onto main.
 /// Generic tool call header: the title followed by the arguments. Collapsed, they are `key=value`
 /// pairs on the title line, cut to `COLLAPSED_ARGS_CHARS`. Expanded, each is a `key: value`
 /// line below the title, with strings shown raw and continuation lines indented.
 pub fn format_tool_call_with_args(title: &str, args: Option<&Value>, theme: &Theme, expanded: bool) -> String {
-    let header = theme.fg(super::super::theme::theme::ThemeColor::ToolTitle, &theme.bold(title));
-    let Some(args_val) = args else {
-        return header;
-    };
-    if args_val.is_null() {
-        return header;
-    }
-    let entries: Vec<(String, &Value)> = match args_val {
-        Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), v)).collect(),
-        other => vec![("args".to_string(), other)],
-    };
-    if entries.is_empty() {
-        return header;
-    }
-    if expanded {
-        let lines: Vec<String> = entries
-            .into_iter()
-            .map(|(key, value)| {
-                let text = match value {
-                    Value::String(s) => s.clone(),
-                    other => pi_js::json::stringify_pretty(other, "  "),
-                };
-                let indented = replace_tabs(&text).replace('\r', "").replace('\n', "\n    ");
-                format!("  {key}: {indented}")
-            })
-            .collect();
-        return format!(
-            "{header}\n{}",
-            theme.fg(super::super::theme::theme::ThemeColor::Muted, &lines.join("\n"))
-        );
-    }
-    let pairs: String = entries
-        .into_iter()
-        .map(|(key, value)| format!("{key}={}", pi_js::json::stringify(value)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let preview = if pi_js::str16::len(&pairs) > COLLAPSED_ARGS_CHARS {
-        format!(
-            "{}...",
-            pi_js::str16::slice(&pairs, 0, Some((COLLAPSED_ARGS_CHARS - 3) as i64))
-        )
-    } else {
-        pairs
-    };
-    format!(
-        "{header} {}",
-        theme.fg(super::super::theme::theme::ThemeColor::Muted, &preview)
-    )
+    let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));
+    crate::core::tools::render_utils::format_tool_call_with_args(title, args, &ext_theme, expanded)
 }
 
 fn transcode_to_png_sync(base64_data: &str, _mime_type: &str) -> Option<String> {

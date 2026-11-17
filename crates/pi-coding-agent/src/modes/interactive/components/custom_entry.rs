@@ -2,22 +2,11 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::extensions::types::{EntryRenderOptions, EntryRenderer};
 pub use crate::core::session_manager::CustomEntry;
 use pi_tui::{Component, Container, Spacer, TuiMouseEvent, TuiMouseEventResult};
-use serde::{Deserialize, Serialize};
 
-use super::super::theme::theme::{Theme, theme};
-
-// WIRE(@tui-w3): Replace local `EntryRenderOptions`/`EntryRenderer` with `crate::core::extensions::types::{EntryRenderOptions, EntryRenderer}` once @codemode merges.
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EntryRenderOptions {
-    pub expanded: bool,
-}
-
-pub type EntryRenderer =
-    Arc<dyn Fn(CustomEntry, EntryRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
+use super::super::theme::theme::theme;
 
 struct CustomEntryState {
     custom_component: Option<Arc<dyn Component>>,
@@ -82,7 +71,7 @@ impl CustomEntryComponent {
             state.expanded
         };
 
-        let t = theme();
+        let t = crate::core::extensions::types::Theme::new(Arc::new(theme()));
         let Some(component) = (self.inner.renderer)(self.inner.entry.clone(), EntryRenderOptions { expanded }, t)
         else {
             return;

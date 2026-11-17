@@ -2,8 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::tools::truncate::{
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationOptions, TruncationResult, truncate_tail,
+};
 use pi_tui::{Component, Container, Loader, Spacer, TUI, Text, TuiMouseEvent, TuiMouseEventResult};
-use serde::{Deserialize, Serialize};
 
 use super::super::theme::theme::{ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
@@ -11,92 +13,6 @@ use super::keybinding_hints::{key_hint, key_text};
 use super::visual_truncate::truncate_to_visual_lines;
 
 const PREVIEW_LINES: usize = 20;
-
-// WIRE(@tui-w3): Replace local mirror with `crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationResult, truncate_tail}` once @codemode merges onto main.
-pub const DEFAULT_MAX_LINES: usize = 2000;
-pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TruncationResult {
-    pub content: String,
-    pub truncated: bool,
-    pub truncated_by: Option<String>,
-    pub total_lines: usize,
-    pub total_bytes: usize,
-    pub output_lines: usize,
-    pub output_bytes: usize,
-    pub last_line_partial: bool,
-    pub first_line_exceeds_limit: bool,
-    pub max_lines: usize,
-    pub max_bytes: usize,
-}
-
-fn truncate_tail_local(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let total_lines = lines.len();
-    let total_bytes = content.len();
-
-    if total_lines <= max_lines && total_bytes <= max_bytes {
-        return TruncationResult {
-            content: content.to_string(),
-            truncated: false,
-            truncated_by: None,
-            total_lines,
-            total_bytes,
-            output_lines: total_lines,
-            output_bytes: total_bytes,
-            last_line_partial: false,
-            first_line_exceeds_limit: false,
-            max_lines,
-            max_bytes,
-        };
-    }
-
-    let mut output: Vec<&str> = Vec::new();
-    let mut output_bytes = 0usize;
-    let mut truncated_by = Some("lines".to_string());
-    let mut last_line_partial = false;
-
-    for &line in lines.iter().rev() {
-        if output.len() >= max_lines {
-            break;
-        }
-        let added = line.len() + usize::from(!output.is_empty());
-        if output_bytes + added > max_bytes {
-            if output.is_empty() {
-                // Keep trailing slice of a single oversized line cleanly along UTF-8 boundaries.
-                let mut start = line.len().saturating_sub(max_bytes);
-                while start < line.len() && !line.is_char_boundary(start) {
-                    start += 1;
-                }
-                output.push(&line[start..]);
-                last_line_partial = true;
-            }
-            truncated_by = Some("bytes".to_string());
-            break;
-        }
-        output.push(line);
-        output_bytes += added;
-    }
-
-    output.reverse();
-    let out_content = output.join("\n");
-    let out_len = output.len();
-    TruncationResult {
-        content: out_content.clone(),
-        truncated: true,
-        truncated_by,
-        total_lines,
-        total_bytes,
-        output_lines: out_len,
-        output_bytes: out_content.len(),
-        last_line_partial,
-        first_line_exceeds_limit: false,
-        max_lines,
-        max_bytes,
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BashStatus {
@@ -312,7 +228,13 @@ impl BashExecutionComponent {
             )
         };
 
-        let context_truncation = truncate_tail_local(&full_output, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        let context_truncation = truncate_tail(
+            &full_output,
+            Some(TruncationOptions {
+                max_lines: Some(DEFAULT_MAX_LINES),
+                max_bytes: Some(DEFAULT_MAX_BYTES),
+            }),
+        );
         let available_lines: Vec<&str> = if context_truncation.content.is_empty() {
             Vec::new()
         } else {

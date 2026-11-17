@@ -50,7 +50,6 @@ pub enum RpcStreamingBehavior {
 pub use crate::core::source_info::{SourceInfo, SourceOrigin, SourceScope};
 
 /// Result returned by `bash` RPC command.
-// WIRE(@tui-w3): replace with crate::core::bash_executor::BashResult once @mcp merges.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashResult {
@@ -63,18 +62,35 @@ pub struct BashResult {
     pub full_output_path: Option<String>,
 }
 
+impl From<crate::core::bash_executor::BashResult> for BashResult {
+    fn from(res: crate::core::bash_executor::BashResult) -> Self {
+        Self {
+            output: res.output,
+            exit_code: res.exit_code,
+            cancelled: res.cancelled,
+            truncated: res.truncated,
+            full_output_path: res.full_output_path,
+        }
+    }
+}
+
+impl From<&BashResult> for crate::core::bash_executor::BashResult {
+    fn from(res: &BashResult) -> Self {
+        Self {
+            output: res.output.clone(),
+            exit_code: res.exit_code,
+            cancelled: res.cancelled,
+            truncated: res.truncated,
+            full_output_path: res.full_output_path.clone(),
+        }
+    }
+}
+
 /// Result returned by `compact` RPC command.
 pub type CompactionResult = crate::core::compaction::compaction::CompactionResult<Value>;
 
 /// Context window utilization reported inside [`SessionStats`].
-// WIRE(@tui-w3): replace with crate::core::extensions::types::ContextUsage once @codemode merges.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextUsage {
-    pub tokens: Option<i64>,
-    pub context_window: i64,
-    pub percent: Option<f64>,
-}
+pub use crate::core::extensions::types::ContextUsage;
 
 /// Aggregated token counts in [`SessionStats`].
 // WIRE(@tui-w3): replace with crate::core::agent_session::SessionTokenStats once @ca-cli merges.
@@ -130,24 +146,8 @@ pub struct SessionTreeNode {
 }
 
 /// Notification severity for `notify` extension UI requests.
-// WIRE(@tui-w3): replace with crate::core::extensions::types::NotifyType once @codemode merges.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NotifyType {
-    Info,
-    Warning,
-    Error,
-}
-
 /// Placement for extension widget UI requests.
-// WIRE(@tui-w3): replace with crate::core::extensions::types::WidgetPlacement once @codemode merges.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum WidgetPlacement {
-    #[default]
-    AboveEditor,
-    BelowEditor,
-}
+pub use crate::core::extensions::types::{NotifyType, WidgetPlacement};
 
 // ============================================================================
 // RPC Commands (stdin)
