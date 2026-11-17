@@ -1033,7 +1033,7 @@ impl InteractiveMode {
                 .filter(|s| !s.is_empty())
                 .collect();
             if sort {
-                labels.sort();
+                labels.sort_by(|a, b| pi_js::intl::locale_compare(a, b));
             }
             theme().fg(ThemeColor::Dim, &format!("  {}", labels.join(", ")))
         };
@@ -1863,7 +1863,11 @@ impl InteractiveMode {
         let (dialogs, overlays, default_msg) = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let dialogs = std::mem::take(&mut st.extension_dialogs);
-            let overlays = st.extension_overlays.drain(..).collect::<Vec<_>>();
+            let overlays = st
+                .extension_overlays
+                .iter()
+                .map(|(_, rm)| Arc::clone(rm))
+                .collect::<Vec<_>>();
             (dialogs, overlays, "Working".to_string())
         };
         for dialog in dialogs {
@@ -1872,7 +1876,7 @@ impl InteractiveMode {
             }
         }
         self.show_top_extension_dialog();
-        for (_, remove) in overlays.into_iter().rev() {
+        for remove in overlays.into_iter().rev() {
             remove();
         }
         self.clear_extension_terminal_input_listeners();

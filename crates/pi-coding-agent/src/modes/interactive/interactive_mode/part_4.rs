@@ -2397,7 +2397,7 @@ impl InteractiveMode {
         let usage = notice.usage;
         let tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
         let cost = if usage.cost.total >= 0.01 {
-            format!(" (~${:.2})", usage.cost.total)
+            format!(" (~${})", pi_js::num::to_fixed(usage.cost.total, 2))
         } else {
             String::new()
         };
