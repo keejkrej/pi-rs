@@ -2,6 +2,13 @@
 
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
+use crate::core::source_info::SourceInfo;
+use crate::utils::fs_watch::{FsWatcher, close_watcher, watch_with_error_handler};
+use crate::utils::syntax_highlight::{
+    HighlightFormatter, HighlightOptions, HighlightTheme, get_highlight_language_count, highlight, supports_language,
+};
+use crate::utils::text::strip_bom;
+use crate::vendor::chalk::Chalk;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::ThinkingLevel;
 use pi_tui::colors::ParseColorValue;
@@ -451,28 +458,6 @@ pub struct ThemeInfo {
 }
 
 // ============================================================================
-// Temporary Stage 3A local fallbacks (resolved at Stage 3B-2 merge)
-// ============================================================================
-
-fn strip_bom_local(s: &str) -> &str {
-    // WIRE(@tui-w3): use crate::utils::text::strip_bom once @mcp lands Stage 3A-1.
-    s.strip_prefix('\u{FEFF}').unwrap_or(s)
-}
-
-fn get_themes_dir_local() -> String {
-    // WIRE(@tui-w3): use crate::config::get_themes_dir once @mcp lands Stage 3A-1.
-    pi_js::path::join(&[env!("CARGO_MANIFEST_DIR"), "src", "modes", "interactive", "theme"])
-}
-
-fn get_custom_themes_dir_local() -> String {
-    // WIRE(@tui-w3): use crate::config::get_custom_themes_dir once @mcp lands Stage 3A-1.
-    let agent_dir = pi_js::env::var("PI_CODING_AGENT_DIR")
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| pi_js::path::join(&[&pi_js::env::home_dir(), ".pi", "agent"]));
-    pi_js::path::join(&[&agent_dir, "themes"])
-}
-
-// ============================================================================
 // Color & Variable Resolution
 // ============================================================================
 
@@ -587,8 +572,7 @@ struct ThemeGlobalState {
     on_theme_change: Option<Arc<dyn Fn() + Send + Sync>>,
     theme_reload_timer: Option<pi_js::time::Timeout>,
     theme_json_validator: Option<ThemeJsonValidator>,
-    // WIRE(@tui-w3): store FSWatcher handle from crate::utils::fs_watch once @mcp lands.
-    watcher_active: bool,
+    watcher: Option<Arc<FsWatcher>>,
 }
 
 static GLOBAL_STATE: LazyLock<Mutex<ThemeGlobalState>> = LazyLock::new(|| Mutex::new(ThemeGlobalState::default()));
@@ -684,8 +668,7 @@ struct ThemeMutable {
 struct ThemeInner {
     name: Option<String>,
     source_path: Option<String>,
-    // WIRE(@tui-w3): switch source_info to Option<crate::core::source_info::SourceInfo> once Stage 3A-1 merges.
-    source_info: Option<Value>,
+    source_info: Option<SourceInfo>,
     mode: TerminalColorMode,
     fg_ansi: IndexMap<ThemeColor, String>,
     bg_ansi: IndexMap<ThemeBg, String>,
@@ -706,7 +689,7 @@ pub struct Theme {
 pub struct ThemeOptions {
     pub name: Option<String>,
     pub source_path: Option<String>,
-    pub source_info: Option<Value>,
+    pub source_info: Option<SourceInfo>,
     pub appearance: Option<ThemeAppearance>,
     pub dim: Vec<ThemeColor>,
 }
@@ -810,7 +793,7 @@ impl Theme {
         self.inner.source_path.as_deref()
     }
 
-    pub fn source_info(&self) -> Option<&Value> {
+    pub fn source_info(&self) -> Option<&SourceInfo> {
         self.inner.source_info.as_ref()
     }
 
@@ -951,25 +934,24 @@ impl Theme {
             .ok_or_else(|| pi_js::Error::msg(format!("Unknown theme color: {}", token.as_str())))
     }
 
-    // WIRE(@tui-w3): delegate SGR text modifiers to crate::vendor::chalk once @mcp lands Stage 3A-1.
     pub fn bold(&self, text: &str) -> String {
-        format!("\x1b[1m{text}\x1b[22m")
+        Chalk::new(Some(3)).bold().apply(text)
     }
 
     pub fn italic(&self, text: &str) -> String {
-        format!("\x1b[3m{text}\x1b[23m")
+        Chalk::new(Some(3)).italic().apply(text)
     }
 
     pub fn underline(&self, text: &str) -> String {
-        format!("\x1b[4m{text}\x1b[24m")
+        Chalk::new(Some(3)).underline().apply(text)
     }
 
     pub fn inverse(&self, text: &str) -> String {
-        format!("\x1b[7m{text}\x1b[27m")
+        Chalk::new(Some(3)).inverse().apply(text)
     }
 
     pub fn strikethrough(&self, text: &str) -> String {
-        format!("\x1b[9m{text}\x1b[29m")
+        Chalk::new(Some(3)).strikethrough().apply(text)
     }
 
     pub fn get_fg_ansi(&self, color: ThemeColor) -> String {
@@ -1038,7 +1020,7 @@ const BUILTIN_LIGHT_JSON: &str = include_str!("light.json");
 static BUILTIN_THEMES: OnceLock<(ThemeJson, ThemeJson)> = OnceLock::new();
 
 fn parse_builtin_theme_str(label: &str, raw: &str) -> ThemeJson {
-    let val: Value = pi_js::json::parse(strip_bom_local(raw)).unwrap_or(Value::Null);
+    let val: Value = pi_js::json::parse(strip_bom(raw)).unwrap_or(Value::Null);
     super::theme_json::validate_theme_json(label, &val).unwrap_or_else(|_| ThemeJson {
         schema: None,
         name: label.to_string(),
@@ -1051,7 +1033,7 @@ fn parse_builtin_theme_str(label: &str, raw: &str) -> ThemeJson {
 
 fn builtin_theme_json(name: &str) -> Option<&'static ThemeJson> {
     let (dark, light) = BUILTIN_THEMES.get_or_init(|| {
-        let themes_dir = get_themes_dir_local();
+        let themes_dir = crate::config::get_themes_dir();
         let dark_path = pi_js::path::join(&[&themes_dir, "dark.json"]);
         let light_path = pi_js::path::join(&[&themes_dir, "light.json"]);
         let dark_raw = pi_js::fs::read_to_string(&dark_path).unwrap_or_else(|_| BUILTIN_DARK_JSON.to_string());
@@ -1076,7 +1058,7 @@ pub fn get_available_themes() -> Vec<String> {
 }
 
 pub fn get_available_themes_with_paths() -> Vec<ThemeInfo> {
-    let themes_dir = get_themes_dir_local();
+    let themes_dir = crate::config::get_themes_dir();
     let mut result = Vec::new();
     let mut seen = IndexSet::new();
     let mut add_theme = |info: ThemeInfo| {
@@ -1123,7 +1105,7 @@ pub fn get_available_themes_with_paths() -> Vec<ThemeInfo> {
 }
 
 fn get_custom_theme_infos() -> Vec<ThemeInfo> {
-    let custom_dir = get_custom_themes_dir_local();
+    let custom_dir = crate::config::get_custom_themes_dir();
     let mut result = Vec::new();
     if !pi_js::fs::exists(&custom_dir) {
         return result;
@@ -1181,7 +1163,7 @@ fn parse_theme_json(label: &str, json: &Value) -> pi_js::Result<ThemeJson> {
 }
 
 fn parse_theme_json_content(label: &str, content: &str) -> pi_js::Result<ThemeJson> {
-    let json: Value = pi_js::json::parse(strip_bom_local(content))
+    let json: Value = pi_js::json::parse(strip_bom(content))
         .map_err(|e| pi_js::Error::msg(format!("Failed to parse theme {label}: {e}")))?;
     parse_theme_json(label, &json)
 }
@@ -1206,7 +1188,7 @@ fn load_theme_json(name: &str) -> pi_js::Result<ThemeJson> {
             "Theme \"{name}\" does not have a source path for export"
         )));
     }
-    let custom_dir = get_custom_themes_dir_local();
+    let custom_dir = crate::config::get_custom_themes_dir();
     let theme_path = pi_js::path::join(&[&custom_dir, &format!("{name}.json")]);
     if !pi_js::fs::exists(&theme_path) {
         return Err(pi_js::Error::msg(format!("Theme not found: {name}")));
@@ -1500,21 +1482,100 @@ fn start_theme_watcher() {
     {
         return;
     }
-    let custom_dir = get_custom_themes_dir_local();
-    let theme_file = pi_js::path::join(&[&custom_dir, &format!("{watched_name}.json")]);
+    let custom_dir = crate::config::get_custom_themes_dir();
+    let watched_file_name = format!("{watched_name}.json");
+    let theme_file = pi_js::path::join(&[&custom_dir, &watched_file_name]);
     if !pi_js::fs::exists(&theme_file) {
         return;
     }
-    // WIRE(@tui-w3): attach crate::utils::fs_watch::watch_with_error_handler on custom_dir once Stage 3A-1 merges.
-    GLOBAL_STATE.lock().unwrap().watcher_active = true;
+
+    let watched_name_for_cb = watched_name.clone();
+    let theme_file_for_cb = theme_file.clone();
+    let schedule_reload = Arc::new(move || {
+        let watched_name_timer = watched_name_for_cb.clone();
+        let theme_file_timer = theme_file_for_cb.clone();
+        let new_timer = pi_js::time::set_timeout(100, move || {
+            let still_active = {
+                let mut state = GLOBAL_STATE.lock().unwrap();
+                state.theme_reload_timer = None;
+                state.current_theme_name.as_deref() == Some(watched_name_timer.as_str())
+            };
+            if !still_active || !pi_js::fs::exists(&theme_file_timer) {
+                return;
+            }
+            if let Ok(reloaded_theme) = load_theme_from_path(&theme_file_timer, None) {
+                let cb = {
+                    let mut state = GLOBAL_STATE.lock().unwrap();
+                    if state.current_theme_name.as_deref() != Some(watched_name_timer.as_str()) {
+                        None
+                    } else {
+                        state
+                            .registered_themes
+                            .insert(watched_name_timer.clone(), reloaded_theme.clone());
+                        state.active_theme = Some(reloaded_theme);
+                        state.on_theme_change.clone()
+                    }
+                };
+                if let Some(cb) = cb {
+                    cb();
+                }
+            }
+        });
+        let prev = {
+            let mut state = GLOBAL_STATE.lock().unwrap();
+            state.theme_reload_timer.replace(new_timer)
+        };
+        if let Some(prev) = prev {
+            prev.clear();
+        }
+    });
+
+    let watcher_slot: Arc<Mutex<Option<Arc<FsWatcher>>>> = Arc::new(Mutex::new(None));
+    let watcher_slot_err = Arc::clone(&watcher_slot);
+    let watched_name_listener = watched_name;
+    let watched_file_listener = watched_file_name;
+
+    if let Some(w) = watch_with_error_handler(
+        &custom_dir,
+        move |_event_type, filename| {
+            let matches_current =
+                { GLOBAL_STATE.lock().unwrap().current_theme_name.as_deref() == Some(watched_name_listener.as_str()) };
+            if !matches_current {
+                return;
+            }
+            if filename.is_empty() || filename == watched_file_listener {
+                schedule_reload();
+            }
+        },
+        move || {
+            let w = watcher_slot_err.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(ref w_arc) = w {
+                let mut state = GLOBAL_STATE.lock().unwrap();
+                if state.watcher.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, w_arc)) {
+                    state.watcher = None;
+                }
+            }
+            close_watcher(w.as_deref());
+        },
+    ) {
+        *watcher_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&w));
+        let prev = {
+            let mut state = GLOBAL_STATE.lock().unwrap();
+            state.watcher.replace(w)
+        };
+        close_watcher(prev.as_deref());
+    }
 }
 
 pub fn stop_theme_watcher() {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    if let Some(timer) = state.theme_reload_timer.take() {
+    let (timer, watcher) = {
+        let mut state = GLOBAL_STATE.lock().unwrap();
+        (state.theme_reload_timer.take(), state.watcher.take())
+    };
+    if let Some(timer) = timer {
         timer.clear();
     }
-    state.watcher_active = false;
+    close_watcher(watcher.as_deref());
 }
 
 // ============================================================================
@@ -1603,13 +1664,91 @@ pub fn get_theme_export_colors(theme_name: Option<&str>) -> ThemeExportColors {
 // TUI Helpers
 // ============================================================================
 
+static CACHED_HIGHLIGHT_THEME: LazyLock<Mutex<Option<(usize, HighlightTheme)>>> = LazyLock::new(|| Mutex::new(None));
+
+fn fg_formatter(t: &Theme, token: ThemeColor) -> HighlightFormatter {
+    let t = t.clone();
+    Arc::new(move |s| t.fg(token, s))
+}
+
+fn build_cli_highlight_theme(t: &Theme) -> HighlightTheme {
+    let t_italic = t.clone();
+    let t_bold = t.clone();
+    let t_underline = t.clone();
+    IndexMap::from([
+        ("keyword".to_string(), fg_formatter(t, ThemeColor::SyntaxKeyword)),
+        ("built_in".to_string(), fg_formatter(t, ThemeColor::SyntaxType)),
+        ("literal".to_string(), fg_formatter(t, ThemeColor::SyntaxNumber)),
+        ("number".to_string(), fg_formatter(t, ThemeColor::SyntaxNumber)),
+        ("regexp".to_string(), fg_formatter(t, ThemeColor::SyntaxString)),
+        ("string".to_string(), fg_formatter(t, ThemeColor::SyntaxString)),
+        ("subst".to_string(), fg_formatter(t, ThemeColor::Text)),
+        ("comment".to_string(), fg_formatter(t, ThemeColor::SyntaxComment)),
+        ("doctag".to_string(), fg_formatter(t, ThemeColor::SyntaxComment)),
+        ("meta".to_string(), fg_formatter(t, ThemeColor::Muted)),
+        ("function".to_string(), fg_formatter(t, ThemeColor::SyntaxFunction)),
+        ("title".to_string(), fg_formatter(t, ThemeColor::SyntaxFunction)),
+        ("class".to_string(), fg_formatter(t, ThemeColor::SyntaxType)),
+        ("type".to_string(), fg_formatter(t, ThemeColor::SyntaxType)),
+        ("tag".to_string(), fg_formatter(t, ThemeColor::SyntaxPunctuation)),
+        ("name".to_string(), fg_formatter(t, ThemeColor::SyntaxKeyword)),
+        ("attr".to_string(), fg_formatter(t, ThemeColor::SyntaxVariable)),
+        ("variable".to_string(), fg_formatter(t, ThemeColor::SyntaxVariable)),
+        ("params".to_string(), fg_formatter(t, ThemeColor::SyntaxVariable)),
+        ("operator".to_string(), fg_formatter(t, ThemeColor::SyntaxOperator)),
+        (
+            "punctuation".to_string(),
+            fg_formatter(t, ThemeColor::SyntaxPunctuation),
+        ),
+        (
+            "emphasis".to_string(),
+            Arc::new(move |s: &str| t_italic.italic(s)) as HighlightFormatter,
+        ),
+        (
+            "strong".to_string(),
+            Arc::new(move |s: &str| t_bold.bold(s)) as HighlightFormatter,
+        ),
+        (
+            "link".to_string(),
+            Arc::new(move |s: &str| t_underline.underline(s)) as HighlightFormatter,
+        ),
+        ("addition".to_string(), fg_formatter(t, ThemeColor::ToolDiffAdded)),
+        ("deletion".to_string(), fg_formatter(t, ThemeColor::ToolDiffRemoved)),
+    ])
+}
+
+fn get_cli_highlight_theme(t: &Theme) -> HighlightTheme {
+    let ptr = Arc::as_ptr(&t.inner) as usize;
+    let mut guard = CACHED_HIGHLIGHT_THEME.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_ptr, ref cached)) = *guard
+        && cached_ptr == ptr
+    {
+        return cached.clone();
+    }
+    let built = build_cli_highlight_theme(t);
+    *guard = Some((ptr, built.clone()));
+    built
+}
+
 pub fn highlight_code(code: &str, lang: Option<&str>) -> Vec<String> {
-    let _ = lang;
     let t = theme();
-    // WIRE(@tui-w3): wire crate::utils::syntax_highlight::{highlight, supports_language} once Stage 3A-1 merges.
-    code.split('\n')
-        .map(|line| t.fg(ThemeColor::MdCodeBlock, line))
-        .collect()
+    let valid_lang = lang.map(str::trim).filter(|l| !l.is_empty() && supports_language(l));
+    let Some(valid_lang) = valid_lang else {
+        return code
+            .split('\n')
+            .map(|line| t.fg(ThemeColor::MdCodeBlock, line))
+            .collect();
+    };
+    let highlighted = highlight(
+        code,
+        HighlightOptions {
+            language: Some(valid_lang.to_string()),
+            ignore_illegals: Some(true),
+            language_subset: None,
+            theme: Some(get_cli_highlight_theme(&t)),
+        },
+    );
+    highlighted.split('\n').map(str::to_string).collect()
 }
 
 // SAFETY-FREE Note: we store usize pointer address rather than raw *const to remain Send+Sync without unsafe.
@@ -1636,8 +1775,7 @@ impl CodeHighlighter {
     pub fn highlight(&self, code: &str, lang: Option<&str>) -> Arc<Vec<String>> {
         let current_theme = GLOBAL_STATE.lock().unwrap().active_theme.clone();
         let theme_ptr = current_theme.as_ref().map(|t| Arc::as_ptr(&t.inner) as usize);
-        // WIRE(@tui-w3): query crate::utils::syntax_highlight::get_highlight_language_count() once Stage 3A-1 merges.
-        let language_count = 0usize;
+        let language_count = get_highlight_language_count();
         {
             let guard = self.last.lock().unwrap();
             if let Some(ref prev) = *guard

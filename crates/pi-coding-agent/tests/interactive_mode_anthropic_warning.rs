@@ -232,7 +232,7 @@ impl InteractiveSettingsManager for StubSettings {
     }
     fn set_enabled_models(&self, _patterns: Option<Vec<String>>) {}
     fn get_warnings(&self) -> WarningSettings {
-        self.warnings
+        self.warnings.clone()
     }
     fn set_warnings(&self, _warnings: WarningSettings) {}
     fn get_enable_install_telemetry(&self) -> bool {

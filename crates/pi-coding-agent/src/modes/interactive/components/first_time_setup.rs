@@ -8,11 +8,6 @@ use super::super::theme::theme::{SYSTEM_THEME_NAME, ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_hint, raw_key_hint};
 
-// WIRE(@tui-w3): Replace with `*crate::config::APP_NAME` once @mcp merges onto main.
-fn app_name_local() -> &'static str {
-    "pi"
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirstTimeSetupResult {
     pub theme: String,
@@ -104,7 +99,10 @@ impl FirstTimeSetupComponent {
         self.inner.container.add_child(Arc::new(Text::new(
             Some(&t.fg(
                 ThemeColor::Accent,
-                &t.bold(&format!("Welcome to {}, the minimal coding agent.", app_name_local())),
+                &t.bold(&format!(
+                    "Welcome to {}, the minimal coding agent.",
+                    *crate::config::APP_NAME
+                )),
             )),
             Some(1),
             Some(0),

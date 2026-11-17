@@ -22,11 +22,6 @@ impl Drop for TempDirCleanup {
     }
 }
 
-fn strip_bom_local(s: &str) -> &str {
-    // WIRE(@tui-w3): use crate::utils::text::strip_bom once @mcp lands Stage 3A-1.
-    s.strip_prefix('\u{FEFF}').unwrap_or(s)
-}
-
 struct PreparedExternalEditor {
     _cleanup: TempDirCleanup,
     file_path: String,
@@ -106,7 +101,7 @@ fn finish_external_editor_status(
     }
 
     let updated = pi_js::fs::read_to_string(&prepared.file_path)?;
-    let stripped = strip_bom_local(&updated);
+    let stripped = crate::utils::text::strip_bom(&updated);
     let trimmed = stripped.strip_suffix('\n').unwrap_or(stripped);
     Ok(ExternalEditorResult::Complete {
         content: trimmed.to_string(),

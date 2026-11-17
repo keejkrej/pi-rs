@@ -1,9 +1,11 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/tool-execution.ts
 
 use std::any::Any;
-use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, LazyLock, Mutex};
+
+use crate::utils::exif_orientation::apply_exif_orientation;
+use crate::utils::photon::{PhotonBackend, PhotonImage};
 
 use pi_agent_core::AgentToolResult;
 use pi_ai::UserContentBlock;
@@ -105,41 +107,8 @@ impl From<AgentToolResult> for ToolExecutionResult {
 }
 
 // ---------------------------------------------------------------------------
-// WIRE(@tui-w3): Local fallback helpers mirroring utils/ansi, utils/shell,
-// utils/image_convert, and core/tools/render_utils until @mcp / @codemode merge.
+// WIRE(@tui-w3): Local fallback helper mirroring core/tools/render_utils until @codemode merges.
 // ---------------------------------------------------------------------------
-
-static ANSI_REGEX: LazyLock<Option<fancy_regex::Regex>> = LazyLock::new(|| {
-    let st = r"(?:\x07|\x1b\\|\u{009c})";
-    let osc = format!(r"(?:\x1b\][\s\S]*?{st})");
-    let csi = r"[\x1b\u{009b}][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]";
-    fancy_regex::Regex::new(&format!("{osc}|{csi}")).ok()
-});
-
-// WIRE(@tui-w3): Replace with `crate::utils::ansi::strip_ansi` once @mcp merges onto main.
-fn strip_ansi_local(value: &str) -> String {
-    if !value.contains('\u{001B}') && !value.contains('\u{009B}') {
-        return value.to_owned();
-    }
-    match ANSI_REGEX.as_ref() {
-        Some(re) => re.replace_all(value, "").into_owned(),
-        None => pi_tui::strip_terminal_sequences(value),
-    }
-}
-
-// WIRE(@tui-w3): Replace with `crate::utils::shell::sanitize_binary_output` once @mcp merges onto main.
-fn sanitize_binary_output_local(s: &str) -> String {
-    s.chars()
-        .filter(|&c| {
-            let code = c as u32;
-            !((code <= 0x08)
-                || code == 0x0B
-                || code == 0x0C
-                || (0x0E..=0x1F).contains(&code)
-                || (0xFFF9..=0xFFFB).contains(&code))
-        })
-        .collect()
-}
 
 fn replace_tabs(text: &str) -> String {
     text.replace('\t', "   ")
@@ -157,7 +126,8 @@ pub fn get_text_output(result: Option<&ToolExecutionResult>, show_images: bool) 
     for block in &res.content {
         match block {
             UserContentBlock::Text(text) => {
-                let clean = sanitize_binary_output_local(&strip_ansi_local(&text.text)).replace('\r', "");
+                let clean = crate::utils::shell::sanitize_binary_output(&crate::utils::ansi::strip_ansi(&text.text))
+                    .replace('\r', "");
                 text_parts.push(clean);
             }
             UserContentBlock::Image(img) => {
@@ -246,108 +216,12 @@ pub fn format_tool_call_with_args(title: &str, args: Option<&Value>, theme: &The
     )
 }
 
-fn read_orientation_from_tiff(bytes: &[u8], tiff_start: usize) -> u16 {
-    if tiff_start + 8 > bytes.len() {
-        return 1;
-    }
-    let byte_order = (u16::from(bytes[tiff_start]) << 8) | u16::from(bytes[tiff_start + 1]);
-    let le = byte_order == 0x4949;
-    let read16 = |pos: usize| -> u16 {
-        if pos + 2 > bytes.len() {
-            return 0;
-        }
-        if le {
-            u16::from_le_bytes([bytes[pos], bytes[pos + 1]])
-        } else {
-            u16::from_be_bytes([bytes[pos], bytes[pos + 1]])
-        }
-    };
-    let read32 = |pos: usize| -> u32 {
-        if pos + 4 > bytes.len() {
-            return 0;
-        }
-        if le {
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-        } else {
-            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-        }
-    };
-    let ifd_offset = read32(tiff_start + 4) as usize;
-    let Some(ifd_start) = tiff_start.checked_add(ifd_offset) else {
-        return 1;
-    };
-    if ifd_start + 2 > bytes.len() {
-        return 1;
-    }
-    let entry_count = usize::from(read16(ifd_start));
-    for i in 0..entry_count {
-        let entry_pos = ifd_start + 2 + i * 12;
-        if entry_pos + 12 > bytes.len() {
-            return 1;
-        }
-        if read16(entry_pos) == 0x0112 {
-            let value = read16(entry_pos + 8);
-            return if (1..=8).contains(&value) { value } else { 1 };
-        }
-    }
-    1
-}
-
-fn find_jpeg_tiff_offset(bytes: &[u8]) -> Option<usize> {
-    let mut offset = 2usize;
-    while offset < bytes.len().saturating_sub(1) {
-        if bytes[offset] != 0xff {
-            return None;
-        }
-        let marker = bytes[offset + 1];
-        if marker == 0xff {
-            offset += 1;
-            continue;
-        }
-        if marker == 0xe1 {
-            let segment_start = offset + 4;
-            if segment_start + 6 <= bytes.len()
-                && bytes.get(segment_start..segment_start + 6) == Some(&[0x45, 0x78, 0x69, 0x66, 0x00, 0x00])
-            {
-                return Some(segment_start + 6);
-            }
-        }
-        if offset + 4 > bytes.len() {
-            return None;
-        }
-        let length = ((usize::from(bytes[offset + 2])) << 8) | usize::from(bytes[offset + 3]);
-        offset = offset.checked_add(2 + length)?;
-    }
-    None
-}
-
-fn apply_exif_orientation_local(img: image::DynamicImage, bytes: &[u8]) -> image::DynamicImage {
-    let orientation = if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8 {
-        find_jpeg_tiff_offset(bytes)
-            .map(|off| read_orientation_from_tiff(bytes, off))
-            .unwrap_or(1)
-    } else {
-        1
-    };
-    match orientation {
-        2 => img.fliph(),
-        3 => img.rotate180(),
-        4 => img.flipv(),
-        5 => img.rotate90().fliph(),
-        6 => img.rotate90(),
-        7 => img.rotate270().fliph(),
-        8 => img.rotate270(),
-        _ => img,
-    }
-}
-
-fn transcode_to_png_local(base64_data: &str, _mime_type: &str) -> Option<String> {
+fn transcode_to_png_sync(base64_data: &str, _mime_type: &str) -> Option<String> {
     let bytes = pi_js::b64::decode(base64_data);
-    let img = image::load_from_memory(&bytes).ok()?;
-    let img = apply_exif_orientation_local(img, &bytes);
-    let mut cursor = Cursor::new(Vec::new());
-    img.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
-    Some(pi_js::b64::encode(&cursor.into_inner()))
+    let raw = PhotonImage::new_from_byteslice(&bytes).ok()?;
+    let image = apply_exif_orientation(&PhotonBackend, raw, &bytes);
+    let png_bytes = image.get_bytes().ok()?;
+    Some(pi_js::b64::encode(&png_bytes))
 }
 
 #[derive(Default)]
@@ -360,8 +234,9 @@ struct PngTranscoderState {
 static PNG_TRANSCODER_STATE: LazyLock<Mutex<PngTranscoderState>> =
     LazyLock::new(|| Mutex::new(PngTranscoderState::default()));
 
-// WIRE(@tui-w3): Replace with `crate::utils::image_convert::ensure_png_transcoder` once @mcp implements and merges it onto main.
-fn ensure_png_transcoder_local(on_registered: impl FnOnce() + Send + Sync + 'static) {
+/// Registers the Kitty-terminal PNG image transcoder once `load_photon()` succeeds,
+/// reusing `@mcp`'s EXIF orientation and PNG encoding pipeline.
+pub(crate) fn ensure_png_transcoder_with(on_registered: impl FnOnce() + Send + Sync + 'static) {
     if get_capabilities().images != Some(ImageProtocol::Kitty) {
         return;
     }
@@ -384,8 +259,13 @@ fn ensure_png_transcoder_local(on_registered: impl FnOnce() + Send + Sync + 'sta
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
-            tokio::task::yield_now().await;
-            set_image_transcoder(Some(Arc::new(transcode_to_png_local)));
+            let Some(_photon) = crate::utils::photon::load_photon().await else {
+                let mut state = PNG_TRANSCODER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.loading = false;
+                state.callbacks.clear();
+                return;
+            };
+            set_image_transcoder(Some(Arc::new(transcode_to_png_sync)));
             let callbacks = {
                 let mut state = PNG_TRANSCODER_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 state.registered = true;
@@ -397,7 +277,7 @@ fn ensure_png_transcoder_local(on_registered: impl FnOnce() + Send + Sync + 'sta
             }
         });
     } else {
-        set_image_transcoder(Some(Arc::new(transcode_to_png_local)));
+        set_image_transcoder(Some(Arc::new(transcode_to_png_sync)));
         let mut state = PNG_TRANSCODER_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.registered = true;
         state.loading = false;
@@ -1071,7 +951,7 @@ impl ToolExecutionComponent {
 
         if need_transcoder {
             let weak = Arc::downgrade(&self.inner);
-            ensure_png_transcoder_local(move || {
+            ensure_png_transcoder_with(move || {
                 if let Some(inner) = weak.upgrade() {
                     let comp = Self { inner };
                     comp.invalidate();

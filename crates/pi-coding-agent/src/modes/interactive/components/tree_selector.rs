@@ -2,298 +2,30 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::messages::CustomMessageContent;
+pub use crate::core::session_manager::{
+    BranchSummaryEntry, CompactionEntry, ContextEditEntry, ContextEditReplacement, ContextEditableContent, CustomEntry,
+    CustomMessageEntry, LabelEntry, ModelChangeEntry, SessionEntry, SessionInfoEntry, SessionMessageEntry,
+    SessionTreeNode, ThinkingLevelChangeEntry, UsageEntry,
+};
+use crate::utils::paths::shorten_home_path;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::AgentMessage;
 use pi_ai::{
-    AssistantContentBlock, JsonObject, Message, StopReason, SystemMessageContent, Usage, UserContentBlock,
-    UserMessageContent,
+    AssistantContentBlock, JsonObject, Message, StopReason, SystemMessageContent, UserContentBlock, UserMessageContent,
 };
 use pi_tui::{
     CURSOR_MARKER, Component, Container, Focusable, Input, Keybinding, Spacer, Text, TuiMouseEvent,
     TuiMouseEventResult, get_keybindings, slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{KeyTextFormatOptions, format_key_text, key_hint};
 
-// WIRE(@tui-w3): Import SessionEntry, SessionTreeNode, SessionMessageEntry, ThinkingLevelChangeEntry,
-// ModelChangeEntry, UsageEntry, CompactionEntry, BranchSummaryEntry, CustomEntry, LabelEntry,
-// SessionInfoEntry, CustomMessageEntry, ContextEditEntry, ContextEditReplacement,
-// ContextEditableContent from crate::core::session_manager, CustomMessageContent from
-// crate::core::messages, format_read_line_range from crate::core::tools::render_utils, and
-// shorten_home_path from crate::utils::paths once @mcp / @codemode land on main.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CustomMessageContent {
-    Text(String),
-    Blocks(Vec<UserContentBlock>),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMessageEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub message: AgentMessage,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThinkingLevelChangeEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub thinking_level: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelChangeEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub provider: String,
-    pub model_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub kind: String,
-    pub provider: String,
-    pub model: String,
-    pub usage: Usage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactionEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub summary: String,
-    #[serde(default)]
-    pub first_kept_entry_id: String,
-    pub tokens_before: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_message: Option<AgentMessage>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchSummaryEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub from_id: String,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub custom_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LabelEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub target_id: String,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfoEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomMessageEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub custom_type: String,
-    pub content: CustomMessageContent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-    pub display: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ContextEditableContent {
-    Text(String),
-    Blocks(Vec<Value>),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextEditReplacement {
-    pub content: ContextEditableContent,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextEditEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub target_id: String,
-    pub replacement: Option<ContextEditReplacement>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum SessionEntry {
-    #[serde(rename = "message")]
-    Message(SessionMessageEntry),
-    #[serde(rename = "thinking_level_change")]
-    ThinkingLevelChange(ThinkingLevelChangeEntry),
-    #[serde(rename = "model_change")]
-    ModelChange(ModelChangeEntry),
-    #[serde(rename = "usage")]
-    Usage(UsageEntry),
-    #[serde(rename = "compaction")]
-    Compaction(CompactionEntry),
-    #[serde(rename = "branch_summary")]
-    BranchSummary(BranchSummaryEntry),
-    #[serde(rename = "custom")]
-    Custom(CustomEntry),
-    #[serde(rename = "custom_message")]
-    CustomMessage(CustomMessageEntry),
-    #[serde(rename = "context_edit")]
-    ContextEdit(ContextEditEntry),
-    #[serde(rename = "label")]
-    Label(LabelEntry),
-    #[serde(rename = "session_info")]
-    SessionInfo(SessionInfoEntry),
-}
-
-impl SessionEntry {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Message(e) => &e.id,
-            Self::ThinkingLevelChange(e) => &e.id,
-            Self::ModelChange(e) => &e.id,
-            Self::Usage(e) => &e.id,
-            Self::Compaction(e) => &e.id,
-            Self::BranchSummary(e) => &e.id,
-            Self::Custom(e) => &e.id,
-            Self::CustomMessage(e) => &e.id,
-            Self::ContextEdit(e) => &e.id,
-            Self::Label(e) => &e.id,
-            Self::SessionInfo(e) => &e.id,
-        }
-    }
-
-    pub fn parent_id(&self) -> Option<&str> {
-        match self {
-            Self::Message(e) => e.parent_id.as_deref(),
-            Self::ThinkingLevelChange(e) => e.parent_id.as_deref(),
-            Self::ModelChange(e) => e.parent_id.as_deref(),
-            Self::Usage(e) => e.parent_id.as_deref(),
-            Self::Compaction(e) => e.parent_id.as_deref(),
-            Self::BranchSummary(e) => e.parent_id.as_deref(),
-            Self::Custom(e) => e.parent_id.as_deref(),
-            Self::CustomMessage(e) => e.parent_id.as_deref(),
-            Self::ContextEdit(e) => e.parent_id.as_deref(),
-            Self::Label(e) => e.parent_id.as_deref(),
-            Self::SessionInfo(e) => e.parent_id.as_deref(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionTreeNode {
-    pub entry: SessionEntry,
-    pub children: Vec<SessionTreeNode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label_timestamp: Option<String>,
-}
-
-fn shorten_home_path(path: &str, home_dir: Option<&str>) -> String {
-    let owned_home;
-    let home = match home_dir {
-        Some(h) => h,
-        None => {
-            owned_home = pi_js::env::home_dir();
-            &owned_home
-        }
-    };
-    if home.is_empty() {
-        return path.to_string();
-    }
-    if path == home {
-        "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(home) {
-        let first = rest.chars().next();
-        if first == Some('/') || first == Some('\\') {
-            format!("~{rest}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    }
-}
+// WIRE(@tui-w3): Replace format_read_line_range with crate::core::tools::render_utils::format_read_line_range once @codemode lands.
 
 fn format_read_line_range(offset: Option<&Value>, limit: Option<&Value>) -> String {
     let offset_num = offset.and_then(|v| v.as_i64());

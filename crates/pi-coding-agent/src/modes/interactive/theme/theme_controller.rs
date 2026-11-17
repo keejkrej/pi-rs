@@ -28,10 +28,14 @@ impl From<SetThemeResult> for ThemeResult {
 }
 
 /// Settings subset needed by [`InteractiveThemeController`].
-///
-/// // WIRE(@tui-w3): replace with `SettingsManager` once `swarm/mcp-w3` merges onto `main`.
 pub trait ThemeSettingsSource: Send + Sync {
     fn get_theme_setting(&self) -> Option<String>;
+}
+
+impl ThemeSettingsSource for crate::core::settings_manager::SettingsManager {
+    fn get_theme_setting(&self) -> Option<String> {
+        Self::get_theme(self)
+    }
 }
 
 /// How long the system theme stays grayscale before falling back to palette indices. Terminals answer

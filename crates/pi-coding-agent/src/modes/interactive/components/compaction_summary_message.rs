@@ -2,26 +2,16 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::messages::CompactionSummaryMessage;
 use pi_tui::components::box_::TuiBox;
 use pi_tui::components::markdown::DefaultTextStyle;
 use pi_tui::{
     Component, Container, Markdown, MarkdownTheme, MouseRegion, Spacer, Text, TuiMouseButton, TuiMouseEvent,
     TuiMouseEventResult, TuiMouseEventType,
 };
-use serde::{Deserialize, Serialize};
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
 use super::keybinding_hints::key_text;
-
-// WIRE(@tui-w3): Replace local mirror type with `crate::core::messages::CompactionSummaryMessage` once @mcp merges onto main.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactionSummaryMessage {
-    pub role: String,
-    pub summary: String,
-    pub tokens_before: i64,
-    pub timestamp: i64,
-}
 
 struct CompactionSummaryState {
     expanded: bool,

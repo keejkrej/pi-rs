@@ -2,48 +2,12 @@
 
 use std::sync::Arc;
 
+pub use crate::core::settings_manager::MermaidRenderingMode;
+pub use crate::vendor::grok_mermaid::{Cls as MermaidCls, MermaidArt, Span as MermaidSpan};
 use pi_tui::vendor::marked::{Marked, Token};
-use serde::{Deserialize, Serialize};
 
 use super::super::theme::theme::{Theme, ThemeColor};
 use super::markdown_transform::{MarkdownMessageType, MarkdownTransformContext, MarkdownTransformer};
-
-// WIRE(@tui-w3): Replace local mirror types with `crate::core::settings_manager::MermaidRenderingMode` and `crate::vendor::grok_mermaid::{Cls, MermaidArt, Span, render}` once @mcp merges onto main.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MermaidRenderingMode {
-    Off,
-    Final,
-    Streaming,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MermaidCls {
-    Border,
-    Text,
-    Edge,
-    EdgeLabel,
-    Title,
-    None,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MermaidSpan {
-    pub text: String,
-    pub cls: MermaidCls,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MermaidArt {
-    pub plain: Vec<String>,
-    pub styled: Vec<Vec<MermaidSpan>>,
-    pub width: usize,
-    pub warnings: Vec<String>,
-}
-
-fn render_mermaid_wire(_src: &str) -> Option<MermaidArt> {
-    None
-}
 
 pub struct MermaidTransformerOptions {
     pub get_mode: Arc<dyn Fn() -> MermaidRenderingMode + Send + Sync>,
@@ -144,7 +108,7 @@ pub fn create_mermaid_markdown_transformer(options: MermaidTransformerOptions) -
                 out.push_str(token_raw(token));
                 continue;
             };
-            let Some(art) = render_mermaid_wire(code_text) else {
+            let Some(art) = crate::vendor::grok_mermaid::render(code_text) else {
                 out.push_str(token_raw(token));
                 continue;
             };

@@ -2,98 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use pi_js::path::{dirname, resolve};
+use crate::core::trust_manager::get_project_trust_options;
+pub use crate::core::trust_manager::{ProjectTrustOption, ProjectTrustStoreEntry, ProjectTrustUpdate};
 use pi_tui::{Component, Container, Spacer, Text, TuiMouseEvent, TuiMouseEventResult, get_keybindings};
-use serde::{Deserialize, Serialize};
 
 use super::super::theme::theme::{ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_hint, raw_key_hint};
-
-// WIRE(@tui-w3): Replace local mirror types and `get_project_trust_options_local` with `crate::core::trust_manager::{ProjectTrustOption, ProjectTrustStoreEntry, ProjectTrustUpdate, get_project_trust_options}` once `mcp-w3` merges onto main.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTrustStoreEntry {
-    pub path: String,
-    pub decision: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTrustUpdate {
-    pub path: String,
-    pub decision: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTrustOption {
-    pub label: String,
-    pub trusted: bool,
-    pub updates: Vec<ProjectTrustUpdate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub saved_path: Option<String>,
-}
-
-fn normalize_cwd_local(cwd: &str) -> String {
-    let resolved = resolve(&[cwd]);
-    std::fs::canonicalize(&resolved)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(resolved)
-}
-
-fn get_project_trust_parent_path_local(cwd: &str) -> Option<String> {
-    let trust_path = normalize_cwd_local(cwd);
-    let parent_dir = dirname(&trust_path);
-    if parent_dir == trust_path {
-        None
-    } else {
-        Some(parent_dir)
-    }
-}
-
-fn get_project_trust_options_local(cwd: &str) -> Vec<ProjectTrustOption> {
-    let trust_path = normalize_cwd_local(cwd);
-    let mut trust_options = vec![ProjectTrustOption {
-        label: "Trust".to_string(),
-        trusted: true,
-        updates: vec![ProjectTrustUpdate {
-            path: trust_path.clone(),
-            decision: Some(true),
-        }],
-        saved_path: Some(trust_path.clone()),
-    }];
-
-    if let Some(parent_path) = get_project_trust_parent_path_local(cwd) {
-        trust_options.push(ProjectTrustOption {
-            label: format!("Trust parent folder ({parent_path})"),
-            trusted: true,
-            updates: vec![
-                ProjectTrustUpdate {
-                    path: parent_path.clone(),
-                    decision: Some(true),
-                },
-                ProjectTrustUpdate {
-                    path: trust_path.clone(),
-                    decision: None,
-                },
-            ],
-            saved_path: Some(parent_path),
-        });
-    }
-
-    trust_options.push(ProjectTrustOption {
-        label: "Do not trust".to_string(),
-        trusted: false,
-        updates: vec![ProjectTrustUpdate {
-            path: trust_path.clone(),
-            decision: Some(false),
-        }],
-        saved_path: Some(trust_path),
-    });
-
-    trust_options
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustSelection {
@@ -143,7 +58,7 @@ pub struct TrustSelectorComponent {
 
 impl TrustSelectorComponent {
     pub fn new(options: TrustSelectorOptions) -> Self {
-        let trust_options = get_project_trust_options_local(&options.cwd);
+        let trust_options = get_project_trust_options(&options.cwd, false);
         let is_saved = |opt: &ProjectTrustOption| -> bool {
             let Some(ref saved_path) = opt.saved_path else {
                 return false;

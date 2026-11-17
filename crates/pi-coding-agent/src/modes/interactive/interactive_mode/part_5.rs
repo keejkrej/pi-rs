@@ -1113,7 +1113,10 @@ impl InteractiveMode {
                 })),
                 on_cache_warming_mode_change: Some(Arc::new(move |mode| {
                     m_cw.session().set_cache_warming_mode(mode);
-                    m_cw.show_status(&format!("Cache warming: {}", mode.as_str()));
+                    m_cw.show_status(&format!(
+                        "Cache warming: {}",
+                        crate::modes::interactive::components::settings_selector::cache_warming_mode_as_str(mode)
+                    ));
                 })),
                 on_model_thinking_level_change: Some(Arc::new(move |provider, model_id, level| {
                     m_mtc
@@ -1248,7 +1251,10 @@ impl InteractiveMode {
                         let current_mode = to_settings_tui_mode(m_tm.ui().mode());
                         let sl_opt = sl_tm.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         if let Some(sl) = sl_opt {
-                            sl.update_value("tui-mode", current_mode.as_str());
+                            sl.update_value(
+                                "tui-mode",
+                                crate::modes::interactive::components::settings_selector::tui_mode_as_str(current_mode),
+                            );
                         }
                         m_tm.show_status("Close active overlays before changing TUI mode");
                         return;
@@ -1264,7 +1270,10 @@ impl InteractiveMode {
                     if !has_active {
                         m_tm.inner.status_container.clear();
                     }
-                    m_tm.show_status(&format!("TUI mode: {}", mode.as_str()));
+                    m_tm.show_status(&format!(
+                        "TUI mode: {}",
+                        crate::modes::interactive::components::settings_selector::tui_mode_as_str(mode)
+                    ));
                 })),
                 on_fullscreen_exit_output_change: Some(Arc::new(move |output| {
                     m_feo.settings_manager().set_fullscreen_exit_output(output);

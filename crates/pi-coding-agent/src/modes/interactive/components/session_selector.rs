@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::utils::paths::{canonicalize_path, get_path_comparison_key, shorten_home_path};
 use indexmap::IndexMap;
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::time::Timeout;
@@ -17,9 +18,7 @@ use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_hint, key_text};
 use super::session_selector_search::{NameFilter, SessionInfo, SortMode, filter_and_sort_sessions, has_session_name};
 
-// WIRE(@tui-w3): Replace local path helpers with crate::utils::paths::{canonicalize_path,
-// get_path_comparison_key, shorten_home_path} and keybindings with crate::core::keybindings::KeybindingsManager
-// and SessionInfo/SessionListProgress with crate::core::session_manager once @mcp lands on main.
+// WIRE(@tui-w3): Replace keybindings with crate::core::keybindings::KeybindingsManager once wired across interactive_mode.
 
 pub type SessionListProgress = Arc<dyn Fn(usize, usize, Option<&[SessionInfo]>) + Send + Sync>;
 
@@ -59,44 +58,8 @@ enum SelectorMode {
     Rename,
 }
 
-fn canonicalize_path(path: &str) -> String {
-    pi_js::fs::realpath(path).unwrap_or_else(|_| path.to_string())
-}
-
-fn get_path_comparison_key(path: &str) -> String {
-    let resolved = if pi_js::env::platform() == "win32" {
-        pi_js::path::win32::resolve(&[path])
-    } else {
-        pi_js::path::posix::resolve(&[path])
-    };
-    if pi_js::env::platform() == "win32" {
-        resolved.to_ascii_lowercase()
-    } else {
-        resolved
-    }
-}
-
 fn get_session_path_key(path: &str) -> String {
     get_path_comparison_key(&canonicalize_path(path))
-}
-
-fn shorten_home_path(path: &str) -> String {
-    let home = pi_js::env::home_dir();
-    if path.is_empty() || home.is_empty() {
-        return path.to_string();
-    }
-    if path == home {
-        "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(&home) {
-        let first = rest.chars().next();
-        if first == Some('/') || first == Some('\\') {
-            format!("~{rest}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    }
 }
 
 fn format_session_date(modified_ms: i64) -> String {
@@ -887,10 +850,10 @@ impl Component for SessionList {
             let msg_count = session.message_count.to_string();
             let mut right_part = format!("{msg_count} {age}");
             if state.show_cwd && !session.cwd.is_empty() {
-                right_part = format!("{} {right_part}", shorten_home_path(&session.cwd));
+                right_part = format!("{} {right_part}", shorten_home_path(&session.cwd, None));
             }
             if state.show_path {
-                right_part = format!("{} {right_part}", shorten_home_path(&session.path));
+                right_part = format!("{} {right_part}", shorten_home_path(&session.path, None));
             }
 
             let cursor = if is_selected {

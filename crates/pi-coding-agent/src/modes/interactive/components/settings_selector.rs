@@ -2,6 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::core::http_dispatcher::{HTTP_IDLE_TIMEOUT_CHOICES, format_http_idle_timeout_ms};
+use crate::core::settings_manager::{CACHE_WARMING_MODES, QuietStartup as CoreQuietStartup, QuietStartupHeader};
+pub use crate::core::settings_manager::{
+    CacheWarmingMode, DefaultProjectTrust, DoubleEscapeAction, FullscreenExitOutput, QueueModeSetting as SteeringMode,
+    TreeFilterMode, TuiMode, WarningSettings,
+};
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::{Model, ModelThinkingLevel, Transport, get_supported_thinking_levels};
 use pi_js::intl::locale_compare;
@@ -20,58 +26,21 @@ use super::keybinding_hints::key_display_text;
 use super::mermaid::MermaidRenderingMode;
 use super::settings_submenu::{SelectSubmenu, StepText, SteppedSubmenu, SteppedSubmenuOptions, SteppedSubmenuStep};
 
-// WIRE(@tui-w3): Replace local mirrors with settled `@mcp` types (`core::http_dispatcher`, `core::settings_manager`) once `mcp-w3` merges onto main.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheWarmingMode {
-    Off,
-    Streaming,
-    Idle,
-}
-
-impl CacheWarmingMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Streaming => "streaming",
-            Self::Idle => "idle",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "off" => Some(Self::Off),
-            "streaming" => Some(Self::Streaming),
-            "idle" => Some(Self::Idle),
-            _ => None,
-        }
+pub(crate) fn cache_warming_mode_as_str(mode: CacheWarmingMode) -> &'static str {
+    match mode {
+        CacheWarmingMode::Off => "off",
+        CacheWarmingMode::Streaming => "streaming",
+        CacheWarmingMode::Idle => "idle",
     }
 }
 
-pub const CACHE_WARMING_MODES: &[&str] = &["off", "streaming", "idle"];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WarningSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anthropic_extra_usage: Option<bool>,
-}
-
-impl Default for WarningSettings {
-    fn default() -> Self {
-        Self {
-            anthropic_extra_usage: None,
-        }
+fn parse_cache_warming_mode(s: &str) -> Option<CacheWarmingMode> {
+    match s {
+        "off" => Some(CacheWarmingMode::Off),
+        "streaming" => Some(CacheWarmingMode::Streaming),
+        "idle" => Some(CacheWarmingMode::Idle),
+        _ => None,
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DefaultProjectTrust {
-    #[default]
-    Ask,
-    Always,
-    Never,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,79 +62,37 @@ impl QuietStartup {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TuiMode {
-    #[default]
-    Regular,
-    Fullscreen,
-}
-
-impl TuiMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Regular => "regular",
-            Self::Fullscreen => "fullscreen",
+impl From<CoreQuietStartup> for QuietStartup {
+    fn from(value: CoreQuietStartup) -> Self {
+        match value {
+            CoreQuietStartup::Bool(true) => Self::True,
+            CoreQuietStartup::Bool(false) => Self::False,
+            CoreQuietStartup::Header(_) => Self::Header,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FullscreenExitOutput {
-    #[default]
-    Transcript,
-    ResumeHint,
-}
-
-impl FullscreenExitOutput {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Transcript => "transcript",
-            Self::ResumeHint => "resume-hint",
+impl From<QuietStartup> for CoreQuietStartup {
+    fn from(value: QuietStartup) -> Self {
+        match value {
+            QuietStartup::True => Self::Bool(true),
+            QuietStartup::False => Self::Bool(false),
+            QuietStartup::Header => Self::Header(QuietStartupHeader::Header),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct HttpIdleTimeoutChoice {
-    label: &'static str,
-    timeout_ms: u64,
+pub(crate) fn tui_mode_as_str(mode: TuiMode) -> &'static str {
+    match mode {
+        TuiMode::Regular => "regular",
+        TuiMode::Fullscreen => "fullscreen",
+    }
 }
 
-const HTTP_IDLE_TIMEOUT_CHOICES: &[HttpIdleTimeoutChoice] = &[
-    HttpIdleTimeoutChoice {
-        label: "30 sec",
-        timeout_ms: 30_000,
-    },
-    HttpIdleTimeoutChoice {
-        label: "1 min",
-        timeout_ms: 60_000,
-    },
-    HttpIdleTimeoutChoice {
-        label: "2 min",
-        timeout_ms: 120_000,
-    },
-    HttpIdleTimeoutChoice {
-        label: "5 min",
-        timeout_ms: 300_000,
-    },
-    HttpIdleTimeoutChoice {
-        label: "disabled",
-        timeout_ms: 0,
-    },
-];
-
-fn format_http_idle_timeout_ms_local(timeout_ms: u64) -> String {
-    if timeout_ms == 0 {
-        return "disabled".to_string();
-    }
-    if timeout_ms % 60_000 == 0 {
-        format!("{} min", timeout_ms / 60_000)
-    } else if timeout_ms % 1000 == 0 {
-        format!("{} sec", timeout_ms / 1000)
-    } else {
-        format!("{timeout_ms} ms")
+fn fullscreen_exit_output_as_str(output: FullscreenExitOutput) -> &'static str {
+    match output {
+        FullscreenExitOutput::Transcript => "transcript",
+        FullscreenExitOutput::ResumeHint => "resume-hint",
     }
 }
 
@@ -253,87 +180,56 @@ fn wheel_scroll_as_str(w: WheelScrollLines) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SteeringMode {
-    All,
-    #[default]
-    OneAtATime,
-}
-
-impl SteeringMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::OneAtATime => "one-at-a-time",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "all" => Some(Self::All),
-            "one-at-a-time" => Some(Self::OneAtATime),
-            _ => None,
-        }
+fn steering_mode_as_str(mode: SteeringMode) -> &'static str {
+    match mode {
+        SteeringMode::All => "all",
+        SteeringMode::OneAtATime => "one-at-a-time",
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DoubleEscapeAction {
-    Fork,
-    #[default]
-    Tree,
-    None,
-}
-
-impl DoubleEscapeAction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Fork => "fork",
-            Self::Tree => "tree",
-            Self::None => "none",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "fork" => Some(Self::Fork),
-            "tree" => Some(Self::Tree),
-            "none" => Some(Self::None),
-            _ => None,
-        }
+fn parse_steering_mode(s: &str) -> Option<SteeringMode> {
+    match s {
+        "all" => Some(SteeringMode::All),
+        "one-at-a-time" => Some(SteeringMode::OneAtATime),
+        _ => None,
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TreeFilterMode {
-    #[default]
-    Default,
-    NoTools,
-    UserOnly,
-    LabeledOnly,
-    All,
+fn double_escape_action_as_str(action: DoubleEscapeAction) -> &'static str {
+    match action {
+        DoubleEscapeAction::Fork => "fork",
+        DoubleEscapeAction::Tree => "tree",
+        DoubleEscapeAction::None => "none",
+    }
 }
 
-impl TreeFilterMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::NoTools => "no-tools",
-            Self::UserOnly => "user-only",
-            Self::LabeledOnly => "labeled-only",
-            Self::All => "all",
-        }
+fn parse_double_escape_action(s: &str) -> Option<DoubleEscapeAction> {
+    match s {
+        "fork" => Some(DoubleEscapeAction::Fork),
+        "tree" => Some(DoubleEscapeAction::Tree),
+        "none" => Some(DoubleEscapeAction::None),
+        _ => None,
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "default" => Some(Self::Default),
-            "no-tools" => Some(Self::NoTools),
-            "user-only" => Some(Self::UserOnly),
-            "labeled-only" => Some(Self::LabeledOnly),
-            "all" => Some(Self::All),
-            _ => None,
-        }
+fn tree_filter_mode_as_str(mode: TreeFilterMode) -> &'static str {
+    match mode {
+        TreeFilterMode::Default => "default",
+        TreeFilterMode::NoTools => "no-tools",
+        TreeFilterMode::UserOnly => "user-only",
+        TreeFilterMode::LabeledOnly => "labeled-only",
+        TreeFilterMode::All => "all",
+    }
+}
+
+fn parse_tree_filter_mode(s: &str) -> Option<TreeFilterMode> {
+    match s {
+        "default" => Some(TreeFilterMode::Default),
+        "no-tools" => Some(TreeFilterMode::NoTools),
+        "user-only" => Some(TreeFilterMode::UserOnly),
+        "labeled-only" => Some(TreeFilterMode::LabeledOnly),
+        "all" => Some(TreeFilterMode::All),
+        _ => None,
     }
 }
 
@@ -487,7 +383,7 @@ impl WarningSettingsSubmenu {
         on_change: Arc<dyn Fn(WarningSettings) + Send + Sync>,
         on_cancel: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
-        let state = Arc::new(Mutex::new(initial));
+        let state = Arc::new(Mutex::new(initial.clone()));
         let t = theme();
         let container = Container::new();
         container.add_child(Arc::new(Text::new(
@@ -528,7 +424,7 @@ impl WarningSettingsSubmenu {
                     let updated = {
                         let mut guard = state_c.lock().unwrap();
                         guard.anthropic_extra_usage = Some(new_value == "true");
-                        *guard
+                        guard.clone()
                     };
                     on_change(updated);
                 }
@@ -1061,7 +957,7 @@ impl SettingsSelectorComponent {
                     "Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once."
                         .to_string(),
                 ),
-                current_value: config.steering_mode.as_str().to_string(),
+                current_value: steering_mode_as_str(config.steering_mode).to_string(),
                 values: Some(vec!["one-at-a-time".to_string(), "all".to_string()]),
                 submenu: None,
             },
@@ -1071,7 +967,7 @@ impl SettingsSelectorComponent {
                 description: Some(format!(
                     "{follow_up_key} queues follow-up messages until agent stops. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once."
                 )),
-                current_value: config.follow_up_mode.as_str().to_string(),
+                current_value: steering_mode_as_str(config.follow_up_mode).to_string(),
                 values: Some(vec!["one-at-a-time".to_string(), "all".to_string()]),
                 submenu: None,
             },
@@ -1101,7 +997,7 @@ impl SettingsSelectorComponent {
                     "Maximum idle gap while waiting for HTTP headers or body chunks. Disable for local models that pause longer than five minutes."
                         .to_string(),
                 ),
-                current_value: format_http_idle_timeout_ms_local(config.http_idle_timeout_ms),
+                current_value: format_http_idle_timeout_ms(config.http_idle_timeout_ms),
                 values: Some(HTTP_IDLE_TIMEOUT_CHOICES.iter().map(|c| c.label.to_string()).collect()),
                 submenu: None,
             },
@@ -1112,8 +1008,13 @@ impl SettingsSelectorComponent {
                     "off; streaming while the agent runs; idle also between runs while continuation stays profitable"
                         .to_string(),
                 ),
-                current_value: config.cache_warming_mode.as_str().to_string(),
-                values: Some(CACHE_WARMING_MODES.iter().map(|s| (*s).to_string()).collect()),
+                current_value: cache_warming_mode_as_str(config.cache_warming_mode).to_string(),
+                values: Some(
+                    CACHE_WARMING_MODES
+                        .iter()
+                        .map(|m| cache_warming_mode_as_str(*m).to_string())
+                        .collect(),
+                ),
                 submenu: None,
             },
             SettingItem {
@@ -1193,7 +1094,7 @@ impl SettingsSelectorComponent {
                 id: "double-escape-action".to_string(),
                 label: "Double-escape action".to_string(),
                 description: Some("Action when pressing Escape twice with empty editor".to_string()),
-                current_value: config.double_escape_action.as_str().to_string(),
+                current_value: double_escape_action_as_str(config.double_escape_action).to_string(),
                 values: Some(vec!["tree".to_string(), "fork".to_string(), "none".to_string()]),
                 submenu: None,
             },
@@ -1201,7 +1102,7 @@ impl SettingsSelectorComponent {
                 id: "tree-filter-mode".to_string(),
                 label: "Tree filter mode".to_string(),
                 description: Some("Default filter when opening /tree".to_string()),
-                current_value: config.tree_filter_mode.as_str().to_string(),
+                current_value: tree_filter_mode_as_str(config.tree_filter_mode).to_string(),
                 values: Some(vec![
                     "default".to_string(),
                     "no-tools".to_string(),
@@ -1221,13 +1122,13 @@ impl SettingsSelectorComponent {
                     current_value: "configure".to_string(),
                     values: None,
                     submenu: Some(Arc::new(move |_, done| {
-                        let initial = *cw_c.lock().unwrap();
+                        let initial = cw_c.lock().unwrap().clone();
                         let cw_inner = Arc::clone(&cw_c);
                         let cb_inner = cb_w.clone();
                         Arc::new(WarningSettingsSubmenu::new(
                             initial,
                             Arc::new(move |w| {
-                                *cw_inner.lock().unwrap() = w;
+                                *cw_inner.lock().unwrap() = w.clone();
                                 if let Some(ref cb) = cb_inner {
                                     cb(w);
                                 }
@@ -1425,7 +1326,7 @@ impl SettingsSelectorComponent {
                 id: "tui-mode".to_string(),
                 label: "TUI mode".to_string(),
                 description: Some("Interface layout; regular mode uses the terminal's normal scrollback".to_string()),
-                current_value: config.tui_mode.as_str().to_string(),
+                current_value: tui_mode_as_str(config.tui_mode).to_string(),
                 values: Some(vec!["regular".to_string(), "fullscreen".to_string()]),
                 submenu: None,
             },
@@ -1435,7 +1336,7 @@ impl SettingsSelectorComponent {
                 description: Some(
                     "Print the transcript or only a session resume hint when exiting fullscreen mode".to_string(),
                 ),
-                current_value: config.fullscreen_exit_output.as_str().to_string(),
+                current_value: fullscreen_exit_output_as_str(config.fullscreen_exit_output).to_string(),
                 values: Some(vec!["transcript".to_string(), "resume-hint".to_string()]),
                 submenu: None,
             },
@@ -1657,14 +1558,14 @@ impl SettingsSelectorComponent {
                 }
             }
             "steering-mode" => {
-                if let Some(mode) = SteeringMode::from_str(new_value)
+                if let Some(mode) = parse_steering_mode(new_value)
                     && let Some(ref f) = cb.on_steering_mode_change
                 {
                     f(mode);
                 }
             }
             "follow-up-mode" => {
-                if let Some(mode) = SteeringMode::from_str(new_value)
+                if let Some(mode) = parse_steering_mode(new_value)
                     && let Some(ref f) = cb.on_follow_up_mode_change
                 {
                     f(mode);
@@ -1692,7 +1593,7 @@ impl SettingsSelectorComponent {
                 }
             }
             "cache-warming-mode" => {
-                if let Some(mode) = CacheWarmingMode::from_str(new_value)
+                if let Some(mode) = parse_cache_warming_mode(new_value)
                     && let Some(ref f) = cb.on_cache_warming_mode_change
                 {
                     f(mode);
@@ -1749,14 +1650,14 @@ impl SettingsSelectorComponent {
                 }
             }
             "double-escape-action" => {
-                if let Some(act) = DoubleEscapeAction::from_str(new_value)
+                if let Some(act) = parse_double_escape_action(new_value)
                     && let Some(ref f) = cb.on_double_escape_action_change
                 {
                     f(act);
                 }
             }
             "tree-filter-mode" => {
-                if let Some(mode) = TreeFilterMode::from_str(new_value)
+                if let Some(mode) = parse_tree_filter_mode(new_value)
                     && let Some(ref f) = cb.on_tree_filter_mode_change
                 {
                     f(mode);

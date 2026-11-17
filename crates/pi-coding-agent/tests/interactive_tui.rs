@@ -1316,3 +1316,40 @@ fn uses_the_standalone_row_for_a_custom_editor_that_has_not_opted_in() {
         ind.dispose();
     }
 }
+
+#[tokio::test]
+#[serial]
+async fn drops_the_fullscreen_selection_when_session_entries_are_re_rendered() {
+    // Regression test for #9311: selection coordinates survived session switches.
+    let _g = TestGuard;
+    init_theme(Some("dark"), None);
+    let terminal = RecordingTerminal::new(40, 4);
+    let (mode, _) = build_mode_with(
+        TuiMode::Fullscreen,
+        false,
+        terminal.clone(),
+        InteractiveModeHooks::default(),
+    );
+
+    let alt = mode.renderer().as_alt_screen().expect("alt").clone();
+    alt.add_child(Arc::new(Text::new(
+        Some("alpha\nbeta\ngamma\ndelta"),
+        Some(0),
+        Some(0),
+        None,
+    )));
+    alt.start();
+    terminal.wait_for_render().await;
+    alt.render_now(Some(true));
+
+    terminal.send_input("\x1b[<0;1;1M");
+    terminal.send_input("\x1b[<32;4;2M");
+    terminal.send_input("\x1b[<0;4;2m");
+    terminal.wait_for_render().await;
+    assert!(alt.has_active_selection());
+
+    mode.render_session_entries(&[], false, false);
+
+    assert!(!alt.has_active_selection());
+    alt.stop(None);
+}

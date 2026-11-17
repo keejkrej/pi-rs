@@ -2,23 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::session_manager::CustomEntry;
 use pi_tui::{Component, Container, Spacer, TuiMouseEvent, TuiMouseEventResult};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::super::theme::theme::{Theme, theme};
 
-// WIRE(@tui-w3): Replace these local mirror types with `crate::core::session_manager::CustomEntry` once @mcp merges and `crate::core::extensions::types::{EntryRenderOptions, EntryRenderer}` once @codemode merges.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomEntry {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    pub custom_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-}
+// WIRE(@tui-w3): Replace local `EntryRenderOptions`/`EntryRenderer` with `crate::core::extensions::types::{EntryRenderOptions, EntryRenderer}` once @codemode merges.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

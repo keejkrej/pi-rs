@@ -2,34 +2,16 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use crate::core::messages::{CustomMessage, CustomMessageContent};
 use pi_ai::UserContentBlock;
 use pi_tui::components::box_::TuiBox;
 use pi_tui::components::markdown::DefaultTextStyle;
 use pi_tui::{Component, Container, Markdown, MarkdownTheme, Spacer, Text, TuiMouseEvent, TuiMouseEventResult};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::super::theme::theme::{Theme, ThemeBg, ThemeColor, get_markdown_theme, theme};
 
-// WIRE(@tui-w3): Replace local mirror types with `crate::core::messages::{CustomMessage, CustomMessageContent}` once @mcp merges and `crate::core::extensions::types::{MessageRenderOptions, MessageRenderer}` once @codemode merges.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CustomMessageContent {
-    Text(String),
-    Blocks(Vec<UserContentBlock>),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomMessage {
-    pub role: String,
-    pub custom_type: String,
-    pub content: CustomMessageContent,
-    pub display: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-    pub timestamp: i64,
-}
+// WIRE(@tui-w3): Replace local `MessageRenderOptions`/`MessageRenderer` with `crate::core::extensions::types::{MessageRenderOptions, MessageRenderer}` once @codemode merges.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,26 +1,8 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/session-selector-search.ts
 
+pub use crate::core::session_manager::SessionInfo;
 use pi_tui::fuzzy_match;
 use regex::{Regex, RegexBuilder};
-use serde::{Deserialize, Serialize};
-
-// WIRE(@tui-w3): Replace local mirror `SessionInfo` with `crate::core::session_manager::SessionInfo` once `mcp-w3` merges onto main.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    pub path: String,
-    pub id: String,
-    pub cwd: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_path: Option<String>,
-    pub created: i64,
-    pub modified: i64,
-    pub message_count: usize,
-    pub first_message: String,
-    pub all_messages_text: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortMode {

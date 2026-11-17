@@ -45,17 +45,14 @@ fn open_browser_wire(target: &str) {
         f(target);
         return;
     }
-    // WIRE(@tui-w3): Replace with `crate::utils::open_browser::open_browser(target)` once @mcp merges onto main.
-    let _ = target;
+    crate::utils::open_browser::open_browser(target);
 }
 
 async fn copy_to_clipboard_with_override(text: &str, override_fn: Option<Arc<CopyToClipboardFn>>) -> pi_js::Result<()> {
     if let Some(f) = override_fn {
         return f(text).await;
     }
-    // WIRE(@tui-w3): Replace with `crate::utils::clipboard::copy_to_clipboard(text).await` once @mcp merges onto main.
-    let _ = text;
-    Ok(())
+    crate::utils::clipboard::copy_to_clipboard(text).await
 }
 
 // WIRE(@tui-w3): Replace with `pi_tui::replace_control_characters` if exported from pi-tui.

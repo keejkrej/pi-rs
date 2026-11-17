@@ -1863,7 +1863,7 @@ impl InteractiveMode {
             info.push_str(&format!(
                 "{} {}\n",
                 t.fg(ThemeColor::Dim, "Mode:"),
-                cache_warming_mode.as_str()
+                crate::modes::interactive::components::settings_selector::cache_warming_mode_as_str(cache_warming_mode)
             ));
             let status_str = cache_warming_status
                 .as_ref()
@@ -2431,14 +2431,5 @@ impl ForkSessionExt for dyn InteractiveSession {
         &self,
     ) -> Vec<crate::modes::interactive::components::user_message_selector::UserMessageItem> {
         self.get_user_messages_for_forking()
-    }
-}
-
-impl From<pi_tui::tui::TuiMode> for crate::modes::interactive::components::settings_selector::TuiMode {
-    fn from(mode: pi_tui::tui::TuiMode) -> Self {
-        match mode {
-            pi_tui::tui::TuiMode::Regular => Self::Regular,
-            pi_tui::tui::TuiMode::Fullscreen => Self::Fullscreen,
-        }
     }
 }

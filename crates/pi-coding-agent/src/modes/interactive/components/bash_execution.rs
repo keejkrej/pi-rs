@@ -2,9 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use pi_tui::{
-    Component, Container, Loader, Spacer, TUI, Text, TuiMouseEvent, TuiMouseEventResult, strip_terminal_sequences,
-};
+use pi_tui::{Component, Container, Loader, Spacer, TUI, Text, TuiMouseEvent, TuiMouseEventResult};
 use serde::{Deserialize, Serialize};
 
 use super::super::theme::theme::{ThemeColor, theme};
@@ -246,8 +244,7 @@ impl BashExecutionComponent {
     }
 
     pub fn append_output(&self, chunk: &str) {
-        // WIRE(@tui-w3): Replace strip_terminal_sequences with crate::utils::ansi::strip_ansi once @mcp merges.
-        let clean = strip_terminal_sequences(chunk)
+        let clean = crate::utils::ansi::strip_ansi(chunk)
             .replace("\r\n", "\n")
             .replace('\r', "\n");
         let new_lines: Vec<&str> = clean.split('\n').collect();

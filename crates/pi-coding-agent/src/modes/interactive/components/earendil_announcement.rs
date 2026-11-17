@@ -12,22 +12,11 @@ const IMAGE_FILENAME: &str = "clankolas.png";
 
 static CACHED_IMAGE_BASE64: OnceLock<Option<String>> = OnceLock::new();
 
-fn bundled_asset_path_local(name: &str) -> String {
-    // WIRE(@tui-w3): Replace with crate::config::get_bundled_interactive_asset_path once @mcp merges.
-    pi_js::path::join(&[
-        env!("CARGO_MANIFEST_DIR"),
-        "src",
-        "modes",
-        "interactive",
-        "assets",
-        name,
-    ])
-}
-
 fn load_image_base64() -> Option<&'static str> {
     CACHED_IMAGE_BASE64
         .get_or_init(|| {
-            let bytes = pi_js::fs::read_file(&bundled_asset_path_local(IMAGE_FILENAME)).ok()?;
+            let bytes =
+                pi_js::fs::read_file(&crate::config::get_bundled_interactive_asset_path(IMAGE_FILENAME)).ok()?;
             Some(pi_js::b64::encode(&bytes))
         })
         .as_deref()

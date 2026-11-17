@@ -938,7 +938,9 @@ fn uses_the_cache_miss_notice_setting_for_compaction_and_branch_summary_costs() 
             tokens_before: 100,
             details: None,
             usage: Some(usage),
+            from_hook: None,
             system_message: None,
+            first_kept_entry_index: None,
         }),
         SessionEntry::BranchSummary(BranchSummaryEntry {
             id: "b1".to_string(),
@@ -948,6 +950,7 @@ fn uses_the_cache_miss_notice_setting_for_compaction_and_branch_summary_costs() 
             summary: "branch summary".to_string(),
             details: None,
             usage: Some(usage),
+            from_hook: None,
         }),
     ];
 
@@ -1029,7 +1032,9 @@ fn renders_each_compaction_cost_after_its_summary() {
             tokens_before: 200,
             details: None,
             usage: Some(current_usage),
+            from_hook: None,
             system_message: None,
+            first_kept_entry_index: None,
         }),
         SessionEntry::Compaction(CompactionEntry {
             id: "previous".to_string(),
@@ -1040,7 +1045,9 @@ fn renders_each_compaction_cost_after_its_summary() {
             tokens_before: 100,
             details: None,
             usage: Some(previous_usage),
+            from_hook: None,
             system_message: None,
+            first_kept_entry_index: None,
         }),
     ];
 
@@ -1094,7 +1101,9 @@ async fn renders_retained_entries_and_appends_the_latest_summary_cost_at_the_bot
         tokens_before: 123,
         details: None,
         usage: Some(usage),
+        from_hook: None,
         system_message: None,
+        first_kept_entry_index: None,
     });
     let previous = SessionEntry::Compaction(CompactionEntry {
         id: "previous".to_string(),
@@ -1105,7 +1114,9 @@ async fn renders_retained_entries_and_appends_the_latest_summary_cost_at_the_bot
         tokens_before: 100,
         details: None,
         usage: Some(usage),
+        from_hook: None,
         system_message: None,
+        first_kept_entry_index: None,
     });
 
     let (mode, session, _) = build_mode(StubSettings::default(), vec![latest, previous]);

@@ -2,6 +2,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::config::CONFIG_DIR_NAME;
+pub use crate::core::package_manager::{PathMetadata, ResolvedPaths, ResolvedResource};
+pub use crate::core::settings_manager::{PackageFilterSource, PackageSource, SettingsManager};
+pub use crate::core::source_info::{BUILTIN_PATH_PREFIX, SourceOrigin, SourceScope, get_resource_path_key};
+use crate::utils::paths::{PathInputOptions, is_local_path, resolve_path, shorten_home_path};
 use indexmap::{IndexMap, IndexSet};
 use pi_tui::{
     Component, Container, Focusable, Input, Spacer, TuiMouseEvent, TuiMouseEventResult, get_keybindings, matches_key,
@@ -12,92 +17,25 @@ use super::super::theme::theme::{ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_hint, raw_key_hint};
 
-// WIRE(@tui-w3): Import CONFIG_DIR_NAME from crate::config, PathMetadata/ResolvedPaths/ResolvedResource from
-// crate::core::package_manager, PackageSource/PackageFilterSource/Settings/SettingsManager from
-// crate::core::settings_manager, BUILTIN_PATH_PREFIX/SourceOrigin/SourceScope/get_resource_path_key from
-// crate::core::source_info, and is_local_path/resolve_path/shorten_home_path from crate::utils::paths once
-// @mcp lands on main.
-const CONFIG_DIR_NAME: &str = ".pi";
-const BUILTIN_PATH_PREFIX: &str = "builtin:";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceScope {
-    User,
-    Project,
-    Temporary,
-}
-
-impl SourceScope {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Project => "project",
-            Self::Temporary => "temporary",
-        }
+fn source_scope_str(scope: SourceScope) -> &'static str {
+    match scope {
+        SourceScope::User => "user",
+        SourceScope::Project => "project",
+        SourceScope::Temporary => "temporary",
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceOrigin {
-    Package,
-    TopLevel,
-}
-
-impl SourceOrigin {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Package => "package",
-            Self::TopLevel => "top-level",
-        }
+fn source_origin_str(origin: SourceOrigin) -> &'static str {
+    match origin {
+        SourceOrigin::Package => "package",
+        SourceOrigin::TopLevel => "top-level",
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PathMetadata {
-    pub source: String,
-    pub scope: SourceScope,
-    pub origin: SourceOrigin,
-    pub base_dir: Option<String>,
-    pub changelog_path: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedResource {
-    pub path: String,
-    pub enabled: bool,
-    pub metadata: PathMetadata,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ResolvedPaths {
-    pub extensions: Vec<ResolvedResource>,
-    pub skills: Vec<ResolvedResource>,
-    pub prompts: Vec<ResolvedResource>,
-    pub themes: Vec<ResolvedResource>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PackageFilterSource {
-    pub source: String,
-    pub autoload: Option<bool>,
-    pub extensions: Option<Vec<String>>,
-    pub skills: Option<Vec<String>>,
-    pub prompts: Option<Vec<String>>,
-    pub themes: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PackageSource {
-    String(String),
-    Object(PackageFilterSource),
-}
-
-impl PackageSource {
-    fn source_str(&self) -> &str {
-        match self {
-            Self::String(s) => s,
-            Self::Object(obj) => &obj.source,
-        }
+fn package_source_str(source: &PackageSource) -> &str {
+    match source {
+        PackageSource::String(s) => s,
+        PackageSource::Object(obj) => &obj.source,
     }
 }
 
@@ -123,6 +61,70 @@ pub trait ConfigSettingsStore: Send + Sync {
     fn set_project_prompt_template_paths(&self, paths: Vec<String>);
     fn set_theme_paths(&self, paths: Vec<String>);
     fn set_project_theme_paths(&self, paths: Vec<String>);
+}
+
+impl ConfigSettingsStore for SettingsManager {
+    fn get_global_settings(&self) -> ConfigSettings {
+        let s = SettingsManager::get_global_settings(self);
+        ConfigSettings {
+            packages: s.packages,
+            extensions: s.extensions,
+            skills: s.skills,
+            prompts: s.prompts,
+            themes: s.themes,
+        }
+    }
+
+    fn get_project_settings(&self) -> ConfigSettings {
+        let s = SettingsManager::get_project_settings(self);
+        ConfigSettings {
+            packages: s.packages,
+            extensions: s.extensions,
+            skills: s.skills,
+            prompts: s.prompts,
+            themes: s.themes,
+        }
+    }
+
+    fn set_packages(&self, packages: Vec<PackageSource>) {
+        SettingsManager::set_packages(self, packages);
+    }
+
+    fn set_project_packages(&self, packages: Vec<PackageSource>) {
+        let _ = SettingsManager::set_project_packages(self, packages);
+    }
+
+    fn set_extension_paths(&self, paths: Vec<String>) {
+        SettingsManager::set_extension_paths(self, paths);
+    }
+
+    fn set_project_extension_paths(&self, paths: Vec<String>) {
+        let _ = SettingsManager::set_project_extension_paths(self, paths);
+    }
+
+    fn set_skill_paths(&self, paths: Vec<String>) {
+        SettingsManager::set_skill_paths(self, paths);
+    }
+
+    fn set_project_skill_paths(&self, paths: Vec<String>) {
+        let _ = SettingsManager::set_project_skill_paths(self, paths);
+    }
+
+    fn set_prompt_template_paths(&self, paths: Vec<String>) {
+        SettingsManager::set_prompt_template_paths(self, paths);
+    }
+
+    fn set_project_prompt_template_paths(&self, paths: Vec<String>) {
+        let _ = SettingsManager::set_project_prompt_template_paths(self, paths);
+    }
+
+    fn set_theme_paths(&self, paths: Vec<String>) {
+        SettingsManager::set_theme_paths(self, paths);
+    }
+
+    fn set_project_theme_paths(&self, paths: Vec<String>) {
+        let _ = SettingsManager::set_project_theme_paths(self, paths);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,73 +257,12 @@ enum FlatEntry {
     Item(ResourceItem),
 }
 
-fn shorten_home_path(path: &str) -> String {
-    let home = pi_js::env::home_dir();
-    if home.is_empty() {
-        return path.to_string();
-    }
-    if path == home {
-        "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(&home) {
-        let first = rest.chars().next();
-        if first == Some('/') || first == Some('\\') {
-            format!("~{rest}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    }
-}
-
-fn is_local_path(value: &str) -> bool {
-    let trimmed = value.trim();
-    trimmed.starts_with('/')
-        || trimmed.starts_with("./")
-        || trimmed.starts_with("../")
-        || trimmed == "."
-        || trimmed == ".."
-        || trimmed.starts_with("~/")
-        || trimmed == "~"
-        || (trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' && trimmed.as_bytes()[0].is_ascii_alphabetic())
-}
-
-fn resolve_path(input: &str, base_dir: &str) -> String {
-    let trimmed = input.trim();
-    let expanded = if trimmed == "~" {
-        pi_js::env::home_dir()
-    } else if let Some(rest) = trimmed.strip_prefix("~/") {
-        pi_js::path::join(&[&pi_js::env::home_dir(), rest])
-    } else {
-        trimmed.to_string()
-    };
-    if pi_js::path::is_absolute(&expanded) {
-        pi_js::path::resolve(&[&expanded])
-    } else {
-        pi_js::path::resolve(&[base_dir, &expanded])
-    }
-}
-
-fn get_resource_path_key(path: &str) -> String {
-    if path.starts_with(BUILTIN_PATH_PREFIX) || path.starts_with('<') {
-        path.to_string()
-    } else {
-        let canonical = pi_js::fs::realpath(path).unwrap_or_else(|_| path.to_string());
-        let resolved = pi_js::path::resolve(&[&canonical]);
-        if pi_js::env::platform() == "win32" {
-            resolved.to_ascii_lowercase()
-        } else {
-            resolved
-        }
-    }
-}
-
 fn relative_path(from: &str, to: &str) -> String {
     pi_js::path::relative(from, to)
 }
 
 fn format_base_dir(base_dir: &str) -> String {
-    let display_path = shorten_home_path(base_dir).replace('\\', "/");
+    let display_path = shorten_home_path(base_dir, None).replace('\\', "/");
     if display_path.ends_with('/') {
         display_path
     } else {
@@ -331,7 +272,7 @@ fn format_base_dir(base_dir: &str) -> String {
 
 fn get_group_label(metadata: &PathMetadata, agent_dir: &str) -> String {
     if metadata.origin == SourceOrigin::Package {
-        return format!("{} ({})", metadata.source, metadata.scope.as_str());
+        return format!("{} ({})", metadata.source, source_scope_str(metadata.scope));
     }
     if metadata.source == "builtin" {
         return if metadata.scope == SourceScope::User {
@@ -351,7 +292,7 @@ fn get_group_label(metadata: &PathMetadata, agent_dir: &str) -> String {
         return if metadata.scope == SourceScope::User {
             format!("User ({})", format_base_dir(agent_dir))
         } else {
-            format!("Project ({CONFIG_DIR_NAME}/)")
+            format!("Project ({}/)", *CONFIG_DIR_NAME)
         };
     }
     if metadata.scope == SourceScope::User {
@@ -368,8 +309,8 @@ fn build_groups(resolved: &ResolvedPaths, agent_dir: &str) -> Vec<ResourceGroup>
         for res in resources {
             let group_key = format!(
                 "{}:{}:{}:{}",
-                res.metadata.origin.as_str(),
-                res.metadata.scope.as_str(),
+                source_origin_str(res.metadata.origin),
+                source_scope_str(res.metadata.scope),
                 res.metadata.source,
                 res.metadata.base_dir.as_deref().unwrap_or("")
             );
@@ -501,10 +442,16 @@ impl Component for ConfigSelectorHeader {
         let scope_hint = if write_scope == ConfigWriteScope::Project {
             t.fg(
                 ThemeColor::Muted,
-                &format!("{CONFIG_DIR_NAME}/settings.json · inherited global resources are dimmed"),
+                &format!(
+                    "{}/settings.json · inherited global resources are dimmed",
+                    *CONFIG_DIR_NAME
+                ),
             )
         } else {
-            t.fg(ThemeColor::Muted, &format!("~/{CONFIG_DIR_NAME}/agent/settings.json"))
+            t.fg(
+                ThemeColor::Muted,
+                &format!("~/{}/agent/settings.json", *CONFIG_DIR_NAME),
+            )
         };
 
         vec![
@@ -635,7 +582,7 @@ impl ResourceList {
 
     fn top_level_base_dir(&self, scope: SettingsScope) -> String {
         match scope {
-            SettingsScope::Project => pi_js::path::join(&[&self.inner.cwd, CONFIG_DIR_NAME]),
+            SettingsScope::Project => pi_js::path::join(&[&self.inner.cwd, *CONFIG_DIR_NAME]),
             SettingsScope::User => self.inner.agent_dir.clone(),
         }
     }
@@ -860,8 +807,16 @@ impl ResourceList {
         if !is_local_path(left_source) || !is_local_path(right_source) {
             return false;
         }
-        let left = resolve_path(left_source, &self.top_level_base_dir(left_scope));
-        let right = resolve_path(right_source, &self.top_level_base_dir(right_scope));
+        let left = resolve_path(
+            left_source,
+            Some(&self.top_level_base_dir(left_scope)),
+            PathInputOptions::default(),
+        );
+        let right = resolve_path(
+            right_source,
+            Some(&self.top_level_base_dir(right_scope)),
+            PathInputOptions::default(),
+        );
         left == right
     }
 
@@ -875,7 +830,7 @@ impl ResourceList {
             self.package_source_string_matches(
                 item.metadata.source.as_str(),
                 item_scope,
-                pkg.source_str(),
+                package_source_str(pkg),
                 target_scope,
             )
         })
@@ -887,15 +842,25 @@ impl ResourceList {
             return PackageSource::Object(PackageFilterSource {
                 source: source.clone(),
                 autoload: Some(false),
-                ..Default::default()
+                extensions: None,
+                skills: None,
+                prompts: None,
+                themes: None,
             });
         }
-        let source_path = resolve_path(source, &self.top_level_base_dir(Self::item_scope(item)));
+        let source_path = resolve_path(
+            source,
+            Some(&self.top_level_base_dir(Self::item_scope(item))),
+            PathInputOptions::default(),
+        );
         let rel = relative_path(&self.top_level_base_dir(SettingsScope::Project), &source_path);
         PackageSource::Object(PackageFilterSource {
             source: if rel.is_empty() { ".".to_string() } else { rel },
             autoload: Some(false),
-            ..Default::default()
+            extensions: None,
+            skills: None,
+            prompts: None,
+            themes: None,
         })
     }
 
@@ -1071,7 +1036,7 @@ impl ResourceList {
             self.package_source_string_matches(
                 &item.metadata.source,
                 item_scope,
-                pkg.source_str(),
+                package_source_str(pkg),
                 SettingsScope::Project,
             )
         });
@@ -1089,7 +1054,11 @@ impl ResourceList {
             Some(PackageSource::Object(obj)) => obj.clone(),
             Some(PackageSource::String(s)) => PackageFilterSource {
                 source: s.clone(),
-                ..Default::default()
+                autoload: None,
+                extensions: None,
+                skills: None,
+                prompts: None,
+                themes: None,
             },
             None => return false,
         };
@@ -1155,13 +1124,20 @@ impl ResourceList {
             SettingsScope::User => self.inner.settings_manager.get_global_settings(),
         };
         let mut packages = settings.packages.unwrap_or_default();
-        let Some(idx) = packages.iter().position(|pkg| pkg.source_str() == item.metadata.source) else {
+        let Some(idx) = packages
+            .iter()
+            .position(|pkg| package_source_str(pkg) == item.metadata.source)
+        else {
             return;
         };
         let mut filter = match &packages[idx] {
             PackageSource::String(s) => PackageFilterSource {
                 source: s.clone(),
-                ..Default::default()
+                autoload: None,
+                extensions: None,
+                skills: None,
+                prompts: None,
+                themes: None,
             },
             PackageSource::Object(obj) => obj.clone(),
         };

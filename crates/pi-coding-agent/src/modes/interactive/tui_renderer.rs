@@ -34,15 +34,6 @@ pub struct InteractiveTuiOptions {
     pub copy_selection: Option<CopySelectionFn>,
 }
 
-fn open_browser_wire(_target: &str) {
-    // WIRE(@tui-w3): Replace with `crate::utils::open_browser::open_browser` once @mcp merges onto main.
-}
-
-async fn copy_to_clipboard_wire(_text: &str) -> pi_js::Result<()> {
-    // WIRE(@tui-w3): Replace with `crate::utils::clipboard::copy_to_clipboard` once @mcp merges onto main.
-    Ok(())
-}
-
 /// Composition root TUI handle shared by coding-agent presentations.
 #[derive(Clone)]
 pub enum InteractiveTui {
@@ -203,6 +194,9 @@ impl TUI for InteractiveTui {
     fn as_viewport(&self) -> Option<&dyn ViewportTUI> {
         self.as_tui().as_viewport()
     }
+    fn reset_text_selection(&self) {
+        self.as_tui().reset_text_selection();
+    }
 }
 
 pub fn create_interactive_tui(options: InteractiveTuiOptions) -> InteractiveTui {
@@ -218,7 +212,7 @@ pub fn create_interactive_tui(options: InteractiveTuiOptions) -> InteractiveTui 
         let copy_selection: CopySelectionFn = options.copy_selection.unwrap_or_else(|| {
             Arc::new(|text: String| {
                 Box::pin(async move {
-                    match copy_to_clipboard_wire(&text).await {
+                    match crate::utils::clipboard::copy_to_clipboard(&text).await {
                         Ok(()) => CopySelectionResult::Bool(true),
                         Err(err) => CopySelectionResult::Message(err.to_string()),
                     }
@@ -251,7 +245,7 @@ pub fn create_interactive_tui(options: InteractiveTuiOptions) -> InteractiveTui 
                 let t = theme();
                 t.bg(ThemeBg::SelectedBg, &t.fg(ThemeColor::Text, &label))
             })),
-            open_url: Some(Arc::new(|url: &str| open_browser_wire(url))),
+            open_url: Some(Arc::new(|url: &str| crate::utils::open_browser::open_browser(url))),
             on_right_click_paste: options.on_right_click_paste,
             copy_on_select: options.fullscreen_copy_on_select,
             copy_selection: Some(copy_selection),
@@ -400,5 +394,8 @@ impl TUI for InteractiveTuiReference {
         // Static trait limitation without dynamic reference lifetime: only forward concrete ViewportTUI when held directly,
         // wait: `TuiBase` checks `as_viewport()` via `TUI`; cannot return borrowed lifetime from closure return value!
         None
+    }
+    fn reset_text_selection(&self) {
+        (self.get_tui)().reset_text_selection();
     }
 }

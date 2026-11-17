@@ -15,6 +15,8 @@ use pi_tui::tui::OverlayHandle;
 use pi_tui::{Component, Spacer};
 use serde_json::Value;
 
+use crate::core::messages::{create_compaction_summary_message, create_custom_message};
+use crate::core::session_manager::{CustomEntry, SessionEntry, UsageEntry, session_entry_to_context_messages};
 use crate::modes::interactive::components::assistant_message::AssistantMessageComponent;
 use crate::modes::interactive::components::bash_execution::{BashExecutionComponent, TruncationResult};
 use crate::modes::interactive::components::branch_summary_message::{
@@ -23,9 +25,9 @@ use crate::modes::interactive::components::branch_summary_message::{
 use crate::modes::interactive::components::compaction_summary_message::{
     CompactionSummaryMessage, CompactionSummaryMessageComponent,
 };
-use crate::modes::interactive::components::custom_entry::{CustomEntry as EntryCustomEntry, CustomEntryComponent};
+use crate::modes::interactive::components::custom_entry::CustomEntryComponent;
 use crate::modes::interactive::components::custom_message::{
-    CustomMessage, CustomMessageComponent, CustomMessageContent as MsgCustomMessageContent,
+    CustomMessage, CustomMessageComponent, CustomMessageContent,
 };
 use crate::modes::interactive::components::settings_selector::DoubleEscapeAction;
 use crate::modes::interactive::components::skill_invocation_message::{
@@ -37,9 +39,6 @@ use crate::modes::interactive::components::status_indicator::{
 use crate::modes::interactive::components::themed_text::ThemedText;
 use crate::modes::interactive::components::tool_execution::{
     ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult,
-};
-use crate::modes::interactive::components::tree_selector::{
-    CustomEntry as TreeCustomEntry, CustomMessageContent as TreeCustomMessageContent, SessionEntry, UsageEntry,
 };
 use crate::modes::interactive::components::user_message::UserMessageComponent;
 use crate::modes::interactive::theme::theme::{ThemeColor, get_editor_theme, theme};
@@ -69,8 +68,7 @@ const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES: &[&str] = &[
 ];
 
 // WIRE(@tui-w3): Replace local mirrors with `crate::core::agent_session::parse_skill_block`,
-// `crate::core::cache_warmer::format_cache_warming_usage`, `crate::core::cache_stats::{CACHE_TTL_MS, collect_cache_misses}`,
-// `crate::core::session_manager::session_entry_to_context_messages`, and
+// `crate::core::cache_warmer::format_cache_warming_usage`, `crate::core::cache_stats::{CACHE_TTL_MS, collect_cache_misses}`, and
 // `crate::core::trust_manager::has_trust_requiring_project_resources` once Stage 3A merges onto main.
 pub fn parse_skill_block_local(text: &str) -> Option<ParsedSkillBlock> {
     let rest = text.strip_prefix("<skill name=\"")?;
@@ -187,88 +185,20 @@ fn to_compaction_status_reason(reason: CompactionReason) -> CompactionStatusReas
     }
 }
 
-fn tree_custom_content_to_msg(content: &TreeCustomMessageContent) -> MsgCustomMessageContent {
-    match content {
-        TreeCustomMessageContent::Text(s) => MsgCustomMessageContent::Text(s.clone()),
-        TreeCustomMessageContent::Blocks(b) => MsgCustomMessageContent::Blocks(b.clone()),
-    }
-}
-
-fn make_custom_entry_for_component(entry: &TreeCustomEntry) -> EntryCustomEntry {
-    EntryCustomEntry {
-        id: entry.id.clone(),
-        parent_id: entry.parent_id.clone(),
-        timestamp: entry.timestamp.clone(),
-        custom_type: entry.custom_type.clone(),
-        data: entry.data.clone(),
-    }
-}
-
 fn create_custom_agent_message(
     custom_type: &str,
-    content: MsgCustomMessageContent,
+    content: CustomMessageContent,
     display: bool,
     details: Option<Value>,
     timestamp: &str,
 ) -> AgentMessage {
-    let msg = CustomMessage {
-        role: "custom".to_string(),
-        custom_type: custom_type.to_string(),
-        content,
-        display,
-        details,
-        timestamp: parse_rfc3339_ms(timestamp),
-    };
-    AgentMessage::Custom(serde_json::to_value(msg).unwrap_or(Value::Null))
-}
-
-fn create_branch_summary_agent_message(summary: &str, from_id: &str, timestamp: &str) -> AgentMessage {
-    let msg = BranchSummaryMessage {
-        role: "branchSummary".to_string(),
-        summary: summary.to_string(),
-        from_id: Some(from_id.to_string()),
-        timestamp: parse_rfc3339_ms(timestamp),
-    };
+    let msg = create_custom_message(custom_type.to_string(), content, display, details, timestamp);
     AgentMessage::Custom(serde_json::to_value(msg).unwrap_or(Value::Null))
 }
 
 fn create_compaction_summary_agent_message(summary: &str, tokens_before: i64, timestamp: &str) -> AgentMessage {
-    let msg = CompactionSummaryMessage {
-        role: "compactionSummary".to_string(),
-        summary: summary.to_string(),
-        tokens_before,
-        timestamp: parse_rfc3339_ms(timestamp),
-    };
+    let msg = create_compaction_summary_message(summary.to_string(), tokens_before, timestamp);
     AgentMessage::Custom(serde_json::to_value(msg).unwrap_or(Value::Null))
-}
-
-fn session_entry_to_context_messages_local(entry: &SessionEntry) -> Vec<AgentMessage> {
-    match entry {
-        SessionEntry::Message(m) => vec![m.message.clone()],
-        SessionEntry::CustomMessage(cm) => vec![create_custom_agent_message(
-            &cm.custom_type,
-            tree_custom_content_to_msg(&cm.content),
-            cm.display,
-            cm.details.clone(),
-            &cm.timestamp,
-        )],
-        SessionEntry::BranchSummary(bs) if !bs.summary.is_empty() => {
-            vec![create_branch_summary_agent_message(
-                &bs.summary,
-                &bs.from_id,
-                &bs.timestamp,
-            )]
-        }
-        SessionEntry::Compaction(c) => {
-            let summary = create_compaction_summary_agent_message(&c.summary, c.tokens_before, &c.timestamp);
-            if let Some(ref sys) = c.system_message {
-                vec![sys.clone(), summary]
-            } else {
-                vec![summary]
-            }
-        }
-        _ => Vec::new(),
-    }
 }
 
 #[derive(Clone)]
@@ -365,7 +295,7 @@ fn detect_miss_local(
 }
 
 enum RenderSessionItemLocal {
-    Custom(TreeCustomEntry),
+    Custom(CustomEntry),
     Usage(UsageEntry),
     CompactionCost(CompactionCostNotice),
     Message { msg: AgentMessage, entry_id: String },
@@ -1259,7 +1189,7 @@ impl InteractiveMode {
                         self.add_message_to_chat(
                             &create_custom_agent_message(
                                 &cm.custom_type,
-                                tree_custom_content_to_msg(&cm.content),
+                                cm.content.clone(),
                                 cm.display,
                                 cm.details.clone(),
                                 &cm.timestamp,
@@ -1963,11 +1893,11 @@ impl InteractiveMode {
         self.ui().request_render(None);
     }
 
-    pub(crate) fn add_custom_entry_to_chat(&self, entry: &TreeCustomEntry) {
+    pub(crate) fn add_custom_entry_to_chat(&self, entry: &CustomEntry) {
         let Some(renderer) = self.session().extension_runner().get_entry_renderer(&entry.custom_type) else {
             return;
         };
-        let entry_comp = CustomEntryComponent::new(make_custom_entry_for_component(entry), renderer);
+        let entry_comp = CustomEntryComponent::new(entry.clone(), renderer);
         let tool_expanded = self
             .inner
             .state
@@ -2293,7 +2223,7 @@ impl InteractiveMode {
     }
 
     pub fn render_session_entries(&self, entries: &[SessionEntry], update_footer: bool, populate_history: bool) {
-        // WIRE(@tui-w3): Reset fullscreen text selection on alt-screen once pi-tui exposes reset_text_selection().
+        self.ui().reset_text_selection();
         let mut items: Vec<RenderSessionItemLocal> = Vec::new();
         for entry in entries {
             match entry {
@@ -2302,7 +2232,7 @@ impl InteractiveMode {
                     items.push(RenderSessionItemLocal::Usage(u.clone()));
                 }
                 _ => {
-                    let messages = session_entry_to_context_messages_local(entry);
+                    let messages = session_entry_to_context_messages(entry);
                     let has_msgs = !messages.is_empty();
                     let entry_id = entry.id().to_string();
                     for msg in messages {

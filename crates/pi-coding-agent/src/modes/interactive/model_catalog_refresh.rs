@@ -3,13 +3,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::core::model_runtime::ModelRuntime;
+use crate::utils::abort::race_with_abort_signal;
 use indexmap::IndexMap;
 use pi_ai::Model;
+use pi_ai::models::ModelsRefreshOptions;
 use pi_js::abort::{AbortController, AbortReason, AbortSignal};
 use pi_js::{BoxFuture, Error, Result};
 use tokio::sync::watch;
-
-// WIRE(@tui-w3): Implement `ModelCatalogRuntime` for `Arc<crate::core::model_runtime::ModelRuntime>` (and use `crate::utils::abort::race_with_abort_signal`) once @mcp's `core-models-pkg` merges onto main.
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCatalogRefreshResult {
@@ -25,38 +26,48 @@ pub trait ModelCatalogRuntime: Send + Sync {
     fn get_error(&self) -> Option<String>;
 }
 
+impl ModelCatalogRuntime for Arc<ModelRuntime> {
+    fn runtime_ptr_key(&self) -> usize {
+        Arc::as_ptr(self) as usize
+    }
+
+    fn refresh(&self, signal: AbortSignal) -> BoxFuture<Result<ModelCatalogRefreshResult>> {
+        let runtime = Arc::clone(self);
+        Box::pin(async move {
+            let res = ModelRuntime::refresh(
+                &runtime,
+                Some(ModelsRefreshOptions {
+                    allow_network: Some(true),
+                    providers: None,
+                    force: Some(true),
+                    signal: Some(signal),
+                }),
+            )
+            .await?;
+            Ok(ModelCatalogRefreshResult {
+                aborted: res.aborted,
+                errors: res.errors.into_iter().map(|(k, v)| (k, v.to_string())).collect(),
+            })
+        })
+    }
+
+    fn get_available_snapshot(&self) -> Vec<Model> {
+        ModelRuntime::get_available_snapshot(self)
+    }
+
+    fn get_model(&self, provider: &str, id: &str) -> Option<Model> {
+        ModelRuntime::get_model(self, provider, id)
+    }
+
+    fn get_error(&self) -> Option<String> {
+        ModelRuntime::get_error(self)
+    }
+}
+
 fn abort_error(signal: &AbortSignal) -> Error {
     match signal.reason() {
         Some(reason) => Error::Abort(reason),
         None => Error::Abort(AbortReason::abort()),
-    }
-}
-
-async fn race_with_abort<T, F>(operation: F, signal: Option<&AbortSignal>) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T>> + Send + 'static,
-    T: Send + 'static,
-{
-    let Some(signal) = signal else {
-        return operation.await;
-    };
-    if signal.aborted() {
-        tokio::spawn(async move {
-            let _ = operation.await;
-        });
-        return Err(abort_error(signal));
-    }
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let _ = tx.send(operation.await);
-    });
-    tokio::select! {
-        biased;
-        _ = signal.cancelled() => Err(abort_error(signal)),
-        res = rx => match res {
-            Ok(inner) => inner,
-            Err(_) => Err(Error::msg("aborted task dropped before settling")),
-        },
     }
 }
 
@@ -101,7 +112,7 @@ impl ModelCatalogRefreshCoordinator {
                 let created_c = Arc::clone(&created);
                 let op = runtime.refresh(op_signal.clone());
                 tokio::spawn(async move {
-                    let result = race_with_abort(op, Some(&op_signal)).await;
+                    let result = race_with_abort_signal(op, Some(&op_signal)).await;
                     let _ = tx.send(Some(result));
                     let mut guard = COORDINATOR.active_by_runtime.lock().unwrap();
                     if guard.get(&key).is_some_and(|e| Arc::ptr_eq(e, &created_c)) {
@@ -127,7 +138,7 @@ impl ModelCatalogRefreshCoordinator {
                 }
             }
         };
-        let result = race_with_abort(wait_fut, Some(&signal)).await;
+        let result = race_with_abort_signal(wait_fut, Some(&signal)).await;
 
         let remaining = active.waiters.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
         if remaining == 0 {
