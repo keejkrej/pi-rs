@@ -413,4 +413,15 @@ impl KeybindingsManager {
     pub fn get_resolved_bindings(&self) -> KeybindingsConfig {
         self.inner.get_resolved_bindings()
     }
+
+    pub fn to_tui_manager(&self) -> TuiKeybindingsManager {
+        (*self.inner).clone()
+    }
+
+    pub fn from_tui_manager(inner: TuiKeybindingsManager) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            config_path: Arc::new(Mutex::new(None)),
+        }
+    }
 }

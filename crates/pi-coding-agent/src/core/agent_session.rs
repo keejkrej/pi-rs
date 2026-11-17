@@ -538,6 +538,7 @@ pub(crate) struct AgentSessionState {
     pub next_bash_id: u64,
     pub pending_bash_messages: Vec<BashExecutionMessage>,
     pub pending_custom_messages: Vec<AgentMessage>,
+    pub pending_user_bash_operations: Option<Arc<dyn crate::core::tools::bash::BashOperations>>,
     pub scoped_models: Vec<ScopedModelEntry>,
     pub is_agent_run_active: bool,
     pub agent_run_abort_requested: bool,
@@ -638,6 +639,7 @@ impl AgentSession {
             next_bash_id: 1,
             pending_bash_messages: Vec::new(),
             pending_custom_messages: Vec::new(),
+            pending_user_bash_operations: None,
             scoped_models: config.scoped_models.unwrap_or_default(),
             is_agent_run_active: false,
             agent_run_abort_requested: false,
@@ -746,6 +748,10 @@ impl AgentSession {
 
     pub fn model_runtime(&self) -> &ModelRuntime {
         &self.inner.model_runtime
+    }
+
+    pub fn ptr_key(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
     }
 
     pub(crate) async fn _get_required_request_auth(

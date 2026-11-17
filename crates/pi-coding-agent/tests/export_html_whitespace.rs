@@ -1,5 +1,4 @@
 //! Port of `packages/coding-agent/test/export-html-whitespace.test.ts`.
-// WIRE(@tui-w3): Theme reference uses `HtmlTheme` adapter until TUI theme merges.
 
 use std::path::PathBuf;
 use std::sync::Arc;

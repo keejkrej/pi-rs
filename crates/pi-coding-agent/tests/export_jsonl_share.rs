@@ -1,5 +1,4 @@
 //! Port of `packages/coding-agent/test/export-jsonl-share.test.ts`.
-// WIRE(@tui-w3): `exportSessionForShare` UI helper resides in `modes::interactive::session_share`.
 
 use std::sync::Arc;
 
@@ -243,4 +242,75 @@ async fn agent_session_exports_to_jsonl_with_create_agent_session() {
     assert!(content.contains("\"type\":\"session\""));
     assert!(content.contains("\"hello\""));
     created.session.dispose();
+}
+
+#[test]
+fn export_session_for_share_writes_trailing_pi_share_entry() {
+    use pi_coding_agent::modes::interactive::session_share::{
+        SessionShareDestination, ShareSession, ShareToolSummary, export_session_for_share,
+    };
+    use std::sync::Arc;
+
+    struct ShareStub {
+        sm: SessionManager,
+    }
+
+    impl ShareSession for ShareStub {
+        fn system_prompt(&self) -> String {
+            "share test prompt".to_owned()
+        }
+        fn state_tools(&self) -> Vec<ShareToolSummary> {
+            vec![ShareToolSummary {
+                name: "share_tool".to_owned(),
+                description: "Render a value for sharing".to_owned(),
+                parameters: json!({ "type": "object" }),
+            }]
+        }
+        fn export_session_jsonl(
+            &self,
+            file_path: &str,
+            trailing_entries_fn: Arc<dyn Fn(Option<&str>, &str) -> Vec<Value> + Send + Sync>,
+        ) -> pi_coding_agent::Result<()> {
+            let cb = |parent_id: Option<&str>, ts: &str| trailing_entries_fn(parent_id, ts);
+            export_session_to_jsonl(&self.sm, Some(file_path), Some(&cb)).map(|_| ())
+        }
+        fn export_to_html(&self, _html_path: &str, _theme_name: &str) -> pi_js::BoxFuture<pi_coding_agent::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn session_share_destination(&self) -> SessionShareDestination {
+            SessionShareDestination::Gist
+        }
+        fn has_radius_provider(&self) -> bool {
+            false
+        }
+        fn get_radius_auth_token(&self, _min_oauth_validity_ms: i64) -> pi_js::BoxFuture<Option<String>> {
+            Box::pin(async { None })
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let sm = SessionManager::in_memory(Some(cwd), None, None).unwrap();
+    let msg_id = sm
+        .append_message(AgentMessage::Message(Message::User(UserMessage {
+            content: UserMessageContent::Text("hello".to_owned()),
+            timestamp: 1,
+        })))
+        .unwrap();
+
+    let out = tmp.path().join("via-helper.jsonl");
+    export_session_for_share(out.to_str().unwrap(), Arc::new(ShareStub { sm })).unwrap();
+
+    let raw = std::fs::read_to_string(&out).unwrap();
+    let records: Vec<Value> = raw.trim().lines().map(|l| pi_js::json::parse(l).unwrap()).collect();
+    let share_entry = records
+        .iter()
+        .find(|r| r.get("customType").and_then(Value::as_str) == Some("pi.share"))
+        .expect("pi.share custom entry present");
+    assert_eq!(
+        share_entry.get("parentId").and_then(Value::as_str),
+        Some(msg_id.as_str())
+    );
+    assert_eq!(share_entry["data"]["systemPrompt"].as_str(), Some("share test prompt"));
+    assert_eq!(share_entry["data"]["tools"][0]["name"].as_str(), Some("share_tool"));
 }

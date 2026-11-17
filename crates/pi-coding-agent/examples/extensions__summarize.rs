@@ -15,58 +15,10 @@ use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionCommandContext, ExtensionFactory, ExtensionMode, InlineExtension, NotifyType,
     RegisteredCommandOptions, Theme,
 };
-use pi_tui::components::markdown::MarkdownTheme;
+use pi_coding_agent::modes::interactive::components::dynamic_border::DynamicBorder;
+use pi_coding_agent::modes::interactive::theme::theme::get_markdown_theme;
 use pi_tui::{Component, Container, Markdown, Text, matches_key};
 use serde_json::Value;
-
-struct FallbackDynamicBorder {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::components::DynamicBorder once @tui merges.
-    color: Arc<dyn Fn(&str) -> String + Send + Sync>,
-}
-
-impl Component for FallbackDynamicBorder {
-    fn render(&self, width: usize) -> Vec<String> {
-        vec![(self.color)(&"─".repeat(width.max(1)))]
-    }
-
-    fn invalidate(&self) {}
-}
-
-fn fallback_markdown_theme(theme: &Theme) -> MarkdownTheme {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::theme::get_markdown_theme() once @tui merges.
-    let t_heading = theme.clone();
-    let t_link = theme.clone();
-    let t_link_url = theme.clone();
-    let t_code = theme.clone();
-    let t_code_block = theme.clone();
-    let t_code_border = theme.clone();
-    let t_quote = theme.clone();
-    let t_quote_border = theme.clone();
-    let t_hr = theme.clone();
-    let t_bullet = theme.clone();
-    let t_bold = theme.clone();
-    let t_italic = theme.clone();
-    let t_strike = theme.clone();
-    let t_under = theme.clone();
-    MarkdownTheme {
-        heading: Arc::new(move |s| t_heading.fg("mdHeading", &t_heading.bold(s))),
-        link: Arc::new(move |s| t_link.fg("mdLink", s)),
-        link_url: Arc::new(move |s| t_link_url.fg("mdLinkUrl", s)),
-        code: Arc::new(move |s| t_code.fg("mdCode", s)),
-        code_block: Arc::new(move |s| t_code_block.fg("mdCodeBlock", s)),
-        code_block_border: Arc::new(move |s| t_code_border.fg("mdCodeBlockBorder", s)),
-        quote: Arc::new(move |s| t_quote.fg("mdQuote", s)),
-        quote_border: Arc::new(move |s| t_quote_border.fg("mdQuoteBorder", s)),
-        hr: Arc::new(move |s| t_hr.fg("mdHr", s)),
-        list_bullet: Arc::new(move |s| t_bullet.fg("mdListBullet", s)),
-        bold: Arc::new(move |s| t_bold.bold(s)),
-        italic: Arc::new(move |s| t_italic.italic(s)),
-        strikethrough: Arc::new(move |s| t_strike.strikethrough(s)),
-        underline: Arc::new(move |s| t_under.underline(s)),
-        highlight_code: None,
-        code_block_indent: None,
-    }
-}
 
 struct SummaryModal {
     container: Container,
@@ -194,10 +146,8 @@ async fn show_summary_ui(summary: String, ctx: &ExtensionCommandContext) -> pi_j
                 Box::pin(async move {
                     let container = Container::new();
                     let t_border = theme.clone();
-                    let border = Arc::new(FallbackDynamicBorder {
-                        color: Arc::new(move |s| t_border.fg("accent", s)),
-                    });
-                    let md_theme = fallback_markdown_theme(&theme);
+                    let border = Arc::new(DynamicBorder::new(Some(Arc::new(move |s| t_border.fg("accent", s)))));
+                    let md_theme = get_markdown_theme();
 
                     container.add_child(border.clone());
                     container.add_child(Arc::new(Text::new(

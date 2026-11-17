@@ -100,12 +100,10 @@ pub struct CacheWarmingDecisionEventResult {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 3B Theme adapter (// WIRE(@w3-b))
+// Stage 3B Theme adapter
 // ---------------------------------------------------------------------------
 
 /// Render theme surface used by tool renderers and extension UI.
-///
-/// // WIRE(@w3-b): implement for `crate::modes::interactive::theme::Theme` in Stage 3B-2.
 pub trait ExtensionTheme: Send + Sync {
     fn fg(&self, color: &str, text: &str) -> String;
     fn bg(&self, bg: &str, text: &str) -> String;
@@ -116,6 +114,9 @@ pub trait ExtensionTheme: Send + Sync {
     fn strikethrough(&self, text: &str) -> String;
     fn get_fg_ansi(&self, color: &str) -> String;
     fn get_bg_ansi(&self, bg: &str) -> String;
+    fn to_interactive_theme(&self) -> Option<crate::modes::interactive::theme::theme::Theme> {
+        None
+    }
 }
 
 #[derive(Default)]

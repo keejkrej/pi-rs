@@ -9,7 +9,8 @@ use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionContext, ExtensionFactory, ExtensionMode, InlineExtension, NotifyType,
     RegisteredCommandOptions, SessionStartEvent, SessionTreeEvent, Theme, ToolInfo,
 };
-use pi_tui::components::settings_list::{SettingItem, SettingsList, SettingsListTheme};
+use pi_coding_agent::modes::interactive::theme::theme::get_settings_list_theme;
+use pi_tui::components::settings_list::{SettingItem, SettingsList};
 use pi_tui::{Component, Container};
 use serde::{Deserialize, Serialize};
 
@@ -56,33 +57,6 @@ impl Component for ToolsModal {
 
     fn invalidate(&self) {
         self.container.invalidate();
-    }
-}
-
-fn fallback_settings_list_theme(theme: &Theme) -> SettingsListTheme {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::theme::get_settings_list_theme() once @tui merges.
-    let t_lbl = theme.clone();
-    let t_val = theme.clone();
-    let t_desc = theme.clone();
-    let t_hint = theme.clone();
-    SettingsListTheme {
-        label: Arc::new(move |text, selected| {
-            if selected {
-                t_lbl.fg("accent", text)
-            } else {
-                text.to_string()
-            }
-        }),
-        value: Arc::new(move |text, selected| {
-            if selected {
-                t_val.fg("accent", text)
-            } else {
-                t_val.fg("muted", text)
-            }
-        }),
-        description: Arc::new(move |text| t_desc.fg("muted", text)),
-        cursor: "  ".to_string(),
-        hint: Arc::new(move |text| t_hint.fg("dim", text)),
     }
 }
 
@@ -220,7 +194,7 @@ impl Extension for ToolsExtension {
                                             let settings_list = Arc::new(SettingsList::new(
                                                 items,
                                                 max_visible,
-                                                fallback_settings_list_theme(&theme),
+                                                get_settings_list_theme(),
                                                 Arc::new(move |id, new_value| {
                                                     {
                                                         let mut guard =

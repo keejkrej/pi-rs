@@ -462,10 +462,127 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
 }
 
 #[tokio::test]
-async fn defers_interactive_tui_rendering_until_tui_lands() {
-    // WIRE(@tui-w3): Once @tui lands `modes::interactive::*` (chat_viewport, components, theme,
-    // tui_renderer), remove the early-return gates in `experimental::{client_tui, client_tui_chat}`
-    // and port the component render/input/reload/model/thinking interaction tests.
+async fn renders_chat_view_and_rejects_missing_servers() {
+    let mut chat = ExperimentalChatView::new("/tmp").expect("ExperimentalChatView::new");
+
+    let mut args = pi_ai::JsonObject::new();
+    args.insert("path".to_string(), serde_json::json!("/tmp/hello.txt"));
+    let mut docs = indexmap::IndexMap::new();
+    let mut live_map = serde_json::Map::new();
+    live_map.insert(
+        "run".to_string(),
+        serde_json::json!({
+            "taskId": 42,
+            "inputs": []
+        }),
+    );
+    live_map.insert(
+        "generation".to_string(),
+        serde_json::json!({
+            "attempt": 1,
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "Streaming reply..." }],
+                "api": "anthropic-messages",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-5",
+                "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } },
+                "stopReason": "stop",
+                "timestamp": 2
+            }
+        }),
+    );
+    docs.insert("pi.live".to_string(), live_map);
+
+    let conv_id = pi_durable::ROOT_CONVERSATION_ID;
+    let view = pi_durable::ConversationView {
+        conversation: pi_durable::ConversationRecord {
+            id: conv_id,
+            parent: None,
+            owner: None,
+        },
+        entries: vec![
+            pi_durable::EntryRecord {
+                id: pi_durable::EntryId::new_unchecked(1),
+                conversation_id: conv_id,
+                kind: "pi.user".to_string(),
+                model: Some(vec![pi_ai::Message::User(pi_ai::UserMessage {
+                    content: pi_ai::UserMessageContent::Text("hello world prompt".to_string()),
+                    timestamp: 1,
+                })]),
+                data: None,
+                head: None,
+                edits: None,
+                by_task_id: None,
+            },
+            pi_durable::EntryRecord {
+                id: pi_durable::EntryId::new_unchecked(2),
+                conversation_id: conv_id,
+                kind: "pi.assistant".to_string(),
+                model: Some(vec![pi_ai::Message::Assistant(pi_ai::AssistantMessage {
+                    content: vec![
+                        pi_ai::AssistantContentBlock::Text(pi_ai::TextContent::new("Checking file.")),
+                        pi_ai::AssistantContentBlock::ToolCall(pi_ai::ToolCall::new("tc-1", "read", args)),
+                    ],
+                    api: "anthropic-messages".to_string(),
+                    provider: "anthropic".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    response_model: None,
+                    response_id: None,
+                    provider_thinking_level: None,
+                    thinking_level: None,
+                    diagnostics: None,
+                    usage: pi_ai::Usage::default(),
+                    stop_reason: pi_ai::StopReason::ToolUse,
+                    deferred: None,
+                    error_message: None,
+                    raw_stop_reason: None,
+                    end_turn: None,
+                    timestamp: 2,
+                })]),
+                data: None,
+                head: None,
+                edits: None,
+                by_task_id: None,
+            },
+            pi_durable::EntryRecord {
+                id: pi_durable::EntryId::new_unchecked(3),
+                conversation_id: conv_id,
+                kind: "pi.tool-result".to_string(),
+                model: Some(vec![pi_ai::Message::ToolResult(pi_ai::ToolResultMessage {
+                    tool_call_id: "tc-1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![pi_ai::UserContentBlock::Text(pi_ai::TextContent::new(
+                        "file contents ok",
+                    ))],
+                    details: None,
+                    usage: None,
+                    nested_calls: None,
+                    is_error: false,
+                    timestamp: 3,
+                })]),
+                data: None,
+                head: None,
+                edits: None,
+                by_task_id: None,
+            },
+        ],
+        docs,
+    };
+
+    chat.apply(&view);
+    let rendered = pi_tui::utils::strip_terminal_sequences(&chat.render(100).join("\n"));
+    assert!(rendered.contains("hello world prompt"), "rendered: {rendered}");
+    assert!(rendered.contains("Checking file."), "rendered: {rendered}");
+    assert!(rendered.contains("file contents ok"), "rendered: {rendered}");
+    assert!(rendered.contains("Streaming reply..."), "rendered: {rendered}");
+    assert!(rendered.contains("Working..."), "rendered: {rendered}");
+
+    chat.refresh_theme(&view);
+    let refreshed = pi_tui::utils::strip_terminal_sequences(&chat.render(100).join("\n"));
+    assert!(refreshed.contains("hello world prompt"));
+    chat.dispose();
+
     let err = ExperimentalClientTui::create(
         &ClientCommand {
             auth: None,
@@ -482,12 +599,10 @@ async fn defers_interactive_tui_rendering_until_tui_lands() {
     )
     .await
     .err()
-    .expect("deferred until @tui-w3");
-    assert!(err.message().contains("@tui-w3"));
+    .expect("missing servers error");
+    assert!(!err.message().contains("@tui-w3"), "unexpected deferral: {err}");
 
-    let view_err = ExperimentalChatView::new("/tmp").err().expect("deferred until @tui-w3");
-    assert!(view_err.message().contains("@tui-w3"));
-
+    let empty_dir = tempfile::tempdir().expect("tempdir");
     let run_err = run_client_tui(
         &ClientCommand {
             auth: None,
@@ -500,9 +615,12 @@ async fn defers_interactive_tui_rendering_until_tui_lands() {
             plugin_packages: Vec::new(),
             prompt: None,
         },
-        RunClientTuiOptions::default(),
+        RunClientTuiOptions {
+            directory: Some(empty_dir.path().to_string_lossy().into_owned()),
+            facet_loader: None,
+        },
     )
     .await
-    .expect_err("deferred until @tui-w3");
-    assert!(run_err.message().contains("@tui-w3"));
+    .expect_err("empty directory has no servers");
+    assert!(!run_err.message().contains("@tui-w3"), "unexpected deferral: {run_err}");
 }

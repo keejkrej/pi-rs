@@ -8,10 +8,11 @@ use pi_coding_agent::core::extensions::types::{
     AgentSettledEvent, AgentStartEvent, ExecOptions, Extension, ExtensionApi, ExtensionContext, ExtensionFactory,
     InlineExtension, SessionShutdownEvent, SessionStartEvent,
 };
+use pi_coding_agent::modes::interactive::components::custom_editor::{CustomEditor, CustomEditorOptions};
 use pi_tui::autocomplete::AutocompleteProvider;
 use pi_tui::editor_component::{EditorBorderColor, EditorComponent, EditorTextCallback};
 use pi_tui::tui::{TuiMouseEvent, TuiMouseEventResult};
-use pi_tui::{Component, Editor, EditorOptions, Focusable, TUI, truncate_to_width, visible_width};
+use pi_tui::{Component, Focusable, TUI, truncate_to_width, visible_width};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -127,8 +128,7 @@ impl BorderEditorShared {
 }
 
 struct BorderStatusEditor {
-    // WIRE(@tui-w3): switch inner Editor to CustomEditor once @tui merges.
-    inner: Editor,
+    inner: CustomEditor,
     shared: Arc<Mutex<BorderEditorShared>>,
     ctx: ExtensionContext,
     pi: ExtensionApi,
@@ -378,17 +378,19 @@ impl Extension for BorderStatusEditorExtension {
                 let ctx_editor = ctx.clone();
                 let pi_editor = pi_outer.clone();
                 let shared_editor = Arc::clone(&shared_outer);
-                ui.set_editor_component(Some(Arc::new(move |tui, editor_theme, _kb| {
+                ui.set_editor_component(Some(Arc::new(move |tui, editor_theme, kb| {
                     {
                         let mut g = shared_editor.lock().unwrap_or_else(|e| e.into_inner());
                         g.active_tui = Some(Arc::clone(&tui));
                     }
-                    let inner = Editor::new(
+                    let inner = CustomEditor::new(
                         tui,
                         editor_theme,
-                        Some(EditorOptions {
+                        pi_coding_agent::core::keybindings::KeybindingsManager::from_tui_manager(kb),
+                        Some(CustomEditorOptions {
                             padding_x: Some(0.0),
                             autocomplete_max_visible: None,
+                            embed_working_status: None,
                         }),
                     );
                     Arc::new(BorderStatusEditor {

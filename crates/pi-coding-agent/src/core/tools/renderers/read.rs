@@ -8,7 +8,9 @@ use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderCon
 use crate::core::tools::read::ReadToolDetails;
 use crate::core::tools::render_utils::{shorten_path, str_val};
 use crate::core::tools::renderers::w3b_wire::{get_language_from_path, highlight_code, key_hint};
-use crate::core::tools::renderers::{extract_text_output, format_preview_lines, reuse_or_init_text};
+use crate::core::tools::renderers::{
+    extract_text_output, format_preview_lines, reuse_or_init_call_text, reuse_or_init_result_text,
+};
 use crate::core::tools::truncate::format_size;
 use crate::utils::paths::format_path_relative_to_cwd_or_absolute;
 
@@ -45,19 +47,19 @@ pub fn render_call() -> RenderCallFn {
             text.push_str(&theme.fg("warning", &range_suffix));
         }
 
-        reuse_or_init_text(&context, &text, 0, 0)
+        reuse_or_init_call_text(&context, &text, 0, 0)
     })
 }
 
 pub fn render_result() -> RenderResultFn {
     Arc::new(|result, options, theme, context: ToolRenderContext| {
         if options.is_partial {
-            return reuse_or_init_text(&context, "", 0, 0);
+            return reuse_or_init_result_text(&context, "", 0, 0);
         }
 
         let raw_output = extract_text_output(&result.content, context.show_images);
         if raw_output.is_empty() {
-            return reuse_or_init_text(&context, "", 0, 0);
+            return reuse_or_init_result_text(&context, "", 0, 0);
         }
 
         let path = str_val(context.args.get("path")).unwrap_or_default();
@@ -82,6 +84,6 @@ pub fn render_result() -> RenderResultFn {
             out.push_str(&format!("\n{}", theme.fg("warning", &warn)));
         }
 
-        reuse_or_init_text(&context, &out, 0, 0)
+        reuse_or_init_result_text(&context, &out, 0, 0)
     })
 }

@@ -160,3 +160,16 @@ pub fn render_tool_path(raw_path: Option<&str>, theme: &Theme, cwd: &str, empty_
     }
     link_path(&theme.fg("accent", &shorten_path(Some(value))), value, cwd)
 }
+
+pub fn format_read_line_range(offset: Option<&Value>, limit: Option<&Value>) -> String {
+    let offset_num = offset.and_then(Value::as_i64);
+    let limit_num = limit.and_then(Value::as_i64);
+    if offset_num.is_none() && limit_num.is_none() {
+        return String::new();
+    }
+    let start = offset_num.unwrap_or(1);
+    match limit_num {
+        Some(lim) => format!(":{start}-{}", start + lim - 1),
+        None => format!(":{start}"),
+    }
+}

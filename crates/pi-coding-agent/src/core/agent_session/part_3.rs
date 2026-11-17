@@ -134,6 +134,52 @@ impl Drop for BranchSummaryControllerGuard {
     }
 }
 
+fn collect_slash_commands(
+    runner: Option<&ExtensionRunner>,
+    resource_loader: &Arc<dyn crate::core::resource_loader::ResourceLoader>,
+) -> Vec<SlashCommandInfo> {
+    let ext_cmds: Vec<SlashCommandInfo> = runner
+        .map(|r| {
+            r.get_registered_commands()
+                .into_iter()
+                .map(|c| SlashCommandInfo {
+                    name: c.invocation_name,
+                    description: c.command.description,
+                    source: SlashCommandSource::Extension,
+                    source_info: c.command.source_info,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let templates: Vec<SlashCommandInfo> = resource_loader
+        .get_prompts()
+        .0
+        .into_iter()
+        .map(|t| SlashCommandInfo {
+            name: t.name,
+            description: Some(t.description),
+            source: SlashCommandSource::Prompt,
+            source_info: t.source_info,
+        })
+        .collect();
+    let skills: Vec<SlashCommandInfo> = resource_loader
+        .get_skills()
+        .0
+        .into_iter()
+        .map(|s| SlashCommandInfo {
+            name: format!("skill:{}", s.name),
+            description: Some(s.description),
+            source: SlashCommandSource::Skill,
+            source_info: s.source_info,
+        })
+        .collect();
+    let mut all = Vec::with_capacity(ext_cmds.len() + templates.len() + skills.len());
+    all.extend(ext_cmds);
+    all.extend(templates);
+    all.extend(skills);
+    all
+}
+
 impl AgentSession {
     // =========================================================================
     // Compaction
@@ -885,47 +931,16 @@ impl AgentSession {
         self.inner.agent.set_model(refreshed);
     }
 
+    pub fn get_commands(&self) -> Vec<SlashCommandInfo> {
+        let runner = self.extension_runner();
+        collect_slash_commands(runner.as_ref(), &self.inner.resource_loader)
+    }
+
     fn _bind_extension_core(&self, runner: &ExtensionRunner) {
         let runner_for_cmds = runner.clone();
         let resource_loader = Arc::clone(&self.inner.resource_loader);
         let get_commands = Arc::new(move || -> Vec<SlashCommandInfo> {
-            let ext_cmds: Vec<SlashCommandInfo> = runner_for_cmds
-                .get_registered_commands()
-                .into_iter()
-                .map(|c| SlashCommandInfo {
-                    name: c.invocation_name,
-                    description: c.command.description,
-                    source: SlashCommandSource::Extension,
-                    source_info: c.command.source_info,
-                })
-                .collect();
-            let templates: Vec<SlashCommandInfo> = resource_loader
-                .get_prompts()
-                .0
-                .into_iter()
-                .map(|t| SlashCommandInfo {
-                    name: t.name,
-                    description: Some(t.description),
-                    source: SlashCommandSource::Prompt,
-                    source_info: t.source_info,
-                })
-                .collect();
-            let skills: Vec<SlashCommandInfo> = resource_loader
-                .get_skills()
-                .0
-                .into_iter()
-                .map(|s| SlashCommandInfo {
-                    name: format!("skill:{}", s.name),
-                    description: Some(s.description),
-                    source: SlashCommandSource::Skill,
-                    source_info: s.source_info,
-                })
-                .collect();
-            let mut all = Vec::with_capacity(ext_cmds.len() + templates.len() + skills.len());
-            all.extend(ext_cmds);
-            all.extend(templates);
-            all.extend(skills);
-            all
+            collect_slash_commands(Some(&runner_for_cmds), &resource_loader)
         });
 
         let weak = Arc::downgrade(&self.inner);
@@ -2434,15 +2449,44 @@ impl AgentSession {
     ) -> pi_js::Result<String> {
         let requested_theme = options.and_then(|o| o.theme_name);
         let settings_theme = self.inner.settings_manager.get_theme();
-        // WIRE(@tui-w3): resolve theme_name with modes::interactive::theme::theme::get_theme_by_name and pass theme to create_tool_html_renderer
-        let theme_name = requested_theme.or(settings_theme);
+        let candidate_theme = requested_theme.or(settings_theme);
+        let resolved_theme = candidate_theme.as_deref().and_then(|name| {
+            crate::modes::interactive::theme::theme::resolve_theme_setting(
+                Some(name),
+                crate::modes::interactive::theme::theme::get_terminal_theme(),
+            )
+            .or_else(|| Some(name.to_string()))
+        });
+        let theme_name = resolved_theme
+            .as_deref()
+            .and_then(crate::modes::interactive::theme::theme::get_theme_by_name)
+            .and_then(|t| t.name().map(str::to_string))
+            .or(resolved_theme);
+        let session = self.clone();
+        let get_tool_definition: Arc<
+            dyn Fn(&str) -> Option<Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>> + Send + Sync,
+        > = Arc::new(move |name| {
+            session
+                .get_tool_definition(name)
+                .map(|def| Arc::new(def) as Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>)
+        });
+        let tool_renderer = crate::core::export_html::tool_renderer::create_tool_html_renderer(
+            crate::core::export_html::tool_renderer::ToolHtmlRendererDeps {
+                get_tool_definition,
+                theme: crate::core::export_html::tool_renderer::HtmlTheme {
+                    name: theme_name.clone(),
+                },
+                cwd: self.inner.session_manager.get_cwd(),
+                width: None,
+            },
+        );
         export_session_to_html(
             &self.inner.session_manager,
             Some(&self.inner.agent.state()),
             Some(ExportOptions {
                 output_path: output_path.map(str::to_string),
                 theme_name,
-                tool_renderer: None,
+                tool_renderer: Some(tool_renderer),
                 theme_override: None,
             }),
         )

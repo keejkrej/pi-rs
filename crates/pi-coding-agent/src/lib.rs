@@ -88,6 +88,7 @@ pub use crate::core::session_manager::{
 };
 pub use crate::core::settings_manager::{CompactionSettings, RetrySettings, Settings, SettingsManager};
 pub use crate::core::system_prompt::{build_system_prompt, diff_system_prompt_sections};
+pub use crate::core::tools::render_utils::format_read_line_range;
 pub use crate::core::tools::{
     BashOperations, BashToolDetails, BashToolInput, BashToolOptions, EditToolDetails, EditToolInput, EditToolOptions,
     FindToolDetails, FindToolInput, FindToolOptions, GrepToolDetails, GrepToolInput, GrepToolOptions, LsToolDetails,
@@ -100,6 +101,16 @@ pub use crate::core::tools::{
 pub use crate::core::trust_manager::{
     ProjectTrustDecision, ProjectTrustStore, ProjectTrustStoreEntry, has_trust_requiring_project_resources,
 };
+pub use crate::modes::interactive::interactive_mode::{InteractiveMode, InteractiveModeOptions};
+pub use crate::modes::interactive::theme::theme::{
+    Theme, ThemeAppearance, ThemeBg, ThemeColor, ThemeStyle, ThemeToken, get_language_from_path, get_markdown_theme,
+    get_select_list_theme, get_settings_list_theme, highlight_code, init_theme,
+};
+pub use crate::modes::json_event::JsonAgentSessionEvent;
+pub use crate::modes::print_mode::{PrintModeOptions, run_print_mode};
+pub use crate::modes::rpc::rpc_client::{ModelInfo, RpcClient, RpcClientOptions, RpcEventListener};
+pub use crate::modes::rpc::rpc_mode::run_rpc_mode;
+pub use crate::modes::rpc::rpc_types::{
+    RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, RpcSessionState,
+};
 pub use pi_agent_core::types::{AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode};
-
-// WIRE(@tui-w3): re-export InteractiveMode, InteractiveModeOptions, JsonAgentSessionEvent, ModelInfo, PrintModeOptions, RpcClient, RpcClientOptions, RpcCommand, RpcEventListener, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, RpcSessionState, run_print_mode, run_rpc_mode, and theme helpers from modes::* once @tui merges.

@@ -13,13 +13,14 @@ use pi_ai::types::{
 use pi_coding_agent::core::compaction::serialize_conversation;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, ExtensionMode, InlineExtension, NewSessionOptions, NotifyType,
-    RegisteredCommandOptions, Theme,
+    RegisteredCommandOptions,
 };
 use pi_coding_agent::core::messages::convert_to_llm;
 use pi_coding_agent::core::model_registry::ResolvedRequestAuth;
 use pi_coding_agent::core::session_manager::SessionEntry;
-use pi_tui::components::cancellable_loader::CancellableLoader;
-use pi_tui::{Component, Container, Text};
+use pi_coding_agent::modes::interactive::components::bordered_loader::BorderedLoader;
+use pi_coding_agent::modes::interactive::theme::theme::theme as current_interactive_theme;
+use pi_tui::Component;
 use serde_json::{Value, json};
 
 const SYSTEM_PROMPT: &str = "You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:\n\n\
@@ -38,79 +39,6 @@ Files involved:\n\
 - path/to/file2.ts\n\n\
 ## Task\n\
 [Clear description of what to do next based on user's goal]";
-
-struct FallbackDynamicBorder {
-    color: Arc<dyn Fn(&str) -> String + Send + Sync>,
-}
-
-impl Component for FallbackDynamicBorder {
-    fn render(&self, width: usize) -> Vec<String> {
-        vec![(self.color)(&"─".repeat(width.max(1)))]
-    }
-
-    fn invalidate(&self) {}
-}
-
-struct FallbackBorderedLoader {
-    // WIRE(@tui-w3): use pi_coding_agent::modes::interactive::components::BorderedLoader once @tui merges.
-    container: Container,
-    loader: CancellableLoader,
-}
-
-impl FallbackBorderedLoader {
-    fn new(tui: Arc<dyn pi_tui::TUI>, theme: &Theme, message: &str) -> Self {
-        let container = Container::new();
-        let t_border1 = theme.clone();
-        container.add_child(Arc::new(FallbackDynamicBorder {
-            color: Arc::new(move |s| t_border1.fg("border", s)),
-        }));
-        let t_spin = theme.clone();
-        let t_msg = theme.clone();
-        let loader = CancellableLoader::new(
-            tui,
-            Arc::new(move |s| t_spin.fg("accent", s)),
-            Arc::new(move |s| t_msg.fg("muted", s)),
-            Some(message),
-            None,
-        );
-        container.add_child(Arc::new(loader.clone()));
-        container.add_child(Arc::new(Text::new(
-            Some(&theme.fg("dim", "esc cancel")),
-            Some(1),
-            Some(0),
-            None,
-        )));
-        let t_border2 = theme.clone();
-        container.add_child(Arc::new(FallbackDynamicBorder {
-            color: Arc::new(move |s| t_border2.fg("border", s)),
-        }));
-        Self { container, loader }
-    }
-}
-
-impl Drop for FallbackBorderedLoader {
-    fn drop(&mut self) {
-        self.loader.dispose();
-    }
-}
-
-impl Component for FallbackBorderedLoader {
-    fn has_handle_input(&self) -> bool {
-        true
-    }
-
-    fn handle_input(&self, data: &str) {
-        self.loader.handle_input(data);
-    }
-
-    fn render(&self, width: usize) -> Vec<String> {
-        self.container.render(width)
-    }
-
-    fn invalidate(&self) {
-        self.container.invalidate();
-    }
-}
 
 fn entry_to_message(entry: &SessionEntry) -> Option<AgentMessage> {
     match entry {
@@ -199,14 +127,22 @@ impl Extension for HandoffExtension {
                             .custom(
                                 Box::new(move |tui, theme, _kb, done| {
                                     Box::pin(async move {
-                                        let bordered =
-                                            FallbackBorderedLoader::new(tui, &theme, "Generating handoff prompt...");
+                                        let interactive_theme = theme
+                                            .0
+                                            .to_interactive_theme()
+                                            .unwrap_or_else(current_interactive_theme);
+                                        let bordered = BorderedLoader::new(
+                                            tui,
+                                            &interactive_theme,
+                                            "Generating handoff prompt...",
+                                            None,
+                                        );
                                         let done_abort = Arc::clone(&done);
-                                        bordered.loader.set_on_abort(Some(Arc::new(move || {
+                                        bordered.set_on_abort(Some(Arc::new(move || {
                                             done_abort(Value::Null);
                                         })));
 
-                                        let signal = bordered.loader.signal();
+                                        let signal = bordered.signal();
                                         let done_task = Arc::clone(&done);
                                         let reg = registry.clone();
                                         let model_clone = model.clone();

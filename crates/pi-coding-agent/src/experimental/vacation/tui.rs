@@ -9,6 +9,5 @@ pub async fn run_durable_tui(
     controller: &DurableController,
     settings: &SettingsManager,
 ) -> pi_js::Result<()> {
-    // WIRE(@tui-w3): shares modes::interactive wiring with durable::tui::run_durable_tui.
     crate::experimental::durable::tui::run_durable_tui(source, controller, settings).await
 }

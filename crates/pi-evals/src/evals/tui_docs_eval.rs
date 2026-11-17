@@ -6,13 +6,17 @@ use indexmap::IndexMap;
 use pi_agent_core::AgentMessage;
 use pi_ai::{AssistantMessage, Message, ModelThinkingLevel, StopReason, Usage, UsageCost, faux_text};
 use pi_coding_agent::core::agent_session::AgentSession;
+use pi_coding_agent::core::agent_session_runtime::AgentSessionRuntime;
 use pi_coding_agent::core::agent_session_services::AgentSessionServices;
 use pi_coding_agent::core::sdk::{
     CreateAgentSessionFromServicesOptions, NoToolsMode, create_agent_session_from_services,
 };
 use pi_coding_agent::core::session_manager::SessionManager;
+use pi_coding_agent::core::settings_manager::FullscreenExitOutput;
+use pi_coding_agent::modes::interactive::components::settings_selector::TuiMode;
 use pi_coding_agent::pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
 use pi_coding_agent::pi_tui::utils::strip_terminal_sequences;
+use pi_coding_agent::{InteractiveMode, InteractiveModeOptions};
 use pi_js::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -285,28 +289,61 @@ async fn inspect_context_footer(session: &AgentSession, agent_dir: &str) -> Resu
         .session_manager()
         .append_message(AgentMessage::Message(Message::Assistant(fixture_msg)))?;
 
-    // WIRE(@tui-w3): Connect `RecordingTerminal` to `@tui`'s `InteractiveMode` once interactive mode lands:
-    //   let runtime = AgentSessionRuntime::new(
-    //       oracle_session.clone(),
-    //       services,
-    //       Arc::new(|_| Box::pin(async { Err(Error::msg("The TUI footer oracle does not replace sessions.")) })),
-    //   );
-    //   let terminal = Arc::new(RecordingTerminal::new());
-    //   let mode = InteractiveMode::new(runtime.clone(), InteractiveModeOptions {
-    //       tui_mode: Some(TuiMode::Regular),
-    //       terminal: Some(terminal.clone()),
-    //       ..Default::default()
-    //   });
-    //   for (index, &(percent, _)) in CONTEXT_FIXTURES.iter().enumerate() {
-    //       oracle_session.agent().replace_messages(vec![AgentMessage::Message(Message::Assistant(
-    //           create_context_message(&model, percent),
-    //       ))]);
-    //       if index == 0 { mode.init().await?; } else { terminal.request_resize(); }
-    //       let renders = terminal.take_renders().await?;
-    //       ...
-    //   }
-    //   mode.stop(Some("resume-hint"));
-    //   runtime.dispose().await;
+    let runtime = Arc::new(AgentSessionRuntime::new(
+        oracle_session.clone(),
+        services,
+        Arc::new(|_| Box::pin(async { Err(Error::msg("The TUI footer oracle does not replace sessions.")) })),
+        Vec::new(),
+        None,
+    ));
+    let terminal = Arc::new(RecordingTerminal::new());
+    let mode = InteractiveMode::new(
+        runtime.clone(),
+        InteractiveModeOptions {
+            tui_mode: Some(TuiMode::Regular),
+            terminal: Some(terminal.clone()),
+            ..Default::default()
+        },
+    );
+    let mut built_in_status_line: Option<String> = None;
+    let mut observations = Vec::with_capacity(CONTEXT_FIXTURES.len());
+    let run_result: Result<()> = async {
+        for (index, &(percent, _)) in CONTEXT_FIXTURES.iter().enumerate() {
+            oracle_session
+                .agent()
+                .replace_messages(vec![AgentMessage::Message(Message::Assistant(create_context_message(
+                    &model, percent,
+                )))]);
+            if index == 0 {
+                mode.init().await;
+            } else {
+                terminal.request_resize();
+            }
+            let renders = terminal.take_renders().await?;
+            if index == 0 {
+                built_in_status_line = renders
+                    .iter()
+                    .flat_map(|render| non_empty_lines(render))
+                    .find(|line| BUILT_IN_CONTEXT_PATTERN.as_ref().is_some_and(|re| re.is_match(line)))
+                    .map(str::to_string);
+            }
+            let usage = oracle_session.get_context_usage().map(|u| ContextUsageObservation {
+                tokens: u.tokens,
+                context_window: u.context_window,
+                percent: u.percent,
+            });
+            observations.push(TuiFooterObservation {
+                percent,
+                rendered_output: renders.last().cloned().unwrap_or_default(),
+                context_usage: usage,
+            });
+        }
+        Ok(())
+    }
+    .await;
+    mode.stop(Some(FullscreenExitOutput::ResumeHint));
+    runtime.dispose().await;
+    run_result?;
     let extension_errors: Vec<String> = session
         .resource_loader()
         .get_extensions()
@@ -314,11 +351,11 @@ async fn inspect_context_footer(session: &AgentSession, agent_dir: &str) -> Resu
         .into_iter()
         .map(|entry| entry.error)
         .collect();
-    oracle_session.dispose();
-    let _ = (&services, CONTEXT_FIXTURES, extension_errors);
-    Err(Error::msg(
-        "TUI footer oracle requires InteractiveMode from @tui (WIRE(@tui-w3)).",
-    ))
+    Ok(TuiFooterOutput {
+        built_in_status_line,
+        observations,
+        extension_errors,
+    })
 }
 
 fn context_footer_judge() -> Judge {

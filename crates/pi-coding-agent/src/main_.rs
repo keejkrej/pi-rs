@@ -550,7 +550,7 @@ pub async fn create_session_manager(
             settings_manager,
         )
         .await;
-        // WIRE(@tui-w3): modes::interactive::theme::theme::stop_theme_watcher()
+        crate::modes::interactive::theme::theme::stop_theme_watcher();
         let selected_path = selected?;
         let Some(path) = selected_path else {
             pi_js::console::log(&chalk().dim().apply("No session selected"));
@@ -1317,7 +1317,13 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     let (initial_message, initial_images) = prepare_initial_message(&mut parsed, stdin_content.as_deref()).await?;
     time("prepareInitialMessage", TimingNamespaceKind::Main);
 
-    // WIRE(@tui-w3): set_theme_json_validator(validate_theme_json); init_theme(services.settings_manager.get_theme(), app_mode == AppMode::Interactive);
+    crate::modes::interactive::theme::theme::set_theme_json_validator(Some(Arc::new(|label, json| {
+        crate::modes::interactive::theme::theme_json::validate_theme_json(label, json)
+    })));
+    crate::modes::interactive::theme::theme::init_theme(
+        services.settings_manager.get_theme().as_deref(),
+        Some(app_mode == AppMode::Interactive),
+    );
     time("initTheme", TimingNamespaceKind::Main);
 
     if app_mode == AppMode::Interactive && !migration_res.deprecation_warnings.is_empty() {
@@ -1384,38 +1390,84 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     match app_mode {
         AppMode::Rpc => {
             print_timings();
-            // WIRE(@tui-w3): crate::modes::run_rpc_mode(runtime).await
-            let _ = (
-                &runtime,
-                &migration_res.migrated_auth_providers,
-                &auto_trust_on_reload_cwd,
-            );
-            Err(pi_js::Error::msg(
-                "RPC mode is not wired yet (pending Stage 3B-2 @tui merge)",
-            ))
+            let _ = (&migration_res.migrated_auth_providers, &auto_trust_on_reload_cwd);
+            crate::modes::rpc::rpc_mode::run_rpc_mode(Arc::new(runtime)).await
         }
         AppMode::Interactive => {
-            print_timings();
-            // WIRE(@tui-w3): InteractiveMode::new(runtime, InteractiveModeOptions { ... }).run().await (plus startup_benchmark)
-            let _ = (
-                &runtime,
-                &startup_diagnostics,
-                &initial_message,
-                &initial_images,
-                &parsed,
+            let interactive_diagnostics: Vec<
+                crate::modes::interactive::interactive_mode::AgentSessionRuntimeDiagnostic,
+            > = startup_diagnostics
+                .iter()
+                .map(
+                    |d| crate::modes::interactive::interactive_mode::AgentSessionRuntimeDiagnostic {
+                        diagnostic_type: match d.r#type {
+                            AgentSessionRuntimeDiagnosticType::Info => {
+                                crate::modes::interactive::interactive_mode::DiagnosticLevel::Info
+                            }
+                            AgentSessionRuntimeDiagnosticType::Warning => {
+                                crate::modes::interactive::interactive_mode::DiagnosticLevel::Warning
+                            }
+                            AgentSessionRuntimeDiagnosticType::Error => {
+                                crate::modes::interactive::interactive_mode::DiagnosticLevel::Error
+                            }
+                        },
+                        message: d.message.clone(),
+                    },
+                )
+                .collect();
+            let interactive_mode = crate::modes::interactive::interactive_mode::InteractiveMode::new(
+                Arc::new(runtime.clone()),
+                crate::modes::interactive::interactive_mode::InteractiveModeOptions {
+                    migrated_providers: (!migration_res.migrated_auth_providers.is_empty())
+                        .then_some(migration_res.migrated_auth_providers),
+                    startup_diagnostics: (!interactive_diagnostics.is_empty()).then_some(interactive_diagnostics),
+                    model_fallback_message: runtime.model_fallback_message(),
+                    auto_trust_on_reload_cwd,
+                    initial_message,
+                    initial_images,
+                    initial_messages: (!parsed.messages.is_empty()).then_some(parsed.messages),
+                    verbose: parsed.verbose,
+                    tui_mode: parsed.tui_mode,
+                    initial_theme_setting: parsed.use_theme,
+                    ..Default::default()
+                },
             );
-            Err(pi_js::Error::msg(
-                "Interactive mode is not wired yet (pending Stage 3B-2 @tui merge)",
-            ))
+            if startup_benchmark {
+                interactive_mode.init().await;
+                time("interactiveMode.init", TimingNamespaceKind::Main);
+                pi_js::time::sleep(150, None).await?;
+                interactive_mode.stop(None);
+                runtime.dispose().await;
+                crate::modes::interactive::theme::theme::stop_theme_watcher();
+                print_timings();
+                return Ok(());
+            }
+            print_timings();
+            interactive_mode.run().await;
+            Ok(())
         }
         AppMode::Print | AppMode::Json => {
             print_timings();
-            // WIRE(@tui-w3): crate::modes::run_print_mode(runtime, PrintModeOptions { ... }).await; stop_theme_watcher();
+            let exit_code = crate::modes::print_mode::run_print_mode(
+                Arc::new(runtime),
+                crate::modes::print_mode::PrintModeOptions {
+                    mode: if app_mode == AppMode::Json {
+                        crate::modes::print_mode::PrintModeKind::Json
+                    } else {
+                        crate::modes::print_mode::PrintModeKind::Text
+                    },
+                    messages: parsed.messages,
+                    initial_message,
+                    initial_images,
+                },
+            )
+            .await;
+            crate::modes::interactive::theme::theme::stop_theme_watcher();
             restore_stdout();
-            let _ = (&runtime, &initial_message, &initial_images, &parsed);
-            Err(pi_js::Error::msg(
-                "Print/JSON mode is not wired yet (pending Stage 3B-2 @tui merge)",
-            ))
+            if exit_code != 0 {
+                return Err(pi_js::Error::Exit(exit_code));
+            }
+            Ok(())
         }
     }
 }
