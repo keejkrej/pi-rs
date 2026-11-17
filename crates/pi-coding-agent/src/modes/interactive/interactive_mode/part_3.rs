@@ -2179,13 +2179,16 @@ impl InteractiveMode {
             let sel_slot = Arc::clone(&sel_slot);
             let m = self.clone();
             Arc::new(move |value: Option<String>| {
-                if let Some(sel) = sel_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let sel = sel_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(sel) = sel {
                     sel.dispose();
                 }
-                if let Some(comp) = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let comp = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(comp) = comp {
                     m.remove_extension_dialog(&comp);
                 }
-                if let Some(sender) = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let sender = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(sender) = sender {
                     let _ = sender.send(value);
                 }
             })
@@ -2278,13 +2281,16 @@ impl InteractiveMode {
             let input_slot = Arc::clone(&input_slot);
             let m = self.clone();
             Arc::new(move |value: Option<String>| {
-                if let Some(inp) = input_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let inp = input_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(inp) = inp {
                     inp.dispose();
                 }
-                if let Some(comp) = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let comp = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(comp) = comp {
                     m.remove_extension_dialog(&comp);
                 }
-                if let Some(sender) = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let sender = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(sender) = sender {
                     let _ = sender.send(value);
                 }
             })
@@ -2336,10 +2342,12 @@ impl InteractiveMode {
             let comp_slot = Arc::clone(&comp_slot);
             let m = self.clone();
             Arc::new(move |value: Option<String>| {
-                if let Some(comp) = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let comp = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(comp) = comp {
                     m.remove_extension_dialog(&comp);
                 }
-                if let Some(sender) = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let sender = tx_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(sender) = sender {
                     let _ = sender.send(value);
                 }
             })

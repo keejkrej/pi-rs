@@ -906,7 +906,8 @@ impl InteractiveMode {
             let m = self.clone();
             let d_slot = Arc::clone(&dispose_slot);
             Arc::new(move || {
-                if let Some(d) = d_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let d = d_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(d) = d {
                     d();
                 }
                 {
@@ -1245,7 +1246,8 @@ impl InteractiveMode {
                 on_tui_mode_change: Some(Arc::new(move |mode| {
                     if !m_tm.switch_tui_mode(mode, true, true) {
                         let current_mode = to_settings_tui_mode(m_tm.ui().mode());
-                        if let Some(sl) = sl_tm.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                        let sl_opt = sl_tm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if let Some(sl) = sl_opt {
                             sl.update_value("tui-mode", current_mode.as_str());
                         }
                         m_tm.show_status("Close active overlays before changing TUI mode");
