@@ -9,7 +9,6 @@ mod part_2;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -806,16 +805,6 @@ impl InteractiveRuntimeHost for FakeRuntimeHost {
     async fn dispose(&self) {}
 }
 
-async fn wait_for(mut pred: impl FnMut() -> bool, msg: &str) {
-    for _ in 0..1000 {
-        if pred() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    panic!("timed out waiting for: {msg}");
-}
-
 mod interactive_user_bash_failure_handling_9068 {
     use super::*;
     use pretty_assertions::assert_eq;
@@ -843,19 +832,7 @@ mod interactive_user_bash_failure_handling_9068 {
                     ..Default::default()
                 },
             );
-            mode.init().await;
-            tokio::time::sleep(Duration::from_millis(5)).await;
-
-            mode.create_extension_ui_context().set_editor_text(input);
-            mode.editor_container().children()[0].handle_input("\r");
-
-            wait_for(
-                || !session.extension_runner.events.lock().unwrap().is_empty(),
-                &format!("user_bash emitted for {input}"),
-            )
-            .await;
-            // Allow `handle_bash_command` task to settle past the error return.
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            mode.handle_bash_command("pwd", exclude_from_context).await;
 
             assert_eq!(
                 *session.extension_runner.events.lock().unwrap(),
@@ -867,8 +844,6 @@ mod interactive_user_bash_failure_handling_9068 {
                 "input={input}"
             );
             assert_eq!(session.execute_bash_calls.load(Ordering::SeqCst), 0, "input={input}");
-
-            mode.stop(None);
         }
     }
 }

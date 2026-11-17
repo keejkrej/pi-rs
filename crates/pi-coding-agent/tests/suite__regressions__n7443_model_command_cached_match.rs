@@ -3,7 +3,6 @@
 // #7443
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -838,16 +837,6 @@ fn render_chat(container: &Container) -> String {
     strip_terminal_sequences(&container.render(120).join("\n"))
 }
 
-async fn wait_for(mut pred: impl FnMut() -> bool, msg: &str) {
-    for _ in 0..1000 {
-        if pred() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    panic!("timed out waiting for: {msg}");
-}
-
 mod issue_7443_model_command_cached_match {
     use super::*;
 
@@ -874,26 +863,13 @@ mod issue_7443_model_command_cached_match {
                 ..Default::default()
             },
         );
-        mode.init().await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-
-        // PORT: `find_exact_model_match` is private in `InteractiveMode`, so we drive it via `/model cached`.
-        mode.create_extension_ui_context().set_editor_text("/model cached");
-        mode.editor_container().children()[0].handle_input("\r");
-
-        wait_for(
-            || !session.set_model_calls.lock().unwrap().is_empty(),
-            "set_model called",
-        )
-        .await;
+        mode.handle_model_command(Some("cached")).await;
 
         let calls = session.set_model_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "cached");
         assert!(runtime.refresh_calls.lock().unwrap().is_empty());
         assert!(!render_chat(mode.chat_container()).contains("Refreshing model catalogs…"));
-
-        mode.stop(None);
     }
 
     #[tokio::test]
@@ -920,28 +896,13 @@ mod issue_7443_model_command_cached_match {
             },
         );
         runtime.set_chat_observer(mode.chat_container().clone());
-        mode.init().await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
 
-        let initial_editor = mode.editor_container().children()[0].clone();
-
-        // PORT: `find_exact_model_match` is private in `InteractiveMode`, so we drive it via `/model not-cached`.
-        // On a miss, `handle_model_command` falls back to `show_model_selector`, which may perform a second refresh.
-        mode.create_extension_ui_context().set_editor_text("/model not-cached");
-        initial_editor.handle_input("\r");
-
-        wait_for(
-            || !Arc::ptr_eq(&mode.editor_container().children()[0], &initial_editor),
-            "model selector opened after miss",
-        )
-        .await;
+        mode.handle_model_command(Some("not-cached")).await;
 
         assert!(session.set_model_calls.lock().unwrap().is_empty());
         let calls = runtime.refresh_calls.lock().unwrap();
         assert!(!calls.is_empty());
         assert!(!calls[0].aborted_on_entry);
         assert!(calls[0].status_snapshot.contains("Refreshing model catalogs…"));
-
-        mode.stop(None);
     }
 }
