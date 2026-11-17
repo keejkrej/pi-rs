@@ -1,8 +1,7 @@
 //! Port of packages/evals/evals/configured-runtime.ts
 
 use pi_ai::{
-    ContentTextSource, Context, Model, ModelCostRates, ModelInput, ModelsRefreshOptions, ModelsSimpleStreamOptions,
-    content_text,
+    Context, Model, ModelCostRates, ModelInput, ModelsRefreshOptions, ModelsSimpleStreamOptions, content_text,
 };
 use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use pi_js::Result;
@@ -97,13 +96,13 @@ fn model_fields(model: &Model) -> ModelFields {
 
 /// Loads an offline [`ModelRuntime`] configured from an isolated agent directory.
 pub async fn load_configured_model_runtime(agent_dir: &str) -> Result<ModelRuntime> {
-    ModelRuntime::create(Some(CreateModelRuntimeOptions {
+    ModelRuntime::create(CreateModelRuntimeOptions {
         models_path: Some(Some(pi_js::path::join(&[agent_dir, "models.json"]))),
         auth_path: Some(pi_js::path::join(&[agent_dir, "auth.json"])),
         models_store_path: Some(pi_js::path::join(&[agent_dir, "models-store.json"])),
         allow_model_network: Some(false),
         ..Default::default()
-    }))
+    })
     .await
 }
 
@@ -138,7 +137,7 @@ pub async fn inspect_provider(runtime: &ModelRuntime, scenario: ProviderScenario
             valid_request_received: (scenario.valid_request_received)(),
             model: model_fields(&model),
             response: ProbeResponseFields {
-                text: content_text(ContentTextSource::Assistant(&response.content), None),
+                text: content_text(&response.content, None),
                 stop_reason: response.stop_reason.as_str().to_string(),
                 input_tokens: response.usage.input,
                 output_tokens: response.usage.output,
@@ -153,11 +152,11 @@ pub async fn inspect_added_model(
     provider_id: &str,
     model_id: &str,
 ) -> Result<AddedModelOutput> {
-    let pristine_runtime = ModelRuntime::create(Some(CreateModelRuntimeOptions {
+    let pristine_runtime = ModelRuntime::create(CreateModelRuntimeOptions {
         models_path: Some(None),
         allow_model_network: Some(false),
         ..Default::default()
-    }))
+    })
     .await?;
     let Some(pristine_provider) = pristine_runtime.get_provider(provider_id) else {
         return Ok(AddedModelOutput {

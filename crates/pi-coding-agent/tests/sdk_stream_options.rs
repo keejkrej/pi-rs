@@ -6,14 +6,14 @@ mod support;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexMap;
-use pi_ai::compat::create_assistant_message_event_stream;
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEventStream, Context, Model, ModelCost, ModelInput,
-    ModelPromptCache, ProviderHeaders, SimpleStreamOptions, StopReason, TextContent, Usage, UserMessage,
+    AssistantContentBlock, AssistantMessage, Context, Model, ModelCost, ModelInput, ModelPromptCache, ProviderHeaders,
+    SimpleStreamOptions, StopReason, TextContent, Usage, UserMessage, UserMessageContent,
 };
+use pi_ai::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::auth_storage::AuthStorage;
-use pi_coding_agent::core::cache_warmer::CacheWarmingState;
+use pi_coding_agent::core::cache_warmer::CacheWarmingRunState;
 use pi_coding_agent::core::extensions::types::{
     BeforeProviderHeadersEvent, ExtensionApi, InlineExtension, ProviderConfig, ProviderStreamEvent,
 };
@@ -47,7 +47,7 @@ fn create_model(api: &str) -> Model {
             output: 0.0,
             cache_read: 0.0,
             cache_write: 0.0,
-            cache_write_1h: None,
+            tiers: None,
         },
         context_window: 128_000,
         max_tokens: 4_096,
@@ -98,16 +98,18 @@ async fn capture_stream_options(
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-stream-options-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&cwd, true).unwrap();
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&cwd, true, None).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
 
     let model = create_model(api);
     let settings_manager = SettingsManager::in_memory(Some(settings), None);
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(cwd.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
-        extension_factories: extension_factory.map(|f| vec![f]),
+        extension_factories: extension_factory
+            .map(|f| vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(f)])
+            .unwrap_or_default(),
         ..Default::default()
     }));
     resource_loader.reload(None).await.unwrap();
@@ -131,8 +133,9 @@ async fn capture_stream_options(
         )
         .await
         .unwrap();
-    let model_registry =
-        create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
+    let model_registry = create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"])))
+        .await
+        .unwrap();
     let captured: Arc<Mutex<Option<SimpleStreamOptions>>> = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
 
@@ -141,32 +144,34 @@ async fn capture_stream_options(
     let api_owned = api.to_string();
     let ev_opt = provider_event.clone();
 
-    model_registry.register_provider(
-        &model.provider,
-        ProviderConfig {
-            api: Some(api.to_string()),
-            headers: Some(provider_headers),
-            stream_simple: Some(Arc::new(move |request_model, _ctx, provider_opts| {
-                *captured_ref.lock().unwrap_or_else(PoisonError::into_inner) = provider_opts.clone();
-                if ev_opt.is_none() {
-                    return create_done_stream(&api_owned, 0);
-                }
-                let stream = create_assistant_message_event_stream();
-                let stream_clone = stream.clone();
-                let ev_val = ev_opt.clone().unwrap();
-                let api_done = api_owned.clone();
-                tokio::spawn(async move {
-                    if let Some(cb) = provider_opts.and_then(|o| o.base.on_provider_stream_event) {
-                        let _ = cb(ev_val, request_model).await;
+    model_registry
+        .register_provider(
+            &model.provider,
+            ProviderConfig {
+                api: Some(api.to_string()),
+                headers: Some(provider_headers),
+                stream_simple: Some(Arc::new(move |request_model, _ctx, provider_opts| {
+                    *captured_ref.lock().unwrap_or_else(PoisonError::into_inner) = provider_opts.clone();
+                    if ev_opt.is_none() {
+                        return create_done_stream(&api_owned, 0);
                     }
-                    stream_clone.end(Some(create_done_message(&api_done, 0)));
-                });
-                stream
-            })),
-            ..Default::default()
-        },
-        None,
-    );
+                    let stream = create_assistant_message_event_stream();
+                    let stream_clone = stream.clone();
+                    let ev_val = ev_opt.clone().unwrap();
+                    let api_done = api_owned.clone();
+                    tokio::spawn(async move {
+                        if let Some(cb) = provider_opts.and_then(|o| o.base.on_provider_stream_event) {
+                            let _ = cb(&ev_val, &request_model).await;
+                        }
+                        stream_clone.end(Some(create_done_message(&api_done, 0)));
+                    });
+                    stream
+                })),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
 
     let created = create_agent_session(Some(CreateAgentSessionOptions {
         cwd: Some(cwd.clone()),
@@ -202,7 +207,7 @@ async fn capture_stream_options(
 
     let result = captured.lock().unwrap_or_else(PoisonError::into_inner).clone();
     session.dispose();
-    model_registry.unregister_provider(&model.provider, None);
+    model_registry.unregister_provider(&model.provider);
     let _ = pi_js::fs::rm(&temp_dir, true, true);
     result
 }
@@ -220,8 +225,8 @@ where
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-cache-warm-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&cwd, true).unwrap();
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&cwd, true, None).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
 
     let mut model = create_model("anthropic-messages");
     model.cost = ModelCost {
@@ -229,7 +234,7 @@ where
         output: 50.0,
         cache_read: 0.25,
         cache_write: 12.5,
-        cache_write_1h: None,
+        tiers: None,
     };
     model.prompt_cache = Some(ModelPromptCache {
         short: Some(300),
@@ -256,23 +261,26 @@ where
         .await
         .unwrap();
 
-    let model_registry =
-        create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
+    let model_registry = create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"])))
+        .await
+        .unwrap();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_ref = Arc::clone(&calls);
     let api_owned = model.api.clone();
-    model_registry.register_provider(
-        &model.provider,
-        ProviderConfig {
-            api: Some(model.api.clone()),
-            stream_simple: Some(Arc::new(move |_m, _ctx, _opts| {
-                calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                create_done_stream(&api_owned, 100_000)
-            })),
-            ..Default::default()
-        },
-        None,
-    );
+    model_registry
+        .register_provider(
+            &model.provider,
+            ProviderConfig {
+                api: Some(model.api.clone()),
+                stream_simple: Some(Arc::new(move |_m, _ctx, _opts| {
+                    calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    create_done_stream(&api_owned, 100_000)
+                })),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
 
     let session_manager = SessionManager::in_memory(Some(&cwd), None, None).unwrap();
     if let Some(f) = populate {
@@ -301,7 +309,7 @@ where
     let provider_name = model.provider.clone();
     let dispose = Box::new(move || {
         session_cleanup.dispose();
-        model_registry.unregister_provider(&provider_name, None);
+        model_registry.unregister_provider(&provider_name);
         let _ = pi_js::fs::rm(&temp_dir, true, true);
     });
     (session, calls, dispose)
@@ -344,7 +352,13 @@ async fn waits_for_the_next_request_instead_of_restoring_cache_warming() {
         manager.append_model_change(&model.provider, &model.id).unwrap();
         manager.append_thinking_level_change("off").unwrap();
         manager
-            .append_message(pi_ai::types::Message::User(UserMessage::text("test")).into())
+            .append_message(
+                pi_ai::types::Message::User(UserMessage {
+                    content: UserMessageContent::Text("test".to_string()),
+                    timestamp: pi_js::time::now_ms(),
+                })
+                .into(),
+            )
             .unwrap();
         let assistant = create_done_message(&model.api, 100_000);
         let usage = assistant.usage;
@@ -359,7 +373,7 @@ async fn waits_for_the_next_request_instead_of_restoring_cache_warming() {
 
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     let status = session.cache_warming_status().unwrap();
-    assert_eq!(status.state, CacheWarmingState::Inactive);
+    assert_eq!(status.state, CacheWarmingRunState::Inactive);
     assert_eq!(status.reason.as_deref(), Some("waiting for first request"));
 
     dispose();

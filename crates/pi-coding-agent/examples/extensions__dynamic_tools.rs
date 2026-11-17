@@ -101,7 +101,7 @@ impl Extension for DynamicToolsExtension {
         {
             let pi_ss = pi.clone();
             let reg_ss = Arc::clone(&registered);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let pi = pi_ss.clone();
                 let reg = Arc::clone(&reg_ss);
                 Box::pin(async move {
@@ -110,7 +110,7 @@ impl Extension for DynamicToolsExtension {
                         .notify("Registered dynamic tool: echo_session", Some(NotifyType::Info));
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {

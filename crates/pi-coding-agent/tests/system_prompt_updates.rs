@@ -1,17 +1,26 @@
 //! Port of `packages/coding-agent/test/system-prompt-updates.test.ts`.
-// WIRE(@ca-cli-w3): AgentSession prompt-loop, `before_agent_start`, and `setActiveToolsByName` live tests await `core::agent_session`.
+
+#[path = "support/mod.rs"]
+mod support;
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexMap;
-use pi_agent_core::AgentMessage;
+use pi_agent_core::{AgentMessage, AgentToolResult};
+use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message};
 use pi_ai::{
-    Message, SystemMessage, SystemMessageContent, Tool, get_current_system_message, get_current_system_prompt,
-    get_system_message_text,
+    Message, SystemMessage, SystemMessageContent, TextContent, Tool, UserContentBlock, get_current_system_message,
+    get_current_system_prompt, get_system_message_text,
 };
+use pi_coding_agent::core::extensions::types::{BeforeAgentStartEvent, ExtensionApi, InlineExtension, ToolDefinition};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::system_prompt::{
     BuildSystemPromptOptions, SystemPromptState, build_system_prompt_sections, build_system_prompt_state,
     diff_system_prompt_sections,
 };
+use pi_js::vendor::typebox::t;
+use serde_json::json;
+use support::suite::harness::{HarnessOptions, create_harness};
 use tempfile::TempDir;
 
 #[test]
@@ -190,4 +199,119 @@ fn system_message_persistence_and_tool_reorder_invariance() {
     })
     .unwrap();
     assert!(diff_system_prompt_sections(&cur_opt, &same_again).is_none());
+}
+
+#[tokio::test]
+async fn set_active_tools_and_before_agent_start_emit_prompt_and_tool_updates() {
+    let ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
+        for name in ["first", "second"] {
+            let n = name.to_owned();
+            pi.register_tool(ToolDefinition {
+                name: name.to_owned(),
+                label: name.to_owned(),
+                description: format!("{name} description"),
+                prompt_snippet: Some(format!("{name} prompt snippet")),
+                prompt_guidelines: Some(vec![format!("Use {name} carefully.")]),
+                parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+                constrained_sampling: None,
+                render_shell: None,
+                prepare_arguments: None,
+                output_schema: None,
+                exposure: None,
+                namespace: None,
+                annotations: None,
+                default_active: None,
+                prepare_loadout: None,
+                execution_mode: None,
+                execute: Arc::new(move |_id, _params, _sig, _upd, _ctx| {
+                    let n = n.clone();
+                    Box::pin(async move {
+                        Ok(AgentToolResult {
+                            content: vec![UserContentBlock::Text(TextContent::new(n))],
+                            details: Some(json!({})),
+                            ..Default::default()
+                        })
+                    })
+                }),
+                render_call: None,
+                render_result: None,
+            })?;
+        }
+        let turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pi_ev = pi.clone();
+        pi.on::<BeforeAgentStartEvent>(move |_ev, _ctx| {
+            let turn = Arc::clone(&turn);
+            let pi_ev = pi_ev.clone();
+            Box::pin(async move {
+                if turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    pi_ev.set_active_tools(vec!["second".to_owned()])?;
+                }
+                Ok(None)
+            })
+        });
+        Ok(())
+    }));
+
+    let harness = create_harness(HarnessOptions {
+        extension_factories: Some(vec![ext]),
+        initial_active_tool_names: Some(vec!["first".to_owned()]),
+        ..Default::default()
+    })
+    .await;
+    harness.session.bind_extensions(Default::default()).await.unwrap();
+
+    let requests: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
+    let req_a = Arc::clone(&requests);
+    let req_b = Arc::clone(&requests);
+    harness.set_responses(vec![
+        FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
+            let req_a = Arc::clone(&req_a);
+            Box::pin(async move {
+                req_a
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(ctx.messages.clone());
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("first".to_owned()),
+                    None,
+                ))
+            })
+        })),
+        FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
+            let req_b = Arc::clone(&req_b);
+            Box::pin(async move {
+                req_b
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(ctx.messages.clone());
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("second".to_owned()),
+                    None,
+                ))
+            })
+        })),
+    ]);
+
+    harness.session.prompt("first", None).await.unwrap();
+    harness.session.prompt("second", None).await.unwrap();
+
+    let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(recorded.len(), 2);
+    let second_turn_sys: Vec<&SystemMessage> = recorded[1]
+        .iter()
+        .filter_map(|m| match m {
+            Message::System(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let update = second_turn_sys.last().expect("update system message");
+    assert_eq!(
+        update
+            .tools_removed
+            .as_ref()
+            .map(|t| t.iter().map(|d| d.name.as_str()).collect::<Vec<_>>()),
+        Some(vec!["first"])
+    );
+    assert_eq!(harness.session.get_active_tool_names(), vec!["second"]);
+    harness.cleanup();
 }

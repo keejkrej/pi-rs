@@ -93,7 +93,7 @@ impl Extension for DebugProviderExtension {
                     None,
                 )));
                 if opts.expanded {
-                    let pretty = pi_js::json::stringify_pretty(&data.events, 2).unwrap_or_else(|_| "[]".to_string());
+                    let pretty = pi_js::json::stringify_pretty(&data.events, "  ");
                     tui_box.add_child(Arc::new(Text::new(Some(&pretty), Some(0), Some(0), None)));
                 }
                 let comp: Arc<dyn Component> = Arc::new(tui_box);
@@ -149,19 +149,19 @@ impl Extension for DebugProviderExtension {
 
         {
             let state_ts = Arc::clone(&state);
-            pi.on::<TurnStartEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<TurnStartEvent>(move |_event, _ctx| {
                 let state = Arc::clone(&state_ts);
                 Box::pin(async move {
                     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
                     guard.active_events = if guard.enabled { Some(Vec::new()) } else { None };
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let state_ps = Arc::clone(&state);
-            pi.on::<ProviderStreamEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<ProviderStreamEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_ps);
                 Box::pin(async move {
                     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -170,12 +170,12 @@ impl Extension for DebugProviderExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let state_me = Arc::clone(&state);
-            pi.on::<MessageEndEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<MessageEndEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_me);
                 Box::pin(async move {
                     let AgentMessage::Message(Message::Assistant(assistant)) = event.message else {
@@ -192,13 +192,13 @@ impl Extension for DebugProviderExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_te = pi.clone();
             let state_te = Arc::clone(&state);
-            pi.on::<TurnEndEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<TurnEndEvent>(move |_event, _ctx| {
                 let pi = pi_te.clone();
                 let state = Arc::clone(&state_te);
                 Box::pin(async move {
@@ -209,7 +209,7 @@ impl Extension for DebugProviderExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

@@ -7,28 +7,29 @@ use pi_ai::types::AssistantMessageEvent;
 use pi_coding_agent::config::get_agent_dir;
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
 use pi_coding_agent::core::extensions::types::{CodemodeMode, InlineExtension};
-use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
+use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
 use pi_coding_agent::extensions::codemode::{CodemodeExtensionOptions, create_codemode_extension};
-use pi_coding_agent::extensions::mcp::create_mcp_extension;
+use pi_coding_agent::extensions::mcp::{McpExtensionOptions, create_mcp_extension};
 use pi_coding_agent::extensions::tool_search::create_tool_search_extension;
 
 async fn run() -> pi_coding_agent::Result<()> {
     let cwd = pi_js::env::cwd();
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(cwd.clone()),
-        agent_dir: Some(get_agent_dir()),
-        extension_factories: Some(vec![
+        cwd: cwd.clone(),
+        agent_dir: get_agent_dir(),
+        extension_factories: vec![
             InlineExtension::Factory(create_codemode_extension(CodemodeExtensionOptions {
                 mode: Some(CodemodeMode::On),
                 ..Default::default()
-            })),
-            InlineExtension::Factory(create_tool_search_extension()),
-            InlineExtension::Factory(create_mcp_extension()),
-        ]),
+            }))
+            .into(),
+            InlineExtension::Factory(create_tool_search_extension()).into(),
+            InlineExtension::Factory(create_mcp_extension(McpExtensionOptions::default())).into(),
+        ],
         ..Default::default()
     }));
     resource_loader.reload(None).await?;

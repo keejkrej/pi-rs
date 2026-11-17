@@ -12,7 +12,7 @@ use pi_ai::compat::get_model;
 use pi_ai::providers::faux::{FauxAssistantMessageContent, faux_assistant_message};
 use pi_ai::types::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, Model, StopReason, TextContent, Usage,
-    UserMessage,
+    UserMessage, UserMessageContent,
 };
 use pi_ai::utils::event_stream::create_assistant_message_event_stream;
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
@@ -24,10 +24,10 @@ use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult,
 };
 use pi_coding_agent::core::session_manager::SessionManager;
-use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings, SettingsManager};
+use pi_coding_agent::core::settings_manager::{CompactionSettings, ModelRef, Settings, SettingsManager};
 use serde_json::json;
 use support::model_runtime_test_utils::{create_model_registry, get_model_runtime};
-use support::utilities::{TestExtensionInput, create_test_extensions_result, create_test_resource_loader};
+use support::suite::harness::{create_suite_extensions_result, create_suite_resource_loader};
 
 async fn create_session(
     extensions: Option<Vec<InlineExtension>>,
@@ -44,7 +44,7 @@ async fn create_session(
             Box::pin(async move { Ok(pi_ai::compat::stream_simple(&m, &ctx, opts)) })
         })),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -70,11 +70,10 @@ async fn create_session(
         )
         .await
         .unwrap();
-    let model_registry = create_model_registry(auth_storage, Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage, Some(&temp_dir)).await.unwrap();
 
     let ext_res = if let Some(list) = extensions {
-        let inputs: Vec<TestExtensionInput> = list.into_iter().map(TestExtensionInput::Inline).collect();
-        Some(create_test_extensions_result(&inputs, &temp_dir).await)
+        Some(create_suite_extensions_result(&list, &temp_dir).await)
     } else {
         None
     };
@@ -85,7 +84,7 @@ async fn create_session(
         settings_manager: settings_manager.clone(),
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(ext_res),
+        resource_loader: create_suite_resource_loader(ext_res),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -96,7 +95,7 @@ async fn create_session(
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
 
@@ -116,8 +115,10 @@ async fn should_resume_after_threshold_compaction_when_only_agent_level_queued_m
 
     let model = session.model().unwrap();
     let now = pi_js::time::now_ms();
-    let mut u = UserMessage::text("message to compact");
-    u.timestamp = now - 1000;
+    let u = UserMessage {
+        content: UserMessageContent::Text("message to compact".to_string()),
+        timestamp: now - 1000,
+    };
     session_manager
         .append_message(pi_ai::types::Message::User(u).into())
         .unwrap();
@@ -150,7 +151,7 @@ async fn should_resume_after_threshold_compaction_when_only_agent_level_queued_m
         .unwrap();
     session
         .agent()
-        .replace_messages(session_manager.build_session_context(None, None).messages);
+        .replace_messages(session_manager.build_session_context().messages);
 
     let summary_stream: StreamFn = Arc::new(|summary_model: Model, _ctx: Context, _opts| {
         Box::pin(async move {
@@ -214,18 +215,56 @@ async fn should_not_compact_repeatedly_after_overflow_recovery_already_attempted
         }
     }));
 
-    let (session, session_manager, _sm, temp_dir) = create_session(Some(vec![ext])).await;
+    let (session, session_manager, settings_manager, temp_dir) = create_session(Some(vec![ext])).await;
+    settings_manager.apply_overrides(&Settings {
+        compaction: Some(CompactionSettings {
+            keep_recent_tokens: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
 
     let model = session.model().unwrap();
-    let mut u = UserMessage::text("before overflow");
-    u.timestamp = pi_js::time::now_ms() - 1000;
+    let now = pi_js::time::now_ms();
+    let u = UserMessage {
+        content: UserMessageContent::Text("before overflow".to_string()),
+        timestamp: now - 3000,
+    };
+    let prior_assistant = AssistantMessage {
+        content: vec![AssistantContentBlock::Text(TextContent::new("prior response"))],
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        provider_thinking_level: None,
+        thinking_level: None,
+        diagnostics: None,
+        usage: Usage::default(),
+        stop_reason: StopReason::Stop,
+        deferred: None,
+        error_message: None,
+        raw_stop_reason: None,
+        end_turn: None,
+        timestamp: now - 2000,
+    };
+    let u2 = UserMessage {
+        content: UserMessageContent::Text("trigger overflow".to_string()),
+        timestamp: now - 1000,
+    };
     session_manager
         .append_message(pi_ai::types::Message::User(u).into())
         .unwrap();
+    session_manager
+        .append_message(pi_ai::types::Message::Assistant(prior_assistant).into())
+        .unwrap();
+    session_manager
+        .append_message(pi_ai::types::Message::User(u2).into())
+        .unwrap();
     session
         .agent()
-        .replace_messages(session_manager.build_session_context(None, None).messages);
+        .replace_messages(session_manager.build_session_context().messages);
 
     let overflow_msg = AssistantMessage {
         content: vec![AssistantContentBlock::Text(TextContent::new(""))],
@@ -317,8 +356,10 @@ async fn should_ignore_stale_pre_compaction_assistant_usage_on_pre_prompt_compac
         timestamp: stale_ts,
     };
 
-    let mut u1 = UserMessage::text("before compaction");
-    u1.timestamp = stale_ts - 1000;
+    let u1 = UserMessage {
+        content: UserMessageContent::Text("before compaction".to_string()),
+        timestamp: stale_ts - 1000,
+    };
     let first_kept = session_manager
         .append_message(pi_ai::types::Message::User(u1).into())
         .unwrap();
@@ -335,8 +376,10 @@ async fn should_ignore_stale_pre_compaction_assistant_usage_on_pre_prompt_compac
             None,
         )
         .unwrap();
-    let mut u2 = UserMessage::text("session recovery payload");
-    u2.timestamp = pi_js::time::now_ms();
+    let u2 = UserMessage {
+        content: UserMessageContent::Text("session recovery payload".to_string()),
+        timestamp: pi_js::time::now_ms(),
+    };
     session_manager
         .append_message(pi_ai::types::Message::User(u2).into())
         .unwrap();
@@ -373,11 +416,23 @@ async fn should_trigger_threshold_compaction_for_error_messages_using_last_succe
         }
     }));
 
-    let (session, _sm, settings_manager, temp_dir) = create_session(Some(vec![ext])).await;
+    let (session, session_manager, settings_manager, temp_dir) = create_session(Some(vec![ext])).await;
+    settings_manager.apply_overrides(&Settings {
+        compaction: Some(CompactionSettings {
+            keep_recent_tokens: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
     let model = session.model().unwrap();
 
-    let compaction_settings = settings_manager.get_compaction_settings(Some(&model));
+    let compaction_settings = settings_manager
+        .get_compaction_settings(Some(&ModelRef {
+            provider: model.provider.clone(),
+            id: model.id.clone(),
+        }))
+        .unwrap();
     let threshold_tokens = model.context_window - compaction_settings.reserve_tokens + 1;
     let successful_assistant = AssistantMessage {
         content: vec![AssistantContentBlock::Text(TextContent::new(
@@ -423,10 +478,23 @@ async fn should_trigger_threshold_compaction_for_error_messages_using_last_succe
         timestamp: pi_js::time::now_ms() + 1000,
     };
 
-    let mut u1 = UserMessage::text("hello");
-    u1.timestamp = pi_js::time::now_ms() - 1000;
-    let mut u2 = UserMessage::text("another prompt");
-    u2.timestamp = pi_js::time::now_ms() + 500;
+    let u1 = UserMessage {
+        content: UserMessageContent::Text("hello".to_string()),
+        timestamp: pi_js::time::now_ms() - 1000,
+    };
+    let u2 = UserMessage {
+        content: UserMessageContent::Text("another prompt".to_string()),
+        timestamp: pi_js::time::now_ms() + 500,
+    };
+    session_manager
+        .append_message(pi_ai::types::Message::User(u1.clone()).into())
+        .unwrap();
+    session_manager
+        .append_message(pi_ai::types::Message::Assistant(successful_assistant.clone()).into())
+        .unwrap();
+    session_manager
+        .append_message(pi_ai::types::Message::User(u2.clone()).into())
+        .unwrap();
     session.agent().replace_messages(vec![
         pi_ai::types::Message::User(u1).into(),
         pi_ai::types::Message::Assistant(successful_assistant).into(),
@@ -472,8 +540,10 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_no_prio
         timestamp: pi_js::time::now_ms(),
     };
 
-    let mut u = UserMessage::text("hello");
-    u.timestamp = pi_js::time::now_ms() - 1000;
+    let u = UserMessage {
+        content: UserMessageContent::Text("hello".to_string()),
+        timestamp: pi_js::time::now_ms() - 1000,
+    };
     session.agent().replace_messages(vec![
         pi_ai::types::Message::User(u).into(),
         pi_ai::types::Message::Assistant(error_assistant.clone()).into(),
@@ -525,8 +595,10 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_only_ke
         timestamp: pre_compaction_ts,
     };
 
-    let mut u_before = UserMessage::text("before compaction");
-    u_before.timestamp = pre_compaction_ts - 1000;
+    let u_before = UserMessage {
+        content: UserMessageContent::Text("before compaction".to_string()),
+        timestamp: pre_compaction_ts - 1000,
+    };
     let first_kept = session_manager
         .append_message(pi_ai::types::Message::User(u_before).into())
         .unwrap();
@@ -563,10 +635,14 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_only_ke
         timestamp: pi_js::time::now_ms(),
     };
 
-    let mut u_kept = UserMessage::text("kept user msg");
-    u_kept.timestamp = pre_compaction_ts - 1000;
-    let mut u_new = UserMessage::text("new prompt");
-    u_new.timestamp = pi_js::time::now_ms() - 500;
+    let u_kept = UserMessage {
+        content: UserMessageContent::Text("kept user msg".to_string()),
+        timestamp: pre_compaction_ts - 1000,
+    };
+    let u_new = UserMessage {
+        content: UserMessageContent::Text("new prompt".to_string()),
+        timestamp: pi_js::time::now_ms() - 500,
+    };
     session.agent().replace_messages(vec![
         pi_ai::types::Message::User(u_kept).into(),
         pi_ai::types::Message::Assistant(kept_assistant).into(),

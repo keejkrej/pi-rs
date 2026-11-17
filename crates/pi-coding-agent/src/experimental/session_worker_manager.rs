@@ -799,8 +799,7 @@ async fn apply_demand(
     let (tx, rx) = oneshot::channel();
     let inner_timeout = Arc::clone(inner);
     let req_timeout = request_id.clone();
-    let timer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(WORKER_DEMAND_TIMEOUT_MS)).await;
+    let timer = crate::experimental::server::spawn_registered_delay_fut(WORKER_DEMAND_TIMEOUT_MS, move || async move {
         if compensate_on_timeout {
             reconcile_demand_timeout(&inner_timeout, &req_timeout).await;
         } else {
@@ -1024,9 +1023,15 @@ fn handle_coordinator_event(inner: &Arc<ManagerInner>, event: CoordinatorConnect
         CoordinatorConnectionEvent::Message { from, payload } => {
             let Ok(message) = serde_json::from_value::<SessionWorkerEvent>(payload.clone()) else {
                 if payload.as_object().and_then(|o| o.get("type")).and_then(Value::as_str) == Some("operation_response")
-                    && let Some(worker) = lock_mutex(&inner.state).workers_by_peer.get(&from).cloned()
                 {
-                    reject_worker_operations(inner, &worker, "Session worker returned an invalid operation response");
+                    let worker = lock_mutex(&inner.state).workers_by_peer.get(&from).cloned();
+                    if let Some(worker) = worker {
+                        reject_worker_operations(
+                            inner,
+                            &worker,
+                            "Session worker returned an invalid operation response",
+                        );
+                    }
                 }
                 return;
             };
@@ -1451,7 +1456,6 @@ fn reconcile_demand_timeout<'a>(
         let Some(mut pending) = pending_opt else {
             return;
         };
-        pending.timer.abort();
         let timeout_error = pi_js::Error::msg("Session worker demand update timed out");
         let tx = pending.tx.take();
         let res = apply_demand(

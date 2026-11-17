@@ -15,7 +15,7 @@ use pi_coding_agent::experimental::radius_relay::{
     create_radius_client_transport_factory, encode_relay_data_frame, parse_relay_data_frame,
 };
 use pi_js::Unsubscribe;
-use pi_server::{ByteConnection, ByteConnectionHandler};
+use pi_server::connection::{ByteConnection, ByteConnectionHandler};
 use serde_json::json;
 
 const SERVER_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -614,7 +614,8 @@ async fn reports_a_useful_error_when_undici_omits_websocket_failure_details() {
     let err = opening
         .await
         .expect("join")
-        .expect_err("must report connection failure");
+        .err()
+        .expect("must report connection failure");
     assert!(
         err.message().contains("Radius WebSocket connection failed"),
         "unexpected error: {}",

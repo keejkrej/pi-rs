@@ -7,11 +7,13 @@ use std::sync::Arc;
 use pi_js::BoxFuture;
 use pi_js::abort::AbortSignal;
 
-use crate::core::session_manager::{SessionInfo, SessionListProgress};
+use crate::core::session_manager::SessionInfo;
 use crate::core::settings_manager::SettingsManager;
 
+pub type SessionsProgressCallback = Arc<dyn Fn(usize, usize, Option<&[SessionInfo]>) + Send + Sync>;
+
 pub type SessionsLoader = Arc<
-    dyn Fn(Option<SessionListProgress>, Option<AbortSignal>) -> BoxFuture<pi_js::Result<Vec<SessionInfo>>>
+    dyn Fn(Option<SessionsProgressCallback>, Option<AbortSignal>) -> BoxFuture<pi_js::Result<Vec<SessionInfo>>>
         + Send
         + Sync,
 >;

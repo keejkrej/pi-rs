@@ -34,7 +34,7 @@ async fn file_processor_omits_image_attachments_when_auto_resize_cannot_produce_
 async fn can_defer_resizing_file_attachments_until_prompt_dispatch() {
     let dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "image-resize-callers-"])).unwrap();
     let image_path = pi_js::path::join(&[&dir, "test.png"]);
-    let bytes = pi_js::b64::decode(TINY_PNG_BASE64).unwrap();
+    let bytes = pi_js::b64::decode(TINY_PNG_BASE64);
     pi_js::fs::write_file(&image_path, &bytes, None).unwrap();
 
     // Even when auto-resize would otherwise run, disabling auto_resize_images skips resizing and keeps the raw image.

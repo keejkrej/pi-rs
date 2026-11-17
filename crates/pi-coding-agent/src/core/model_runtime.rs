@@ -6,7 +6,7 @@ use indexmap::{IndexMap, IndexSet};
 use pi_ai::api::lazy::lazy_stream;
 use pi_ai::auth::resolve::AuthResolutionOverrides;
 use pi_ai::models::{
-    CreateModelsOptions, ModelsApiStreamOptions, ModelsClassifierOptions, ModelsDeferredCancelOptions,
+    CreateModelsOptions, Models, ModelsApiStreamOptions, ModelsClassifierOptions, ModelsDeferredCancelOptions,
     ModelsDeferredFetchOptions, ModelsImagesOptions, ModelsRefreshOptions, ModelsRefreshResult,
     ModelsSimpleStreamOptions, MutableModels, Provider, create_models,
 };
@@ -710,6 +710,10 @@ impl ModelRuntime {
             }
         }
         res
+    }
+
+    pub fn as_models(&self) -> &Models {
+        &self.inner.models
     }
 
     pub fn get_providers(&self) -> Vec<Arc<dyn Provider + Send + Sync>> {

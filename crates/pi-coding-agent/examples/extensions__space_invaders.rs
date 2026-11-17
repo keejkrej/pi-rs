@@ -151,7 +151,7 @@ struct SpaceInvadersState {
 }
 
 struct SpaceInvadersInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     on_close: Arc<dyn Fn() + Send + Sync>,
     on_save: Arc<dyn Fn(Option<GameState>) + Send + Sync>,
     mutable: Mutex<SpaceInvadersState>,
@@ -356,7 +356,7 @@ impl SpaceInvadersState {
 
 impl SpaceInvadersComponent {
     fn new(
-        tui: Arc<dyn TUI>,
+        tui: Arc<dyn TUI + Send + Sync>,
         on_close: Arc<dyn Fn() + Send + Sync>,
         on_save: Arc<dyn Fn(Option<GameState>) + Send + Sync>,
         saved_state: Option<GameState>,
@@ -409,7 +409,7 @@ impl SpaceInvadersComponent {
                 }
             };
             if should_render {
-                inner.tui.request_render(false);
+                inner.tui.request_render(Some(false));
             }
         });
         let old = {
@@ -526,7 +526,7 @@ impl Component for SpaceInvadersComponent {
             (self.inner.on_save)(None);
         }
         if need_render {
-            self.inner.tui.request_render(false);
+            self.inner.tui.request_render(Some(false));
         }
     }
 
@@ -732,12 +732,12 @@ impl Extension for SpaceInvadersExtension {
                         let entries = base.session_manager()?.get_entries();
                         let mut saved_state: Option<GameState> = None;
                         for entry in entries.iter().rev() {
-                            if entry.r#type == "custom"
-                                && entry.fields.get("customType").and_then(|v| v.as_str()) == Some(INVADERS_SAVE_TYPE)
+                            if let pi_coding_agent::core::session_manager::SessionEntry::Custom(custom) = entry
+                                && custom.custom_type == INVADERS_SAVE_TYPE
                             {
-                                saved_state = entry
-                                    .fields
-                                    .get("data")
+                                saved_state = custom
+                                    .data
+                                    .as_ref()
                                     .and_then(|v| serde_json::from_value::<GameState>(v.clone()).ok());
                                 break;
                             }

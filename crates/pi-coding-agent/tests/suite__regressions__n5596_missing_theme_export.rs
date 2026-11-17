@@ -11,11 +11,12 @@ mod support;
 use std::sync::Arc;
 
 use pi_agent_core::agent::{Agent, AgentInitialState, AgentOptions};
+use pi_ai::compat::{register_faux_provider, stream_simple};
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxModelDefinition, FauxResponseStep, RegisterFauxProviderOptions,
-    faux_assistant_message, register_faux_provider,
+    faux_assistant_message,
 };
-use pi_ai::{ApiKeyCredential, Credential, CredentialStore, compat::stream_simple};
+use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig};
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{ProviderChatModelConfig, ProviderConfig, ProviderModelConfig};
@@ -24,7 +25,7 @@ use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
 use pretty_assertions::assert_eq;
 use support::model_runtime_test_utils::{create_in_memory_model_registry, get_model_runtime};
-use support::utilities::create_test_resource_loader;
+use support::suite::harness::create_suite_resource_loader;
 
 #[tokio::test]
 async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_missing() {
@@ -65,7 +66,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
         .await
         .unwrap();
 
-    let model_registry = create_in_memory_model_registry(auth_storage).await;
+    let model_registry = create_in_memory_model_registry(auth_storage).await.unwrap();
     let models = faux
         .models()
         .iter()
@@ -89,17 +90,19 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
             })
         })
         .collect();
-    model_registry.register_provider(
-        &model.provider,
-        ProviderConfig {
-            base_url: Some(model.base_url.clone()),
-            api_key: Some("faux-key".to_string()),
-            api: Some(faux.api().to_string()),
-            models: Some(models),
-            ..Default::default()
-        },
-        None,
-    );
+    model_registry
+        .register_provider(
+            &model.provider,
+            ProviderConfig {
+                base_url: Some(model.base_url.clone()),
+                api_key: Some("faux-key".to_string()),
+                api: Some(faux.api().to_string()),
+                models: Some(models),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
 
     let settings_manager = SettingsManager::in_memory(
         Some(Settings {
@@ -121,7 +124,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
             tools: Some(vec![]),
             ..Default::default()
         }),
-        convert_to_llm: Some(Arc::new(|msgs| convert_to_llm(&msgs))),
+        convert_to_llm: Some(Arc::new(|msgs| Box::pin(async move { Ok(convert_to_llm(&msgs)) }))),
         stream_fn: Some(Arc::new(|m, ctx, opts| {
             Box::pin(async move { Ok(stream_simple(&m, &ctx, opts)) })
         })),
@@ -134,7 +137,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
         settings_manager: settings_manager.clone(),
         cwd: temp_dir.clone(),
         scoped_models: None,
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         custom_tools: None,
         model_runtime: get_model_runtime(&model_registry),
         cache_warmer: None,

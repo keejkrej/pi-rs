@@ -175,6 +175,17 @@ pub struct SessionInfoEntry {
     pub name: Option<String>,
 }
 
+fn default_empty_custom_content() -> CustomMessageContent {
+    CustomMessageContent::Blocks(Vec::new())
+}
+
+fn deserialize_null_custom_content<'de, D>(deserializer: D) -> std::result::Result<CustomMessageContent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<CustomMessageContent>::deserialize(deserializer)?.unwrap_or_else(default_empty_custom_content))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomMessageEntry {
@@ -184,6 +195,10 @@ pub struct CustomMessageEntry {
     pub parent_id: Option<String>,
     pub timestamp: String,
     pub custom_type: String,
+    #[serde(
+        default = "default_empty_custom_content",
+        deserialize_with = "deserialize_null_custom_content"
+    )]
     pub content: CustomMessageContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
@@ -469,7 +484,7 @@ pub struct SessionInfo {
 
 pub type ReadonlySessionManager = SessionManager;
 
-pub type SessionListProgress<'a> = &'a dyn Fn(usize, usize, Option<&[SessionInfo]>);
+pub type SessionListProgress<'a> = &'a (dyn Fn(usize, usize, Option<&[SessionInfo]>) + Send + Sync);
 
 fn create_session_id() -> String {
     uuidv7(None).unwrap_or_else(|_| pi_js::crypto::random_uuid())
@@ -726,7 +741,7 @@ fn get_session_context_settings(path: &[SessionEntry]) -> (String, Option<Sessio
     (thinking_level, model)
 }
 
-fn repair_null_content_agent_message(message: &AgentMessage) -> AgentMessage {
+pub(crate) fn repair_null_content_agent_message(message: &AgentMessage) -> AgentMessage {
     let AgentMessage::Custom(Value::Object(map)) = message else {
         return message.clone();
     };
@@ -752,6 +767,10 @@ fn repair_null_content_agent_message(message: &AgentMessage) -> AgentMessage {
             serde_json::from_value::<Message>(repaired_val.clone())
                 .map(AgentMessage::Message)
                 .unwrap_or(AgentMessage::Custom(repaired_val))
+        }
+        "custom" => {
+            repaired.insert("content".to_owned(), Value::Array(Vec::new()));
+            AgentMessage::Custom(Value::Object(repaired))
         }
         _ => message.clone(),
     }

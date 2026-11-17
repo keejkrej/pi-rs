@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use pi_coding_agent::config::get_agent_dir;
 use pi_coding_agent::core::prompt_templates::PromptTemplate;
-use pi_coding_agent::core::resource_loader::{
-    DefaultResourceLoader, DefaultResourceLoaderOptions, LoadPromptsResult, ResourceLoader,
-};
+use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, PromptsResult};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::source_info::{SyntheticSourceOptions, create_synthetic_source_info};
@@ -16,6 +14,7 @@ async fn run() -> pi_coding_agent::Result<()> {
     let deploy_template = PromptTemplate {
         name: "deploy".to_string(),
         description: "Deploy the application".to_string(),
+        argument_hint: None,
         file_path: "/virtual/prompts/deploy.md".to_string(),
         source_info: create_synthetic_source_info(
             "/virtual/prompts/deploy.md",
@@ -28,11 +27,11 @@ async fn run() -> pi_coding_agent::Result<()> {
     };
 
     let loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(pi_js::env::cwd()),
-        agent_dir: Some(get_agent_dir()),
+        cwd: pi_js::env::cwd(),
+        agent_dir: get_agent_dir(),
         prompts_override: Some(Arc::new(move |mut current| {
             current.prompts.push(deploy_template.clone());
-            LoadPromptsResult {
+            PromptsResult {
                 prompts: current.prompts,
                 diagnostics: current.diagnostics,
             }

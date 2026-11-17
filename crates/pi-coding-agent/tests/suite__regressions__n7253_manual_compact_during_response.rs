@@ -7,16 +7,16 @@ use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxModelDefinition, FauxResponseStep,
     faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, CompactionReason};
+use pi_coding_agent::core::compaction::CompactionResult;
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionEntry,
 };
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::CompactionResult;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -28,7 +28,7 @@ fn create_noop_tool() -> AgentTool {
         name: "noop".to_string(),
         label: "No-op".to_string(),
         description: "Return immediately".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -78,9 +78,13 @@ async fn persists_the_aborted_response_before_running_the_requested_manual_compa
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(1_000),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -101,7 +105,11 @@ async fn persists_the_aborted_response_before_running_the_requested_manual_compa
     let srr_c = Arc::clone(&second_response_released);
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("noop", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "noop",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()

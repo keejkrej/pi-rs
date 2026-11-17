@@ -96,7 +96,7 @@ impl Extension for ProjectTrustExtension {
             })
         }));
 
-        pi.on::<SessionStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 ctx.ui()?.notify(
                     &format!("project-trust example loaded after trust resolution in {}", ctx.cwd()?),
@@ -104,7 +104,7 @@ impl Extension for ProjectTrustExtension {
                 );
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

@@ -14,7 +14,7 @@ pub struct InputTransformExtension;
 #[async_trait]
 impl Extension for InputTransformExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<InputEvent>(Arc::new(|event, ctx| {
+        pi.on::<InputEvent>(|event, ctx| {
             Box::pin(async move {
                 if event.source == InputSource::Extension {
                     return Ok(Some(InputEventResult::Continue));
@@ -45,7 +45,7 @@ impl Extension for InputTransformExtension {
 
                 Ok(Some(InputEventResult::Continue))
             })
-        }));
+        });
 
         Ok(())
     }

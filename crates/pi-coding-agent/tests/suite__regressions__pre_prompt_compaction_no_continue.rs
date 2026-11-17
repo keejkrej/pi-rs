@@ -14,11 +14,11 @@ use pi_ai::types::{
     Message, StopReason, TextContent, Usage, UsageCost, UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, CompactionReason};
+use pi_coding_agent::core::compaction::CompactionResult;
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult,
 };
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::CompactionResult;
 use pretty_assertions::assert_eq;
 use support::suite::harness::{HarnessOptions, create_harness, get_user_texts};
 
@@ -33,6 +33,7 @@ async fn compacts_length_stop_overflow_before_new_prompt_without_continuing_from
                         summary: "pre-prompt summary".to_string(),
                         first_kept_entry_id: event.preparation.first_kept_entry_id,
                         tokens_before: event.preparation.tokens_before,
+                        estimated_tokens_after: None,
                         details: Some(serde_json::json!({})),
                         usage: None,
                     }),

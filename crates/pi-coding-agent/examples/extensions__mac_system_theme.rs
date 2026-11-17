@@ -34,7 +34,7 @@ impl Extension for MacSystemThemeExtension {
 
         {
             let handle_ss = Arc::clone(&task_handle);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let handle_slot = Arc::clone(&handle_ss);
                 Box::pin(async move {
                     let mut current_theme = if is_dark_mode().await { "dark" } else { "light" };
@@ -63,12 +63,12 @@ impl Extension for MacSystemThemeExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let handle_shut = Arc::clone(&task_handle);
-            pi.on::<SessionShutdownEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<SessionShutdownEvent>(move |_event, _ctx| {
                 let handle_slot = Arc::clone(&handle_shut);
                 Box::pin(async move {
                     let old = handle_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -77,7 +77,7 @@ impl Extension for MacSystemThemeExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

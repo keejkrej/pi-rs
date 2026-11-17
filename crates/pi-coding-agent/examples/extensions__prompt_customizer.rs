@@ -36,7 +36,7 @@ pub struct PromptCustomizerExtension;
 #[async_trait]
 impl Extension for PromptCustomizerExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<BeforeAgentStartEvent>(Arc::new(|event, _ctx| {
+        pi.on::<BeforeAgentStartEvent>(|event, _ctx| {
             Box::pin(async move {
                 let mut opts = event.system_prompt_options.lock().unwrap_or_else(|e| e.into_inner());
                 let guidance = build_tool_guidance(&opts);
@@ -47,7 +47,7 @@ impl Extension for PromptCustomizerExtension {
                 }
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

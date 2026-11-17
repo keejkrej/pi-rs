@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_js::time::{Interval, set_interval, sleep};
+use pi_tui::components::input::InputOptions;
 use pi_tui::{
-    Component, Container, Focusable, Input, InputOptions, ProcessTerminal, SelectItem, SelectList, SelectListTheme,
-    TUI, TuiMainScreen, matches_key, truncate_to_width,
+    Component, Container, Focusable, Input, ProcessTerminal, SelectItem, SelectList, SelectListTheme, TuiMainScreen,
+    matches_key, truncate_to_width,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -360,9 +361,8 @@ struct AppController {
 
 impl AppController {
     fn send_json(&self, value: Value) {
-        if let Ok(line) = pi_js::json::stringify(&value) {
-            let _ = self.stdin_tx.send(format!("{line}\n"));
-        }
+        let line = pi_js::json::stringify(&value);
+        let _ = self.stdin_tx.send(format!("{line}\n"));
     }
 
     fn request_exit(&self, code: i32) {
@@ -758,7 +758,7 @@ impl AppController {
             "tool_execution_end" => {
                 let result_str = data
                     .get("result")
-                    .and_then(|v| pi_js::json::stringify(v).ok())
+                    .map(pi_js::json::stringify)
                     .unwrap_or_else(|| "null".to_string());
                 let preview: String = result_str.chars().take(120).collect();
                 self.output_log.append(&format!("{DIM}[result: {preview}...]{RESET}"));

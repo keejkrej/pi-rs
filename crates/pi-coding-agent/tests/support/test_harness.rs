@@ -4,14 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexMap;
-use pi_agent_core::{
-    Agent, AgentEvent, AgentInitialState, AgentMessage, AgentOptions, AgentTool, PromptInput, StreamFn,
-};
+use pi_agent_core::{Agent, AgentEvent, AgentInitialState, AgentMessage, AgentOptions, AgentTool, StreamFn};
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context, JsonObject,
     Model, ModelCost, ModelInput, SimpleStreamOptions, StopReason, TextContent, ThinkingContent, ToolCall,
     TranscriptContext, Usage, UsageCost, create_assistant_message_event_stream,
 };
+use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use pi_coding_agent::core::auth_storage::{AuthStorage, make_api_key_credential};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
@@ -415,100 +414,23 @@ pub enum HarnessSessionEvent {
     },
 }
 
-// WIRE(@ca-cli-w3): replace `HarnessSession` adapter with real `pi_coding_agent::core::agent_session::AgentSession`
-// once `@ca-cli-w3` lands `AgentSession` + retry/session persistence integration.
 #[derive(Clone)]
 pub struct HarnessSession {
-    agent: Agent,
-    session_manager: SessionManager,
-    settings_manager: SettingsManager,
-    events: Arc<Mutex<Vec<HarnessSessionEvent>>>,
+    agent_session: AgentSession,
     pub extension_runner: Option<TestExtensionRunner>,
 }
 
 impl HarnessSession {
     pub fn messages(&self) -> Vec<AgentMessage> {
-        self.agent.state().messages
+        self.agent_session.messages()
     }
 
     pub async fn prompt(&self, text: &str) -> Result<()> {
-        let retry_cfg = self.settings_manager.get_settings().retry.unwrap_or_default();
-        let retry_enabled = retry_cfg.enabled.unwrap_or(true);
-        let max_retries = retry_cfg.max_retries.unwrap_or(3).max(0) as usize;
-        let base_delay_ms = retry_cfg.base_delay_ms.unwrap_or(2000).max(0) as u64;
-
-        let prev_len = self.agent.state().messages.len();
-        self.agent.prompt(PromptInput::from(text)).await?;
-
-        // Persist newly produced messages into SessionManager.
-        let mut attempt = 0usize;
-        loop {
-            let msgs = self.agent.state().messages;
-            let last_error = msgs
-                .last()
-                .and_then(|m| m.as_assistant())
-                .filter(|a| a.stop_reason == StopReason::Error)
-                .and_then(|a| a.error_message.clone());
-
-            let transient = last_error.as_deref().is_some_and(|e| {
-                e.contains("overloaded_error")
-                    || e.contains("rate_limit")
-                    || e.contains("ENOTFOUND")
-                    || e.contains("EAI_AGAIN")
-                    || e.contains("ECONNRESET")
-            });
-            if !retry_enabled || !transient || attempt >= max_retries {
-                break;
-            }
-            attempt += 1;
-            let err_msg = last_error.unwrap_or_default();
-            {
-                let mut ev = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-                ev.push(HarnessSessionEvent::AutoRetryStart {
-                    attempt,
-                    delay_ms: base_delay_ms,
-                    error_message: err_msg,
-                });
-            }
-            if base_delay_ms > 0 {
-                let _ = pi_js::time::sleep(base_delay_ms, None).await;
-            }
-            // Retry by popping the failed assistant message and continuing from the user message.
-            let mut trimmed = self.agent.state().messages;
-            if trimmed.last().and_then(|m| m.as_assistant()).is_some() {
-                trimmed.pop();
-            }
-            self.agent.replace_messages(trimmed);
-            self.agent.continue_run().await?;
-
-            let succeeded = self
-                .agent
-                .state()
-                .messages
-                .last()
-                .and_then(|m| m.as_assistant())
-                .is_some_and(|a| a.stop_reason != StopReason::Error);
-            {
-                let mut ev = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-                ev.push(HarnessSessionEvent::AutoRetryEnd {
-                    success: succeeded,
-                    attempt,
-                });
-            }
-            if succeeded {
-                break;
-            }
-        }
-
-        let final_msgs = self.agent.state().messages;
-        for msg in final_msgs.into_iter().skip(prev_len) {
-            let _ = self.session_manager.append_message(msg);
-        }
-        Ok(())
+        self.agent_session.prompt(text, None).await
     }
 
     pub fn dispose(&self) {
-        self.agent.abort();
+        self.agent_session.dispose();
     }
 }
 
@@ -523,6 +445,7 @@ pub struct Harness {
     pub events: Arc<Mutex<Vec<HarnessSessionEvent>>>,
     pub temp_dir: String,
     _unsub: pi_js::Unsubscribe,
+    _session_unsub: pi_js::Unsubscribe,
 }
 
 impl Harness {
@@ -566,13 +489,22 @@ async fn create_harness_with_resource_loader(
     let (stream_fn, faux_state) = create_faux_stream_fn(responses)?;
 
     let mut tools = options.tools.unwrap_or_default();
-    if let Some(override_map) = options.base_tools_override {
-        for (_, t) in override_map {
+    let base_tools_override = if let Some(override_map) = options.base_tools_override {
+        for (_, t) in &override_map {
             if !tools.iter().any(|existing| existing.name == t.name) {
-                tools.push(t);
+                tools.push(t.clone());
             }
         }
-    }
+        Some(override_map)
+    } else {
+        Some(
+            tools
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
+                .collect::<IndexMap<String, AgentTool>>(),
+        )
+    };
+    let active_tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("faux-key".to_owned())) }))),
@@ -645,11 +577,57 @@ async fn create_harness_with_resource_loader(
         Some(resource_loader.get_extensions().runner.clone())
     };
 
-    let session = HarnessSession {
+    let agent_session = AgentSession::new(AgentSessionConfig {
         agent: agent.clone(),
         session_manager: session_manager.clone(),
         settings_manager: settings_manager.clone(),
-        events: events.clone(),
+        cwd: temp_dir.clone(),
+        scoped_models: None,
+        resource_loader: Arc::new(resource_loader),
+        custom_tools: None,
+        model_runtime: model_runtime.clone(),
+        cache_warmer: None,
+        initial_active_tool_names: Some(active_tool_names),
+        uses_default_tools: Some(false),
+        allowed_tool_names: None,
+        excluded_tool_names: None,
+        base_tools_override,
+        extension_runner_ref: None,
+        session_start_event: None,
+        initial_model: Some(model),
+        initial_thinking_level: None,
+    });
+    let session_events = events.clone();
+    let session_unsub = agent_session.subscribe(move |ev| match ev {
+        AgentSessionEvent::AutoRetryStart {
+            attempt,
+            delay_ms,
+            error_message,
+            ..
+        } => {
+            session_events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(HarnessSessionEvent::AutoRetryStart {
+                    attempt: attempt as usize,
+                    delay_ms,
+                    error_message,
+                });
+        }
+        AgentSessionEvent::AutoRetryEnd { success, attempt, .. } => {
+            session_events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(HarnessSessionEvent::AutoRetryEnd {
+                    success,
+                    attempt: attempt as usize,
+                });
+        }
+        _ => {}
+    });
+
+    let session = HarnessSession {
+        agent_session,
         extension_runner,
     };
 
@@ -664,6 +642,7 @@ async fn create_harness_with_resource_loader(
         events,
         temp_dir,
         _unsub: unsub,
+        _session_unsub: session_unsub,
     })
 }
 

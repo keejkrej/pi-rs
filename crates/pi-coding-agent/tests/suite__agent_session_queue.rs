@@ -10,7 +10,7 @@ use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
     faux_assistant_message, faux_tool_call,
 };
-use pi_ai::types::{StopReason, TextContent, UserContentBlock};
+use pi_ai::types::{StopReason, TextContent, UserContentBlock, UserMessageContent};
 use pi_coding_agent::core::agent_session::{
     AgentSessionEvent, CustomMessageDelivery, ExtensionBindings, QueueInputOptions, SendCustomMessageDraft,
     SendCustomMessageOptions,
@@ -19,13 +19,27 @@ use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, InputDeliveryBehavior, InputEvent, InputEventResult, InputSource,
     RegisteredCommandOptions, SendUserMessageOptions,
 };
-use pi_coding_agent::core::tools::mcp_wire::CustomMessageContent;
+use pi_coding_agent::core::messages::CustomMessageContent;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use support::suite::harness::{
     Harness, HarnessOptions, create_harness, get_assistant_texts, get_message_text, get_user_texts,
 };
+
+fn user_content_text(content: &UserMessageContent) -> String {
+    match content {
+        UserMessageContent::Text(t) => t.clone(),
+        UserMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|p| match p {
+                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 
 async fn create_waiting_harness(
     extension_factories: Vec<InlineExtension>,
@@ -41,7 +55,7 @@ async fn create_waiting_harness(
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for release".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -55,8 +69,7 @@ async fn create_waiting_harness(
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("released"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -155,7 +168,7 @@ async fn delivers_extension_origin_steering_messages_before_the_next_llm_call() 
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -166,17 +179,7 @@ async fn delivers_extension_origin_steering_messages_before_the_next_llm_call() 
         FauxResponseStep::Factory(Arc::new(|ctx, _opts, _st, _mdl| {
             Box::pin(async move {
                 let saw_steer = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => {
-                        u.content
-                            .iter()
-                            .filter_map(|p| match p {
-                                UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            == "steer now"
-                    }
+                    pi_ai::types::Message::User(u) => user_content_text(&u.content) == "steer now",
                     _ => false,
                 });
                 Ok(faux_assistant_message(
@@ -190,7 +193,7 @@ async fn delivers_extension_origin_steering_messages_before_the_next_llm_call() 
     ]);
 
     let _ = start_rx.await;
-    pi_js::time::sleep(1).await;
+    let _ = pi_js::time::sleep(1, None).await;
 
     let api = ext_api.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
     api.send_user_message(
@@ -219,7 +222,7 @@ async fn delivers_follow_up_messages_only_after_the_current_run_finishes() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -231,7 +234,7 @@ async fn delivers_follow_up_messages_only_after_the_current_run_finishes() {
             let as_inner = Arc::clone(&as_ref);
             Box::pin(async move {
                 for m in &ctx.messages {
-                    if let pi_ai::types::TranscriptMessage::Assistant(a) = m {
+                    if let pi_ai::types::Message::Assistant(a) = m {
                         let txt = a
                             .content
                             .iter()
@@ -311,7 +314,7 @@ async fn runs_direct_steering_and_follow_up_messages_through_input_handlers() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -384,7 +387,7 @@ async fn delivers_multiple_steering_messages_in_order_in_one_at_a_time_mode() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -423,7 +426,7 @@ async fn delivers_multiple_follow_up_messages_in_order_in_one_at_a_time_mode() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -475,7 +478,7 @@ async fn delivers_all_steering_messages_in_one_batch_in_all_mode() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -490,16 +493,7 @@ async fn delivers_all_steering_messages_in_one_batch_in_all_mode() {
                     .messages
                     .iter()
                     .filter_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::User(u) => Some(
-                            u.content
-                                .iter()
-                                .filter_map(|p| match p {
-                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
+                        pi_ai::types::Message::User(u) => Some(user_content_text(&u.content)),
                         _ => None,
                     })
                     .collect();
@@ -537,7 +531,7 @@ async fn delivers_all_follow_up_messages_in_one_batch_in_all_mode() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -556,16 +550,7 @@ async fn delivers_all_follow_up_messages_in_one_batch_in_all_mode() {
                     .messages
                     .iter()
                     .filter_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::User(u) => Some(
-                            u.content
-                                .iter()
-                                .filter_map(|p| match p {
-                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
+                        pi_ai::types::Message::User(u) => Some(user_content_text(&u.content)),
                         _ => None,
                     })
                     .collect();
@@ -605,7 +590,7 @@ async fn queues_custom_messages_with_deliver_as_steer_while_streaming() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -617,10 +602,13 @@ async fn queues_custom_messages_with_deliver_as_steer_while_streaming() {
             let sc = Arc::clone(&sc_ref);
             Box::pin(async move {
                 let found = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                        UserContentBlock::Text(t) => t.text == "steer custom",
-                        _ => false,
-                    }),
+                    pi_ai::types::Message::User(u) => match &u.content {
+                        UserMessageContent::Text(s) => s == "steer custom",
+                        UserMessageContent::Blocks(blocks) => blocks.iter().any(|p| match p {
+                            UserContentBlock::Text(t) => t.text == "steer custom",
+                            _ => false,
+                        }),
+                    },
                     _ => false,
                 });
                 sc.store(found, std::sync::atomic::Ordering::SeqCst);
@@ -673,7 +661,7 @@ async fn queues_custom_messages_with_deliver_as_follow_up_while_streaming() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -689,10 +677,13 @@ async fn queues_custom_messages_with_deliver_as_follow_up_while_streaming() {
             let sc = Arc::clone(&sc_ref);
             Box::pin(async move {
                 let found = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                        UserContentBlock::Text(t) => t.text == "follow-up custom",
-                        _ => false,
-                    }),
+                    pi_ai::types::Message::User(u) => match &u.content {
+                        UserMessageContent::Text(s) => s == "follow-up custom",
+                        UserMessageContent::Blocks(blocks) => blocks.iter().any(|p| match p {
+                            UserContentBlock::Text(t) => t.text == "follow-up custom",
+                            _ => false,
+                        }),
+                    },
                     _ => false,
                 });
                 sc.store(found, std::sync::atomic::Ordering::SeqCst);
@@ -763,10 +754,13 @@ async fn injects_next_turn_custom_messages_into_the_next_prompt() {
             let sc = Arc::clone(&sc_ref);
             Box::pin(async move {
                 let found = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                        UserContentBlock::Text(t) => t.text == "carry this",
-                        _ => false,
-                    }),
+                    pi_ai::types::Message::User(u) => match &u.content {
+                        UserMessageContent::Text(s) => s == "carry this",
+                        UserMessageContent::Blocks(blocks) => blocks.iter().any(|p| match p {
+                            UserContentBlock::Text(t) => t.text == "carry this",
+                            _ => false,
+                        }),
+                    },
                     _ => false,
                 });
                 sc.store(found, std::sync::atomic::Ordering::SeqCst);
@@ -780,9 +774,8 @@ async fn injects_next_turn_custom_messages_into_the_next_prompt() {
 
     harness.session.prompt("normal prompt", None).await.unwrap();
     assert!(saw_custom.load(std::sync::atomic::Ordering::SeqCst));
-    let roles: Vec<&str> = harness
-        .session
-        .messages()
+    let msgs = harness.session.messages();
+    let roles: Vec<&str> = msgs
         .iter()
         .filter_map(|m| m.role())
         .collect::<Vec<_>>()
@@ -809,7 +802,7 @@ async fn updates_pending_message_count_and_removes_queued_text_before_message_st
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {

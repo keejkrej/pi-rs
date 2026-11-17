@@ -6,26 +6,26 @@ mod support;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult};
+use pi_agent_core::types::{AgentMessage, AgentToolResult};
+use pi_ai::compat::register_faux_provider;
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxModelDefinition, FauxProviderRegistration,
-    FauxResponseStep, RegisterFauxProviderOptions, faux_assistant_message, faux_tool_call, register_faux_provider,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxModelDefinition,
+    FauxProviderRegistration, FauxResponseStep, RegisterFauxProviderOptions, faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{
-    Api, ModelCost, ModelInput, ModelThinkingLevel, StopReason, TextContent, UserContentBlock, UserMessage,
-    UserMessageContent,
+    Message, ModelThinkingLevel, StopReason, TextContent, UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session_runtime::{
     AgentSessionRuntime, CreateAgentSessionFromServicesOptions, CreateAgentSessionRuntimeFactory,
     CreateAgentSessionRuntimeFactoryOptions, CreateAgentSessionRuntimeOptions, CreateAgentSessionRuntimeResult,
-    CreateAgentSessionServicesOptions, ForkPosition, RuntimeForkOptions, RuntimeForkResult,
-    create_agent_session_from_services, create_agent_session_runtime, create_agent_session_services,
+    CreateAgentSessionServicesOptions, RuntimeForkOptions, RuntimeForkResult, create_agent_session_from_services,
+    create_agent_session_runtime, create_agent_session_services,
 };
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{
-    ExtensionApi, InlineExtension, MessageEndEvent, MessageEndEventResult, ProviderChatModelConfig, ProviderConfig,
-    ProviderModelConfig, SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
+    ExtensionApi, ForkPosition, InlineExtension, MessageEndEvent, MessageEndEventResult, ProviderChatModelConfig,
+    ProviderConfig, ProviderModelConfig, SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
     SessionBeforeSwitchReason, SessionBeforeSwitchResult, SessionEntry, SessionShutdownEvent, SessionShutdownReason,
     SessionStartEvent, SessionStartReason, ToolDefinition,
 };
@@ -34,7 +34,7 @@ use pi_coding_agent::core::session_manager::SessionManager;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use support::model_runtime_test_utils::create_model_registry;
+use support::model_runtime_test_utils::{create_model_registry, get_model_runtime};
 use tokio::sync::Notify;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +75,7 @@ fn provider_config_for_faux(faux: &FauxProviderRegistration) -> (String, Provide
         ProviderConfig {
             base_url: Some(model.base_url),
             api_key: Some("faux-key".to_string()),
-            api: Some(Api::new(faux.api())),
+            api: Some(faux.api().to_string()),
             models: Some(models),
             ..Default::default()
         },
@@ -131,16 +131,20 @@ fn build_runtime_factory(
                     Ok(())
                 }
             }));
-            let model_runtime = create_model_registry(&auth, Some(&m_path)).await;
+            let cred_store: Arc<dyn CredentialStore + Send + Sync> = auth;
+            let model_registry = create_model_registry(cred_store, Some(&m_path)).await?;
+            let model_runtime = get_model_runtime(&model_registry);
             let services = create_agent_session_services(CreateAgentSessionServicesOptions {
-                cwd: opts.cwd,
-                agent_dir: Some(opts.agent_dir),
+                cwd: opts.cwd.clone(),
+                agent_dir: Some(opts.agent_dir.clone()),
                 model_runtime: Some(model_runtime),
                 resource_loader_options: Some(DefaultResourceLoaderOptions {
-                    extension_factories: Some(vec![reg_ext]),
-                    no_skills: Some(true),
-                    no_prompt_templates: Some(true),
-                    no_themes: Some(true),
+                    cwd: opts.cwd,
+                    agent_dir: opts.agent_dir,
+                    extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(reg_ext)],
+                    no_skills: true,
+                    no_prompt_templates: true,
+                    no_themes: true,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -183,13 +187,23 @@ async fn create_runtime_for_test(
         models: Some(vec![
             FauxModelDefinition {
                 id: "faux-1".to_string(),
+                name: None,
                 reasoning: Some(true),
-                ..Default::default()
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
             },
             FauxModelDefinition {
                 id: "faux-2".to_string(),
+                name: None,
                 reasoning: Some(false),
-                ..Default::default()
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
             },
         ]),
         ..Default::default()
@@ -303,7 +317,7 @@ async fn settles_the_active_response_before_session_replacement() {
                 name: "block".to_string(),
                 label: "Block".to_string(),
                 description: "Blocks until aborted".to_string(),
-                parameters: t::object(&[]),
+                parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
                 prompt_snippet: None,
                 prompt_guidelines: None,
                 exposure: None,
@@ -311,6 +325,9 @@ async fn settles_the_active_response_before_session_replacement() {
                 namespace: None,
                 output_schema: None,
                 annotations: None,
+                constrained_sampling: None,
+                render_shell: None,
+                prepare_loadout: None,
                 execution_mode: None,
                 execute: Arc::new(move |_id, _params, signal, _upd, _ctx| {
                     let ts = Arc::clone(&ts);
@@ -318,7 +335,7 @@ async fn settles_the_active_response_before_session_replacement() {
                         let aborted = Arc::new(Notify::new());
                         let ab_c = Arc::clone(&aborted);
                         let _sub = signal.as_ref().map(|s| {
-                            s.on_abort(move || {
+                            s.on_abort(move |_| {
                                 ab_c.notify_one();
                             })
                         });
@@ -330,13 +347,11 @@ async fn settles_the_active_response_before_session_replacement() {
                         Ok(AgentToolResult {
                             content: vec![UserContentBlock::Text(TextContent::new("tool aborted"))],
                             details: Some(json!({})),
-                            structured_content: None,
-                            usage: None,
+                            ..Default::default()
                         })
                     })
                 }),
                 prepare_arguments: None,
-                replay: None,
                 render_call: None,
                 render_result: None,
             })?;
@@ -352,7 +367,11 @@ async fn settles_the_active_response_before_session_replacement() {
     runtime.session().bind_extensions(Default::default()).await.unwrap();
 
     faux.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Blocks(vec![faux_tool_call("block", json!({}))]),
+        FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+            "block",
+            Default::default(),
+            None,
+        ))]),
         Some(FauxAssistantMessageOptions {
             stop_reason: Some(StopReason::ToolUse),
             ..Default::default()
@@ -833,13 +852,23 @@ async fn duplicates_the_current_active_branch_in_memory_when_forking_at_the_curr
         models: Some(vec![
             FauxModelDefinition {
                 id: "faux-1".to_string(),
+                name: None,
                 reasoning: Some(true),
-                ..Default::default()
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
             },
             FauxModelDefinition {
                 id: "faux-2".to_string(),
+                name: None,
                 reasoning: Some(false),
-                ..Default::default()
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
             },
         ]),
         ..Default::default()

@@ -21,7 +21,7 @@ use pi_coding_agent::core::tools::with_file_mutation_queue;
 use pi_js::abort::AbortSignal;
 use pi_js::vendor::typebox::t;
 use pi_tui::components::markdown::MarkdownTheme;
-use pi_tui::{Component, Container, Markdown, Spacer, Text};
+use pi_tui::{Container, Markdown, Spacer, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -135,7 +135,7 @@ enum DisplayItem {
     Text(String),
     ToolCall {
         name: String,
-        args: serde_json::Map<String, Value>,
+        args: IndexMap<String, Value>,
     },
 }
 
@@ -216,7 +216,7 @@ fn shorten_path(p: &str) -> String {
     }
 }
 
-fn format_tool_call(tool_name: &str, args: &serde_json::Map<String, Value>, theme: &Theme) -> String {
+fn format_tool_call(tool_name: &str, args: &IndexMap<String, Value>, theme: &Theme) -> String {
     match tool_name {
         "bash" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("...");
@@ -300,7 +300,7 @@ fn format_tool_call(tool_name: &str, args: &serde_json::Map<String, Value>, them
             )
         }
         _ => {
-            let args_str = pi_js::json::stringify(args).unwrap_or_else(|_| "{}".to_string());
+            let args_str = pi_js::json::stringify(args);
             let preview = if args_str.chars().count() > 50 {
                 format!("{}...", args_str.chars().take(50).collect::<String>())
             } else {
@@ -820,7 +820,8 @@ impl Extension for SubagentExtension {
                 .to_string(),
             format!("Default agent scope is \"user\" (from {user_agents_dir})."),
             format!(
-                "To enable project-local agents in {CONFIG_DIR_NAME}/agents, set agentScope: \"both\" (or \"project\")."
+                "To enable project-local agents in {}/agents, set agentScope: \"both\" (or \"project\").",
+                *CONFIG_DIR_NAME
             ),
         ]
         .join(" ");
@@ -887,8 +888,8 @@ impl Extension for SubagentExtension {
 
                     if matches!(agent_scope, AgentScope::Project | AgentScope::Both)
                         && confirm_project_agents
-                        && ctx.has_ui()?
-                        && !ctx.is_project_trusted()?
+                        && ctx.as_context().has_ui()?
+                        && !ctx.as_context().is_project_trusted()?
                     {
                         let mut requested_names = IndexSet::new();
                         if let Some(chain) = &params.chain {

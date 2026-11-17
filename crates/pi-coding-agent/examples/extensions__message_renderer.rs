@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use pi_ai::types::UserContentBlock;
 use pi_coding_agent::core::extensions::types::{
-    ContentBlock, CustomMessageContent, CustomMessageDraft, Extension, ExtensionApi, ExtensionFactory, InlineExtension,
+    CustomMessageContent, CustomMessageDraft, Extension, ExtensionApi, ExtensionFactory, InlineExtension,
     RegisteredCommandOptions,
 };
 use pi_tui::{Box as TuiBox, Component, Text};
@@ -30,8 +31,8 @@ fn content_to_string(content: &CustomMessageContent) -> String {
         CustomMessageContent::Blocks(blocks) => blocks
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.text.as_str()),
-                ContentBlock::Image(_) => None,
+                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                UserContentBlock::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join(""),

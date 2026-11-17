@@ -40,23 +40,21 @@ async fn passes_server_options_to_the_command_action() {
         },
     };
 
-    let result = CLI
-        .execute(
-            &[
-                "server",
-                "--server-id",
-                "00000000-0000-4000-8000-000000000001",
-                "--session-dir",
-                "./sessions",
-                "--provider",
-                "anthropic",
-                "--model",
-                "claude-sonnet-4-5",
-            ],
-            &ctx,
-        )
-        .await
-        .expect("execute succeeds");
+    let args: Vec<String> = [
+        "server",
+        "--server-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--session-dir",
+        "./sessions",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let result = CLI.execute(&args, &ctx).await.expect("execute succeeds");
 
     let expected = ServerCommand {
         auth: None,
@@ -99,7 +97,7 @@ async fn executes_parsed_server_and_client_commands() {
             },
         };
 
-        let result = CLI.execute(&[name], &ctx).await.expect("execute succeeds");
+        let result = CLI.execute(&[name.to_string()], &ctx).await.expect("execute succeeds");
         if name == "server" {
             assert_eq!(
                 result,

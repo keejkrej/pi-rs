@@ -144,10 +144,8 @@ impl Extension for QnaExtension {
                         let mut last_assistant_text: Option<String> = None;
 
                         for entry in branch.iter().rev() {
-                            if entry.r#type == "message"
-                                && let Some(msg_val) = entry.fields.get("message")
-                                && let Ok(AgentMessage::Message(Message::Assistant(assistant))) =
-                                    serde_json::from_value::<AgentMessage>(msg_val.clone())
+                            if let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry
+                                && let AgentMessage::Message(Message::Assistant(assistant)) = &msg_entry.message
                             {
                                 if assistant.stop_reason != StopReason::Stop {
                                     ui.notify(
@@ -198,8 +196,18 @@ impl Extension for QnaExtension {
 
                                         let done_task = Arc::clone(&done);
                                         tokio::spawn(async move {
-                                            let api_key =
-                                                model_registry.get_api_key(&model_for_ui).await.ok().flatten();
+                                            let api_key = match model_registry
+                                                .get_api_key_and_headers(&model_for_ui)
+                                                .await
+                                            {
+                                                pi_coding_agent::core::model_registry::ResolvedRequestAuth::Ok {
+                                                    api_key,
+                                                    ..
+                                                } => api_key,
+                                                pi_coding_agent::core::model_registry::ResolvedRequestAuth::Err {
+                                                    ..
+                                                } => None,
+                                            };
                                             let user_message = Message::User(UserMessage {
                                                 content: UserMessageContent::Blocks(vec![UserContentBlock::Text(
                                                     TextContent::new(last_text),

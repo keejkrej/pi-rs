@@ -56,7 +56,7 @@ pub async fn check_provider_auth(
     if let Some(cli_model) = cli_model.as_deref() {
         let resolved = resolve_cli_model(ResolveCliModelOptions {
             cli_provider: cli_provider.as_deref(),
-            cli_model,
+            cli_model: Some(cli_model),
             cli_thinking: None,
             model_runtime,
         });

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
@@ -32,7 +33,7 @@ async fn treats_extension_origin_queued_slash_command_follow_ups_as_raw_user_tex
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for the test to release execution".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -85,7 +86,11 @@ async fn treats_extension_origin_queued_slash_command_follow_ups_as_raw_user_tex
 
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("wait", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "wait",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()

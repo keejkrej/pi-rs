@@ -29,15 +29,26 @@ async fn replicates_the_conversation_view_as_it_changes() {
         "test-transcript-consumer",
         Arc::new(move |env| {
             let transcript_obj = env.r#use::<ServiceObject>(&*TRANSCRIPT_SERVICE)?;
-            let transcript = Transcript::from_service(transcript_obj)?;
             let views_inner = Arc::clone(&views_sub);
-            let unsub = transcript.state.subscribe(move |value, _ctx, _del| {
-                views_inner.lock().expect("lock").push(value);
-                Box::pin(futures::future::ready(Ok(())))
-            })?;
-            env.own(Arc::new(move || {
-                unsub.call();
-                Box::pin(futures::future::ready(Ok(())))
+            let env_activate = env.clone();
+            env.on_activate(Arc::new(move || {
+                let transcript_obj = transcript_obj.clone();
+                let views_inner = Arc::clone(&views_inner);
+                let env_activate = env_activate.clone();
+                Box::pin(async move {
+                    let transcript = Transcript::from_service(transcript_obj)?;
+                    let unsub = transcript.state.subscribe(move |value, _ctx, _del| {
+                        views_inner.lock().expect("lock").push(value);
+                        Box::pin(futures::future::ready(Ok(())))
+                    })?;
+                    let unsub = std::sync::Mutex::new(Some(unsub));
+                    env_activate.own(Arc::new(move || {
+                        if let Some(u) = unsub.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            u.call();
+                        }
+                        Box::pin(futures::future::ready(Ok(())))
+                    }))
+                })
             }))
         }),
     ));

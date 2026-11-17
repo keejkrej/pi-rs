@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pi_ai::types::AssistantMessageEvent;
 use pi_coding_agent::config::get_agent_dir;
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
-use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
+use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 
@@ -16,8 +16,8 @@ async fn run() -> pi_coding_agent::Result<()> {
 
     // Option 1: Replace prompt entirely
     let loader1 = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(cwd.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
         system_prompt_override: Some(Arc::new(|_| {
             Some(
                 "You are a helpful assistant that speaks like a pirate.\nAlways end responses with \"Arrr!\""
@@ -53,8 +53,8 @@ async fn run() -> pi_coding_agent::Result<()> {
 
     // Option 2: Append instructions to the default prompt
     let loader2 = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(cwd),
-        agent_dir: Some(agent_dir),
+        cwd,
+        agent_dir,
         append_system_prompt_override: Some(Arc::new(|mut base| {
             base.push(
                 "## Additional Instructions\n- Always be concise\n- Use bullet points when listing things".to_string(),

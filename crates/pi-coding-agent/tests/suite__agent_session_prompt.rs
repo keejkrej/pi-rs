@@ -12,23 +12,26 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::{
     ImageContent, Message, ModelImageInputLimits, ModelImageResizeOptions, ModelInputLimits, StopReason, TextContent,
-    UserContentBlock,
+    UserContentBlock, UserMessageContent,
 };
 use pi_coding_agent::core::agent_session::{
     AgentSessionEvent, ExtensionBindings, PromptOptions, SendUserMessageOptions, StreamingBehavior,
 };
+use pi_coding_agent::core::compaction::CompactionResult;
 use pi_coding_agent::core::extensions::types::{
     BeforeAgentStartEvent, ExtensionApi, InlineExtension, InputDeliveryBehavior, InputEvent, RegisteredCommandOptions,
     SessionBeforeCompactEvent, SessionBeforeCompactResult,
 };
-use pi_coding_agent::core::prompt_templates::{LoadPromptTemplatesResult, PromptTemplate};
-use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
+use pi_coding_agent::core::messages::CustomMessageContent;
+use pi_coding_agent::core::prompt_templates::PromptTemplate;
+use pi_coding_agent::core::resource_loader::{
+    DefaultResourceLoader, DefaultResourceLoaderOptions, PromptsResult, ResourceLoader, SkillsResult,
+};
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::skills::{LoadSkillsResult, Skill};
+use pi_coding_agent::core::skills::Skill;
 use pi_coding_agent::core::source_info::{
     SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
 };
-use pi_coding_agent::core::tools::mcp_wire::{CompactionResult, CustomMessageContent};
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -51,14 +54,12 @@ async fn prompts_while_idle_and_records_a_single_text_response() {
         .session
         .messages()
         .into_iter()
-        .filter_map(|m| m.role())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|s| match s {
-            "system" => "system",
-            "user" => "user",
-            "assistant" => "assistant",
-            _ => "other",
+        .filter_map(|m| match m.role() {
+            Some("system") => Some("system"),
+            Some("user") => Some("user"),
+            Some("assistant") => Some("assistant"),
+            Some(_) => Some("other"),
+            None => None,
         })
         .collect();
     assert_eq!(roles, vec!["system", "user", "assistant"]);
@@ -75,7 +76,7 @@ async fn handles_a_tool_call_turn_and_waits_for_the_follow_up_llm_response() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -88,8 +89,7 @@ async fn handles_a_tool_call_turn_and_waits_for_the_follow_up_llm_response() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("echo:{text}")))],
                     details: Some(json!({ "text": text })),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -101,7 +101,7 @@ async fn handles_a_tool_call_turn_and_waits_for_the_follow_up_llm_response() {
         ..Default::default()
     })
     .await;
-    let mut args = serde_json::Map::new();
+    let mut args = indexmap::IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -139,7 +139,7 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
             name: name.to_string(),
             label: name.to_string(),
             description: format!("{name} tool"),
-            parameters: t::object(&[t::prop("value", t::string())]),
+            parameters: t::object([("value", t::string())]),
             constrained_sampling: None,
             output_schema: None,
             execution_mode: None,
@@ -149,7 +149,7 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
                 Box::pin(async move {
                     let val = params.get("value").and_then(Value::as_str).unwrap_or("").to_string();
                     if delay_ms > 0 {
-                        pi_js::time::sleep(delay_ms).await;
+                        let _ = pi_js::time::sleep(delay_ms, None).await;
                     }
                     runs_inner
                         .lock()
@@ -158,8 +158,7 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
                     Ok(AgentToolResult {
                         content: vec![UserContentBlock::Text(TextContent::new(format!("{name}:{val}")))],
                         details: Some(json!({ "value": val })),
-                        structured_content: None,
-                        usage: None,
+                        ..Default::default()
                     })
                 })
             }),
@@ -173,9 +172,9 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
     })
     .await;
 
-    let mut a1 = serde_json::Map::new();
+    let mut a1 = indexmap::IndexMap::new();
     a1.insert("value".to_string(), Value::String("a".to_string()));
-    let mut a2 = serde_json::Map::new();
+    let mut a2 = indexmap::IndexMap::new();
     a2.insert("value".to_string(), Value::String("b".to_string()));
 
     harness.set_responses(vec![
@@ -194,7 +193,7 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
                 let count = ctx
                     .messages
                     .iter()
-                    .filter(|m| matches!(m, pi_ai::types::TranscriptMessage::ToolResult(_)))
+                    .filter(|m| matches!(m, Message::ToolResult(_)))
                     .count();
                 Ok(faux_assistant_message(
                     FauxAssistantMessageContent::Text(format!("tool results: {count}")),
@@ -236,9 +235,12 @@ async fn preserves_image_attachments_in_the_provider_context() {
             let si = Arc::clone(&si_ref);
             Box::pin(async move {
                 let found = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => {
-                        u.content.iter().any(|p| matches!(p, UserContentBlock::Image(_)))
-                    }
+                    Message::User(u) => match &u.content {
+                        UserMessageContent::Blocks(blocks) => {
+                            blocks.iter().any(|p| matches!(p, UserContentBlock::Image(_)))
+                        }
+                        UserMessageContent::Text(_) => false,
+                    },
                     _ => false,
                 });
                 si.store(found, std::sync::atomic::Ordering::SeqCst);
@@ -375,11 +377,11 @@ async fn expands_skill_commands_before_sending_the_prompt() {
     let sp_clone = skill_path.clone();
     let sd_clone = skill_dir.clone();
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        no_extensions: Some(true),
-        no_skills: Some(true),
-        no_prompt_templates: Some(true),
-        no_themes: Some(true),
-        skills_override: Some(Arc::new(move |_| LoadSkillsResult {
+        no_extensions: true,
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
+        skills_override: Some(Arc::new(move |_| SkillsResult {
             skills: vec![Skill {
                 name: "test".to_string(),
                 description: "Test skill".to_string(),
@@ -388,10 +390,11 @@ async fn expands_skill_commands_before_sending_the_prompt() {
                 source_info: create_synthetic_source_info(
                     &sp_clone,
                     SyntheticSourceOptions {
-                        source: Some("local".to_string()),
+                        source: "local".to_string(),
                         scope: Some(SourceScope::Project),
                         origin: Some(SourceOrigin::TopLevel),
                         base_dir: Some(sd_clone.clone()),
+                        changelog_path: None,
                     },
                 ),
                 disable_model_invocation: false,
@@ -414,20 +417,18 @@ async fn expands_skill_commands_before_sending_the_prompt() {
         move |ctx, _opts, _st, _mdl| {
             let ex = Arc::clone(&ex_ref);
             Box::pin(async move {
-                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                    .messages
-                    .iter()
-                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-                {
-                    let txt = u
-                        .content
-                        .iter()
-                        .filter_map(|p| match p {
-                            UserContentBlock::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                if let Some(Message::User(u)) = ctx.messages.iter().find(|m| matches!(m, Message::User(_))) {
+                    let txt = match &u.content {
+                        UserMessageContent::Text(s) => s.clone(),
+                        UserMessageContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|p| match p {
+                                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
                     *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
                 }
                 Ok(faux_assistant_message(
@@ -459,19 +460,20 @@ async fn expands_prompt_templates_before_sending_the_prompt() {
         source_info: create_synthetic_source_info(
             "/virtual/review.md",
             SyntheticSourceOptions {
-                source: Some("local".to_string()),
+                source: "local".to_string(),
                 scope: Some(SourceScope::Temporary),
                 origin: Some(SourceOrigin::TopLevel),
                 base_dir: None,
+                changelog_path: None,
             },
         ),
     };
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        no_extensions: Some(true),
-        no_skills: Some(true),
-        no_prompt_templates: Some(true),
-        no_themes: Some(true),
-        prompts_override: Some(Arc::new(move |_| LoadPromptTemplatesResult {
+        no_extensions: true,
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
+        prompts_override: Some(Arc::new(move |_| PromptsResult {
             prompts: vec![template.clone()],
             diagnostics: Vec::new(),
         })),
@@ -491,20 +493,18 @@ async fn expands_prompt_templates_before_sending_the_prompt() {
         move |ctx, _opts, _st, _mdl| {
             let ex = Arc::clone(&ex_ref);
             Box::pin(async move {
-                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                    .messages
-                    .iter()
-                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-                {
-                    let txt = u
-                        .content
-                        .iter()
-                        .filter_map(|p| match p {
-                            UserContentBlock::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                if let Some(Message::User(u)) = ctx.messages.iter().find(|m| matches!(m, Message::User(_))) {
+                    let txt = match &u.content {
+                        UserMessageContent::Text(s) => s.clone(),
+                        UserMessageContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|p| match p {
+                                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
                     *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
                 }
                 Ok(faux_assistant_message(
@@ -534,19 +534,20 @@ async fn send_user_message_can_opt_into_prompt_template_expansion() {
         source_info: create_synthetic_source_info(
             "/virtual/review.md",
             SyntheticSourceOptions {
-                source: Some("local".to_string()),
+                source: "local".to_string(),
                 scope: Some(SourceScope::Temporary),
                 origin: Some(SourceOrigin::TopLevel),
                 base_dir: None,
+                changelog_path: None,
             },
         ),
     };
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        no_extensions: Some(true),
-        no_skills: Some(true),
-        no_prompt_templates: Some(true),
-        no_themes: Some(true),
-        prompts_override: Some(Arc::new(move |_| LoadPromptTemplatesResult {
+        no_extensions: true,
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
+        prompts_override: Some(Arc::new(move |_| PromptsResult {
             prompts: vec![template.clone()],
             diagnostics: Vec::new(),
         })),
@@ -566,20 +567,18 @@ async fn send_user_message_can_opt_into_prompt_template_expansion() {
         move |ctx, _opts, _st, _mdl| {
             let ex = Arc::clone(&ex_ref);
             Box::pin(async move {
-                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                    .messages
-                    .iter()
-                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-                {
-                    let txt = u
-                        .content
-                        .iter()
-                        .filter_map(|p| match p {
-                            UserContentBlock::Text(t) => Some(t.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                if let Some(Message::User(u)) = ctx.messages.iter().find(|m| matches!(m, Message::User(_))) {
+                    let txt = match &u.content {
+                        UserMessageContent::Text(s) => s.clone(),
+                        UserMessageContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|p| match p {
+                                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
                     *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
                 }
                 Ok(faux_assistant_message(
@@ -794,7 +793,7 @@ async fn reports_streaming_behavior_to_input_handlers_while_streaming() {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for release".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -808,8 +807,7 @@ async fn reports_streaming_behavior_to_input_handlers_while_streaming() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("released"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -849,7 +847,7 @@ async fn reports_streaming_behavior_to_input_handlers_while_streaming() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                Default::default(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -906,7 +904,7 @@ async fn throws_when_prompted_during_streaming_without_a_streaming_behavior() {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for release".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -920,8 +918,7 @@ async fn throws_when_prompted_during_streaming_without_a_streaming_behavior() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("released"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -937,7 +934,7 @@ async fn throws_when_prompted_during_streaming_without_a_streaming_behavior() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                Default::default(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {

@@ -6,11 +6,11 @@ mod support;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexMap;
-use pi_ai::compat::create_assistant_message_event_stream;
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEventStream, Context, Model, ModelCost, ModelInput,
-    ProviderHeaders, SimpleStreamOptions, StopReason, TextContent, Usage,
+    AssistantContentBlock, AssistantMessage, Context, Model, ModelCost, ModelInput, ProviderHeaders,
+    SimpleStreamOptions, StopReason, TextContent, Usage,
 };
+use pi_ai::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use pi_ai::utils::transcript::normalize_context;
 use pi_ai::{ApiKeyCredential, Credential};
 use pi_coding_agent::core::auth_storage::{AuthStorage, AuthStorageData};
@@ -42,7 +42,7 @@ fn make_model(provider: &str, base_url: &str, id: Option<&str>) -> Model {
             output: 0.0,
             cache_read: 0.0,
             cache_write: 0.0,
-            cache_write_1h: None,
+            tiers: None,
         },
         context_window: 128_000,
         max_tokens: 4_096,
@@ -92,8 +92,8 @@ async fn capture_headers(model: Model, opts: CaptureOpts) -> Option<ProviderHead
     .unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&cwd, true).unwrap();
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&cwd, true, None).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
 
     let settings_manager = SettingsManager::create(&cwd, Some(&agent_dir), None);
     if opts.telemetry_enabled == Some(false) {
@@ -109,23 +109,25 @@ async fn capture_headers(model: Model, opts: CaptureOpts) -> Option<ProviderHead
         }),
     );
     let auth_storage = Arc::new(AuthStorage::in_memory(Some(auth_data)));
-    let model_registry = create_in_memory_model_registry(auth_storage).await;
+    let model_registry = create_in_memory_model_registry(auth_storage).await.unwrap();
     let captured_options: Arc<Mutex<Option<SimpleStreamOptions>>> = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured_options);
 
-    model_registry.register_provider(
-        &model.provider,
-        ProviderConfig {
-            api: Some(model.api.clone()),
-            headers: opts.provider_headers,
-            stream_simple: Some(Arc::new(move |_m, _ctx, provider_opts| {
-                *captured_ref.lock().unwrap_or_else(PoisonError::into_inner) = provider_opts;
-                create_done_stream()
-            })),
-            ..Default::default()
-        },
-        None,
-    );
+    model_registry
+        .register_provider(
+            &model.provider,
+            ProviderConfig {
+                api: Some(model.api.clone()),
+                headers: opts.provider_headers,
+                stream_simple: Some(Arc::new(move |_m, _ctx, provider_opts| {
+                    *captured_ref.lock().unwrap_or_else(PoisonError::into_inner) = provider_opts;
+                    create_done_stream()
+                })),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
 
     let model_runtime = get_model_runtime(&model_registry);
     let session_manager = SessionManager::in_memory(Some(&cwd), None, None).unwrap();
@@ -182,7 +184,7 @@ async fn capture_headers(model: Model, opts: CaptureOpts) -> Option<ProviderHead
         .and_then(|o| o.base.headers.clone());
 
     session.dispose();
-    model_registry.unregister_provider(&model.provider, None);
+    model_registry.unregister_provider(&model.provider);
     let _ = pi_js::fs::rm(&temp_dir, true, true);
     result
 }
@@ -190,7 +192,7 @@ async fn capture_headers(model: Model, opts: CaptureOpts) -> Option<ProviderHead
 #[tokio::test]
 #[serial]
 async fn adds_default_attribution_headers_for_openrouter_models() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("openrouter", "https://openrouter.ai/api/v1", None),
         CaptureOpts::default(),
@@ -211,7 +213,7 @@ async fn adds_default_attribution_headers_for_openrouter_models() {
 #[tokio::test]
 #[serial]
 async fn does_not_add_attribution_headers_when_telemetry_is_disabled() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("openrouter", "https://openrouter.ai/api/v1", None),
         CaptureOpts {
@@ -229,7 +231,7 @@ async fn does_not_add_attribution_headers_when_telemetry_is_disabled() {
 #[tokio::test]
 #[serial]
 async fn adds_attribution_headers_for_custom_providers_routed_through_openrouter() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("custom-openrouter", "https://openrouter.ai/api/v1", None),
         CaptureOpts::default(),
@@ -250,7 +252,7 @@ async fn adds_attribution_headers_for_custom_providers_routed_through_openrouter
 #[tokio::test]
 #[serial]
 async fn preserves_legacy_openrouter_base_url_substring_attribution_matching() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("custom-openrouter", "not-a-url-openrouter.ai", None),
         CaptureOpts::default(),
@@ -271,7 +273,7 @@ async fn preserves_legacy_openrouter_base_url_substring_attribution_matching() {
 #[tokio::test]
 #[serial]
 async fn lets_provider_and_request_headers_override_the_defaults() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let mut provider_headers = IndexMap::new();
     provider_headers.insert("HTTP-Referer".to_string(), "https://provider.example".to_string());
     provider_headers.insert("X-OpenRouter-Categories".to_string(), "provider-category".to_string());
@@ -305,7 +307,7 @@ async fn lets_provider_and_request_headers_override_the_defaults() {
 #[tokio::test]
 #[serial]
 async fn adds_default_attribution_headers_for_direct_nvidia_nim_endpoints() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("custom-nim", "https://integrate.api.nvidia.com/v1", None),
         CaptureOpts::default(),
@@ -321,7 +323,7 @@ async fn adds_default_attribution_headers_for_direct_nvidia_nim_endpoints() {
 #[tokio::test]
 #[serial]
 async fn adds_default_attribution_headers_for_the_nvidia_provider() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("nvidia", "https://example.test/v1", None),
         CaptureOpts::default(),
@@ -337,7 +339,7 @@ async fn adds_default_attribution_headers_for_the_nvidia_provider() {
 #[tokio::test]
 #[serial]
 async fn does_not_add_nvidia_nim_attribution_headers_when_telemetry_is_disabled() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("nvidia", "https://integrate.api.nvidia.com/v1", None),
         CaptureOpts {
@@ -353,7 +355,7 @@ async fn does_not_add_nvidia_nim_attribution_headers_when_telemetry_is_disabled(
 #[tokio::test]
 #[serial]
 async fn lets_provider_and_request_headers_override_nvidia_nim_defaults() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let mut provider_headers = IndexMap::new();
     provider_headers.insert("X-BILLING-INVOKE-ORIGIN".to_string(), "Provider".to_string());
     let mut request_headers: ProviderHeaders = IndexMap::new();
@@ -378,7 +380,7 @@ async fn lets_provider_and_request_headers_override_nvidia_nim_defaults() {
 #[tokio::test]
 #[serial]
 async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_through_openrouter() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model(
             "openrouter",
@@ -399,7 +401,7 @@ async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_th
 #[tokio::test]
 #[serial]
 async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_through_vercel_ai_gateway() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model(
             "vercel-ai-gateway",
@@ -416,7 +418,7 @@ async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_th
 #[tokio::test]
 #[serial]
 async fn adds_opencode_session_headers() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let headers = capture_headers(
         make_model("opencode", "https://opencode.ai/zen/v1", None),
         CaptureOpts {
@@ -436,7 +438,7 @@ async fn adds_opencode_session_headers() {
 #[tokio::test]
 #[serial]
 async fn lets_configured_opencode_headers_override_the_defaults() {
-    let _env = pi_js::env::testing::set("PI_TELEMETRY", None);
+    let _env = pi_js::env::testing::EnvGuard::set("PI_TELEMETRY", None);
     let mut provider_headers = IndexMap::new();
     provider_headers.insert("x-opencode-session".to_string(), "configured-session".to_string());
     provider_headers.insert("x-opencode-client".to_string(), "configured-client".to_string());

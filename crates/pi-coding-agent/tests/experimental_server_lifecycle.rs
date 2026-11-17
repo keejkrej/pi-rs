@@ -30,7 +30,9 @@ async fn retires_an_automatic_server_if_no_first_client_arrives() {
         retire_cb.fetch_add(1, Ordering::AcqRel);
     }));
 
-    tokio::time::advance(Duration::from_millis(10_999)).await;
+    tokio::time::advance(Duration::from_millis(10_000)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(999)).await;
     tokio::task::yield_now().await;
     assert_eq!(retire_calls.load(Ordering::Acquire), 0);
 

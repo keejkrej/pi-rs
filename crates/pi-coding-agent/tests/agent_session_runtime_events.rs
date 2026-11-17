@@ -2,9 +2,8 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message, register_faux_provider,
-};
+use pi_ai::compat::register_faux_provider;
+use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message};
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session::ExtensionBindings;
 use pi_coding_agent::core::agent_session_runtime::{
@@ -89,7 +88,7 @@ async fn create_runtime_host(
 
     let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
         credentials: Some(auth_storage),
-        models_path: Some(pi_js::path::join(&[&temp_dir, "models.json"])),
+        models_path: Some(Some(pi_js::path::join(&[&temp_dir, "models.json"]))),
         ..Default::default()
     })
     .await
@@ -118,16 +117,18 @@ async fn create_runtime_host(
             })
         })
         .collect();
-    model_runtime.register_provider(
-        &model.provider,
-        ProviderConfig {
-            base_url: Some(model.base_url.clone()),
-            api: Some(model.api.clone()),
-            models: Some(models),
-            ..Default::default()
-        },
-        None,
-    );
+    model_runtime
+        .register_provider(
+            &model.provider,
+            ProviderConfig {
+                base_url: Some(model.base_url.clone()),
+                api: Some(model.api.clone()),
+                models: Some(models),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
 
     let mr_for_factory = model_runtime.clone();
     let model_for_factory = model.clone();
@@ -142,10 +143,10 @@ async fn create_runtime_host(
                 agent_dir: Some(opts.agent_dir),
                 model_runtime: Some(mr),
                 resource_loader_options: Some(DefaultResourceLoaderOptions {
-                    extension_factories: Some(vec![ext]),
-                    no_skills: Some(true),
-                    no_prompt_templates: Some(true),
-                    no_themes: Some(true),
+                    extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(ext)],
+                    no_skills: true,
+                    no_prompt_templates: true,
+                    no_themes: true,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -416,8 +417,8 @@ async fn runs_before_session_invalidate_after_session_shutdown_and_before_rebind
             .unwrap_or_else(PoisonError::into_inner)
             .push("beforeSessionInvalidate".to_string());
         let runner = old_sess_inv.extension_runner().unwrap();
-        let ctx = runner.create_context().unwrap();
-        assert_eq!(ctx.cwd(), old_sess_inv.session_manager().get_cwd());
+        let ctx = runner.create_context();
+        assert_eq!(ctx.cwd().unwrap(), old_sess_inv.session_manager().get_cwd());
     })));
 
     let phases_reb = Arc::clone(&phases);
@@ -442,7 +443,12 @@ async fn runs_before_session_invalidate_after_session_shutdown_and_before_rebind
             "rebindSession".to_string(),
         ]
     );
-    let err = old_session.extension_runner().unwrap().create_context().unwrap_err();
+    let err = old_session
+        .extension_runner()
+        .unwrap()
+        .create_context()
+        .cwd()
+        .unwrap_err();
     assert_eq!(
         err.to_string(),
         "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload()."

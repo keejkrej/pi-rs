@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use pi_agent_core::types::AgentMessage;
 use pi_ai::types::Message;
 use pi_coding_agent::core::extensions::types::{
-    Extension, ExtensionApi, ExtensionContext, ExtensionFactory, InlineExtension, NotifyType, RegisteredCommandOptions,
-    Theme, mcp_wire::ReadonlyFooterDataProvider,
+    Extension, ExtensionApi, ExtensionContext, ExtensionFactory, InlineExtension, NotifyType,
+    ReadonlyFooterDataProvider, RegisteredCommandOptions, Theme,
 };
+use pi_coding_agent::core::session_manager::SessionEntry;
 use pi_tui::{Component, truncate_to_width, visible_width};
 
 struct CustomFooterComponent {
@@ -27,10 +28,8 @@ impl Component for CustomFooterComponent {
 
         if let Ok(sm) = self.ctx.session_manager() {
             for e in sm.get_branch(None) {
-                if e.r#type == "message"
-                    && let Some(msg_val) = e.fields.get("message")
-                    && let Ok(AgentMessage::Message(Message::Assistant(m))) =
-                        serde_json::from_value::<AgentMessage>(msg_val.clone())
+                if let SessionEntry::Message(entry) = e
+                    && let AgentMessage::Message(Message::Assistant(m)) = entry.message
                 {
                     input += m.usage.input;
                     output += m.usage.output;

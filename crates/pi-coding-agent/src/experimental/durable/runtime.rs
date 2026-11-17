@@ -549,6 +549,8 @@ pub(crate) async fn open_durable_with(
         None => pi_js::env::cwd(),
     };
     let location = (config.select_location)(cwd, options.continue_session).await?;
+    let loc_id = location.id.clone();
+    let loc_dir = location.directory.clone();
     let loc_cwd = location.cwd.clone();
     let loc_database = location.database.clone();
     let loc_created = location.created;
@@ -560,7 +562,7 @@ pub(crate) async fn open_durable_with(
     let location_for_close = Arc::clone(&location_slot);
     let result = async {
         let model_runtime = Arc::new(ModelRuntime::create(ModelRuntimeCreateOptions::default()).await?);
-        let settings_manager = Arc::new(SettingsManager::create(Some(&loc_cwd), None)?);
+        let settings_manager = Arc::new(SettingsManager::create(&loc_cwd, None, None));
         configure_harness_http(&settings_manager);
         let harness_settings = create_harness_settings(Arc::clone(&settings_manager));
         let registry = (config.build_registry)(Arc::clone(&settings_manager), loc_cwd.clone());
@@ -673,15 +675,15 @@ pub(crate) async fn open_durable_with(
                 provider: m.provider,
                 model_id: m.id,
                 name: m.name,
-                context_window: m.context_window,
+                context_window: u64::try_from(m.context_window).unwrap_or(0),
             })
             .collect();
 
         let initial_view = DurableView {
             session: DurableSessionMeta {
-                id: location.id.clone(),
-                directory: location.directory.clone(),
-                cwd: location.cwd.clone(),
+                id: loc_id,
+                directory: loc_dir,
+                cwd: loc_cwd.clone(),
             },
             conversation: conv_state.value(),
             conversations: summaries,

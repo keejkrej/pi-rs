@@ -2,10 +2,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use pi_ai::auth::types::ProviderAuth;
 use pi_ai::compat::get_model;
-use pi_ai::models::{Provider, ProviderAuth};
-use pi_ai::types::{ApiStreamOptions, AssistantMessageEventStream, Model, SimpleStreamOptions, TranscriptContext};
-use pi_ai::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth};
+use pi_ai::models::Provider;
+use pi_ai::types::{ApiStreamOptions, Model, SimpleStreamOptions, TranscriptContext};
+use pi_ai::utils::event_stream::AssistantMessageEventStream;
+use pi_ai::{ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthResult, Credential, CredentialStore, ModelAuth};
 use pi_coding_agent::core::agent_session::{AgentSession, ExtensionBindings};
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{
@@ -108,7 +110,7 @@ async fn create_session(extension_factories: Vec<InlineExtension>) -> (AgentSess
     ]))
     .unwrap();
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
 
     let settings_manager = SettingsManager::create(&temp_dir, Some(&agent_dir), None);
     let session_manager = SessionManager::in_memory(Some(&temp_dir), None, None).unwrap();
@@ -116,20 +118,37 @@ async fn create_session(extension_factories: Vec<InlineExtension>) -> (AgentSess
         &agent_dir,
         "auth.json",
     ]))));
-    let _ = auth_storage;
+    auth_storage
+        .modify(
+            "anthropic",
+            Box::new(|_prev| {
+                Box::pin(async move {
+                    Ok(Some(Credential::ApiKey(ApiKeyCredential {
+                        key: Some("test-key".to_string()),
+                        env: None,
+                    })))
+                })
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
         credentials: Some(auth_storage),
-        models_path: Some(pi_js::path::join(&[&agent_dir, "models.json"])),
+        models_path: Some(Some(pi_js::path::join(&[&agent_dir, "models.json"]))),
         ..Default::default()
     })
     .await
     .unwrap();
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: temp_dir.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
-        extension_factories: Some(extension_factories),
+        extension_factories: extension_factories
+            .into_iter()
+            .map(pi_coding_agent::core::resource_loader::InlineExtension::Core)
+            .collect(),
         ..Default::default()
     }));
     resource_loader.reload(None).await.unwrap();

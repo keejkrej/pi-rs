@@ -6,7 +6,6 @@ use pi_ai::{Message, UserMessageContent};
 use pi_js::BoxFuture;
 
 use crate::core::agent_session::AgentSession;
-use crate::core::agent_session_services::{AgentSessionRuntimeDiagnostic, AgentSessionServices};
 use crate::core::extensions::runner::emit_session_shutdown_event;
 use crate::core::extensions::types::{
     CancelledResult, ForkPosition, ProjectTrustContext, ReplacedSessionContext, SessionShutdownEvent,
@@ -226,7 +225,9 @@ impl AgentSessionRuntime {
         target_session_file: Option<String>,
     ) -> pi_js::Result<CancelledResult> {
         let session = self.session();
-        let runner = session.extension_runner();
+        let Some(runner) = session.extension_runner() else {
+            return Ok(CancelledResult { cancelled: false });
+        };
         if !runner.has_handlers("session_before_switch") {
             return Ok(CancelledResult { cancelled: false });
         }
@@ -235,7 +236,7 @@ impl AgentSessionRuntime {
                 reason,
                 target_session_file,
             })
-            .await?;
+            .await;
         Ok(CancelledResult {
             cancelled: result.is_some_and(|r| r.cancel == Some(true)),
         })
@@ -243,16 +244,18 @@ impl AgentSessionRuntime {
 
     async fn emit_before_fork(&self, entry_id: &str, position: ForkPosition) -> pi_js::Result<CancelledResult> {
         let session = self.session();
-        let runner = session.extension_runner();
+        let Some(runner) = session.extension_runner() else {
+            return Ok(CancelledResult { cancelled: false });
+        };
         if !runner.has_handlers("session_before_fork") {
             return Ok(CancelledResult { cancelled: false });
         }
         let result = runner
             .emit_session_before_fork(crate::core::extensions::types::SessionBeforeForkEvent {
                 entry_id: entry_id.to_string(),
-                position: Some(position),
+                position,
             })
-            .await?;
+            .await;
         Ok(CancelledResult {
             cancelled: result.is_some_and(|r| r.cancel == Some(true)),
         })
@@ -264,14 +267,16 @@ impl AgentSessionRuntime {
             (guard.session.clone(), guard.before_session_invalidate.clone())
         };
         session.abort().await;
-        emit_session_shutdown_event(
-            &session.extension_runner(),
-            SessionShutdownEvent {
-                reason,
-                target_session_file,
-            },
-        )
-        .await;
+        if let Some(ref runner) = session.extension_runner() {
+            emit_session_shutdown_event(
+                runner,
+                SessionShutdownEvent {
+                    reason,
+                    target_session_file,
+                },
+            )
+            .await;
+        }
         if let Some(cb) = before_invalidate {
             cb();
         }
@@ -295,7 +300,7 @@ impl AgentSessionRuntime {
             rebind(session.clone()).await?;
         }
         if let Some(with_session) = with_session {
-            with_session(session.create_replaced_session_context()).await?;
+            with_session(session.create_replaced_session_context()?).await?;
         }
         Ok(())
     }
@@ -635,14 +640,16 @@ impl AgentSessionRuntime {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             (guard.session.clone(), guard.before_session_invalidate.clone())
         };
-        emit_session_shutdown_event(
-            &session.extension_runner(),
-            SessionShutdownEvent {
-                reason: SessionShutdownReason::Quit,
-                target_session_file: None,
-            },
-        )
-        .await;
+        if let Some(ref runner) = session.extension_runner() {
+            emit_session_shutdown_event(
+                runner,
+                SessionShutdownEvent {
+                    reason: SessionShutdownReason::Quit,
+                    target_session_file: None,
+                },
+            )
+            .await;
+        }
         if let Some(cb) = before_invalidate {
             cb();
         }

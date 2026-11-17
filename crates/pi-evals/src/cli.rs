@@ -397,7 +397,17 @@ async fn run_docs_cli(args: &[String]) -> Result<i32> {
         .await?;
     }
 
-    let report = summarize_eval_observations(&protocol_digest, &tasks, &observations);
+    let expected_runs: Vec<crate::report::EvalRunIdentity> = tasks
+        .iter()
+        .map(|t| crate::report::EvalRunIdentity {
+            eval_set: t.eval_set.clone(),
+            case_id: t.case_id.clone(),
+            variant: t.variant,
+            model: t.model.clone(),
+            run_number: t.run_number,
+        })
+        .collect();
+    let report = summarize_eval_observations(&protocol_digest, &expected_runs, &observations);
     let report_text = format_eval_comparison_report(&report);
     let report_json_path = pi_js::path::resolve(&[&artifact_directory, "report.json"]);
     let report_txt_path = pi_js::path::resolve(&[&artifact_directory, "report.txt"]);

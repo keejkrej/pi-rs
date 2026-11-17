@@ -12,8 +12,9 @@ use pi_ai::{
 };
 use pi_coding_agent::core::agent_session_services::CreateAgentSessionServicesOptions;
 use pi_coding_agent::core::auth_storage::AuthStorage;
-use pi_coding_agent::core::model_runtime::{AuthStatus, ModelRuntime, ModelRuntimeCreateOptions};
+use pi_coding_agent::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
 use pi_coding_agent::core::models_store::InMemoryCodingAgentModelsStore;
+use pi_coding_agent::core::provider_composer::AuthStatus;
 use pretty_assertions::assert_eq;
 use support::suite::harness::{Harness, HarnessOptions, create_harness};
 use tokio::sync::Notify;
@@ -254,6 +255,7 @@ async fn does_not_let_a_stale_provider_scoped_failure_overwrite_a_newer_availabi
     let rt_stale = runtime.clone();
     let prov_c = provider.clone();
     let stale_task = tokio::spawn(async move { rt_stale.get_available(Some(&prov_c), None).await });
+    tokio::pin!(stale_task);
     tokio::select! {
         _ = started_wait => {
             runtime.get_available(None, None).await.unwrap();
@@ -265,7 +267,7 @@ async fn does_not_let_a_stale_provider_scoped_failure_overwrite_a_newer_availabi
             }
             assert_eq!(runtime.get_error(), None);
         }
-        res = stale_task => {
+        res = &mut stale_task => {
             let _ = res;
             runtime.get_available(None, None).await.unwrap();
             assert_eq!(runtime.get_error(), None);

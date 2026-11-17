@@ -9,7 +9,6 @@ use pi_evals::harness::{
 };
 use pi_evals::plan::DocumentationVariant;
 use pi_js::env::testing::EnvGuard;
-use pretty_assertions::assert_eq;
 
 mod resolve_model_selection_tests {
     use super::*;
@@ -118,11 +117,12 @@ mod documentation_variant_tests {
 
     #[test]
     fn strips_only_the_documentation_routing_section_from_the_default_pi_prompt() {
-        let prompt = build_system_prompt(BuildSystemPromptOptions {
+        let prompt = build_system_prompt(&BuildSystemPromptOptions {
             cwd: "/workspace".to_string(),
             selected_tools: Some(DOCUMENTATION_EVAL_TOOLS.iter().map(|s| (*s).to_string()).collect()),
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert!(prompt.contains("\n<docs>\nPi documentation (read only"), "{prompt}");
         assert!(prompt.contains("\n<rules>\n"), "{prompt}");
         assert!(prompt.contains("\n<cwd>\n/workspace\n</cwd>"), "{prompt}");
@@ -141,11 +141,12 @@ mod documentation_variant_tests {
 
     #[test]
     fn verifies_the_prompt_that_was_sent() {
-        let prompt = build_system_prompt(BuildSystemPromptOptions {
+        let prompt = build_system_prompt(&BuildSystemPromptOptions {
             cwd: "/workspace".to_string(),
             selected_tools: Some(DOCUMENTATION_EVAL_TOOLS.iter().map(|s| (*s).to_string()).collect()),
             ..Default::default()
-        });
+        })
+        .unwrap();
         let stripped = exclude_pi_documentation(&prompt).unwrap();
         assert_eq!(
             verify_system_prompt(&stripped, Some("without_docs"), Some(false)).unwrap(),

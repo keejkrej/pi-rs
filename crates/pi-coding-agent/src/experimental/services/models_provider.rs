@@ -203,7 +203,7 @@ impl ModelsApi for ModelsServiceImpl {
             .await?;
         if let Some(ref sm) = self.settings_manager {
             sm.set_default_model_and_provider(&selected.provider, &selected.id);
-            sm.flush().await?;
+            sm.flush().await;
         }
         Ok(())
     }

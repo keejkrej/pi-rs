@@ -8,14 +8,14 @@ use pi_durable::harness::types::{Extension, PromptInput, PromptSection};
 use pi_durable::{define_extension, section_with_options};
 
 use crate::config::get_agent_dir;
-use crate::core::resource_loader::{ContextFile, LoadProjectContextFilesOptions, load_project_context_files};
+use crate::core::resource_loader::{LoadProjectContextFilesOptions, load_project_context_files};
 use crate::core::settings_manager::SettingsManager;
 use crate::core::skills::{LoadSkillsOptions, Skill, load_skills};
-use crate::core::system_prompt::{BuildSystemPromptOptions, build_system_prompt_sections};
-use crate::core::tools::bash::BASH_TOOL_SYSTEM_PROMPT_CONTRIBUTION;
-use crate::core::tools::edit::EDIT_TOOL_SYSTEM_PROMPT_CONTRIBUTION;
-use crate::core::tools::read::READ_TOOL_SYSTEM_PROMPT_CONTRIBUTION;
-use crate::core::tools::write::WRITE_TOOL_SYSTEM_PROMPT_CONTRIBUTION;
+use crate::core::system_prompt::{BuildSystemPromptOptions, ContextFile, build_system_prompt_sections};
+use crate::core::tools::bash::bash_tool_system_prompt_contribution;
+use crate::core::tools::edit::edit_tool_system_prompt_contribution;
+use crate::core::tools::read::read_tool_system_prompt_contribution;
+use crate::core::tools::write::write_tool_system_prompt_contribution;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -29,40 +29,24 @@ struct CachedResources {
     skills: Vec<Skill>,
 }
 
-fn tool_contribution(name: &str) -> Option<(&'static str, Vec<String>)> {
+fn tool_contribution(name: &str) -> Option<(String, Vec<String>)> {
     match name {
-        "read" => Some((
-            READ_TOOL_SYSTEM_PROMPT_CONTRIBUTION.snippet,
-            READ_TOOL_SYSTEM_PROMPT_CONTRIBUTION
-                .guidelines
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        )),
-        "bash" => Some((
-            BASH_TOOL_SYSTEM_PROMPT_CONTRIBUTION.snippet,
-            BASH_TOOL_SYSTEM_PROMPT_CONTRIBUTION
-                .guidelines
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        )),
-        "edit" => Some((
-            EDIT_TOOL_SYSTEM_PROMPT_CONTRIBUTION.snippet,
-            EDIT_TOOL_SYSTEM_PROMPT_CONTRIBUTION
-                .guidelines
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        )),
-        "write" => Some((
-            WRITE_TOOL_SYSTEM_PROMPT_CONTRIBUTION.snippet,
-            WRITE_TOOL_SYSTEM_PROMPT_CONTRIBUTION
-                .guidelines
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        )),
+        "read" => {
+            let c = read_tool_system_prompt_contribution();
+            Some((c.prompt_snippet, c.prompt_guidelines))
+        }
+        "bash" => {
+            let c = bash_tool_system_prompt_contribution(None);
+            Some((c.prompt_snippet, c.prompt_guidelines.unwrap_or_default()))
+        }
+        "edit" => {
+            let c = edit_tool_system_prompt_contribution();
+            Some((c.prompt_snippet, c.prompt_guidelines))
+        }
+        "write" => {
+            let c = write_tool_system_prompt_contribution();
+            Some((c.prompt_snippet, c.prompt_guidelines))
+        }
         _ => None,
     }
 }
@@ -105,14 +89,20 @@ pub fn create_pi_prompt(settings: Arc<SettingsManager>, fallback_cwd: String) ->
                             } else {
                                 let agent_dir = get_agent_dir();
                                 let context_files = load_project_context_files(LoadProjectContextFilesOptions {
-                                    cwd: Some(cwd.clone()),
-                                    agent_dir: Some(agent_dir.clone()),
-                                });
+                                    cwd: cwd.clone(),
+                                    agent_dir: agent_dir.clone(),
+                                })
+                                .into_iter()
+                                .map(|cf| ContextFile {
+                                    path: cf.path,
+                                    content: cf.content,
+                                })
+                                .collect();
                                 let skills = load_skills(LoadSkillsOptions {
-                                    cwd: Some(cwd.clone()),
+                                    cwd: cwd.clone(),
                                     agent_dir: Some(agent_dir),
-                                    skill_paths: Some(settings.get_skill_paths()),
-                                    include_defaults: Some(true),
+                                    skill_paths: settings.get_skill_paths(),
+                                    include_defaults: true,
                                 })
                                 .skills;
                                 let loaded = CachedResources { context_files, skills };
@@ -130,15 +120,16 @@ pub fn create_pi_prompt(settings: Arc<SettingsManager>, fallback_cwd: String) ->
                             }
                         }
 
-                        let map = build_system_prompt_sections(BuildSystemPromptOptions {
-                            cwd: Some(cwd),
+                        let map = build_system_prompt_sections(&BuildSystemPromptOptions {
+                            cwd,
                             selected_tools: Some(selected_tools),
                             tool_snippets: Some(snippets),
                             tool_guidelines: Some(guidelines),
                             context_files: Some(res.context_files),
                             skills: Some(res.skills),
                             ..Default::default()
-                        });
+                        })
+                        .unwrap_or_default();
                         lock(&built_sections).insert(cache_key, map.clone());
                         map
                     }

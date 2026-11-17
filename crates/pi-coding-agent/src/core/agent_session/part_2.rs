@@ -1,34 +1,38 @@
 //! Port of packages/coding-agent/src/core/agent-session.ts#L1386-L2666
 
 use base64::Engine as _;
+use futures::future::BoxFuture;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::agent::{Agent, PromptInput};
-use pi_agent_core::types::{AgentContext, AgentMessage, AgentState, AgentTool, QueueMode};
+use pi_agent_core::types::{AgentMessage, AgentState, AgentTool, QueueMode};
 use pi_ai::types::{
-    AssistantMessage, ImageContent, Model, ModelThinkingLevel, SystemMessage, TextContent, UserContentBlock,
-    UserMessage, UserMessageContent,
+    ImageContent, Model, ModelThinkingLevel, SystemMessage, TextContent, UserContentBlock, UserMessage,
+    UserMessageContent,
 };
-use pi_ai::{clamp_thinking_level, get_current_system_message, get_supported_thinking_levels, models_are_equal};
-use pi_js::BoxFuture;
+use pi_ai::{
+    AnyModel, clamp_thinking_level, get_current_system_message, get_supported_thinking_levels, models_are_equal,
+};
 use serde_json::Value;
 
+use super::BoundaryKind;
 use crate::core::auth_guidance::{format_no_api_key_found_message, format_no_model_selected_message};
 use crate::core::cache_warmer::CacheWarmingStatus;
 use crate::core::defaults::DEFAULT_THINKING_LEVEL;
+use crate::core::extensions::runner::BoundaryBaseEvent;
 use crate::core::extensions::types::{
-    AgentBeforeSettleEvent, BeforeAgentStartEvent, BoundaryEntryBuilder, CustomMessageContent, InputDeliveryBehavior,
-    InputSource, ModelSelectEvent, ModelSelectSource, ThinkingLevelSelectEvent, ToolDefinition, ToolExposure, ToolInfo,
-    ToolLoadoutBackend, ToolNamespace,
+    CustomMessageContent, CustomMessageDraft, ExtensionError, InputDeliveryBehavior, InputSource, ModelSelectEvent,
+    ModelSelectSource, ThinkingLevelSelectEvent, ToolDefinition, ToolExposure, ToolInfo, ToolLoadoutBackend,
+    ToolNamespace,
 };
 use crate::core::messages::CustomMessage;
 use crate::core::prompt_templates::{PromptTemplate, expand_prompt_template};
 use crate::core::resource_loader::ResourceLoader;
 use crate::core::sdk::ScopedModelEntry;
 use crate::core::session_manager::SessionManager;
-use crate::core::settings_manager::{CacheWarmingMode, SettingsManager};
+use crate::core::settings_manager::{CacheWarmingMode, QueueModeSetting, SettingsManager};
 use crate::core::system_prompt::{
-    NormalizedBuildSystemPromptOptions, build_system_prompt, build_system_prompt_sections, diff_system_prompt_sections,
-    normalize_build_system_prompt_options,
+    BuildSystemPromptOptions, ContextFile, NormalizedBuildSystemPromptOptions, build_system_prompt_from_normalized,
+    build_system_prompt_sections, diff_system_prompt_sections, normalize_build_system_prompt_options,
 };
 use crate::core::virtual_models::{find_latest_response, is_virtual_model};
 use crate::utils::frontmatter::strip_frontmatter;
@@ -119,6 +123,53 @@ impl ToolLoadoutBackend for SessionToolLoadout {
     }
 }
 
+pub(crate) fn is_mcp_tool_name(name: &str) -> bool {
+    name.starts_with("mcp__")
+        || matches!(
+            name,
+            "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+        )
+}
+
+/// Glob wildcard match where `*` matches zero or more characters.
+pub(crate) fn tool_pattern_matches(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let p = pattern.as_bytes();
+    let s = name.as_bytes();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let mut star_pi: Option<usize> = None;
+    let mut match_si = 0usize;
+    while si < s.len() {
+        if pi < p.len() && p[pi] == s[si] {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star_pi = Some(pi);
+            match_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            match_si += 1;
+            si = match_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+pub(crate) fn tool_name_matches_entries<'a, I>(entries: I, name: &str) -> bool
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    entries.into_iter().any(|entry| tool_pattern_matches(entry, name))
+}
+
 impl AgentSession {
     // =========================================================================
     // Read-only State Access
@@ -171,7 +222,8 @@ impl AgentSession {
         if !is_virtual_model(&model) {
             return None;
         }
-        let latest = find_latest_response(&self.messages())?;
+        let messages = self.messages();
+        let latest = find_latest_response(&messages)?;
         let physical = self
             .inner
             .model_runtime
@@ -209,7 +261,7 @@ impl AgentSession {
                 .clone()
                 .unwrap_or_else(|| guard.base_system_prompt_options.clone())
         };
-        build_system_prompt(&opts)
+        build_system_prompt_from_normalized(&opts).unwrap_or_default()
     }
 
     /// Current retry attempt (0 if not retrying).
@@ -304,15 +356,21 @@ impl AgentSession {
 
     pub(crate) fn _is_allowed_tool(&self, name: &str) -> bool {
         let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        let allowed_ok = guard
-            .allowed_tool_names
-            .as_ref()
-            .is_none_or(|allowed| allowed.contains(name));
-        let excluded_ok = guard
+        if guard
             .excluded_tool_names
             .as_ref()
-            .is_none_or(|excluded| !excluded.contains(name));
-        allowed_ok && excluded_ok
+            .is_some_and(|excluded| tool_name_matches_entries(excluded, name))
+        {
+            return false;
+        }
+        let Some(allowed) = guard.allowed_tool_names.as_ref() else {
+            return true;
+        };
+        if tool_name_matches_entries(allowed, name) {
+            return true;
+        }
+        let allowlist_filters_mcp = allowed.is_empty() || allowed.iter().any(|entry| entry.starts_with("mcp__"));
+        !allowlist_filters_mcp && is_mcp_tool_name(name)
     }
 
     pub(crate) fn _get_tool_exposure(&self, name: &str) -> ToolExposure {
@@ -434,7 +492,12 @@ impl AgentSession {
                         Ok(None) => {}
                         Err(err) => {
                             if let Some(ref runner) = runner {
-                                runner.emit_error_parts(&entry.source_info.path, "prepare_loadout", &err.to_string());
+                                runner.emit_error(ExtensionError {
+                                    extension_path: entry.source_info.path.clone(),
+                                    event: "prepare_loadout".to_string(),
+                                    error: err.to_string(),
+                                    stack: None,
+                                });
                             }
                         }
                     }
@@ -512,7 +575,7 @@ impl AgentSession {
 
     /// File-based prompt templates.
     pub fn prompt_templates(&self) -> Vec<PromptTemplate> {
-        self.inner.resource_loader.get_prompts().prompts
+        self.inner.resource_loader.get_prompts().0
     }
 
     pub(crate) fn _normalize_prompt_snippet(&self, text: Option<&str>) -> Option<String> {
@@ -547,8 +610,17 @@ impl AgentSession {
         } else {
             loader_append.join("\n\n")
         };
-        let loaded_skills = self.inner.resource_loader.get_skills().skills;
-        let loaded_context_files = self.inner.resource_loader.get_agents_files().agents_files;
+        let loaded_skills = self.inner.resource_loader.get_skills().0;
+        let loaded_context_files: Vec<ContextFile> = self
+            .inner
+            .resource_loader
+            .get_agents_files()
+            .into_iter()
+            .map(|cf| ContextFile {
+                path: cf.path,
+                content: cf.content,
+            })
+            .collect();
 
         let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         let valid_tool_names: Vec<String> = tool_names
@@ -564,18 +636,17 @@ impl AgentSession {
                 tool_snippets.insert(name.clone(), snippet.clone());
             }
         }
-        guard.base_system_prompt_options =
-            normalize_build_system_prompt_options(crate::core::system_prompt::BuildSystemPromptOptions {
-                cwd: Some(guard.cwd.clone()),
-                skills: Some(loaded_skills),
-                context_files: Some(loaded_context_files),
-                custom_prompt: loader_system_prompt,
-                append_system_prompt: Some(append_system_prompt),
-                selected_tools: Some(valid_tool_names),
-                tool_snippets: Some(tool_snippets),
-                tool_guidelines: Some(guard.tool_prompt_guidelines.clone()),
-                ..Default::default()
-            });
+        guard.base_system_prompt_options = normalize_build_system_prompt_options(&BuildSystemPromptOptions {
+            cwd: guard.cwd.clone(),
+            skills: Some(loaded_skills),
+            context_files: Some(loaded_context_files),
+            custom_prompt: loader_system_prompt,
+            append_system_prompt: Some(append_system_prompt),
+            selected_tools: Some(valid_tool_names),
+            tool_snippets: Some(tool_snippets),
+            tool_guidelines: Some(guard.tool_prompt_guidelines.clone()),
+            ..Default::default()
+        });
     }
 
     /// Apply a prompt and tool loadout for the next request.
@@ -605,10 +676,12 @@ impl AgentSession {
             }
         };
 
-        let existing_sections = get_current_system_message(messages)
+        let llm_messages: Vec<pi_ai::types::Message> =
+            messages.iter().filter_map(|m| m.as_message().cloned()).collect();
+        let existing_sections = get_current_system_message(&llm_messages)
             .and_then(|s| s.sections)
             .unwrap_or_default();
-        let next_sections = build_system_prompt_sections(options);
+        let next_sections = build_system_prompt_sections(&normalized_to_build_options(options)).unwrap_or_default();
         let sections = diff_system_prompt_sections(&existing_sections, &next_sections)?;
         Some(SystemMessage {
             content: pi_ai::types::SystemMessageContent::Text(String::new()),
@@ -702,7 +775,8 @@ impl AgentSession {
                     let Some(forced) = forced else {
                         return Ok(transformed);
                     };
-                    let current = get_current_system_message(&transformed);
+                    let llm_msgs: Vec<_> = transformed.iter().filter_map(|m| m.as_message().cloned()).collect();
+                    let current = get_current_system_message(&llm_msgs);
                     let head = SystemMessage {
                         content: pi_ai::types::SystemMessageContent::Text(forced),
                         sections: None,
@@ -731,7 +805,12 @@ impl AgentSession {
                 .clear();
         }
         let context = self.inner.session_manager.build_session_context();
-        let Some(current) = get_current_system_message(&context.messages) else {
+        let llm_messages: Vec<pi_ai::types::Message> = context
+            .messages
+            .iter()
+            .filter_map(|m| m.as_message().cloned())
+            .collect();
+        let Some(current) = get_current_system_message(&llm_messages) else {
             return;
         };
         let names: Vec<String> = current
@@ -766,6 +845,7 @@ impl AgentSession {
                 guard.agent_run_abort_requested = false;
                 guard.failed_response = None;
                 guard.pending_tool_names.clear();
+                guard.message_end_replacements.clear();
                 guard.is_agent_run_active = true;
             }
             self._record_selection();
@@ -836,6 +916,7 @@ impl AgentSession {
     }
 
     async fn _handle_post_agent_run(&self) -> bool {
+        self._await_pending_extension_sends().await;
         let (message, tool_results, abort_req) = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let message = guard.last_assistant_message.take();
@@ -924,27 +1005,29 @@ impl AgentSession {
         };
 
         let weak = Arc::downgrade(&self.inner);
-        let build_ctx: BoundaryEntryBuilder = Arc::new(move |entries| {
-            weak.upgrade()
-                .map(|inner| AgentSession { inner }._build_boundary_context(&entries))
-                .unwrap_or_default()
-        });
-
         let result = runner
-            .emit_before_settle_boundary(
-                AgentBeforeSettleEvent {
-                    entries: Vec::new(),
-                    r#continue: false,
-                    context: self._build_boundary_context(&[]),
-                    outcome,
+            .emit_boundary(
+                BoundaryBaseEvent::AgentBeforeSettle { outcome },
+                move |entries: &[crate::core::extensions::types::SessionBoundaryDraft]| {
+                    let entries = entries.to_vec();
+                    let weak = weak.clone();
+                    Box::pin(async move {
+                        Ok(weak
+                            .upgrade()
+                            .map(|inner| {
+                                AgentSession { inner }
+                                    ._build_boundary_context(&entries, BoundaryKind::AgentBeforeSettle)
+                            })
+                            .unwrap_or_default())
+                    })
                 },
-                build_ctx,
             )
             .await;
 
+        self._await_pending_extension_sends().await;
         self._commit_boundary_drafts(&result.entries);
         self._flush_pending_custom_messages();
-        let final_context = self._build_boundary_context(&[]);
+        let final_context = self._build_boundary_context(&[], BoundaryKind::AgentBeforeSettle);
 
         let abort_during = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1006,7 +1089,13 @@ impl AgentSession {
             ._limits_model()
             .and_then(|m| m.input_limits)
             .and_then(|l| l.images)
-            .and_then(|img| img.resize);
+            .and_then(|img| img.resize)
+            .map(|r| crate::utils::image_resize::ImageResizeOptions {
+                max_width: r.max_width.and_then(|v| u32::try_from(v).ok()),
+                max_height: r.max_height.and_then(|v| u32::try_from(v).ok()),
+                max_bytes: r.max_bytes.and_then(|v| usize::try_from(v).ok()),
+                jpeg_quality: r.jpeg_quality.map(|v| v.clamp(0.0, 100.0) as u8),
+            });
         let mut normalized_images = Vec::new();
         let mut hints = Vec::new();
         for image in images {
@@ -1140,7 +1229,14 @@ impl AgentSession {
             };
 
             let has_configured_auth = self.inner.model_runtime.has_configured_auth(&model.provider)
-                || self.inner.model_runtime.check_auth(&model.provider).await.is_some();
+                || self
+                    .inner
+                    .model_runtime
+                    .check_auth(&model.provider, None)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
             if !has_configured_auth {
                 if self.inner.model_runtime.is_using_oauth(&model.provider) {
                     return Err(pi_js::Error::msg(format!(
@@ -1161,17 +1257,25 @@ impl AgentSession {
             };
             let selected_tools_before = base_opts.selected_tools.clone();
             let mut next_system_opts = base_opts.clone();
-            let mut extra_custom_messages: Vec<crate::core::extensions::types::mcp_wire::CustomMessageDraft> =
-                Vec::new();
+            let mut extra_custom_messages: Vec<CustomMessageDraft> = Vec::new();
 
             if let Some(ref runner) = runner {
+                let build_opts = BuildSystemPromptOptions {
+                    custom_prompt: base_opts.custom_prompt.clone(),
+                    force_system_prompt: base_opts.force_system_prompt.clone(),
+                    selected_tools: Some(base_opts.selected_tools.clone()),
+                    hidden_tools: Some(base_opts.hidden_tools.clone()),
+                    tool_snippets: Some(base_opts.tool_snippets.clone()),
+                    tool_guidelines: Some(base_opts.tool_guidelines.clone()),
+                    prompt_guidelines: Some(base_opts.prompt_guidelines.clone()),
+                    append_system_prompt: Some(base_opts.append_system_prompt.clone()),
+                    sections: Some(base_opts.sections.clone()),
+                    cwd: base_opts.cwd.clone(),
+                    context_files: Some(base_opts.context_files.clone()),
+                    skills: Some(base_opts.skills.clone()),
+                };
                 let before_res = runner
-                    .emit_before_agent_start(BeforeAgentStartEvent {
-                        prompt: expanded_text.clone(),
-                        images: current_images.clone(),
-                        system_prompt: build_system_prompt(&base_opts),
-                        system_prompt_options: Arc::new(std::sync::Mutex::new(next_system_opts.clone())),
-                    })
+                    .emit_before_agent_start(&expanded_text, current_images.clone(), build_opts)
                     .await;
                 next_system_opts = before_res.system_prompt_options;
                 extra_custom_messages = before_res.messages;
@@ -1253,8 +1357,13 @@ impl AgentSession {
             return false;
         };
         let ctx = runner.create_command_context();
-        if let Err(err) = (command.handler)(args.to_string(), ctx).await {
-            runner.emit_error_parts(&format!("command:{command_name}"), "command", &err.to_string());
+        if let Err(err) = (command.command.handler)(args.to_string(), ctx).await {
+            runner.emit_error(ExtensionError {
+                extension_path: format!("command:{command_name}"),
+                event: "command".to_string(),
+                error: err.to_string(),
+                stack: None,
+            });
         }
         true
     }
@@ -1268,7 +1377,7 @@ impl AgentSession {
             None => (after_prefix, ""),
         };
 
-        let skills = self.inner.resource_loader.get_skills().skills;
+        let skills = self.inner.resource_loader.get_skills().0;
         let Some(skill) = skills.into_iter().find(|s| s.name == skill_name) else {
             return text.to_string();
         };
@@ -1296,7 +1405,12 @@ impl AgentSession {
                     .extension_runner
                     .clone();
                 if let Some(runner) = runner {
-                    runner.emit_error_parts(&skill.file_path, "skill_expansion", &err.to_string());
+                    runner.emit_error(ExtensionError {
+                        extension_path: skill.file_path.clone(),
+                        event: "skill_expansion".to_string(),
+                        error: err.to_string(),
+                        stack: None,
+                    });
                 }
                 text.to_string()
             }
@@ -1432,12 +1546,13 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Send a custom message to the session. Creates a `CustomMessageEntry`.
-    pub async fn send_custom_message(
+    /// Synchronously performs custom-message queuing/appending when no new run is needed, returning
+    /// the message to prompt when a new agent turn should start asynchronously.
+    pub(crate) fn _try_send_custom_message_sync(
         &self,
         message: SendCustomMessageDraft,
         options: Option<SendCustomMessageOptions>,
-    ) -> pi_js::Result<()> {
+    ) -> Option<AgentMessage> {
         let opts = options.unwrap_or_default();
         let app_message = CustomMessage {
             role: "custom".to_string(),
@@ -1463,25 +1578,22 @@ impl AgentSession {
                 self.inner.agent.steer(agent_msg);
             }
         } else if opts.trigger_turn == Some(true) {
-            {
-                let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-                if guard.is_emitting_agent_settled {
-                    let weak = Arc::downgrade(&self.inner);
-                    let agent_msg = AgentMessage::from(app_message);
-                    guard.deferred_settled_actions.push(Box::new(move || {
-                        Box::pin(async move {
-                            if let Some(inner) = weak.upgrade() {
-                                let _ = AgentSession { inner }
-                                    ._run_agent_prompt(PromptInput::Message(agent_msg))
-                                    .await;
-                            }
-                        })
-                    }));
-                    return Ok(());
-                }
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_emitting_agent_settled {
+                let weak = Arc::downgrade(&self.inner);
+                let agent_msg = AgentMessage::from(app_message);
+                guard.deferred_settled_actions.push(Box::new(move || {
+                    Box::pin(async move {
+                        if let Some(inner) = weak.upgrade() {
+                            let _ = AgentSession { inner }
+                                ._run_agent_prompt(PromptInput::Message(agent_msg))
+                                .await;
+                        }
+                    })
+                }));
+                return None;
             }
-            self._run_agent_prompt(PromptInput::Message(AgentMessage::from(app_message)))
-                .await?;
+            return Some(AgentMessage::from(app_message));
         } else if self.is_streaming() {
             self.inner
                 .state
@@ -1491,6 +1603,18 @@ impl AgentSession {
                 .push(AgentMessage::from(app_message));
         } else {
             self._append_custom_message(app_message);
+        }
+        None
+    }
+
+    /// Send a custom message to the session. Creates a `CustomMessageEntry`.
+    pub async fn send_custom_message(
+        &self,
+        message: SendCustomMessageDraft,
+        options: Option<SendCustomMessageOptions>,
+    ) -> pi_js::Result<()> {
+        if let Some(agent_msg) = self._try_send_custom_message_sync(message, options) {
+            self._run_agent_prompt(PromptInput::Message(agent_msg)).await?;
         }
         Ok(())
     }
@@ -1527,13 +1651,8 @@ impl AgentSession {
         }
     }
 
-    /// Send a user message to the agent. Always triggers a turn.
-    pub async fn send_user_message(
-        &self,
-        content: impl Into<UserMessageInput>,
-        options: Option<SendUserMessageOptions>,
-    ) -> pi_js::Result<()> {
-        let (text, images) = match content.into() {
+    fn _split_user_message_input(content: UserMessageInput) -> (String, Option<Vec<ImageContent>>) {
+        match content {
             UserMessageInput::Text(s) => (s, None),
             UserMessageInput::Blocks(blocks) => {
                 let mut text_parts = Vec::new();
@@ -1547,7 +1666,111 @@ impl AgentSession {
                 let images = if imgs.is_empty() { None } else { Some(imgs) };
                 (text_parts.join("\n"), images)
             }
-        };
+        }
+    }
+
+    /// Synchronously queues extension user messages when safe to do without awaiting hooks, returning
+    /// `(track_during_run, future)` when async execution is required.
+    pub(crate) fn _try_send_user_message_sync(
+        &self,
+        content: UserMessageInput,
+        options: Option<SendUserMessageOptions>,
+    ) -> pi_js::Result<Option<(bool, BoxFuture<'static, pi_js::Result<()>>)>> {
+        let (text, images) = Self::_split_user_message_input(content);
+        let opts = options.unwrap_or_default();
+        let expand_prompt_templates = opts.expand_prompt_templates.unwrap_or(false);
+
+        {
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_emitting_agent_settled {
+                let weak = Arc::downgrade(&self.inner);
+                let text_owned = text;
+                let images_owned = images;
+                let deliver_as = opts.deliver_as;
+                guard.deferred_settled_actions.push(Box::new(move || {
+                    Box::pin(async move {
+                        if let Some(inner) = weak.upgrade() {
+                            let _ = AgentSession { inner }
+                                .prompt(
+                                    &text_owned,
+                                    Some(PromptOptions {
+                                        expand_prompt_templates: Some(expand_prompt_templates),
+                                        streaming_behavior: deliver_as,
+                                        images: images_owned,
+                                        source: Some(InputSource::Extension),
+                                        preflight_result: None,
+                                    }),
+                                )
+                                .await;
+                        }
+                    })
+                }));
+                return Ok(None);
+            }
+        }
+
+        let is_streaming = self.is_streaming();
+        if is_streaming {
+            let runner = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extension_runner
+                .clone();
+            let is_ext_cmd = expand_prompt_templates && text.starts_with('/') && {
+                let rest = &text[1..];
+                let cmd_name = rest.split(' ').next().unwrap_or(rest);
+                runner.as_ref().is_some_and(|r| r.get_command(cmd_name).is_some())
+            };
+            let has_input_handlers = runner.as_ref().is_some_and(|r| r.has_handlers("input"));
+            if !is_ext_cmd && !has_input_handlers {
+                let mut expanded_text = text;
+                if expand_prompt_templates {
+                    expanded_text = self._expand_skill_command(&expanded_text);
+                    let templates = self.prompt_templates();
+                    expanded_text = expand_prompt_template(&expanded_text, &templates);
+                }
+                let Some(behavior) = opts.deliver_as else {
+                    return Err(pi_js::Error::msg(
+                        "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+                    ));
+                };
+                match behavior {
+                    StreamingBehavior::FollowUp => self._queue_follow_up(&expanded_text, images),
+                    StreamingBehavior::Steer => self._queue_steer(&expanded_text, images),
+                }
+                return Ok(None);
+            }
+        }
+
+        let session = self.clone();
+        Ok(Some((
+            is_streaming,
+            Box::pin(async move {
+                session
+                    .prompt(
+                        &text,
+                        Some(PromptOptions {
+                            expand_prompt_templates: Some(expand_prompt_templates),
+                            streaming_behavior: opts.deliver_as,
+                            images,
+                            source: Some(InputSource::Extension),
+                            preflight_result: None,
+                        }),
+                    )
+                    .await
+            }),
+        )))
+    }
+
+    /// Send a user message to the agent. Always triggers a turn.
+    pub async fn send_user_message(
+        &self,
+        content: impl Into<UserMessageInput>,
+        options: Option<SendUserMessageOptions>,
+    ) -> pi_js::Result<()> {
+        let (text, images) = Self::_split_user_message_input(content.into());
         let opts = options.unwrap_or_default();
         self.prompt(
             &text,
@@ -1606,8 +1829,8 @@ impl AgentSession {
         &self.inner.resource_loader
     }
 
-    /// Abort current operation and wait for agent to become idle.
-    pub async fn abort(&self) {
+    /// Synchronously mark abort requested and signal active operations to abort without waiting for idle.
+    pub fn request_abort(&self) {
         {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_agent_run_active {
@@ -1621,6 +1844,11 @@ impl AgentSession {
         self.abort_compaction();
         self.abort_branch_summary();
         self.inner.agent.abort();
+    }
+
+    /// Abort current operation and wait for agent to become idle.
+    pub async fn abort(&self) {
+        self.request_abort();
         self.wait_for_idle().await;
     }
 
@@ -1646,7 +1874,9 @@ impl AgentSession {
     // =========================================================================
 
     async fn _emit_model_select(&self, next_model: &Model, previous_model: Option<&Model>, source: ModelSelectSource) {
-        if models_are_equal(previous_model, Some(next_model)) {
+        let prev_any = previous_model.map(|m| AnyModel::Chat(m.clone()));
+        let next_any = AnyModel::Chat(next_model.clone());
+        if models_are_equal(prev_any.as_ref(), Some(&next_any)) {
             return;
         }
         let runner = self
@@ -1658,7 +1888,7 @@ impl AgentSession {
             .clone();
         if let Some(runner) = runner {
             let _ = runner
-                .emit_model_select(ModelSelectEvent {
+                .emit(ModelSelectEvent {
                     model: next_model.clone(),
                     previous_model: previous_model.cloned(),
                     source,
@@ -1670,7 +1900,15 @@ impl AgentSession {
     /// Set model directly.
     /// Validates that auth is configured and saves to the session transcript.
     pub async fn set_model(&self, model: Model, options: Option<ModelMutationOptions>) -> pi_js::Result<()> {
-        if self.inner.model_runtime.check_auth(&model.provider).await.is_none() {
+        if self
+            .inner
+            .model_runtime
+            .check_auth(&model.provider, None)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
             return Err(pi_js::Error::msg(format!(
                 "No API key for {}/{}",
                 model.provider, model.id
@@ -1707,10 +1945,11 @@ impl AgentSession {
             if guard.scoped_models.is_empty() {
                 return;
             }
+            let model_any = AnyModel::Chat(model.clone());
             if guard
                 .scoped_models
                 .iter()
-                .any(|scoped| models_are_equal(Some(&scoped.model), Some(model)))
+                .any(|scoped| models_are_equal(Some(&AnyModel::Chat(scoped.model.clone())), Some(&model_any)))
             {
                 return;
             }
@@ -1734,7 +1973,7 @@ impl AgentSession {
             return;
         }
         enabled_models.push(model_reference);
-        self.inner.settings_manager.set_enabled_models(enabled_models);
+        self.inner.settings_manager.set_enabled_models(Some(enabled_models));
     }
 
     /// Cycle to next/previous model.
@@ -1781,9 +2020,10 @@ impl AgentSession {
         }
 
         let current_model = self.model();
+        let current_any = current_model.as_ref().map(|m| AnyModel::Chat(m.clone()));
         let current_index = scoped_models
             .iter()
-            .position(|sm| models_are_equal(Some(&sm.model), current_model.as_ref()))
+            .position(|sm| models_are_equal(Some(&AnyModel::Chat(sm.model.clone())), current_any.as_ref()))
             .unwrap_or(0);
         let len = scoped_models.len();
         let next_index = match direction {
@@ -1830,9 +2070,10 @@ impl AgentSession {
         }
 
         let current_model = self.model();
+        let current_any = current_model.as_ref().map(|m| AnyModel::Chat(m.clone()));
         let current_index = available_models
             .iter()
-            .position(|m| models_are_equal(Some(m), current_model.as_ref()))
+            .position(|m| models_are_equal(Some(&AnyModel::Chat(m.clone())), current_any.as_ref()))
             .unwrap_or(0);
         let len = available_models.len();
         let next_index = match direction {
@@ -1907,7 +2148,11 @@ impl AgentSession {
                     level: to_agent_thinking_level(effective_level),
                     previous_level: to_agent_thinking_level(previous_level),
                 };
-                runner.emit_thinking_level_select_background(ev);
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = runner.emit(ev).await;
+                    });
+                }
             }
         }
     }
@@ -1984,23 +2229,35 @@ impl AgentSession {
     // =========================================================================
 
     pub(crate) fn sync_queue_modes_from_settings(&self) {
+        let to_queue_mode = |m: QueueModeSetting| match m {
+            QueueModeSetting::All => QueueMode::All,
+            QueueModeSetting::OneAtATime => QueueMode::OneAtATime,
+        };
         self.inner
             .agent
-            .set_steering_mode(self.inner.settings_manager.get_steering_mode());
+            .set_steering_mode(to_queue_mode(self.inner.settings_manager.get_steering_mode()));
         self.inner
             .agent
-            .set_follow_up_mode(self.inner.settings_manager.get_follow_up_mode());
+            .set_follow_up_mode(to_queue_mode(self.inner.settings_manager.get_follow_up_mode()));
     }
 
     /// Set steering message mode. Saves to settings.
     pub fn set_steering_mode(&self, mode: QueueMode) {
         self.inner.agent.set_steering_mode(mode);
-        self.inner.settings_manager.set_steering_mode(mode);
+        let setting = match mode {
+            QueueMode::All => QueueModeSetting::All,
+            QueueMode::OneAtATime => QueueModeSetting::OneAtATime,
+        };
+        self.inner.settings_manager.set_steering_mode(setting);
     }
 
     /// Set follow-up message mode. Saves to settings.
     pub fn set_follow_up_mode(&self, mode: QueueMode) {
         self.inner.agent.set_follow_up_mode(mode);
-        self.inner.settings_manager.set_follow_up_mode(mode);
+        let setting = match mode {
+            QueueMode::All => QueueModeSetting::All,
+            QueueMode::OneAtATime => QueueModeSetting::OneAtATime,
+        };
+        self.inner.settings_manager.set_follow_up_mode(setting);
     }
 }

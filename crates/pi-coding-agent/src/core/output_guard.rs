@@ -17,12 +17,14 @@ pub fn take_over_stdout() {
     if let Ok(mut guard) = STATE.lock() {
         guard.taken_over = true;
     }
+    pi_js::console::set_stdout_redirect_to_stderr(true);
 }
 
 pub fn restore_stdout() {
     if let Ok(mut guard) = STATE.lock() {
         guard.taken_over = false;
     }
+    pi_js::console::set_stdout_redirect_to_stderr(false);
 }
 
 pub fn is_stdout_taken_over() -> bool {
@@ -40,10 +42,10 @@ pub fn write_raw_stdout(text: &str) {
         let text_owned = text.to_owned();
         tokio::spawn(async move {
             let _guard = WRITE_SERIALIZER.lock().await;
-            pi_js::console::stdout_write(&text_owned);
+            pi_js::console::raw_stdout_write(&text_owned);
         });
     } else {
-        pi_js::console::stdout_write(text);
+        pi_js::console::raw_stdout_write(text);
     }
 }
 

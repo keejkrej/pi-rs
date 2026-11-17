@@ -4,7 +4,7 @@ use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use pi_ai::types::ImageContent;
+use pi_ai::types::{AnyModel, ImageContent};
 use pi_ai::{AuthOperationOptions, CredentialStore, ModelsRefreshOptions, models_are_equal};
 use pi_js::abort::AbortController;
 use pi_tui::set_capability_overrides;
@@ -26,7 +26,9 @@ use crate::cli::credential_print::resolve_credential_for_print;
 use crate::cli::file_processor::{ProcessFileOptions, process_file_arguments};
 use crate::cli::initial_message::{InitialMessageInput, build_initial_message};
 use crate::cli::list_models::list_models;
-use crate::cli::project_trust::{CreateProjectTrustContextOptions, create_project_trust_context};
+use crate::cli::project_trust::{
+    CreateProjectTrustContextOptions, create_project_trust_runtime_context, extension_project_trust_to_runtime_context,
+};
 use crate::cli::startup_ui::{should_run_first_time_setup, show_first_time_setup, show_startup_selector};
 use crate::config::{APP_NAME, ENV_SESSION_DIR, VERSION, expand_tilde_path, get_agent_dir, get_package_dir};
 use crate::core::agent_session_runtime::{
@@ -39,21 +41,29 @@ use crate::core::agent_session_services::{
 };
 use crate::core::auth_guidance::format_no_models_available_message;
 use crate::core::auth_storage::{AuthStorage, ReadOnlyAuthStorage};
-use crate::core::export_html::export_from_file;
+use crate::core::export_html::{ExportOptions, export_from_file};
 use crate::core::extensions::types::{FlagValue, InlineExtension};
-use crate::core::http_dispatcher::{apply_http_proxy_settings, configure_http_dispatcher};
+use crate::core::http_dispatcher::{
+    DEFAULT_HTTP_IDLE_TIMEOUT_MS, apply_http_proxy_settings, configure_http_dispatcher,
+};
 use crate::core::model_resolver::{ResolveCliModelOptions, ScopedModel, resolve_cli_model, resolve_model_scope};
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
 use crate::core::output_guard::{restore_stdout, take_over_stdout};
-use crate::core::project_trust::{AppMode, ResolveProjectTrustedOptions, resolve_project_trusted};
-use crate::core::resource_loader::{DefaultResourceLoaderOptions, ResourceLoaderReloadOptions};
+use crate::core::project_trust::{
+    AppMode, ProjectTrustExtensionHost, ResolveProjectTrustedOptions, RunnerProjectTrustExtensionHost,
+    resolve_project_trusted,
+};
+use crate::core::resource_loader::{
+    CoreExtensionLoaderHost, DefaultResourceLoaderOptions, InlineExtension as LoaderInlineExtension,
+    ResourceLoaderReloadOptions,
+};
 use crate::core::sdk::{CreateAgentSessionOptions, NoToolsMode, ScopedModelEntry};
 use crate::core::session_cwd::{
     MissingSessionCwdError, format_missing_session_cwd_prompt, get_missing_session_cwd_issue,
 };
 use crate::core::session_manager::{NewSessionOptions, SessionManager, assert_valid_session_id};
 use crate::core::settings_diagnostics::{collect_settings_diagnostics, deduplicate_diagnostics};
-use crate::core::settings_manager::{SettingsManager, SettingsManagerCreateOptions};
+use crate::core::settings_manager::{Settings, SettingsManager, SettingsManagerCreateOptions};
 use crate::core::timings::{TimingNamespaceKind, print_timings, reset_timings, time};
 use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
 use crate::experimental::coordinator::run_coordinator_process;
@@ -98,7 +108,6 @@ fn report_diagnostics(diagnostics: &[AgentSessionRuntimeDiagnostic]) {
             AgentSessionRuntimeDiagnosticType::Error => c.red().apply(&format!("Error: {}", d.message)),
             AgentSessionRuntimeDiagnosticType::Warning => c.yellow().apply(&format!("Warning: {}", d.message)),
             AgentSessionRuntimeDiagnosticType::Info => c.dim().apply(&d.message),
-            AgentSessionRuntimeDiagnosticType::Collision => c.yellow().apply(&format!("Warning: {}", d.message)),
         };
         pi_js::console::error(&rendered);
     }
@@ -280,7 +289,7 @@ async fn run_auth_command(args: &[String]) -> pi_js::Result<bool> {
 }
 
 async fn prepare_initial_message(
-    parsed: &Args,
+    parsed: &mut Args,
     stdin_content: Option<&str>,
 ) -> pi_js::Result<(Option<String>, Option<Vec<ImageContent>>)> {
     if parsed.file_args.is_empty() {
@@ -300,7 +309,7 @@ async fn prepare_initial_message(
     )
     .await?;
     let file_text = (!processed.text.is_empty()).then_some(processed.text.as_str());
-    let file_images = (!processed.images.is_empty()).then_some(processed.images.as_slice());
+    let file_images = (!processed.images.is_empty()).then_some(processed.images);
     let res = build_initial_message(InitialMessageInput {
         parsed,
         file_text,
@@ -459,14 +468,14 @@ pub async fn create_session_manager(
     settings_manager: &SettingsManager,
 ) -> pi_js::Result<SessionManager> {
     if parsed.no_session == Some(true) || parsed.help == Some(true) || parsed.list_models.is_some() {
-        return Ok(SessionManager::in_memory(
+        return SessionManager::in_memory(
             Some(cwd),
             parsed.session_id.as_ref().map(|id| NewSessionOptions {
                 id: Some(id.clone()),
                 ..Default::default()
             }),
             None,
-        ));
+        );
     }
 
     if let Some(ref fork_arg) = parsed.fork {
@@ -516,17 +525,27 @@ pub async fn create_session_manager(
         let cwd_owned = cwd.to_string();
         let sd_owned = session_dir.map(str::to_string);
         let selected = crate::cli::session_picker::select_session(
-            move |on_progress, signal| {
+            Arc::new(move |on_progress, signal| {
                 let cwd = cwd_owned.clone();
                 let sd = sd_owned.clone();
-                Box::pin(async move { SessionManager::list(&cwd, sd.as_deref(), on_progress, signal).await })
-            },
+                Box::pin(async move {
+                    let progress = on_progress
+                        .as_deref()
+                        .map(|cb| cb as crate::core::session_manager::SessionListProgress<'_>);
+                    SessionManager::list(&cwd, sd.as_deref(), progress, signal.as_ref()).await
+                })
+            }),
             {
                 let sd = session_dir.map(str::to_string);
-                move |on_progress, signal| {
+                Arc::new(move |on_progress, signal| {
                     let sd = sd.clone();
-                    Box::pin(async move { SessionManager::list_all(sd.as_deref(), on_progress, signal).await })
-                }
+                    Box::pin(async move {
+                        let progress = on_progress
+                            .as_deref()
+                            .map(|cb| cb as crate::core::session_manager::SessionListProgress<'_>);
+                        SessionManager::list_all(sd.as_deref(), progress, signal.as_ref()).await
+                    })
+                })
             },
             settings_manager,
         )
@@ -626,9 +645,11 @@ fn build_session_options(
             .zip(saved_model_id.as_deref())
             .and_then(|(p, id)| model_runtime.get_model(p, id));
         let saved_in_scope = saved_model.as_ref().and_then(|sm| {
-            scoped_models
-                .iter()
-                .find(|entry| models_are_equal(Some(&entry.model), Some(sm)))
+            let sm_any = AnyModel::Chat(sm.clone());
+            scoped_models.iter().find(|entry| {
+                let entry_any = AnyModel::Chat(entry.model.clone());
+                models_are_equal(Some(&entry_any), Some(&sm_any))
+            })
         });
         let chosen = saved_in_scope.unwrap_or(&scoped_models[0]);
         options.model = Some(chosen.model.clone());
@@ -697,9 +718,10 @@ async fn prompt_for_missing_session_cwd(
         ("Continue".to_string(), Some(issue.fallback_cwd.clone())),
         ("Cancel".to_string(), None),
     ];
-    show_startup_selector(settings_manager, &prompt, options)
+    show_startup_selector(settings_manager, &prompt, &options)
         .await
         .ok()
+        .flatten()
         .flatten()
 }
 
@@ -767,8 +789,13 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     apply_http_proxy_settings(bootstrap_settings.get_global_settings().http_proxy.as_deref());
     let _ = configure_http_dispatcher(None);
 
+    let loader_extension_factories: Vec<LoaderInlineExtension> = extension_factories
+        .iter()
+        .cloned()
+        .map(LoaderInlineExtension::Core)
+        .collect();
     let pkg_opts = PackageCommandRuntimeOptions {
-        extension_factories: extension_factories.clone(),
+        extension_factories: loader_extension_factories,
         select_config: Some(Arc::new(|input: ConfigSelectorInput| {
             Box::pin(select_config(ConfigSelectorOptions {
                 resolved_paths_global: input.resolved_paths_global,
@@ -780,31 +807,44 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                 project_mode_available: input.project_mode_available,
             }))
         })),
+        create_project_trust_context: Some(Arc::new(|cwd, mode, settings_manager, has_ui| {
+            create_project_trust_runtime_context(CreateProjectTrustContextOptions {
+                cwd: cwd.to_owned(),
+                mode,
+                settings_manager: settings_manager.clone(),
+                has_ui,
+            })
+        })),
         ..Default::default()
     };
-    if let Some(exit_code) = handle_package_command(args, Some(&pkg_opts)).await? {
-        if exit_code != 0 {
-            return Err(pi_js::Error::Exit(exit_code));
-        }
+    if handle_package_command(args, pkg_opts.clone()).await {
         return Ok(());
     }
 
-    if let Some(exit_code) = handle_config_command(args, Some(&pkg_opts)).await? {
-        if exit_code != 0 {
-            return Err(pi_js::Error::Exit(exit_code));
-        }
+    if handle_config_command(args, pkg_opts).await {
         return Ok(());
     }
 
     if args.first().map(String::as_str) == Some("mcp") {
-        let exit_code = run_mcp_command(&args[1..], McpCommandOptions { cwd, agent_dir }).await?;
+        let exit_code = run_mcp_command(
+            &args[1..],
+            McpCommandOptions {
+                cwd,
+                agent_dir,
+                credentials: None,
+                open_url: None,
+                log: None,
+                error: None,
+            },
+        )
+        .await?;
         if exit_code != 0 {
             return Err(pi_js::Error::Exit(exit_code));
         }
         return Ok(());
     }
 
-    let parsed = parse_args(args);
+    let mut parsed = parse_args(args);
     if !parsed.diagnostics.is_empty() {
         let c = chalk();
         for d in &parsed.diagnostics {
@@ -836,7 +876,11 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
 
     if let Some(ref export_path) = parsed.export {
         let output_path = parsed.messages.first().map(String::as_str);
-        let result = match export_from_file(export_path, output_path).await {
+        let export_opts = output_path.map(|p| ExportOptions {
+            output_path: Some(p.to_string()),
+            ..Default::default()
+        });
+        let result = match export_from_file(export_path, export_opts).await {
             Ok(res) => res,
             Err(err) => {
                 pi_js::console::error(&chalk().red().apply(&format!("Error: {err}")));
@@ -885,7 +929,10 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     if app_mode == AppMode::Interactive
         && let Some(ref theme) = parsed.use_theme
     {
-        startup_settings.apply_theme_override(theme);
+        startup_settings.apply_overrides(&Settings {
+            theme: Some(theme.clone()),
+            ..Default::default()
+        });
     }
 
     let env_session_dir = pi_js::env::var(&ENV_SESSION_DIR);
@@ -1007,12 +1054,14 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
             let trust_diagnostics_slot: Arc<std::sync::Mutex<Vec<AgentSessionRuntimeDiagnostic>>> =
                 Arc::new(std::sync::Mutex::new(Vec::new()));
 
+            let core_host = Arc::new(CoreExtensionLoaderHost::new());
             let reload_opts = if should_resolve_trust {
                 let cwd_for_trust = cwd.clone();
                 let trust_store_for_cb = trust_store.clone();
                 let startup_settings_for_cb = startup_settings.clone();
                 let diag_slot = Arc::clone(&trust_diagnostics_slot);
                 let trust_cache = Arc::clone(&project_trust_by_cwd);
+                let core_host_for_trust = Arc::clone(&core_host);
                 let override_val = parsed.project_trust_override;
                 let prompt_mode = if is_initial_runtime {
                     trust_prompt_mode
@@ -1020,45 +1069,51 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                     app_mode
                 };
                 Some(ResourceLoaderReloadOptions {
-                    resolve_project_trust: Some(Arc::new(move |extensions_result| {
+                    resolve_project_trust: Some(Arc::new(move |_extensions_result| {
                         let cwd = cwd_for_trust.clone();
                         let trust_store = trust_store_for_cb.clone();
                         let startup_settings = startup_settings_for_cb.clone();
                         let pt_ctx = project_trust_context.clone();
                         let diag_slot = Arc::clone(&diag_slot);
                         let trust_cache = Arc::clone(&trust_cache);
+                        let core_host = Arc::clone(&core_host_for_trust);
                         Box::pin(async move {
-                            let resolved_ctx = pt_ctx.unwrap_or_else(|| {
-                                create_project_trust_context(CreateProjectTrustContextOptions {
+                            let resolved_ctx = match pt_ctx {
+                                Some(ctx) => extension_project_trust_to_runtime_context(ctx),
+                                None => create_project_trust_runtime_context(CreateProjectTrustContextOptions {
                                     cwd: cwd.clone(),
                                     mode: prompt_mode,
                                     settings_manager: startup_settings.clone(),
                                     has_ui: is_initial_runtime && trust_prompt_mode == AppMode::Interactive,
-                                })
-                            });
+                                }),
+                            };
+                            let trust_ext_host = core_host
+                                .loaded_extensions_result()
+                                .map(RunnerProjectTrustExtensionHost::new);
                             let diag_cb_slot = Arc::clone(&diag_slot);
+                            let on_ext_error = move |msg: &str| {
+                                diag_cb_slot.lock().unwrap_or_else(|e| e.into_inner()).push(
+                                    AgentSessionRuntimeDiagnostic {
+                                        r#type: AgentSessionRuntimeDiagnosticType::Warning,
+                                        message: msg.to_string(),
+                                    },
+                                );
+                            };
                             let trusted = resolve_project_trusted(ResolveProjectTrustedOptions {
-                                cwd: cwd.clone(),
-                                trust_store,
+                                cwd: &cwd,
+                                trust_store: &trust_store,
                                 trust_override: override_val,
                                 default_project_trust: Some(startup_settings.get_default_project_trust()),
-                                extensions_result: Some(extensions_result),
-                                project_trust_context: resolved_ctx,
-                                on_extension_error: Some(Arc::new(move |msg: String| {
-                                    diag_cb_slot.lock().unwrap_or_else(|e| e.into_inner()).push(
-                                        AgentSessionRuntimeDiagnostic {
-                                            r#type: AgentSessionRuntimeDiagnosticType::Warning,
-                                            message: msg,
-                                        },
-                                    );
-                                })),
+                                extension_host: trust_ext_host.as_ref().map(|h| h as &dyn ProjectTrustExtensionHost),
+                                project_trust_context: resolved_ctx.as_ref(),
+                                on_extension_error: Some(&on_ext_error),
                             })
                             .await;
                             trust_cache
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .insert(cwd, trusted);
-                            Ok(trusted)
+                            trusted
                         })
                     })),
                 })
@@ -1067,27 +1122,32 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
             };
 
             let model_signal = AbortController::new().signal();
+            let loader_extension_factories: Vec<LoaderInlineExtension> = extension_factories
+                .into_iter()
+                .map(LoaderInlineExtension::Core)
+                .collect();
             let services = create_agent_session_services(CreateAgentSessionServicesOptions {
                 cwd: cwd.clone(),
-                agent_dir,
+                agent_dir: Some(agent_dir),
                 settings_manager: Some(runtime_settings),
                 model_runtime: None,
                 model_runtime_signal: Some(model_signal),
                 extension_flag_values: Some(extension_flags),
                 resource_loader_reload_options: reload_opts,
                 resource_loader_options: Some(DefaultResourceLoaderOptions {
-                    additional_extension_paths: resolved_ext_paths,
-                    additional_skill_paths: resolved_skill_paths,
-                    additional_prompt_template_paths: resolved_prompt_paths,
-                    additional_theme_paths: resolved_theme_paths,
-                    no_extensions: parsed.no_extensions,
-                    no_skills: parsed.no_skills,
-                    no_prompt_templates: parsed.no_prompt_templates,
-                    no_themes: parsed.no_themes,
-                    no_context_files: parsed.no_context_files,
+                    additional_extension_paths: resolved_ext_paths.unwrap_or_default(),
+                    additional_skill_paths: resolved_skill_paths.unwrap_or_default(),
+                    additional_prompt_template_paths: resolved_prompt_paths.unwrap_or_default(),
+                    additional_theme_paths: resolved_theme_paths.unwrap_or_default(),
+                    no_extensions: parsed.no_extensions.unwrap_or(false),
+                    no_skills: parsed.no_skills.unwrap_or(false),
+                    no_prompt_templates: parsed.no_prompt_templates.unwrap_or(false),
+                    no_themes: parsed.no_themes.unwrap_or(false),
+                    no_context_files: parsed.no_context_files.unwrap_or(false),
                     system_prompt: parsed.system_prompt.clone(),
                     append_system_prompt: parsed.append_system_prompt.clone(),
-                    extension_factories: Some(extension_factories),
+                    extension_factories: loader_extension_factories,
+                    extension_host: Some(core_host),
                     ..Default::default()
                 }),
             })
@@ -1146,7 +1206,10 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
 
             if let Some(ref api_key) = parsed.api_key {
                 if let Some(ref model) = built.options.model {
-                    services.model_runtime.set_runtime_api_key(&model.provider, api_key);
+                    services
+                        .model_runtime
+                        .set_runtime_api_key(&model.provider, api_key, None)
+                        .await?;
                 } else {
                     diagnostics.push(AgentSessionRuntimeDiagnostic {
                         r#type: AgentSessionRuntimeDiagnosticType::Error,
@@ -1203,18 +1266,29 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     let session = runtime.session();
     set_capability_overrides(services.settings_manager.get_terminal_capability_overrides());
     apply_http_proxy_settings(services.settings_manager.get_global_settings().http_proxy.as_deref());
-    let _ = configure_http_dispatcher(Some(services.settings_manager.get_http_idle_timeout_ms()));
+    let idle_timeout_ms = services
+        .settings_manager
+        .get_http_idle_timeout_ms()
+        .unwrap_or(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+    let _ = configure_http_dispatcher(Some(idle_timeout_ms));
 
     if parsed.help == Some(true) {
         report_diagnostics(&startup_settings_diagnostics);
         let extension_flags: Vec<_> = services
             .resource_loader
-            .get_extensions()
+            .get_core_extensions()
             .extensions
             .into_iter()
-            .flat_map(|ext| ext.flags.into_values())
+            .flat_map(|ext| {
+                ext.flags
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        print_help(&extension_flags);
+        print_help(Some(&extension_flags));
         return Ok(());
     }
 
@@ -1240,7 +1314,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     };
     time("readPipedStdin", TimingNamespaceKind::Main);
 
-    let (initial_message, initial_images) = prepare_initial_message(&parsed, stdin_content.as_deref()).await?;
+    let (initial_message, initial_images) = prepare_initial_message(&mut parsed, stdin_content.as_deref()).await?;
     time("prepareInitialMessage", TimingNamespaceKind::Main);
 
     // WIRE(@tui-w3): set_theme_json_validator(validate_theme_json); init_theme(services.settings_manager.get_theme(), app_mode == AppMode::Interactive);

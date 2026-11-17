@@ -17,13 +17,13 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 fn make_jwt(account_id: &str) -> String {
-    let header = pi_js::b64::btoa(r#"{"alg":"none","typ":"JWT"}"#);
+    let header = pi_js::b64::btoa(r#"{"alg":"none","typ":"JWT"}"#).unwrap();
     let payload_json = pi_js::json::stringify(&json!({
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account_id,
         }
     }));
-    let payload = pi_js::b64::btoa(&payload_json);
+    let payload = pi_js::b64::btoa(&payload_json).unwrap();
     format!("{header}.{payload}.sig")
 }
 

@@ -335,7 +335,7 @@ async fn compensates_a_timed_out_attachment_before_rejecting_it() {
     yield_tasks().await;
     advance_and_yield(5_000).await;
 
-    let err = attaching.await.expect("join").expect_err("attach must time out");
+    let err = attaching.await.expect("join").err().expect("attach must time out");
     assert!(
         err.message().contains("timed out"),
         "unexpected error: {}",
@@ -371,7 +371,7 @@ async fn kills_a_worker_when_timed_out_demand_cannot_be_reconciled() {
     advance_and_yield(5_000).await;
     advance_and_yield(10_000).await;
 
-    let err = attaching.await.expect("join").expect_err("attach must fail");
+    let err = attaching.await.expect("join").err().expect("attach must fail");
     assert!(
         err.message().contains("worker was terminated"),
         "unexpected error: {}",

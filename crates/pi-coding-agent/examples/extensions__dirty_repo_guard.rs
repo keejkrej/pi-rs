@@ -51,7 +51,7 @@ impl Extension for DirtyRepoGuardExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         {
             let pi_sw = pi.clone();
-            pi.on::<SessionBeforeSwitchEvent>(Arc::new(move |event, ctx| {
+            pi.on::<SessionBeforeSwitchEvent>(move |event, ctx| {
                 let pi = pi_sw.clone();
                 Box::pin(async move {
                     let action = if event.reason == SessionBeforeSwitchReason::New {
@@ -64,12 +64,12 @@ impl Extension for DirtyRepoGuardExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_fk = pi.clone();
-            pi.on::<SessionBeforeForkEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionBeforeForkEvent>(move |_event, ctx| {
                 let pi = pi_fk.clone();
                 Box::pin(async move {
                     if check_dirty_repo(&pi, &ctx, "fork").await? {
@@ -80,7 +80,7 @@ impl Extension for DirtyRepoGuardExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

@@ -48,7 +48,7 @@ async fn assert_retries_explicit_guidance(error_message: &str) {
 
     harness.session.prompt("test", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let started: Vec<String> = harness
         .events()
         .into_iter()

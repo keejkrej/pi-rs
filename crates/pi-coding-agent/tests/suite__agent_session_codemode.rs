@@ -9,22 +9,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use indexmap::IndexMap;
 use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{
-    AssistantImages, ClassifierAnswer, ClassifierApi, ClassifierResult, ClassifierStopReason, ImageApi, ImageContent,
-    ImagesOutputContent, ImagesStopReason, ModelCost, ModelInput, ProviderClassifier, ProviderImages, StopReason,
-    TextContent, ToolResultMessage, Usage, UsageCost, UserContentBlock,
+    AssistantImages, ClassifierAnswer, ClassifierResult, ClassifierStopReason, ImageContent, ImagesOutputContent,
+    ImagesStopReason, ModelCost, ModelInput, ProviderClassifier, ProviderImages, StopReason, TextContent,
+    ToolResultMessage, Usage, UsageCost, UserContentBlock,
 };
 use pi_ai::{get_current_system_prompt, get_current_tools};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, ProviderClassifierModelConfig, ProviderConfig, ProviderImageModelConfig,
-    ProviderModelConfig, SessionEntry, ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolResultEvent,
-    ToolResultEventResult, mcp_wire,
+    ProviderModelConfig, SessionEntry, ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolResultContentBlock,
+    ToolResultEvent, ToolResultEventResult,
 };
+use pi_coding_agent::core::session_manager::CustomEntry;
 use pi_coding_agent::core::settings_manager::{CodemodeMode, CodemodeSettings, Settings};
-use pi_coding_agent::core::tools::tool_definition_wrapper::wrap_tool_definition;
 use pi_coding_agent::extensions::codemode::execute::read_codemode_store;
 use pi_coding_agent::extensions::codemode::tool::{
     CODEMODE_STORE_ENTRY_TYPE, CodemodeToolDetails, CodemodeToolOptions, codemode_docs_path, create_codemode_tool,
@@ -43,7 +44,7 @@ fn make_echo_tool() -> AgentTool {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back.\n\nSecond paragraph.".to_string(),
-        parameters: t::object(&[t::prop("text", t::string().with("description", "Text to echo"))]),
+        parameters: t::object([("text", t::string().with("description", "Text to echo"))]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -67,10 +68,8 @@ fn make_stats_tool() -> AgentTool {
         name: "stats".to_string(),
         label: "Stats".to_string(),
         description: "Return structured stats".to_string(),
-        parameters: t::object(&[]),
-        output_schema: Some(
-            t::object(&[t::prop("files", t::number()), t::prop("names", t::array(t::string()))]).to_value(),
-        ),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        output_schema: Some(t::object([("files", t::number()), ("names", t::array(t::string()))]).to_value()),
         constrained_sampling: None,
         execution_mode: None,
         prepare_arguments: None,
@@ -93,7 +92,7 @@ fn make_screenshot_tool() -> AgentTool {
         name: "screenshot".to_string(),
         label: "Screenshot".to_string(),
         description: "Return a screenshot".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -133,6 +132,7 @@ fn agent_tool_to_definition(tool: AgentTool) -> ToolDefinition {
         annotations: None,
         constrained_sampling: None,
         execution_mode: tool.execution_mode,
+        prepare_loadout: None,
         prepare_arguments: tool.prepare_arguments,
         render_shell: None,
         render_call: None,
@@ -161,7 +161,7 @@ fn usage(input: i64, cost: f64) -> Usage {
 }
 
 fn codemode_result(harness: &Harness) -> ToolResultMessage {
-    get_tool_result(harness, "codemode").expect("codemode toolResult")
+    get_tool_result(harness, "codemode")
 }
 
 fn result_text(message: &ToolResultMessage) -> String {
@@ -223,7 +223,11 @@ async fn setup_store_harness() -> Harness {
 async fn run_codemode(harness: &Harness, code: &str) -> ToolResultMessage {
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "codemode",
+                [("code".to_string(), json!(code))].into_iter().collect(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -278,7 +282,7 @@ async fn presents_callable_tools_per_codemode_mode() {
 
     for mode_label in ["on", "only"] {
         if mode_label == "only" {
-            harness.settings_manager.apply_overrides(Settings {
+            harness.settings_manager.apply_overrides(&Settings {
                 codemode: Some(CodemodeSettings {
                     mode: Some(CodemodeMode::Only),
                     ..Default::default()
@@ -367,8 +371,10 @@ async fn runs_nested_calls_in_parallel_and_returns_only_the_script_result() {
             (
                 c.name.as_str(),
                 match c.status {
+                    pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Running => "running",
                     pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Ok => "ok",
                     pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Error => "error",
+                    pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Cancelled => "cancelled",
                 },
             )
         })
@@ -395,10 +401,13 @@ async fn routes_nested_calls_through_extension_hooks() {
     let hook_ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
         pi.on::<ToolCallEvent>(|event, _ctx| {
             Box::pin(async move {
-                if event.tool_name == "echo" && event.input.get("text").and_then(Value::as_str) == Some("forbidden") {
+                if event.tool_name() == "echo"
+                    && event.input_value().get("text").and_then(Value::as_str) == Some("forbidden")
+                {
                     return Ok(Some(ToolCallEventResult {
                         block: Some(true),
                         reason: Some("echo of forbidden text is blocked".to_string()),
+                        terminate: None,
                     }));
                 }
                 Ok(None)
@@ -406,9 +415,9 @@ async fn routes_nested_calls_through_extension_hooks() {
         });
         pi.on::<ToolResultEvent>(|event, _ctx| {
             Box::pin(async move {
-                if event.tool_name == "stats" {
+                if event.tool_name() == "stats" {
                     return Ok(Some(ToolResultEventResult {
-                        content: Some(vec![UserContentBlock::Text(TextContent::new("redacted"))]),
+                        content: Some(vec![ToolResultContentBlock::Text(TextContent::new("redacted"))]),
                         ..Default::default()
                     }));
                 }
@@ -449,7 +458,7 @@ async fn adds_the_usage_of_nested_results_to_the_codemode_result() {
         name: "billed".to_string(),
         label: "Billed".to_string(),
         description: "Run a model".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -504,10 +513,10 @@ async fn keeps_structured_content_that_tool_result_handlers_replace_along_with_t
     let hook_ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
         pi.on::<ToolResultEvent>(|event, _ctx| {
             Box::pin(async move {
-                if event.tool_name == "stats" {
+                if event.tool_name() == "stats" {
                     Ok(Some(ToolResultEventResult {
-                        content: Some(vec![UserContentBlock::Text(TextContent::new("0 files"))]),
-                        structured_content: Some(Some(json!({ "files": 0, "names": [] }))),
+                        content: Some(vec![ToolResultContentBlock::Text(TextContent::new("0 files"))]),
+                        structured_content: Some(json!({ "files": 0, "names": [] })),
                         ..Default::default()
                     }))
                 } else {
@@ -517,7 +526,7 @@ async fn keeps_structured_content_that_tool_result_handlers_replace_along_with_t
         });
         pi.on::<ToolResultEvent>(|event, _ctx| {
             Box::pin(async move {
-                if event.tool_name == "stats" {
+                if event.tool_name() == "stats" {
                     Ok(Some(ToolResultEventResult {
                         details: Some(json!({ "audited": true })),
                         ..Default::default()
@@ -754,17 +763,14 @@ async fn loads_the_values_written_on_the_current_branch() {
 
 #[test]
 fn folds_store_entries_from_the_root_ignoring_malformed_data() {
-    let make_entry = |data: Value, custom_type: &str| -> mcp_wire::SessionEntry {
-        let mut fields = IndexMap::new();
-        fields.insert("customType".to_string(), Value::String(custom_type.to_string()));
-        fields.insert("data".to_string(), data);
-        mcp_wire::SessionEntry {
-            r#type: "custom".to_string(),
+    let make_entry = |data: Value, custom_type: &str| -> SessionEntry {
+        SessionEntry::Custom(CustomEntry {
             id: "entry".to_string(),
             parent_id: None,
             timestamp: "1970-01-01T00:00:00.000Z".to_string(),
-            fields,
-        }
+            custom_type: custom_type.to_string(),
+            data: Some(data),
+        })
     };
     let folded = read_codemode_store(&[
         make_entry(
@@ -814,12 +820,7 @@ async fn declares_models_only_for_the_sessions_own_codemode_tool() {
     harness.cleanup();
 }
 
-// WIRE(@mcp-w3): wire CodemodeExtensionOptions.model_runtime / ModelRegistryBackend typed classify & image methods before removing ignore on the 3 runtime model tests below.
-#[ignore = "WIRE(@mcp-w3): waiting for ModelRegistryBackend typed lookup/classify/image methods"]
-#[tokio::test]
-async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_fields() {
-    let active = Arc::new(AtomicUsize::new(0));
-    let max_active = Arc::new(AtomicUsize::new(0));
+async fn setup_codemode_models_harness(active: Arc<AtomicUsize>, max_active: Arc<AtomicUsize>) -> Harness {
     let act_c = Arc::clone(&active);
     let max_c = Arc::clone(&max_active);
 
@@ -829,7 +830,7 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
         async move {
             let mut classifiers = IndexMap::new();
             classifiers.insert(
-                ClassifierApi::new("test-classifier"),
+                "test-classifier".to_string(),
                 ProviderClassifier {
                     classify: Arc::new(move |model, ctx, opts| {
                         let act = Arc::clone(&act);
@@ -839,11 +840,23 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
                         Box::pin(async move {
                             let cur = act.fetch_add(1, Ordering::SeqCst) + 1;
                             max_a.fetch_max(cur, Ordering::SeqCst);
-                            pi_js::time::sleep(10).await;
+                            let _ = pi_js::time::sleep(10, None).await;
                             act.fetch_sub(1, Ordering::SeqCst);
                             let txt = ctx.state.get("text").and_then(Value::as_str).unwrap_or("");
                             assert_eq!(model.base_url, "https://classifier.test/v1");
-                            assert_eq!(opts.and_then(|o| o.api_key).as_deref(), Some("secret-key"));
+                            assert_eq!(opts.as_ref().and_then(|o| o.api_key.as_deref()), Some("secret-key"));
+                            if txt == "explode" {
+                                return ClassifierResult {
+                                    api: model.api,
+                                    provider: model.provider,
+                                    model: model.id,
+                                    answers: IndexMap::new(),
+                                    usage: None,
+                                    stop_reason: ClassifierStopReason::Error,
+                                    error_message: Some("classifier exploded".to_string()),
+                                    timestamp: 0,
+                                };
+                            }
                             let mut answers = IndexMap::new();
                             answers.insert(
                                 "approved".to_string(),
@@ -865,24 +878,90 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
                     }),
                 },
             );
+            let mut images = IndexMap::new();
+            images.insert(
+                "test-images".to_string(),
+                ProviderImages {
+                    generate_images: Arc::new(|model, ctx, opts| {
+                        let model = model.clone();
+                        let ctx = ctx.clone();
+                        Box::pin(async move {
+                            assert_eq!(model.base_url, "https://images.test/v1");
+                            assert_eq!(opts.as_ref().and_then(|o| o.api_key.as_deref()), Some("secret-key"));
+                            let prompt = ctx
+                                .input
+                                .iter()
+                                .find_map(|b| match b {
+                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                    _ => None,
+                                })
+                                .unwrap_or("");
+                            if prompt == "explode" {
+                                return AssistantImages {
+                                    api: model.api,
+                                    provider: model.provider,
+                                    model: model.id,
+                                    output: Vec::new(),
+                                    response_id: None,
+                                    usage: None,
+                                    stop_reason: ImagesStopReason::Error,
+                                    error_message: Some("painter exploded".to_string()),
+                                    timestamp: 0,
+                                };
+                            }
+                            AssistantImages {
+                                api: model.api,
+                                provider: model.provider,
+                                model: model.id,
+                                output: vec![
+                                    ImagesOutputContent::Text(TextContent::new(format!("painted {prompt}"))),
+                                    ImagesOutputContent::Image(ImageContent {
+                                        data: TINY_PNG_BASE64.to_string(),
+                                        mime_type: "image/png".to_string(),
+                                    }),
+                                ],
+                                response_id: None,
+                                usage: Some(usage(100, 0.04)),
+                                stop_reason: ImagesStopReason::Stop,
+                                error_message: None,
+                                timestamp: 0,
+                            }
+                        })
+                    }),
+                },
+            );
             let mut headers = IndexMap::new();
             headers.insert("X-Secret".to_string(), "hunter2".to_string());
             pi.register_provider(
                 "scorer",
                 ProviderConfig {
                     api_key: Some("secret-key".to_string()),
-                    models: Some(vec![ProviderModelConfig::Classifier(ProviderClassifierModelConfig {
-                        id: "judge".to_string(),
-                        name: "Judge".to_string(),
-                        api: Some(ClassifierApi::new("test-classifier")),
-                        base_url: Some("https://classifier.test/v1".to_string()),
-                        input: vec![ModelInput::Text],
-                        input_limits: None,
-                        cost: ModelCost::default(),
-                        headers: Some(headers),
-                        context_window: 1_000,
-                    })]),
+                    models: Some(vec![
+                        ProviderModelConfig::Classifier(ProviderClassifierModelConfig {
+                            id: "judge".to_string(),
+                            name: "Judge".to_string(),
+                            api: Some("test-classifier".to_string()),
+                            base_url: Some("https://classifier.test/v1".to_string()),
+                            input: vec![ModelInput::Text],
+                            input_limits: None,
+                            cost: ModelCost::default(),
+                            headers: Some(headers),
+                            context_window: 1_000,
+                        }),
+                        ProviderModelConfig::Image(ProviderImageModelConfig {
+                            id: "painter".to_string(),
+                            name: "Painter".to_string(),
+                            api: Some("test-images".to_string()),
+                            base_url: Some("https://images.test/v1".to_string()),
+                            input: vec![ModelInput::Text, ModelInput::Image],
+                            input_limits: None,
+                            cost: ModelCost::default(),
+                            headers: None,
+                            output: vec![ModelInput::Text, ModelInput::Image],
+                        }),
+                    ]),
                     classifiers: Some(classifiers),
+                    images: Some(images),
                     ..Default::default()
                 },
             )?;
@@ -890,7 +969,7 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
         }
     }));
 
-    let harness = create_harness(HarnessOptions {
+    create_harness(HarnessOptions {
         initial_active_tool_names: Some(vec!["codemode".to_string()]),
         extension_factories: Some(vec![
             InlineExtension::Factory(create_codemode_extension(CodemodeExtensionOptions::default())),
@@ -898,7 +977,14 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
         ]),
         ..Default::default()
     })
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_fields() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let harness = setup_codemode_models_harness(Arc::clone(&active), Arc::clone(&max_active)).await;
 
     let result = run_codemode(
         &harness,
@@ -928,100 +1014,204 @@ async fn lists_models_and_classifies_with_catalog_auth_ignoring_script_supplied_
     harness.cleanup();
 }
 
-#[ignore = "WIRE(@mcp-w3): waiting for ModelRegistryBackend typed lookup/classify/image methods"]
 #[tokio::test]
 async fn generates_images_with_catalog_auth_and_attaches_them_through_image() {
-    let scorer_ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
-        let mut images = IndexMap::new();
-        images.insert(
-            ImageApi::new("test-images"),
-            ProviderImages {
-                generate_images: Arc::new(|model, ctx, _opts| {
-                    let model = model.clone();
-                    let ctx = ctx.clone();
-                    Box::pin(async move {
-                        let prompt = ctx
-                            .input
-                            .iter()
-                            .find_map(|b| match b {
-                                UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .unwrap_or("");
-                        AssistantImages {
-                            api: model.api,
-                            provider: model.provider,
-                            model: model.id,
-                            output: vec![
-                                ImagesOutputContent::Text(TextContent::new(format!("painted {prompt}"))),
-                                ImagesOutputContent::Image(ImageContent {
-                                    data: TINY_PNG_BASE64.to_string(),
-                                    mime_type: "image/png".to_string(),
-                                }),
-                            ],
-                            response_id: None,
-                            usage: Some(usage(100, 0.04)),
-                            stop_reason: ImagesStopReason::Stop,
-                            error_message: None,
-                            timestamp: 0,
-                        }
-                    })
-                }),
-            },
-        );
-        pi.register_provider(
-            "scorer",
-            ProviderConfig {
-                api_key: Some("secret-key".to_string()),
-                models: Some(vec![ProviderModelConfig::Image(ProviderImageModelConfig {
-                    id: "painter".to_string(),
-                    name: "Painter".to_string(),
-                    api: Some(ImageApi::new("test-images")),
-                    base_url: Some("https://images.test/v1".to_string()),
-                    input: vec![ModelInput::Text, ModelInput::Image],
-                    input_limits: None,
-                    cost: ModelCost::default(),
-                    headers: None,
-                    output: vec![ModelInput::Text, ModelInput::Image],
-                })]),
-                images: Some(images),
-                ..Default::default()
-            },
-        )?;
-        Ok(())
-    }));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let harness = setup_codemode_models_harness(active, max_active).await;
 
-    let harness = create_harness(HarnessOptions {
-        initial_active_tool_names: Some(vec!["codemode".to_string()]),
-        extension_factories: Some(vec![
-            InlineExtension::Factory(create_codemode_extension(CodemodeExtensionOptions::default())),
-            scorer_ext,
-        ]),
-        ..Default::default()
-    })
-    .await;
+    let code = format!(
+        r#"
+        const [model] = await models.getAvailableOfType("image", "scorer");
+        const reference = {{ type: "image", data: "{TINY_PNG_BASE64}", mimeType: "image/png" }};
+        const generated = await models.generateImages(
+            {{ ...model, baseUrl: "https://evil.test" }},
+            {{ input: [{{ type: "text", text: "a fox" }}, reference] }},
+        );
+        for (const block of generated.output) {{
+            if (block.type === "image") image(block);
+            else text(block.text);
+        }}
+        const failed = await models.generateImages(model, {{ input: [{{ type: "text", text: "explode" }}] }});
+        const attempt = async (fn) => {{ try {{ await fn(); return "ok"; }} catch (error) {{ return error.message; }} }};
+        return {{
+            id: model.id,
+            stopReason: generated.stopReason,
+            failed: [failed.stopReason, failed.errorMessage],
+            wrongType: await attempt(() => models.generateImages({{ provider: "scorer", id: "judge" }}, {{ input: [] }})),
+        }};
+    "#
+    );
+    let result = run_codemode(&harness, &code).await;
+    assert!(!result.is_error);
+    let txt = result_text(&result);
+    assert!(txt.contains("painted a fox"), "unexpected output: {txt}");
+    assert!(txt.contains("\"stopReason\":\"stop\""), "unexpected output: {txt}");
+    assert!(
+        txt.contains("\"failed\":[\"error\",\"painter exploded\"]"),
+        "unexpected output: {txt}"
+    );
+    assert!(
+        txt.contains("\\\"scorer/judge\\\" is a classifier model, not an image model"),
+        "unexpected output: {txt}"
+    );
+    assert_eq!(
+        result.content.get(2),
+        Some(&UserContentBlock::Image(ImageContent {
+            data: TINY_PNG_BASE64.to_string(),
+            mime_type: "image/png".to_string(),
+        }))
+    );
+    harness.cleanup();
+}
+
+#[tokio::test]
+async fn notes_generated_images_that_the_script_did_not_show() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let harness = setup_codemode_models_harness(active, max_active).await;
 
     let result = run_codemode(
         &harness,
-        "const [m] = await models.getAvailableOfType(\"image\", \"scorer\"); return m.id;",
+        r#"
+        const [model] = await models.getAvailableOfType("image", "scorer");
+        const generated = await models.generateImages(model, { input: [{ type: "text", text: "a fox" }] });
+        return generated.stopReason;
+        "#,
     )
     .await;
     assert!(!result.is_error);
+    assert_eq!(
+        result_text(&result),
+        "stop\nNote: models.generateImages() returned 1 image that the script did not show. Show each image block of result.output with image(block)."
+    );
     harness.cleanup();
 }
 
-#[ignore = "WIRE(@mcp-w3): waiting for ModelRegistryBackend typed lookup/classify/image methods"]
-#[tokio::test]
-async fn notes_generated_images_that_the_script_did_not_show() {
-    let harness = setup_store_harness().await;
-    let _ = harness;
-    harness.cleanup();
-}
-
-#[ignore = "WIRE(@mcp-w3): waiting for ModelRegistryBackend typed lookup/classify/image methods"]
 #[tokio::test]
 async fn reports_provider_errors_as_results_and_invalid_arguments_as_exceptions() {
-    let harness = setup_store_harness().await;
-    let _ = harness;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let harness = setup_codemode_models_harness(active, max_active).await;
+    let questions =
+        r#"{ approved: { type: "bool", instructions: "Approval?", criteria: { true: "yes", false: "no" } } }"#;
+
+    let code = format!(
+        r#"
+        const model = await models.getModelOfType("classifier", "scorer", "judge");
+        const failed = await models.classify(model, {{ state: {{ text: "explode" }}, questions: {questions} }});
+        const textOnly = await models.classify(model, {{
+            state: {{ text: "good" }},
+            images: [{{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }}],
+            questions: {questions},
+        }});
+        const attempt = async (fn) => {{ try {{ await fn(); return "ok"; }} catch (error) {{ return error.message; }} }};
+        return {{
+            failed: [failed.stopReason, failed.errorMessage],
+            textOnly: [textOnly.stopReason, textOnly.errorMessage],
+            badClassifierImage: await attempt(() =>
+                models.classify(model, {{ state: {{}}, images: [{{ data: "aW1hZ2U=" }}], questions: {questions} }}),
+            ),
+            badType: await attempt(() => models.getModelsOfType("video")),
+            unknown: await attempt(() => models.classify({{ provider: "scorer", id: "nope" }}, {{}})),
+            noModel: await attempt(() => models.classify("judge", {{}})),
+            undefinedModel: await attempt(() => models.classify(undefined, {{}})),
+            noState: await attempt(() => models.classify(model, {{ questions: {questions} }})),
+            badQuestion: await attempt(() =>
+                models.classify(model, {{ state: {{}}, questions: {{ kind: {{ type: "choice", instructions: "Kind?", criteria: ["a", "b"] }} }} }}),
+            ),
+            badImage: await attempt(() => models.generateImages({{ provider: "scorer", id: "painter" }}, {{ prompt: "a fox" }})),
+            badSplit: await attempt(() => models.getModelOfType("classifier", "scorer/judge")),
+        }};
+    "#
+    );
+    let result = run_codemode(&harness, &code).await;
+    assert!(!result.is_error);
+    let parsed: Value = pi_js::json::parse(&result_text(&result)).unwrap();
+    assert_eq!(parsed["failed"], json!(["error", "classifier exploded"]));
+    assert_eq!(
+        parsed["textOnly"],
+        json!(["error", "Model scorer/judge does not accept image input"])
+    );
+    assert!(
+        parsed["badClassifierImage"]
+            .as_str()
+            .unwrap_or("")
+            .contains("models.classify() context.images[0] must be an image block")
+    );
+    assert!(
+        parsed["badType"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unknown model type \"video\"")
+    );
+    assert_eq!(
+        parsed["unknown"],
+        json!(
+            "Unknown classifier model \"scorer/nope\". List the classifier models you can use with models.getAvailableOfType(\"classifier\")."
+        )
+    );
+    assert!(
+        parsed["noModel"]
+            .as_str()
+            .unwrap_or("")
+            .contains("models.classify() expects a classifier model as its first argument, got a string.")
+    );
+    assert!(
+        parsed["undefinedModel"]
+            .as_str()
+            .unwrap_or("")
+            .contains("models.getModelOfType() returns undefined for an unknown provider or id.")
+    );
+    assert!(
+        parsed["noState"]
+            .as_str()
+            .unwrap_or("")
+            .contains("models.classify() context.state must be an object, got undefined.")
+    );
+    assert!(
+        parsed["badQuestion"]
+            .as_str()
+            .unwrap_or("")
+            .contains("context.questions.kind is a \"choice\" question")
+    );
+    assert!(
+        parsed["badImage"]
+            .as_str()
+            .unwrap_or("")
+            .contains("models.generateImages() context.input must be a non-empty array of blocks")
+    );
+    assert!(
+        parsed["badSplit"]
+            .as_str()
+            .unwrap_or("")
+            .contains("The provider and the id are separate arguments")
+    );
+    let details = parse_details(&result);
+    let call_summary: Vec<(&str, &str, Option<&str>)> = details
+        .calls
+        .iter()
+        .map(|c| {
+            let status = match c.status {
+                pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Ok => "ok",
+                pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Error => "error",
+                pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Running => "running",
+                pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Cancelled => "cancelled",
+            };
+            (c.name.as_str(), status, c.error.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        call_summary,
+        vec![
+            ("models.classify", "error", Some("classifier exploded")),
+            (
+                "models.classify",
+                "error",
+                Some("Model scorer/judge does not accept image input")
+            ),
+        ]
+    );
+    assert!(result.usage.is_none());
     harness.cleanup();
 }

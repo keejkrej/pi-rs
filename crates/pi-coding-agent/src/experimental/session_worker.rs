@@ -2,7 +2,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
@@ -234,6 +233,8 @@ pub struct WorkerLifecycle {
     inner: Arc<Mutex<WorkerLifecycleInner>>,
 }
 
+use crate::experimental::server::spawn_registered_delay;
+
 impl WorkerLifecycle {
     pub fn new(options: WorkerLifecycleOptions) -> Self {
         let initial_grace = options.initial_demand_grace_ms;
@@ -250,8 +251,7 @@ impl WorkerLifecycle {
             retiring: false,
         }));
         let inner_weak = Arc::downgrade(&inner);
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(initial_grace)).await;
+        let handle = spawn_registered_delay(initial_grace, move || {
             let retire = {
                 let Some(inner) = inner_weak.upgrade() else {
                     return;
@@ -296,8 +296,7 @@ impl WorkerLifecycle {
         for key in keys {
             let inner_weak = Arc::downgrade(&self.inner);
             let key_clone = key.clone();
-            let handle = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(orphan_ms)).await;
+            let handle = spawn_registered_delay(orphan_ms, move || {
                 let retire = {
                     let Some(inner) = inner_weak.upgrade() else {
                         return;
@@ -1191,7 +1190,7 @@ async fn create_coding_agent_harness(
 ) -> pi_js::Result<SessionWorkerRuntime> {
     let cwd = options.metadata.cwd.clone();
     let model_runtime = Arc::new(ModelRuntime::create(ModelRuntimeCreateOptions::default()).await?);
-    let settings_manager = Arc::new(SettingsManager::create(Some(&cwd), None)?);
+    let settings_manager = Arc::new(SettingsManager::create(&cwd, None, None));
     configure_harness_http(&settings_manager);
     let envs = Arc::new(ExecutionEnvs::new(cwd.clone()));
     let mut harness: Option<Harness> = None;

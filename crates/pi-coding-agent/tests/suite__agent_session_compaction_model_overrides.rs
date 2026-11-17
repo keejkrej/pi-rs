@@ -9,15 +9,17 @@ use indexmap::IndexMap;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxModelDefinition, FauxResponseStep, faux_assistant_message,
 };
-use pi_ai::types::{AssistantContentBlock, AssistantMessage, Message, StopReason, TextContent, Usage, UserMessage};
+use pi_ai::types::{
+    AssistantContentBlock, AssistantMessage, Message, StopReason, TextContent, Usage, UserMessage, UserMessageContent,
+};
 use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionEvent};
+use pi_coding_agent::core::compaction::{CompactionResult, CompactionSettings as CompactionPrepSettings};
 use pi_coding_agent::core::extensions::types::{
     CompactionReason as ExtCompactionReason, ExtensionApi, InlineExtension, SessionBeforeCompactEvent,
     SessionBeforeCompactResult,
 };
 use pi_coding_agent::core::session_manager::SessionEntry;
-use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::{CompactionResult, CompactionSettings as WireCompactionSettings};
+use pi_coding_agent::core::settings_manager::{CompactionSettings, ModelRef, Settings};
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use support::suite::harness::{Harness, HarnessOptions, create_harness};
@@ -39,8 +41,10 @@ fn seed_history(harness: &Harness, total_tokens: i64) -> String {
     let model = harness.session.model().unwrap();
     let mut recent_user_id = String::new();
     for label in ["old", "recent"] {
-        let mut user = UserMessage::text(format!("{label}{}", "x".repeat(400 - label.len())));
-        user.timestamp = pi_js::time::now_ms() - 2000;
+        let user = UserMessage {
+            content: UserMessageContent::Text(format!("{label}{}", "x".repeat(400 - label.len()))),
+            timestamp: pi_js::time::now_ms() - 2000,
+        };
         recent_user_id = harness
             .session_manager
             .append_message(Message::User(user).into())
@@ -78,7 +82,7 @@ fn seed_history(harness: &Harness, total_tokens: i64) -> String {
     harness
         .session
         .agent()
-        .replace_messages(harness.session_manager.build_session_context(None, None).messages);
+        .replace_messages(harness.session_manager.build_session_context().messages);
     recent_user_id
 }
 
@@ -173,7 +177,7 @@ async fn uses_model_token_settings_for_all_compaction_paths_and_extension_prepar
         assert_eq!(captured.len(), 1);
         assert_eq!(
             captured[0].preparation.settings,
-            WireCompactionSettings {
+            CompactionPrepSettings {
                 enabled: path != "manual",
                 reserve_tokens: 2000,
                 keep_recent_tokens: 150,
@@ -369,7 +373,10 @@ async fn uses_the_newly_selected_model_without_changing_ordinary_settings() {
         compaction_ends[0].as_ref().map(|r| r.summary.as_str()),
         Some("big model summary")
     );
-    assert_eq!(harness.settings_manager.get_compaction_reserve_tokens(None), 10);
+    assert_eq!(
+        harness.settings_manager.get_compaction_reserve_tokens(None).unwrap(),
+        10
+    );
 
     harness
         .session
@@ -377,10 +384,15 @@ async fn uses_the_newly_selected_model_without_changing_ordinary_settings() {
         .await
         .unwrap();
     let active_model = harness.session.model();
+    let active_ref = active_model.as_ref().map(|m| ModelRef {
+        provider: m.provider.clone(),
+        id: m.id.clone(),
+    });
     assert_eq!(
         harness
             .settings_manager
-            .get_compaction_reserve_tokens(active_model.as_ref()),
+            .get_compaction_reserve_tokens(active_ref.as_ref())
+            .unwrap(),
         10
     );
     harness.cleanup();

@@ -34,7 +34,7 @@ fn to_remote_path(path: &str, local_cwd: &str, remote_cwd: &str) -> String {
 }
 
 fn shell_quote(value: &str) -> pi_js::Result<String> {
-    pi_js::json::stringify(&serde_json::Value::String(value.to_string()))
+    pi_js::json::try_stringify(&serde_json::Value::String(value.to_string()))
 }
 
 async fn ssh_exec(remote: &str, command: &str) -> pi_js::Result<Vec<u8>> {

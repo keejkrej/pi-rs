@@ -4,10 +4,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_ai::types::TextContent;
+use pi_ai::types::{TextContent, UserContentBlock};
 use pi_coding_agent::core::extensions::types::{
-    ContentBlock, CustomMessageContent, Extension, ExtensionApi, ExtensionFactory, InlineExtension,
-    InputDeliveryBehavior, NotifyType, RegisteredCommandOptions, SendUserMessageOptions,
+    CustomMessageContent, Extension, ExtensionApi, ExtensionFactory, InlineExtension, InputDeliveryBehavior,
+    NotifyType, RegisteredCommandOptions, SendUserMessageOptions,
 };
 
 pub struct SendUserMessageExtension;
@@ -134,8 +134,8 @@ impl Extension for SendUserMessageExtension {
                             }
                             pi.send_user_message(
                                 CustomMessageContent::Blocks(vec![
-                                    ContentBlock::Text(TextContent::new(format!("User request: {args}"))),
-                                    ContentBlock::Text(TextContent::new("Please respond concisely.")),
+                                    UserContentBlock::Text(TextContent::new(format!("User request: {args}"))),
+                                    UserContentBlock::Text(TextContent::new("Please respond concisely.")),
                                 ]),
                                 None,
                             )

@@ -4,10 +4,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pi_coding_agent::config::get_agent_dir;
-use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
+use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, SkillsResult};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
-use pi_coding_agent::core::skills::{LoadSkillsResult, Skill};
+use pi_coding_agent::core::skills::Skill;
 use pi_coding_agent::core::source_info::{SyntheticSourceOptions, create_synthetic_source_info};
 
 async fn run() -> pi_coding_agent::Result<()> {
@@ -27,8 +27,8 @@ async fn run() -> pi_coding_agent::Result<()> {
     };
 
     let loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(pi_js::env::cwd()),
-        agent_dir: Some(get_agent_dir()),
+        cwd: pi_js::env::cwd(),
+        agent_dir: get_agent_dir(),
         skills_override: Some(Arc::new(move |current| {
             let mut filtered: Vec<Skill> = current
                 .skills
@@ -36,7 +36,7 @@ async fn run() -> pi_coding_agent::Result<()> {
                 .filter(|s| s.name.contains("browser") || s.name.contains("search"))
                 .collect();
             filtered.push(custom_skill.clone());
-            LoadSkillsResult {
+            SkillsResult {
                 skills: filtered,
                 diagnostics: current.diagnostics,
             }

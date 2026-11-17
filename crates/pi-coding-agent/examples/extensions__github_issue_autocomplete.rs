@@ -270,7 +270,7 @@ pub struct GithubIssueAutocompleteExtension;
 impl Extension for GithubIssueAutocompleteExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         let pi_ss = pi.clone();
-        pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+        pi.on::<SessionStartEvent>(move |_event, ctx| {
             let pi = pi_ss.clone();
             Box::pin(async move {
                 let cwd = ctx.cwd()?;
@@ -305,7 +305,7 @@ impl Extension for GithubIssueAutocompleteExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

@@ -16,6 +16,16 @@ pub trait SessionCwdSource {
     fn get_session_file(&self) -> Option<String>;
 }
 
+impl SessionCwdSource for crate::core::session_manager::SessionManager {
+    fn get_cwd(&self) -> String {
+        crate::core::session_manager::SessionManager::get_cwd(self)
+    }
+
+    fn get_session_file(&self) -> Option<String> {
+        crate::core::session_manager::SessionManager::get_session_file(self)
+    }
+}
+
 pub fn get_missing_session_cwd_issue(
     session_manager: &dyn SessionCwdSource,
     fallback_cwd: &str,

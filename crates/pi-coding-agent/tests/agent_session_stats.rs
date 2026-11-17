@@ -10,7 +10,7 @@ use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::compat::{get_model, stream_simple};
 use pi_ai::types::{
     AssistantContentBlock, AssistantMessage, Model, StopReason, TextContent, ToolResultMessage, Usage, UsageCost,
-    UserContentBlock, UserMessage,
+    UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, SessionTokenStats};
@@ -21,7 +21,7 @@ use pi_coding_agent::core::settings_manager::SettingsManager;
 use pi_coding_agent::core::usage_totals::{UsageCostBreakdownEntry, get_usage_cost_breakdown};
 use pretty_assertions::assert_eq;
 use support::model_runtime_test_utils::{create_in_memory_model_registry, get_model_runtime};
-use support::utilities::create_test_resource_loader;
+use support::suite::harness::create_suite_resource_loader;
 
 fn test_model() -> Model {
     get_model("anthropic", "claude-sonnet-4-5").unwrap()
@@ -62,8 +62,10 @@ fn make_assistant_message(model: &Model, text: &str, total_tokens: i64, timestam
 }
 
 fn make_user_message(text: &str, timestamp: i64) -> AgentMessage {
-    let mut msg = UserMessage::text(text);
-    msg.timestamp = timestamp;
+    let msg = UserMessage {
+        content: UserMessageContent::Text(text.to_string()),
+        timestamp,
+    };
     pi_ai::types::Message::User(msg).into()
 }
 
@@ -73,9 +75,9 @@ fn make_tool_result_message(usage: Usage) -> AgentMessage {
         tool_name: "test_tool".to_string(),
         content: vec![UserContentBlock::Text(TextContent::new("tool result"))],
         details: None,
-        structured_content: None,
         usage: Some(usage),
         is_error: false,
+        nested_calls: None,
         timestamp: 1,
     })
     .into()
@@ -102,7 +104,7 @@ async fn create_session() -> (AgentSession, SessionManager, Model) {
         .await
         .unwrap();
 
-    let model_registry = create_in_memory_model_registry(auth_storage).await;
+    let model_registry = create_in_memory_model_registry(auth_storage).await.unwrap();
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_provider| {
             Box::pin(async { Ok(Some("test-key".to_string())) })
@@ -126,7 +128,7 @@ async fn create_session() -> (AgentSession, SessionManager, Model) {
         settings_manager,
         cwd: pi_js::env::cwd(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -147,7 +149,7 @@ async fn create_session() -> (AgentSession, SessionManager, Model) {
 fn sync_agent_messages(session: &AgentSession, session_manager: &SessionManager) {
     session
         .agent()
-        .replace_messages(session_manager.build_session_context(None, None).messages);
+        .replace_messages(session_manager.build_session_context().messages);
 }
 
 #[tokio::test]
@@ -378,7 +380,7 @@ async fn includes_cache_warming_usage_exactly_once_without_adding_messages() {
         }
     );
     assert_eq!(stats.total_messages, 0);
-    assert!(session_manager.build_session_context(None, None).messages.is_empty());
+    assert!(session_manager.build_session_context().messages.is_empty());
     assert_eq!(
         get_usage_cost_breakdown(&session_manager.get_entries()),
         vec![UsageCostBreakdownEntry {

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::extensions::types::{
@@ -23,7 +24,7 @@ fn create_echo_tool() -> AgentTool {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -48,7 +49,7 @@ async fn keeps_persisted_assistant_tool_result_message_order_when_extension_mess
         pi.on::<MessageEndEvent>(|event, _ctx| {
             Box::pin(async move {
                 if event.message.role() == Some("assistant") {
-                    pi_js::time::sleep(20).await;
+                    let _ = pi_js::time::sleep(20, None).await;
                 }
                 Ok(None)
             })
@@ -65,8 +66,16 @@ async fn keeps_persisted_assistant_tool_result_message_order_when_extension_mess
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Blocks(vec![
-                faux_tool_call("echo", json!({ "text": "one" })),
-                faux_tool_call("echo", json!({ "text": "two" })),
+                FauxContentBlock::ToolCall(faux_tool_call(
+                    "echo",
+                    [("text".to_string(), json!("one"))].into_iter().collect(),
+                    None,
+                )),
+                FauxContentBlock::ToolCall(faux_tool_call(
+                    "echo",
+                    [("text".to_string(), json!("two"))].into_iter().collect(),
+                    None,
+                )),
             ]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
@@ -145,7 +154,11 @@ async fn runs_tool_call_handlers_after_the_assistant_tool_use_message_is_settled
 
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("echo", json!({ "text": "hello" }))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "echo",
+                [("text".to_string(), json!("hello"))].into_iter().collect(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()

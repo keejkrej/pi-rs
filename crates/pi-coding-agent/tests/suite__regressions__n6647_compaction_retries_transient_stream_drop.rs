@@ -1,18 +1,28 @@
 //! Port of `packages/coding-agent/test/suite/regressions/6647-compaction-retries-transient-stream-drop.test.ts`.
-// WIRE(@ca-cli-w3): AgentSession wrapper emitting `summarization_retry_scheduled` / `summarization_retry_finished` on SessionEvent is owned by `core::agent_session`.
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::{AgentMessage, StreamFn};
+use pi_ai::providers::faux::{
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message,
+};
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Message, Model,
     ModelCost, ModelInput, RetryCallbacks, RetryPolicy, StopReason, Usage, UserMessage, UserMessageContent, faux_text,
 };
+use pi_coding_agent::core::agent_session::AgentSessionEvent;
 use pi_coding_agent::core::compaction::{CompactOptions, CompactionSettings, compact, prepare_compaction};
 use pi_coding_agent::core::session_manager::SessionManager;
+use pi_coding_agent::core::settings_manager::{
+    CompactionSettings as ManagerCompactionSettings, RetrySettings, Settings,
+};
 use pi_js::abort::AbortController;
+use support::suite::harness::{HarnessOptions, create_harness};
 use tempfile::TempDir;
 
 fn test_model() -> Model {
@@ -341,4 +351,59 @@ async fn aborts_in_flight_retry_backoff_via_abort_signal() {
     .unwrap_err();
 
     assert!(err.is_abort());
+}
+
+#[tokio::test]
+async fn agent_session_emits_summarization_retry_events_when_compaction_recovers() {
+    let harness = create_harness(HarnessOptions {
+        settings: Some(Settings {
+            compaction: Some(ManagerCompactionSettings {
+                keep_recent_tokens: Some(1),
+                ..Default::default()
+            }),
+            retry: Some(RetrySettings {
+                enabled: Some(true),
+                max_retries: Some(2),
+                base_delay_ms: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    harness.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("assistant response".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text(String::new()),
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::Error),
+                error_message: Some("terminated".to_owned()),
+                ..Default::default()
+            }),
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("summary after retry".to_owned()),
+            None,
+        )),
+    ]);
+
+    harness.session.prompt("message to compact", None).await.unwrap();
+    let result = harness.session.compact(None).await.unwrap();
+    assert!(result.summary.contains("summary after retry"));
+    let events = harness.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentSessionEvent::SummarizationRetryScheduled { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentSessionEvent::SummarizationRetryFinished))
+    );
+    harness.cleanup();
 }

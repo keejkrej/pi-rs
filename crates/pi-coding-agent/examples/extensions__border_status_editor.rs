@@ -299,14 +299,14 @@ impl Extension for BorderStatusEditorExtension {
                             g.active_tui.clone()
                         };
                         if let Some(t) = tick_tui {
-                            t.request_render(false);
+                            t.request_render(Some(false));
                         }
                     });
                     guard.spinner_timer = Some(handle);
                     guard.active_tui.clone()
                 };
                 if let Some(t) = tui {
-                    t.request_render(false);
+                    t.request_render(Some(false));
                 }
                 Ok(None)
             })
@@ -323,7 +323,7 @@ impl Extension for BorderStatusEditorExtension {
                     guard.active_tui.clone()
                 };
                 if let Some(t) = tui {
-                    t.request_render(false);
+                    t.request_render(Some(false));
                 }
                 Ok(None)
             })
@@ -371,7 +371,7 @@ impl Extension for BorderStatusEditorExtension {
                         g.active_tui.clone()
                     };
                     if let Some(t) = tui {
-                        t.request_render(false);
+                        t.request_render(Some(false));
                     }
                 });
 

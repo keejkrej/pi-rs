@@ -57,13 +57,13 @@ fn colorize(text: &str, shine_pos: isize) -> String {
 struct RainbowEditor {
     // WIRE(@tui-w3): switch inner Editor to CustomEditor once @tui merges.
     inner: Editor,
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     animation_timer: Mutex<Option<Interval>>,
     frame: Arc<AtomicUsize>,
 }
 
 impl RainbowEditor {
-    fn new(tui: Arc<dyn TUI>, theme: EditorTheme, _kb: KeybindingsManager) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: EditorTheme, _kb: KeybindingsManager) -> Self {
         Self {
             inner: Editor::new(Arc::clone(&tui), theme, None),
             tui,
@@ -195,11 +195,13 @@ impl EditorComponent for RainbowEditor {
     }
 
     fn border_color(&self) -> Option<EditorBorderColor> {
-        self.inner.border_color()
+        Some(self.inner.border_color())
     }
 
     fn set_border_color(&self, border_color: Option<EditorBorderColor>) {
-        self.inner.set_border_color(border_color);
+        if let Some(bc) = border_color {
+            self.inner.set_border_color(bc);
+        }
     }
 
     fn set_padding_x(&self, padding: f64) {
@@ -216,14 +218,14 @@ pub struct RainbowEditorExtension;
 #[async_trait]
 impl Extension for RainbowEditorExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<SessionStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 ctx.ui()?.set_editor_component(Some(Arc::new(|tui, theme, kb| {
                     Arc::new(RainbowEditor::new(tui, theme, kb))
                 })));
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

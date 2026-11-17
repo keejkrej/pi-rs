@@ -5,9 +5,9 @@ use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use indexmap::IndexSet;
+use pi_coding_agent::core::bash_executor::BashResult;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, ExtensionMode, InlineExtension, UserBashEvent, UserBashEventResult,
-    mcp_wire::BashResult,
 };
 use pi_tui::Component;
 use serde_json::Value;
@@ -134,7 +134,7 @@ pub struct InteractiveShellExtension;
 #[async_trait]
 impl Extension for InteractiveShellExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<UserBashEvent>(Arc::new(|event, ctx| {
+        pi.on::<UserBashEvent>(|event, ctx| {
             Box::pin(async move {
                 let mut command = event.command;
                 let mut force_interactive = false;
@@ -210,14 +210,14 @@ impl Extension for InteractiveShellExtension {
                 Ok(Some(UserBashEventResult::Result {
                     result: BashResult {
                         output,
-                        exit_code: Some(exit_code),
+                        exit_code: i32::try_from(exit_code).ok(),
                         cancelled: false,
                         truncated: false,
                         full_output_path: None,
                     },
                 }))
             })
-        }));
+        });
 
         Ok(())
     }

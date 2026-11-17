@@ -178,14 +178,17 @@ impl RadiusRelayHost {
             return Ok(());
         }
         self.inner.abort_controller.abort(None);
-        if let Some(writer) = lock_mutex(&self.inner.writer).take() {
+        let writer = lock_mutex(&self.inner.writer).take();
+        if let Some(writer) = writer {
             writer.close();
         }
-        if let Some(socket) = lock_mutex(&self.inner.socket).take() {
+        let socket = lock_mutex(&self.inner.socket).take();
+        if let Some(socket) = socket {
             let _ = socket.close(Some(1000), Some("Pi server stopped"));
         }
         drop_connections(&self.inner, None);
-        if let Some(handle) = self.loop_task.lock().await.take() {
+        let handle = self.loop_task.lock().await.take();
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
         Ok(())
@@ -377,13 +380,15 @@ fn handle_host_message(inner: &Arc<HostInner>, message: RadiusRelayMessage) -> p
                         if send_control(&inner_c, &HostOutputControlMessage::Pong { version: 1 })
                             .await
                             .is_err()
-                            && let Some(socket) = lock_mutex(&inner_c.socket).clone()
                         {
-                            close_websocket_quiet(
-                                &socket,
-                                LOCAL_TRANSPORT_ERROR_CLOSE_CODE,
-                                "Radius relay send failed",
-                            );
+                            let socket = lock_mutex(&inner_c.socket).clone();
+                            if let Some(socket) = socket {
+                                close_websocket_quiet(
+                                    &socket,
+                                    LOCAL_TRANSPORT_ERROR_CLOSE_CODE,
+                                    "Radius relay send failed",
+                                );
+                            }
                         }
                     });
                 }

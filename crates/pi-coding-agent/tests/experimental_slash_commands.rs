@@ -61,7 +61,6 @@ fn registers_and_removes_contributions() {
     assert!(dup_err.message().contains("already registered"));
 
     close.call();
-    close.call();
     assert!(registry.list().is_empty());
     assert_eq!(
         *snapshots.lock().expect("lock"),
@@ -110,12 +109,20 @@ async fn tracks_plugin_facet_reload_and_unload() {
             let orig_cb = Arc::clone(&orig_cb);
             let env_own = env.clone();
             env.on_activate(Arc::new(move || {
-                let unsub = commands.replace(contribution("hello", "Original", Some(Arc::clone(&orig_cb))))?;
-                env_own.own(Arc::new(move || {
-                    unsub.call();
-                    Box::pin(futures::future::ready(Ok(())))
-                }))?;
-                Box::pin(futures::future::ready(Ok(())))
+                let commands = commands.clone();
+                let orig_cb = Arc::clone(&orig_cb);
+                let env_own = env_own.clone();
+                Box::pin(async move {
+                    let unsub = commands.replace(contribution("hello", "Original", Some(orig_cb)))?;
+                    let unsub = std::sync::Mutex::new(Some(unsub));
+                    env_own.own(Arc::new(move || {
+                        if let Some(u) = unsub.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            u.call();
+                        }
+                        Box::pin(futures::future::ready(Ok(())))
+                    }))?;
+                    Ok(())
+                })
             }))
         }),
     ));
@@ -138,12 +145,19 @@ async fn tracks_plugin_facet_reload_and_unload() {
             let commands = SlashCommands::from_service(obj);
             let env_own = env.clone();
             env.on_activate(Arc::new(move || {
-                let unsub = commands.replace(contribution("hello", "Failing", None))?;
-                env_own.own(Arc::new(move || {
-                    unsub.call();
-                    Box::pin(futures::future::ready(Ok(())))
-                }))?;
-                Box::pin(futures::future::ready(Err(pi_js::Error::msg("replacement failed"))))
+                let commands = commands.clone();
+                let env_own = env_own.clone();
+                Box::pin(async move {
+                    let unsub = commands.replace(contribution("hello", "Failing", None))?;
+                    let unsub = std::sync::Mutex::new(Some(unsub));
+                    env_own.own(Arc::new(move || {
+                        if let Some(u) = unsub.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            u.call();
+                        }
+                        Box::pin(futures::future::ready(Ok(())))
+                    }))?;
+                    Err(pi_js::Error::msg("replacement failed"))
+                })
             }))
         }),
     ));
@@ -166,12 +180,20 @@ async fn tracks_plugin_facet_reload_and_unload() {
             let repl_cb = Arc::clone(&repl_cb);
             let env_own = env.clone();
             env.on_activate(Arc::new(move || {
-                let unsub = commands.replace(contribution("hello", "Replacement", Some(Arc::clone(&repl_cb))))?;
-                env_own.own(Arc::new(move || {
-                    unsub.call();
-                    Box::pin(futures::future::ready(Ok(())))
-                }))?;
-                Box::pin(futures::future::ready(Ok(())))
+                let commands = commands.clone();
+                let repl_cb = Arc::clone(&repl_cb);
+                let env_own = env_own.clone();
+                Box::pin(async move {
+                    let unsub = commands.replace(contribution("hello", "Replacement", Some(repl_cb)))?;
+                    let unsub = std::sync::Mutex::new(Some(unsub));
+                    env_own.own(Arc::new(move || {
+                        if let Some(u) = unsub.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            u.call();
+                        }
+                        Box::pin(futures::future::ready(Ok(())))
+                    }))?;
+                    Ok(())
+                })
             }))
         }),
     ));

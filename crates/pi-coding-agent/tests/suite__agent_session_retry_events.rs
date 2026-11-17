@@ -49,6 +49,9 @@ fn normalize_event_order(events: &[AgentSessionEvent]) -> Vec<String> {
             AgentSessionEvent::SummarizationRetryAttemptStart { .. } => "summarization_retry_attempt_start".to_string(),
             AgentSessionEvent::SummarizationRetryFinished => "summarization_retry_finished".to_string(),
             AgentSessionEvent::BashExecutionUpdate { .. } => "bash_execution_update".to_string(),
+            AgentSessionEvent::EntryAppended { .. }
+            | AgentSessionEvent::SessionInfoChanged { .. }
+            | AgentSessionEvent::ThinkingLevelChanged { .. } => continue,
         };
         if label == "message_update" && normalized.last().map(String::as_str) == Some("message_update") {
             continue;
@@ -239,9 +242,10 @@ async fn finalizes_retry_state_when_abort_is_requested_after_a_retry_attempt_fai
             && a.stop_reason == StopReason::Error
             && ec_ref.fetch_add(1, Ordering::SeqCst) + 1 == 2
         {
+            sess.request_abort();
             let s = sess.clone();
             tokio::spawn(async move {
-                s.abort().await;
+                s.wait_for_idle().await;
             });
         }
     });
@@ -353,7 +357,7 @@ async fn prompt_waits_for_retry_completion_even_when_assistant_message_end_handl
         pi.on::<MessageEndEvent>(|ev, _ctx| {
             Box::pin(async move {
                 if ev.message.role() == Some("assistant") {
-                    pi_js::time::sleep(40).await;
+                    let _ = pi_js::time::sleep(40, None).await;
                 }
                 Ok(None)
             })
@@ -529,7 +533,7 @@ async fn waits_for_the_full_loop_when_retry_recovery_produces_tool_calls() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -542,8 +546,7 @@ async fn waits_for_the_full_loop_when_retry_recovery_produces_tool_calls() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("echo:{text}")))],
                     details: Some(json!({ "text": text })),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -565,7 +568,7 @@ async fn waits_for_the_full_loop_when_retry_recovery_produces_tool_calls() {
     })
     .await;
 
-    let mut args = serde_json::Map::new();
+    let mut args = indexmap::IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -728,7 +731,7 @@ async fn emits_the_expected_event_order_for_a_tool_call_turn() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -741,8 +744,7 @@ async fn emits_the_expected_event_order_for_a_tool_call_turn() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("echo:{text}")))],
                     details: Some(json!({ "text": text })),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -754,7 +756,7 @@ async fn emits_the_expected_event_order_for_a_tool_call_turn() {
         ..Default::default()
     })
     .await;
-    let mut args = serde_json::Map::new();
+    let mut args = indexmap::IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -808,7 +810,7 @@ async fn emits_the_expected_event_order_for_a_tool_call_turn() {
 #[tokio::test]
 async fn emits_streaming_deltas_for_text_thinking_and_tool_calls_in_message_update_events() {
     let harness = create_harness(HarnessOptions::default()).await;
-    let mut args = serde_json::Map::new();
+    let mut args = indexmap::IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
         FauxAssistantMessageContent::Blocks(vec![

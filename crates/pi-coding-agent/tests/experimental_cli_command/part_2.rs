@@ -6,9 +6,13 @@ use pi_coding_agent::cli::experimental::command::CommandParseResult;
 const UNSUPPORTED_SERVER_OPTIONS: &str = "The experimental server command does not support existing CLI options yet";
 const UNSUPPORTED_CLIENT_OPTIONS: &str = "The experimental client command does not support existing CLI options yet";
 
+fn s(items: &[&str]) -> Vec<String> {
+    items.iter().map(|v| (*v).to_string()).collect()
+}
+
 #[test]
 fn parses_server_configuration() {
-    let result = CLI.parse(&[
+    let result = CLI.parse(&s(&[
         "server",
         "--server-id",
         "00000000-0000-4000-8000-000000000001",
@@ -21,7 +25,7 @@ fn parses_server_configuration() {
         "-e",
         "./first-plugin",
         "-e=./second-plugin",
-    ]);
+    ]));
     let cmd = result.command().expect("server parse ok");
     let json = serde_json::to_value(cmd).expect("serialize");
     assert_eq!(
@@ -39,7 +43,7 @@ fn parses_server_configuration() {
 
 #[test]
 fn parses_provider_qualified_server_models() {
-    let result = CLI.parse(&["server", "--model", "anthropic/claude-sonnet-4-5:high"]);
+    let result = CLI.parse(&s(&["server", "--model", "anthropic/claude-sonnet-4-5:high"]));
     let cmd = result.command().expect("parse ok");
     assert_eq!(
         serde_json::to_value(cmd).expect("serialize"),
@@ -52,7 +56,7 @@ fn parses_provider_qualified_server_models() {
 
 #[test]
 fn parses_client_transport_addresses() {
-    let unix = CLI.parse(&["client", "--connect", "unix:///tmp/pi.sock"]);
+    let unix = CLI.parse(&s(&["client", "--connect", "unix:///tmp/pi.sock"]));
     assert_eq!(
         serde_json::to_value(unix.command().expect("unix ok")).expect("serialize"),
         serde_json::json!({
@@ -61,13 +65,13 @@ fn parses_client_transport_addresses() {
         })
     );
 
-    let radius = CLI.parse(&[
+    let radius = CLI.parse(&s(&[
         "client",
         "--connect",
         "radius://00000000-0000-4000-8000-000000000001",
         "--session-id",
         "demo-1",
-    ]);
+    ]));
     assert_eq!(
         serde_json::to_value(radius.command().expect("radius ok")).expect("serialize"),
         serde_json::json!({
@@ -90,7 +94,7 @@ fn parses_client_session_selection_flags() {
         ("--resume", "resume"),
     ];
     for (option, property) in cases {
-        let res = CLI.parse(&["client", option]);
+        let res = CLI.parse(&s(&["client", option]));
         let val = serde_json::to_value(res.command().expect("parse ok")).expect("serialize");
         let mut expected = serde_json::Map::new();
         expected.insert("command".to_string(), serde_json::Value::String("client".to_string()));
@@ -101,7 +105,7 @@ fn parses_client_session_selection_flags() {
 
 #[test]
 fn parses_session_selection_followed_by_one_shot_prompt() {
-    let res = CLI.parse(&["client", "-r", "Explain this project"]);
+    let res = CLI.parse(&s(&["client", "-r", "Explain this project"]));
     assert_eq!(
         serde_json::to_value(res.command().expect("parse ok")).expect("serialize"),
         serde_json::json!({
@@ -114,7 +118,7 @@ fn parses_session_selection_followed_by_one_shot_prompt() {
 
 #[test]
 fn parses_client_model_and_plugin_configuration() {
-    let res = CLI.parse(&[
+    let res = CLI.parse(&s(&[
         "client",
         "--model",
         "anthropic/claude-sonnet-4-5:high",
@@ -122,7 +126,7 @@ fn parses_client_model_and_plugin_configuration() {
         "./first-plugin",
         "-e",
         "./second-plugin",
-    ]);
+    ]));
     assert_eq!(
         serde_json::to_value(res.command().expect("parse ok")).expect("serialize"),
         serde_json::json!({
@@ -148,7 +152,7 @@ fn parses_authentication_sources() {
     for (argv, expected_auth) in cases {
         for command in ["server", "client"] {
             let full = [command, argv[0], argv[1]];
-            let res = CLI.parse(&full);
+            let res = CLI.parse(&s(&full));
             let val = serde_json::to_value(res.command().expect("parse ok")).expect("serialize");
             assert_eq!(val["command"], command);
             assert_eq!(val["auth"], expected_auth);
@@ -159,7 +163,7 @@ fn parses_authentication_sources() {
 #[test]
 fn permits_omitted_authentication_for_server_and_client() {
     for command in ["server", "client"] {
-        let res = CLI.parse(&[command]);
+        let res = CLI.parse(&s(&[command]));
         assert_eq!(
             serde_json::to_value(res.command().expect("parse ok")).expect("serialize"),
             serde_json::json!({ "command": command })
@@ -217,7 +221,7 @@ fn rejects_invalid_experimental_inputs() {
     ];
 
     for (argv, expected_substr) in cases {
-        let res = CLI.parse(argv);
+        let res = CLI.parse(&s(argv));
         assert!(!res.is_ok(), "expected parse error for {argv:?}, got ok");
         assert!(
             res.errors().iter().any(|err| err.contains(expected_substr)),
@@ -229,7 +233,7 @@ fn rejects_invalid_experimental_inputs() {
 
 #[test]
 fn rejects_unsupported_options_without_parsing_them_through_the_stable_cli() {
-    let res = CLI.parse(&["client", "--tui-mode", "wrong", "--model", "claude-sonnet"]);
+    let res = CLI.parse(&s(&["client", "--tui-mode", "wrong", "--model", "claude-sonnet"]));
     assert_eq!(
         res,
         CommandParseResult::Err {

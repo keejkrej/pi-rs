@@ -53,12 +53,12 @@ pub struct NotifyExtension;
 #[async_trait]
 impl Extension for NotifyExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<AgentSettledEvent>(Arc::new(|_event, _ctx| {
+        pi.on::<AgentSettledEvent>(|_event, _ctx| {
             Box::pin(async move {
                 notify("Pi", "Ready for input");
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

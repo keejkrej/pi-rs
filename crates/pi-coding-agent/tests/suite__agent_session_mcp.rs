@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use indexmap::IndexMap;
 use pi_agent_core::types::AgentMessage;
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, SystemMessage, ToolResultMessage};
 use pi_coding_agent::core::agent_session::ExtensionBindings;
@@ -40,6 +41,14 @@ use support::suite::harness::{
 
 const TINY_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+fn faux_tc(name: &str, args: Value) -> FauxContentBlock {
+    let map: IndexMap<String, Value> = match args {
+        Value::Object(m) => m.into_iter().collect(),
+        _ => Default::default(),
+    };
+    FauxContentBlock::ToolCall(faux_tool_call(name, map, None))
+}
 
 fn default_server_tools() -> Vec<Value> {
     vec![
@@ -200,7 +209,7 @@ fn create_fake_server(
         };
         tokio::spawn(async move {
             if let Some(ms) = delay.filter(|d| *d > 0) {
-                pi_js::time::sleep(ms).await;
+                let _ = pi_js::time::sleep(ms, None).await;
             } else {
                 tokio::task::yield_now().await;
             }
@@ -208,6 +217,11 @@ fn create_fake_server(
         });
     }));
     std::mem::forget(_unsub);
+    {
+        let mut start_fut = std::pin::pin!(server.start());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = std::future::Future::poll(start_fut.as_mut(), &mut cx);
+    }
     (pair.client, server)
 }
 
@@ -345,7 +359,7 @@ where
         if cond() {
             return;
         }
-        pi_js::time::sleep(10).await;
+        let _ = pi_js::time::sleep(10, None).await;
     }
     assert!(cond(), "timed out waiting for: {label}");
 }
@@ -386,8 +400,8 @@ async fn setup_mcp(exposure: McpExposure, opts: McpSetupOptions) -> McpSetup {
             url: "http://unused.invalid".to_string(),
             headers: None,
             oauth: None,
+            auth: None,
         }),
-        auth_provider: None,
         source: "test".to_string(),
         scope: None,
     };
@@ -409,13 +423,7 @@ async fn setup_mcp(exposure: McpExposure, opts: McpSetupOptions) -> McpSetup {
                 never_respond_initialize: false,
             },
         );
-        srvs_c
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(server.clone());
-        tokio::spawn(async move {
-            let _ = server.start().await;
-        });
+        srvs_c.lock().unwrap_or_else(PoisonError::into_inner).push(server);
         Ok(CreatedTransport::Custom(Arc::new(client)))
     });
 
@@ -503,7 +511,7 @@ fn servers_section(harness: &Harness) -> Option<String> {
 }
 
 fn tool_result(harness: &Harness, name: &str) -> ToolResultMessage {
-    get_tool_result(harness, name).expect("tool result")
+    get_tool_result(harness, name)
 }
 
 #[tokio::test]
@@ -529,7 +537,7 @@ async fn exposes_codemode_only_mcp_tools_through_codemode_and_hides_them_from_th
     );
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": code }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -590,15 +598,15 @@ async fn exposes_codemode_only_mcp_tools_through_codemode_and_hides_them_from_th
             "found": [search_name],
         })
     );
+    let calls = st.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(calls.len(), 4);
+    let mut first_two = calls[..2].to_vec();
+    first_two.sort();
     assert_eq!(
-        *st.calls.lock().unwrap_or_else(PoisonError::into_inner),
-        vec![
-            "search:{\"query\":\"mcp\"}",
-            "search:{\"query\":\"pi\"}",
-            "fail:{}",
-            "shot:{}",
-        ]
+        first_two,
+        vec!["search:{\"query\":\"mcp\"}", "search:{\"query\":\"pi\"}"]
     );
+    assert_eq!(&calls[2..], ["fail:{}", "shot:{}"]);
     st.harness.cleanup();
 }
 
@@ -665,7 +673,7 @@ async fn run_dash_underscore_routing(reverse: bool) {
     let code = r#"for (const query of ["dashed", "underscored"]) await tools[(await searchTools(query))[0].name]({});"#;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": code }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -700,7 +708,7 @@ async fn rejects_direct_model_calls_to_codemode_only_mcp_tools() {
     let search_name = create_mcp_tool_name("docs", "search", |_| false);
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(&search_name, json!({ "query": "x" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(&search_name, json!({ "query": "x" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -727,10 +735,7 @@ async fn declares_directly_exposed_mcp_tools_to_the_model() {
     let st = setup_mcp(McpExposure::Direct, McpSetupOptions::default()).await;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                "mcp__docs__search",
-                json!({ "query": "direct" }),
-            )]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("mcp__docs__search", json!({ "query": "direct" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -872,9 +877,9 @@ async fn lists_and_reads_resources_with_codexs_resource_tools() {
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Blocks(vec![
-                faux_tool_call("list_mcp_resources", json!({})),
-                faux_tool_call("list_mcp_resource_templates", json!({ "server": "docs" })),
-                faux_tool_call(
+                faux_tc("list_mcp_resources", json!({})),
+                faux_tc("list_mcp_resource_templates", json!({ "server": "docs" })),
+                faux_tc(
                     "read_mcp_resource",
                     json!({ "server": "docs", "uri": "docs://pages/setup" }),
                 ),
@@ -885,7 +890,7 @@ async fn lists_and_reads_resources_with_codexs_resource_tools() {
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "read_mcp_resource",
                 json!({ "server": "nope", "uri": "docs://x" }),
             )]),
@@ -980,7 +985,7 @@ async fn makes_the_resource_tools_callable_from_codemode_for_codemode_servers() 
     let code = "const listed = await tools.list_mcp_resources({ server: \"docs\" });\nconst read = await tools.read_mcp_resource({ server: \"docs\", uri: listed.resources[0].uri });\nreturn { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text };";
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": code }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1055,7 +1060,7 @@ const aliases = await Promise.all(["docs", "mcp__docs"].map((name) => describeNa
 return { docs, sameForAliases: aliases.every((alias) => JSON.stringify(alias) === JSON.stringify(docs)), none: await describeNamespace("mcp__nope") };"#;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": code }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1180,7 +1185,7 @@ async fn treats_codemode_mcp_tools_as_reachable_through_an_active_tool_search() 
     .await;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "tool_search",
                 json!({ "query": "search the docs", "limit": 1 }),
             )]),
@@ -1190,10 +1195,7 @@ async fn treats_codemode_mcp_tools_as_reachable_through_an_active_tool_search() 
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                "mcp__docs__search",
-                json!({ "query": "loaded" }),
-            )]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("mcp__docs__search", json!({ "query": "loaded" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1294,7 +1296,7 @@ async fn does_not_activate_another_extensions_tool_named_codemode() {
             name: "codemode".to_string(),
             label: "codemode".to_string(),
             description: "Another extension's codemode tool.".to_string(),
-            parameters: t::object(&[]),
+            parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
             prompt_snippet: None,
             prompt_guidelines: None,
             exposure: None,
@@ -1304,6 +1306,7 @@ async fn does_not_activate_another_extensions_tool_named_codemode() {
             annotations: None,
             constrained_sampling: None,
             execution_mode: None,
+            prepare_loadout: None,
             prepare_arguments: None,
             render_shell: None,
             render_call: None,
@@ -1362,8 +1365,8 @@ async fn setup_slow(
             url: "http://unused.invalid".to_string(),
             headers: None,
             oauth: None,
+            auth: None,
         }),
-        auth_provider: None,
         source: "test".to_string(),
         scope: None,
     };
@@ -1571,7 +1574,7 @@ async fn waits_for_the_servers_a_codemode_script_names() {
     let (harness, calls, _) = setup_slow("slow", None, None, None, Some(30), false, None).await;
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "codemode",
                 json!({ "code": "return (await tools.mcp__slow__search({ query: \"q\" })).structuredContent;" }),
             )]),
@@ -1605,7 +1608,7 @@ async fn waits_for_servers_whose_script_identifiers_differ_from_their_names() {
     let (harness, calls, _) = setup_slow("slow-docs", None, None, None, Some(30), false, None).await;
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "codemode",
                 json!({ "code": "await tools.mcp__slow_docs__search({ query: \"q\" }); return (await describeNamespace(\"slow_docs\")).name;" }),
             )]),
@@ -1638,7 +1641,7 @@ async fn does_not_wait_for_servers_a_codemode_script_does_not_name() {
     let (harness, _, _) = setup_slow("slow", None, None, None, None, true, None).await;
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": "return 1 + 1;" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": "return 1 + 1;" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1664,7 +1667,7 @@ async fn waits_for_servers_before_tool_search_searches() {
     let (harness, _, _) = setup_slow("slow", Some(McpExposure::Deferred), None, None, Some(30), false, None).await;
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "tool_search",
                 json!({ "query": "search the docs", "limit": 1 }),
             )]),
@@ -1674,7 +1677,7 @@ async fn waits_for_servers_before_tool_search_searches() {
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("mcp__slow__search", json!({ "query": "late" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("mcp__slow__search", json!({ "query": "late" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1768,7 +1771,7 @@ async fn finds_tools_from_scripts_with_search_tools_and_describe_tool() {
     "#;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("codemode", json!({ "code": code }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("codemode", json!({ "code": code }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1813,7 +1816,7 @@ async fn activates_tool_search_for_deferred_mcp_tools_and_keeps_loaded_tools_dec
     let search_name = create_mcp_tool_name("docs", "search", |_| false);
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "tool_search",
                 json!({ "query": "search the docs", "limit": 1 }),
             )]),
@@ -1823,7 +1826,7 @@ async fn activates_tool_search_for_deferred_mcp_tools_and_keeps_loaded_tools_dec
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(&search_name, json!({ "query": "loaded" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(&search_name, json!({ "query": "loaded" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1918,7 +1921,7 @@ async fn finds_nothing_to_load_when_every_matching_tool_is_already_declared() {
     .await;
     st.harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("tool_search", json!({ "query": "docs" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("tool_search", json!({ "query": "docs" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -2082,8 +2085,8 @@ async fn run_prefers_mcp_json_server(ext_name: &str) {
             url: "http://config.invalid".to_string(),
             headers: None,
             oauth: None,
+            auth: None,
         }),
-        auth_provider: None,
         source: "mcp.json".to_string(),
         scope: None,
     };
@@ -2098,7 +2101,7 @@ async fn run_prefers_mcp_json_server(ext_name: &str) {
         "configured server connected",
     )
     .await;
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
     assert_eq!(
         *connected.lock().unwrap_or_else(PoisonError::into_inner),
         vec![configured]
@@ -2195,8 +2198,8 @@ async fn setup_resume_reload(
             url: "http://unused.invalid".to_string(),
             headers: None,
             oauth: None,
+            auth: None,
         }),
-        auth_provider: None,
         source: "test".to_string(),
         scope: None,
     };
@@ -2214,43 +2217,54 @@ async fn setup_resume_reload(
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(entry.name.clone());
-            let (client, server) = create_fake_server(
+            let (client, _server) = create_fake_server(
                 Arc::new(Mutex::new(Vec::new())),
                 FakeServerOptions {
                     initialize_delay_ms,
                     ..Default::default()
                 },
             );
-            tokio::spawn(async move {
-                let _ = server.start().await;
-            });
             Ok(CreatedTransport::Custom(Arc::new(client)))
         })),
         ..Default::default()
     })));
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        extension_factories: Some(factories),
-        no_extensions: Some(true),
-        no_skills: Some(true),
-        no_prompt_templates: Some(true),
-        no_themes: Some(true),
+        extension_factories: factories
+            .into_iter()
+            .map(pi_coding_agent::core::resource_loader::InlineExtension::Core)
+            .collect(),
+        no_extensions: true,
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
         ..Default::default()
     }));
+    resource_loader.reload(None).await.unwrap();
     let harness = create_harness(HarnessOptions {
         resource_loader: Some(resource_loader),
         session_manager,
         ..Default::default()
     })
     .await;
-    harness.session.bind_extensions(Default::default()).await.unwrap();
+    let ui = Arc::new(RecordingUiContext {
+        notifications: Arc::new(Mutex::new(Vec::new())),
+    });
+    harness
+        .session
+        .bind_extensions(ExtensionBindings {
+            ui_context: Some(ui),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     (harness, connected)
 }
 
 async fn load_docs_search(harness: &Harness) {
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![faux_tc(
                 "tool_search",
                 json!({ "query": "search the docs", "limit": 1 }),
             )]),
@@ -2292,7 +2306,7 @@ async fn declares_tools_tool_search_loaded_again_on_resume_once_their_server_con
     .await;
     second.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("mcp__docs__search", json!({ "query": "again" }))]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tc("mcp__docs__search", json!({ "query": "again" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -2346,7 +2360,7 @@ async fn run_restored_tools_with_loadout(loadout: Option<Vec<String>>, kept: boo
                             cur
                         }
                     };
-                    pi_h.set_active_tools(&next)?;
+                    pi_h.set_active_tools(next)?;
                     Ok(None)
                 })
             });

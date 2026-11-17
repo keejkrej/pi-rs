@@ -56,10 +56,11 @@ async fn allows_extensions_to_re_register_tools_without_strict_sampling() {
             async move {
                 let cwd_ev = cwd_inner.clone();
                 let active_ev = active_inner.clone();
+                let pi_ev = pi.clone();
                 pi.on::<SessionStartEvent>(move |_ev, _ctx| {
                     let cwd_run = cwd_ev.clone();
                     let active_run = active_ev.clone();
-                    let pi_handle = pi.clone();
+                    let pi_handle = pi_ev.clone();
                     Box::pin(async move {
                         let definitions = create_all_tool_definitions(&cwd_run, None);
                         for name in STRICT_TOOL_NAMES {
@@ -77,14 +78,16 @@ async fn allows_extensions_to_re_register_tools_without_strict_sampling() {
         });
 
         let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-            cwd: Some(cwd.clone()),
-            agent_dir: Some(agent_dir.clone()),
+            cwd: cwd.clone(),
+            agent_dir: agent_dir.clone(),
             settings_manager: Some(settings_manager.clone()),
-            no_extensions: Some(true),
-            no_skills: Some(true),
-            no_prompt_templates: Some(true),
-            no_themes: Some(true),
-            extension_factories: Some(vec![InlineExtension::Factory(factory)]),
+            no_extensions: true,
+            no_skills: true,
+            no_prompt_templates: true,
+            no_themes: true,
+            extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(
+                InlineExtension::Factory(factory),
+            )],
             ..Default::default()
         }));
 

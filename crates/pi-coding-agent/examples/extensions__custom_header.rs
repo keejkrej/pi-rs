@@ -45,7 +45,7 @@ impl Component for MascotHeaderComponent {
         let subtitle = format!(
             "{}{}",
             self.theme.fg("muted", "   shitty coding agent"),
-            self.theme.fg("dim", &format!(" v{VERSION}"))
+            self.theme.fg("dim", &format!(" v{}", *VERSION))
         );
         lines.push(subtitle);
         lines
@@ -59,7 +59,7 @@ pub struct CustomHeaderExtension;
 #[async_trait]
 impl Extension for CustomHeaderExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<SessionStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 if ctx.mode()? == ExtensionMode::Tui {
                     ctx.ui()?
@@ -67,7 +67,7 @@ impl Extension for CustomHeaderExtension {
                 }
                 Ok(None)
             })
-        }));
+        });
 
         pi.register_command(
             "builtin-header",

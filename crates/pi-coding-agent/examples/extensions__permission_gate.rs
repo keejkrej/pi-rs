@@ -24,7 +24,7 @@ pub struct PermissionGateExtension;
 #[async_trait]
 impl Extension for PermissionGateExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<ToolCallEvent>(Arc::new(|event, ctx| {
+        pi.on::<ToolCallEvent>(|event, ctx| {
             Box::pin(async move {
                 let ToolCallEvent::Bash(bash_evt) = event else {
                     return Ok(None);
@@ -62,7 +62,7 @@ impl Extension for PermissionGateExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

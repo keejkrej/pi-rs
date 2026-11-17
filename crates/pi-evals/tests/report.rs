@@ -5,7 +5,6 @@ use pi_evals::report::{
     CaseStatusOutcome, EvalObservation, EvalOutcome, PI_SESSION_SNAPSHOT_ARTIFACT, VitestJsonStatus,
     classify_case_status, read_task_observation,
 };
-use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

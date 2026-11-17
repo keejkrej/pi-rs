@@ -25,19 +25,19 @@ impl Extension for EventBusExtension {
 
         {
             let ctx_ref = Arc::clone(&current_ctx);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let ctx_ref = Arc::clone(&ctx_ref);
                 Box::pin(async move {
                     let mut guard = ctx_ref.lock().unwrap_or_else(|e| e.into_inner());
                     *guard = Some(ctx);
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let ctx_ref = Arc::clone(&current_ctx);
-            let _unsub = pi.events().on(
+            let _unsub = pi.events().on_sync(
                 "my:notification",
                 Arc::new(move |data| {
                     let ctx_opt = ctx_ref.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -82,7 +82,7 @@ impl Extension for EventBusExtension {
 
         {
             let pi_ss = pi.clone();
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<SessionStartEvent>(move |_event, _ctx| {
                 let pi = pi_ss.clone();
                 Box::pin(async move {
                     pi.events().emit(
@@ -94,7 +94,7 @@ impl Extension for EventBusExtension {
                     );
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

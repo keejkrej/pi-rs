@@ -9,13 +9,12 @@ use pi_ai::types::{
     AssistantContentBlock, CacheRetention, Context, Message, SimpleStreamOptions, StopReason, StreamOptions,
     TextContent, UserContentBlock, UserMessage, UserMessageContent,
 };
+use pi_coding_agent::core::compaction::{CompactionResult, serialize_conversation};
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, NotifyType, SessionBeforeCompactEvent,
-    SessionBeforeCompactResult, mcp_wire,
+    SessionBeforeCompactResult,
 };
-// WIRE(@mcp-w3): switch serialize_conversation import if re-exported by pi_coding_agent::core::compaction
 use pi_coding_agent::core::messages::convert_to_llm;
-use pi_durable::harness::compaction::serialize_conversation;
 
 pub struct CustomCompactionExtension;
 
@@ -33,7 +32,7 @@ impl Extension for CustomCompactionExtension {
 
                 let registry = ctx.model_registry()?;
                 let model = registry
-                    .get_available_models()
+                    .get_available()
                     .into_iter()
                     .find(|m| m.provider == "google" && m.id == "gemini-2.5-flash");
 
@@ -90,7 +89,10 @@ Format the summary as structured markdown with clear sections.\n\n\
                     timestamp: pi_js::time::now_ms() as i64,
                 });
 
-                let api_key = registry.get_api_key(&model).await.ok().flatten();
+                let api_key = match registry.get_api_key_and_headers(&model).await {
+                    pi_coding_agent::core::model_registry::ResolvedRequestAuth::Ok { api_key, .. } => api_key,
+                    pi_coding_agent::core::model_registry::ResolvedRequestAuth::Err { .. } => None,
+                };
                 let response = complete_simple(
                     &model,
                     &Context {
@@ -104,7 +106,7 @@ Format the summary as structured markdown with clear sections.\n\n\
                             signal: signal.clone(),
                             max_tokens: Some(8192),
                             cache_retention: Some(CacheRetention::None),
-                            session_id: Some(pi_ai::uuidv7()),
+                            session_id: pi_ai::uuidv7(None).ok(),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -146,7 +148,7 @@ Format the summary as structured markdown with clear sections.\n\n\
 
                 Ok(Some(SessionBeforeCompactResult {
                     cancel: None,
-                    compaction: Some(mcp_wire::CompactionResult {
+                    compaction: Some(CompactionResult {
                         summary,
                         first_kept_entry_id: prep.first_kept_entry_id.clone(),
                         tokens_before: prep.tokens_before,

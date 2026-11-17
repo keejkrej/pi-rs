@@ -24,7 +24,7 @@ pub struct InlineBashExtension;
 impl Extension for InlineBashExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         let pi_in = pi.clone();
-        pi.on::<InputEvent>(Arc::new(move |event, ctx| {
+        pi.on::<InputEvent>(move |event, ctx| {
             let pi = pi_in.clone();
             Box::pin(async move {
                 let text = &event.text;
@@ -125,7 +125,7 @@ impl Extension for InlineBashExtension {
                     images: event.images,
                 }))
             })
-        }));
+        });
 
         Ok(())
     }

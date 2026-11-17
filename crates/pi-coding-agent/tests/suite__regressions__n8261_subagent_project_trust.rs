@@ -147,9 +147,11 @@ impl ExtensionUIContext for ConfirmUi {
 
 async fn run_project_agent(trusted: bool, confirm_result: bool) -> (usize, String) {
     let missing_home = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-8261-home-"])).unwrap();
-    let _home_guard = pi_js::env::testing::set("HOME", &missing_home);
-    let _agent_dir_guard =
-        pi_js::env::testing::set("PI_CODING_AGENT_DIR", &pi_js::path::join(&[&missing_home, "agent"]));
+    let _home_guard = pi_js::env::testing::EnvGuard::set("HOME", Some(&missing_home));
+    let _agent_dir_guard = pi_js::env::testing::EnvGuard::set(
+        "PI_CODING_AGENT_DIR",
+        Some(&pi_js::path::join(&[&missing_home, "agent"])),
+    );
 
     let harness = create_harness(HarnessOptions {
         extension_factories: Some(vec![InlineExtension::Factory(subagent_example::create_extension())]),
@@ -182,16 +184,18 @@ async fn run_project_agent(trusted: bool, confirm_result: bool) -> (usize, Strin
         .await
         .unwrap();
 
+    let mut subagent_args = indexmap::IndexMap::new();
+    subagent_args.insert("agent".to_string(), json!("project-agent"));
+    subagent_args.insert("task".to_string(), json!("Test project trust"));
+    subagent_args.insert("agentScope".to_string(), json!("project"));
+    subagent_args.insert(
+        "cwd".to_string(),
+        json!(pi_js::path::join(&[&harness.temp_dir, "missing-cwd"])),
+    );
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                "subagent",
-                json!({
-                    "agent": "project-agent",
-                    "task": "Test project trust",
-                    "agentScope": "project",
-                    "cwd": pi_js::path::join(&[&harness.temp_dir, "missing-cwd"]),
-                }),
+            FauxAssistantMessageContent::Blocks(vec![pi_ai::providers::faux::FauxContentBlock::ToolCall(
+                faux_tool_call("subagent", subagent_args, None),
             )]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),

@@ -57,14 +57,14 @@ async fn preserves_initial_settings_when_default_resource_loader_reloads() {
         None,
     );
     let resource_loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir),
+        cwd: temp_dir.clone(),
+        agent_dir,
         settings_manager: Some(settings_manager.clone()),
-        no_extensions: Some(true),
-        no_skills: Some(true),
-        no_prompt_templates: Some(true),
-        no_themes: Some(true),
-        no_context_files: Some(true),
+        no_extensions: true,
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
+        no_context_files: true,
         ..Default::default()
     });
 

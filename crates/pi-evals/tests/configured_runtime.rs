@@ -14,7 +14,6 @@ use pi_evals::evals::configured_runtime::{
     AddedModelOutput, AddedModelResult, ModelFields, ProbeResponseFields, ProviderRuntimeOutput, ProviderRuntimeResult,
     ProviderScenario, inspect_added_model, inspect_provider, load_configured_model_runtime,
 };
-use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

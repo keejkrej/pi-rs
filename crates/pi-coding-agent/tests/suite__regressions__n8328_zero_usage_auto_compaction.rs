@@ -35,6 +35,7 @@ async fn falls_back_to_context_token_estimation_when_provider_reports_zero_usage
             compaction: Some(CompactionSettings {
                 enabled: Some(true),
                 reserve_tokens: Some(10),
+                keep_recent_tokens: Some(1),
                 ..Default::default()
             }),
             ..Default::default()
@@ -46,13 +47,23 @@ async fn falls_back_to_context_token_estimation_when_provider_reports_zero_usage
     let user = build_user_message(&"x".repeat(400), pi_js::time::now_ms() - 1000);
     let mut assistant = faux_assistant_message(FauxAssistantMessageContent::Text("response".to_string()), None);
     assistant.usage = Usage::default();
+    let follow_user = build_user_message("follow up", pi_js::time::now_ms() - 500);
+    let mut follow_assistant =
+        faux_assistant_message(FauxAssistantMessageContent::Text("response 2".to_string()), None);
+    follow_assistant.usage = Usage::default();
 
-    harness
-        .session
-        .agent()
-        .replace_messages(vec![user, AgentMessage::from(Message::Assistant(assistant.clone()))]);
+    let messages = vec![
+        user,
+        AgentMessage::from(Message::Assistant(assistant)),
+        follow_user,
+        AgentMessage::from(Message::Assistant(follow_assistant.clone())),
+    ];
+    for msg in &messages {
+        harness.session_manager.append_message(msg.clone()).unwrap();
+    }
+    harness.session.agent().replace_messages(messages);
 
-    harness.session.check_compaction_for_test(&assistant, true).await;
+    harness.session.check_compaction_for_test(&follow_assistant, true).await;
 
     let started = harness.events().into_iter().any(|e| {
         matches!(

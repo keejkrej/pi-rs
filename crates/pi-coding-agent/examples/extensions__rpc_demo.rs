@@ -20,7 +20,7 @@ impl Extension for RpcDemoExtension {
 
         {
             let tc = Arc::clone(&turn_count);
-            pi.on::<SessionStartEvent>(Arc::new(move |event, ctx| {
+            pi.on::<SessionStartEvent>(move |event, ctx| {
                 let tc = Arc::clone(&tc);
                 Box::pin(async move {
                     let ui = ctx.ui()?;
@@ -42,12 +42,12 @@ impl Extension for RpcDemoExtension {
                     ui.set_status("rpc-demo", Some(&format!("Turns: {count}")));
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let tc = Arc::clone(&turn_count);
-            pi.on::<TurnStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<TurnStartEvent>(move |_event, ctx| {
                 let tc = Arc::clone(&tc);
                 Box::pin(async move {
                     let next = tc.fetch_add(1, Ordering::SeqCst) + 1;
@@ -55,25 +55,25 @@ impl Extension for RpcDemoExtension {
                         .set_status("rpc-demo", Some(&format!("Turn {next} running...")));
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let tc = Arc::clone(&turn_count);
-            pi.on::<TurnEndEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<TurnEndEvent>(move |_event, ctx| {
                 let tc = Arc::clone(&tc);
                 Box::pin(async move {
                     let count = tc.load(Ordering::SeqCst);
                     ctx.ui()?.set_status("rpc-demo", Some(&format!("Turn {count} done")));
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let rm_re = regex::Regex::new(r"(?i)\brm\s+(-rf?|--recursive)").ok();
             let sudo_re = regex::Regex::new(r"(?i)\bsudo\b").ok();
-            pi.on::<ToolCallEvent>(Arc::new(move |event, ctx| {
+            pi.on::<ToolCallEvent>(move |event, ctx| {
                 let rm_re = rm_re.clone();
                 let sudo_re = sudo_re.clone();
                 Box::pin(async move {
@@ -111,10 +111,10 @@ impl Extension for RpcDemoExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
-        pi.on::<SessionBeforeSwitchEvent>(Arc::new(|event, ctx| {
+        pi.on::<SessionBeforeSwitchEvent>(|event, ctx| {
             Box::pin(async move {
                 if event.reason != SessionBeforeSwitchReason::New || !ctx.has_ui()? {
                     return Ok(None);
@@ -127,7 +127,7 @@ impl Extension for RpcDemoExtension {
                 }
                 Ok(None)
             })
-        }));
+        });
 
         pi.register_command(
             "rpc-input",

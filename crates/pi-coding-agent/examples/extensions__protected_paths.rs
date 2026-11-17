@@ -15,7 +15,7 @@ pub struct ProtectedPathsExtension;
 #[async_trait]
 impl Extension for ProtectedPathsExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<ToolCallEvent>(Arc::new(|event, ctx| {
+        pi.on::<ToolCallEvent>(|event, ctx| {
             Box::pin(async move {
                 let path = match event {
                     ToolCallEvent::Write(w) => w.input.path,
@@ -39,7 +39,7 @@ impl Extension for ProtectedPathsExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

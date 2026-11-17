@@ -5,13 +5,12 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use pi_ai::{Model, ModelThinkingLevel};
 use pi_js::abort::AbortSignal;
-use serde::{Deserialize, Serialize};
 
 use crate::config::get_agent_dir;
 use crate::core::extensions::types::{FlagType, FlagValue, SessionStartEvent, ToolDefinition};
 use pi_ai::ModelsRefreshOptions;
 
-use crate::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime, ModelRuntimeCreateOptions};
+use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
 use crate::core::resource_loader::{
     DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader, ResourceLoaderReloadOptions,
 };
@@ -84,7 +83,7 @@ fn apply_extension_flag_values(
     };
 
     let mut diagnostics = Vec::new();
-    let extensions_result = resource_loader.get_extensions();
+    let extensions_result = resource_loader.get_core_extensions();
     let mut registered_flags: IndexMap<String, FlagType> = IndexMap::new();
     for extension in &extensions_result.extensions {
         let flags_guard = extension.flags.lock().unwrap_or_else(|e| e.into_inner());
@@ -155,7 +154,7 @@ pub async fn create_agent_session_services(
         None => {
             ModelRuntime::create(ModelRuntimeCreateOptions {
                 auth_path: Some(pi_js::path::join(&[&agent_dir, "auth.json"])),
-                models_path: Some(pi_js::path::join(&[&agent_dir, "models.json"])),
+                models_path: Some(Some(pi_js::path::join(&[&agent_dir, "models.json"]))),
                 signal: options.model_runtime_signal,
                 ..Default::default()
             })
@@ -169,14 +168,14 @@ pub async fn create_agent_session_services(
     };
 
     let mut loader_opts = options.resource_loader_options.unwrap_or_default();
-    loader_opts.cwd = Some(cwd.clone());
-    loader_opts.agent_dir = Some(agent_dir.clone());
+    loader_opts.cwd = cwd.clone();
+    loader_opts.agent_dir = agent_dir.clone();
     loader_opts.settings_manager = Some(settings_manager.clone());
     let resource_loader = Arc::new(DefaultResourceLoader::new(loader_opts));
     resource_loader.reload(options.resource_loader_reload_options).await?;
 
     let mut diagnostics = Vec::new();
-    let extensions_result = resource_loader.get_extensions();
+    let extensions_result = resource_loader.get_core_extensions();
 
     let pending_providers = {
         let mut guard = extensions_result
@@ -188,7 +187,7 @@ pub async fn create_agent_session_services(
         std::mem::take(&mut *guard)
     };
     for reg in pending_providers {
-        if let Err(err) = model_runtime.register_provider(&reg.name, reg.config) {
+        if let Err(err) = model_runtime.register_provider(&reg.name, reg.config.into()) {
             diagnostics.push(AgentSessionRuntimeDiagnostic {
                 r#type: AgentSessionRuntimeDiagnosticType::Error,
                 message: format!("Extension \"{}\" error: {err}", reg.extension_path),

@@ -22,9 +22,8 @@ async fn run() -> pi_coding_agent::Result<()> {
 
     let prompt_res = session.prompt("What files are in the current directory?", None).await;
     for msg in session.state().messages {
-        if let Ok(json) = pi_js::json::stringify(&msg) {
-            pi_js::console::log(&json);
-        }
+        let json = pi_js::json::stringify(&msg);
+        pi_js::console::log(&json);
     }
     pi_js::console::log("");
     session.dispose();

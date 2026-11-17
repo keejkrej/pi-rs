@@ -1,7 +1,6 @@
 //! Port of packages/evals/test/plan.test.ts
 
 use pi_evals::plan::{DiscoveredEvalCase, DocumentationVariant, EvalTask, create_task_plan, parse_discovered_cases};
-use pretty_assertions::assert_eq;
 use serde_json::json;
 
 fn discovered() -> serde_json::Value {

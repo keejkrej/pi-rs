@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session_runtime::{
@@ -46,7 +47,7 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait until aborted".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -56,10 +57,12 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
             Box::pin(async move {
                 let aborted = Arc::new(Notify::new());
                 let ab_c = Arc::clone(&aborted);
-                let _guard = signal.on_abort(move |_reason| {
-                    ab_c.notify_one();
+                let _guard = signal.as_ref().map(|sig| {
+                    sig.on_abort(move |_reason| {
+                        ab_c.notify_one();
+                    })
                 });
-                if signal.aborted() {
+                if signal.as_ref().is_some_and(|sig| sig.aborted()) {
                     aborted.notify_one();
                 }
                 let wait = aborted.notified();
@@ -68,8 +71,7 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("aborted"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -78,7 +80,6 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
 
     let harness = create_harness(HarnessOptions {
         tools: Some(vec![wait_tool]),
-        in_memory: Some(true),
         ..Default::default()
     })
     .await;
@@ -88,7 +89,11 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
 
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("wait", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "wait",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -102,9 +107,6 @@ async fn waits_for_active_prompt_before_resetting_in_memory_fork_session() {
             let cap = Arc::clone(&cap_c);
             Box::pin(async move {
                 let mut r: Vec<&'static str> = Vec::new();
-                if ctx.system_prompt.is_some() {
-                    r.push("system");
-                }
                 for m in &ctx.messages {
                     let role = match m {
                         pi_ai::types::Message::System(_) => "system",

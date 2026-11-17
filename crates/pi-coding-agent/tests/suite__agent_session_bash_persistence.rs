@@ -90,7 +90,7 @@ impl BashOperations for AbortOnSignalOps {
             let tx_arc = Arc::new(Mutex::new(Some(tx)));
             let _guard = options.signal.as_ref().map(|sig| {
                 let tx_inner = Arc::clone(&tx_arc);
-                sig.add_listener(move || {
+                sig.on_abort(move |_| {
                     if let Some(sender) = tx_inner.lock().unwrap_or_else(PoisonError::into_inner).take() {
                         let _ = sender.send(());
                     }
@@ -171,7 +171,7 @@ async fn defers_bash_results_while_streaming_and_flushes_them_before_the_next_pr
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for release".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -185,8 +185,7 @@ async fn defers_bash_results_while_streaming_and_flushes_them_before_the_next_pr
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("released"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -202,7 +201,7 @@ async fn defers_bash_results_while_streaming_and_flushes_them_before_the_next_pr
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "wait",
-                serde_json::Map::new(),
+                Default::default(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -313,7 +312,7 @@ async fn cancels_running_bash_commands_with_abort_bash() {
         )
         .await
     });
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
     assert!(harness.session.is_bash_running());
     harness.session.abort_bash();
 
@@ -355,7 +354,7 @@ async fn keeps_newer_bash_execution_tracked_when_an_older_execution_finishes() {
         .await
     });
     while ops.list().len() < 2 {
-        pi_js::time::sleep(5).await;
+        let _ = pi_js::time::sleep(5, None).await;
     }
 
     let invs = ops.list();
@@ -408,7 +407,7 @@ async fn aborts_all_active_bash_executions() {
         .await
     });
     while ops.list().len() < 2 {
-        pi_js::time::sleep(5).await;
+        let _ = pi_js::time::sleep(5, None).await;
     }
 
     harness.session.abort_bash();
@@ -435,7 +434,7 @@ async fn persists_user_assistant_tool_result_and_custom_messages_in_order() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -446,8 +445,7 @@ async fn persists_user_assistant_tool_result_and_custom_messages_in_order() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("echo:{text}")))],
                     details: Some(json!({ "text": text })),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -459,7 +457,7 @@ async fn persists_user_assistant_tool_result_and_custom_messages_in_order() {
         ..Default::default()
     })
     .await;
-    let mut args = serde_json::Map::new();
+    let mut args = indexmap::IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -591,14 +589,16 @@ async fn persists_aborted_assistant_messages() {
 #[tokio::test]
 async fn records_bash_output_through_custom_operations() {
     let harness = create_harness(HarnessOptions::default()).await;
-    let ops: Arc<dyn BashOperations> = Arc::new(FnBashOps(|options: BashExecOptions| {
-        Box::pin(async move {
-            if let Some(ref on_data) = options.on_data {
-                on_data(b"hello from custom ops".to_vec());
-            }
-            Ok(BashExecResult { exit_code: Some(0) })
-        })
-    }));
+    let ops: Arc<dyn BashOperations> = Arc::new(FnBashOps(
+        |options: BashExecOptions| -> BoxFuture<pi_js::Result<BashExecResult>> {
+            Box::pin(async move {
+                if let Some(ref on_data) = options.on_data {
+                    on_data(b"hello from custom ops");
+                }
+                Ok(BashExecResult { exit_code: Some(0) })
+            })
+        },
+    ));
 
     let res = harness
         .session
@@ -633,15 +633,17 @@ async fn streams_bash_output_to_the_callback_and_session_events() {
         }
     });
 
-    let ops: Arc<dyn BashOperations> = Arc::new(FnBashOps(|options: BashExecOptions| {
-        Box::pin(async move {
-            if let Some(ref on_data) = options.on_data {
-                on_data(b"hello ".to_vec());
-                on_data(b"world".to_vec());
-            }
-            Ok(BashExecResult { exit_code: Some(0) })
-        })
-    }));
+    let ops: Arc<dyn BashOperations> = Arc::new(FnBashOps(
+        |options: BashExecOptions| -> BoxFuture<pi_js::Result<BashExecResult>> {
+            Box::pin(async move {
+                if let Some(ref on_data) = options.on_data {
+                    on_data(b"hello ");
+                    on_data(b"world");
+                }
+                Ok(BashExecResult { exit_code: Some(0) })
+            })
+        },
+    ));
 
     let cb_ref = Arc::clone(&callback_deltas);
     let cb: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |delta| {

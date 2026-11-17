@@ -415,6 +415,32 @@ pub struct ServerLifetime {
     inner: Arc<Mutex<ServerLifetimeInner>>,
 }
 
+pub(crate) fn spawn_registered_delay_fut<Fut, F>(delay_ms: u64, on_fire: F) -> JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut sleep = Box::pin(tokio::time::sleep(Duration::from_millis(delay_ms)));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let ready = std::future::Future::poll(sleep.as_mut(), &mut cx).is_ready();
+    tokio::spawn(async move {
+        if !ready {
+            sleep.await;
+        }
+        on_fire().await;
+    })
+}
+
+pub(crate) fn spawn_registered_delay<F>(delay_ms: u64, on_fire: F) -> JoinHandle<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    spawn_registered_delay_fut(delay_ms, move || {
+        on_fire();
+        futures::future::ready(())
+    })
+}
+
 impl ServerLifetime {
     pub fn new(keep_alive: bool) -> Self {
         Self {
@@ -436,8 +462,7 @@ impl ServerLifetime {
         inner.retire = Some(retire);
         if inner.startup_held {
             let weak = Arc::downgrade(&self.inner);
-            let handle = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(AUTO_SERVER_STARTUP_GRACE_MS)).await;
+            let handle = spawn_registered_delay(AUTO_SERVER_STARTUP_GRACE_MS, move || {
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
@@ -493,8 +518,7 @@ fn reconcile_lifetime(inner_arc: &Arc<Mutex<ServerLifetimeInner>>, inner: &mut S
         return;
     }
     let weak = Arc::downgrade(inner_arc);
-    let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(AUTO_SERVER_IDLE_GRACE_MS)).await;
+    let handle = spawn_registered_delay(AUTO_SERVER_IDLE_GRACE_MS, move || {
         let retire = {
             let Some(inner_arc) = weak.upgrade() else {
                 return;

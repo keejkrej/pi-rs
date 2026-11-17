@@ -3,56 +3,53 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use pi_ai::get_model;
+use pi_ai::compat::get_model;
 use pi_ai::types::{AssistantMessageEvent, ModelThinkingLevel};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
+use pi_coding_agent::core::diagnostics::ResourceDiagnostic;
 use pi_coding_agent::core::extensions::loader::create_extension_runtime;
-use pi_coding_agent::core::extensions::types::LoadExtensionsResult;
 use pi_coding_agent::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
+use pi_coding_agent::core::prompt_templates::PromptTemplate;
 use pi_coding_agent::core::resource_loader::{
-    AgentsFilesResult, LoadPromptsResult, LoadThemesResult, ResourceExtensionPaths, ResourceLoader,
-    ResourceLoaderReloadOptions, ResourceSourcePath,
+    ContextFile, LoadExtensionsResult, PromptSource, ResourceExtensionPaths, ResourceLoader,
+    ResourceLoaderReloadOptions, Theme,
 };
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{CompactionSettings, RetrySettings, Settings, SettingsManager};
-use pi_coding_agent::core::skills::LoadSkillsResult;
+use pi_coding_agent::core::skills::Skill;
+use pi_js::BoxFuture;
 
 struct MinimalResourceLoader;
 
-#[async_trait]
 impl ResourceLoader for MinimalResourceLoader {
     fn get_extensions(&self) -> LoadExtensionsResult {
-        LoadExtensionsResult {
-            extensions: Vec::new(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
-            runtime: create_extension_runtime(),
-        }
+        let runtime = create_extension_runtime();
+        let _ = &runtime;
+        LoadExtensionsResult::default()
     }
 
-    fn get_skills(&self) -> LoadSkillsResult {
-        LoadSkillsResult::default()
+    fn get_skills(&self) -> (Vec<Skill>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
     }
 
-    fn get_prompts(&self) -> LoadPromptsResult {
-        LoadPromptsResult::default()
+    fn get_prompts(&self) -> (Vec<PromptTemplate>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
     }
 
-    fn get_themes(&self) -> LoadThemesResult {
-        LoadThemesResult::default()
+    fn get_themes(&self) -> (Vec<Theme>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
     }
 
-    fn get_agents_files(&self) -> AgentsFilesResult {
-        AgentsFilesResult::default()
+    fn get_agents_files(&self) -> Vec<ContextFile> {
+        Vec::new()
     }
 
     fn get_system_prompt(&self) -> Option<String> {
         Some("You are a minimal assistant.\nAvailable: read, bash. Be concise.".to_string())
     }
 
-    fn get_system_prompt_source(&self) -> Option<ResourceSourcePath> {
+    fn get_system_prompt_source(&self) -> Option<PromptSource> {
         None
     }
 
@@ -60,14 +57,14 @@ impl ResourceLoader for MinimalResourceLoader {
         Vec::new()
     }
 
-    fn get_append_system_prompt_sources(&self) -> Vec<ResourceSourcePath> {
+    fn get_append_system_prompt_sources(&self) -> Vec<PromptSource> {
         Vec::new()
     }
 
     fn extend_resources(&self, _paths: ResourceExtensionPaths) {}
 
-    async fn reload(&self, _options: Option<ResourceLoaderReloadOptions>) -> pi_coding_agent::Result<()> {
-        Ok(())
+    fn reload(&self, _options: Option<ResourceLoaderReloadOptions>) -> BoxFuture<pi_coding_agent::Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -79,8 +76,8 @@ async fn run() -> pi_coding_agent::Result<()> {
     })
     .await?;
 
-    if let Some(key) = pi_js::env::get("MY_ANTHROPIC_KEY") {
-        model_runtime.set_runtime_api_key("anthropic", &key);
+    if let Some(key) = pi_js::env::var("MY_ANTHROPIC_KEY") {
+        model_runtime.set_runtime_api_key("anthropic", &key, None).await?;
     }
 
     let model =

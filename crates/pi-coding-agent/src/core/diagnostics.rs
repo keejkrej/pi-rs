@@ -43,7 +43,7 @@ pub struct ResourceDiagnostic {
     pub collision: Option<ResourceCollision>,
 }
 
-// WIRE(@ca-cli-w3): Shared diagnostic shape used by core/settings_diagnostics and core/agent_session_services.
+/// Shared diagnostic severity used by `core::settings_diagnostics` and `core::agent_session_services`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentSessionRuntimeDiagnosticLevel {

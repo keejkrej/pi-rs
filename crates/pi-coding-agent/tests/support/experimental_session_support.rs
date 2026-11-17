@@ -60,7 +60,7 @@ pub async fn read_experimental_session_state(sessions_root: &str, session_id: &s
     let storage = Arc::new(
         open_node_sqlite_storage(&session_storage_path(&metadata), NodeSqliteStorageOptions::default()).await?,
     );
-    let session = create_session(storage, None);
+    let session = create_session(storage);
     let res = session
         .snapshot_conversation(&*AGENT_DOC, ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT.clone())
         .await;

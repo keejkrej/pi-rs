@@ -83,8 +83,8 @@ impl Extension for TimedConfirmExtension {
                 handler: Arc::new(|_args, ctx| {
                     Box::pin(async move {
                         let ui = ctx.as_context().ui()?;
-                        let controller = AbortController::new();
-                        let ctrl_abort = controller.clone();
+                        let controller = Arc::new(AbortController::new());
+                        let ctrl_abort = Arc::clone(&controller);
                         let timeout = set_timeout(5000, move || {
                             ctrl_abort.abort(None);
                         });

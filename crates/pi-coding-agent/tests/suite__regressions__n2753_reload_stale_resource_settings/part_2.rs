@@ -1,7 +1,4 @@
 //! Port of packages/coding-agent/test/suite/regressions/2753-reload-stale-resource-settings.test.ts (unit coding-agent-ext-loader-resource-loader)
-//!
-//! // WIRE(@session-w3): add end-to-end `createAgentSessionRuntime` + `session.reload()` assertion
-//! // once `core/agent_session_runtime.rs` and `core/agent_session.rs` land.
 
 use std::fs;
 

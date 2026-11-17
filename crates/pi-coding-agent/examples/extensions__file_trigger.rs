@@ -20,7 +20,7 @@ impl Extension for FileTriggerExtension {
         let watcher_slot: Arc<Mutex<Option<StatWatcher>>> = Arc::new(Mutex::new(None));
         let pi_ss = pi.clone();
 
-        pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+        pi.on::<SessionStartEvent>(move |_event, ctx| {
             let pi = pi_ss.clone();
             let watcher_slot = Arc::clone(&watcher_slot);
             Box::pin(async move {
@@ -57,7 +57,7 @@ impl Extension for FileTriggerExtension {
                 }
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

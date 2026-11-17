@@ -346,8 +346,7 @@ pub fn bash_tool_system_prompt_contribution(options: Option<&BashToolOptions>) -
         None
     } else {
         Some(vec![
-            "Prefer dedicated read, grep, find, and ls tools instead of running bash cat, grep, find, or ls."
-                .to_string(),
+            "You can inspect PI_* environment variables for current model and session details.".to_string(),
         ])
     };
     ShellSystemPromptContribution {
@@ -573,6 +572,50 @@ pub fn create_bash_tool_definition(cwd: &str, options: Option<BashToolOptions>) 
     create_bash_tool_definition_with_shell(cwd, None, options)
 }
 
+pub(crate) fn resolve_shell_spawn_context(
+    command: String,
+    cwd: String,
+    spawn_hook: Option<&BashSpawnHook>,
+    expose_session_environment: Option<bool>,
+    ctx: &crate::core::extensions::types::ExtensionToolContext,
+) -> BashSpawnContext {
+    let mut env = get_shell_env();
+    for key in [
+        "PI_SESSION_ID",
+        "PI_SESSION_FILE",
+        "PI_PROVIDER",
+        "PI_MODEL",
+        "PI_REASONING_LEVEL",
+    ] {
+        env.shift_remove(key);
+    }
+    if expose_session_environment != Some(false) && ctx.as_context().has_session_environment() {
+        if let Ok(sm) = ctx.session_manager() {
+            env.insert("PI_SESSION_ID".to_string(), sm.get_session_id());
+            if let Some(session_file) = sm.get_session_file() {
+                env.insert("PI_SESSION_FILE".to_string(), session_file);
+            }
+        }
+        if let Ok(Some(model)) = ctx.model() {
+            env.insert("PI_PROVIDER".to_string(), model.provider);
+            env.insert("PI_MODEL".to_string(), model.id);
+        }
+        if let Ok(Some(thinking_level)) = ctx.thinking_level() {
+            env.insert(
+                "PI_REASONING_LEVEL".to_string(),
+                crate::core::defaults::from_agent_thinking_level(thinking_level)
+                    .as_str()
+                    .to_string(),
+            );
+        }
+    }
+    let base = BashSpawnContext { command, cwd, env };
+    match spawn_hook {
+        Some(hook) => hook(base),
+        None => base,
+    }
+}
+
 pub fn create_bash_tool_definition_with_shell(
     cwd: &str,
     shell_path: Option<String>,
@@ -582,6 +625,7 @@ pub fn create_bash_tool_definition_with_shell(
     let default_cwd = cwd.to_string();
     let command_prefix = options.as_ref().and_then(|o| o.command_prefix.clone());
     let spawn_hook = options.as_ref().and_then(|o| o.spawn_hook.clone());
+    let expose_session_environment = options.as_ref().and_then(|o| o.expose_session_environment);
     let ops = options
         .and_then(|o| o.operations)
         .unwrap_or_else(move || create_local_bash_operations_with_shell(shell_path));
@@ -627,20 +671,13 @@ pub fn create_bash_tool_definition_with_shell(
                     input.command
                 };
 
-                let initial_env = get_shell_env();
-                let spawn_ctx = if let Some(hook) = &spawn_hook {
-                    hook(BashSpawnContext {
-                        command: prefixed_cmd,
-                        cwd: base_cwd,
-                        env: initial_env,
-                    })
-                } else {
-                    BashSpawnContext {
-                        command: prefixed_cmd,
-                        cwd: base_cwd,
-                        env: initial_env,
-                    }
-                };
+                let spawn_ctx = resolve_shell_spawn_context(
+                    prefixed_cmd,
+                    base_cwd,
+                    spawn_hook.as_ref(),
+                    expose_session_environment,
+                    &ctx,
+                );
 
                 run_shell_tool_execute(
                     spawn_ctx.command.clone(),

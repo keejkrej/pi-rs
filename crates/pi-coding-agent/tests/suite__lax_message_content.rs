@@ -39,7 +39,7 @@ async fn normalizes_tool_results_from_untyped_tools_that_omit_content() {
             description: "Custom tool that returns a result without content".to_string(),
             prompt_snippet: None,
             prompt_guidelines: None,
-            parameters: t::object(&[]),
+            parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,
@@ -57,6 +57,9 @@ async fn normalizes_tool_results_from_untyped_tools_that_omit_content() {
                         details: Some(json!({})),
                         structured_content: None,
                         usage: None,
+                        is_error: None,
+                        terminate: None,
+                        control: None,
                     })
                 })
             }),
@@ -76,7 +79,7 @@ async fn normalizes_tool_results_from_untyped_tools_that_omit_content() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "web_search",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {

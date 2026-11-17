@@ -3,17 +3,17 @@
 use std::sync::{Arc, LazyLock, Mutex};
 
 use indexmap::IndexMap;
-use pi_agent_core::{AgentMessage, ThinkingLevel};
-use pi_ai::{AssistantMessage, Message, StopReason, Usage, UsageCost, faux_text};
+use pi_agent_core::AgentMessage;
+use pi_ai::{AssistantMessage, Message, ModelThinkingLevel, StopReason, Usage, UsageCost, faux_text};
 use pi_coding_agent::core::agent_session::AgentSession;
 use pi_coding_agent::core::agent_session_services::AgentSessionServices;
 use pi_coding_agent::core::sdk::{
     CreateAgentSessionFromServicesOptions, NoToolsMode, create_agent_session_from_services,
 };
 use pi_coding_agent::core::session_manager::SessionManager;
+use pi_coding_agent::pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
+use pi_coding_agent::pi_tui::utils::strip_terminal_sequences;
 use pi_js::{Error, Result};
-use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
-use pi_tui::utils::strip_terminal_sequences;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -251,10 +251,14 @@ async fn inspect_context_footer(session: &AgentSession, agent_dir: &str) -> Resu
     let oracle_session = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
         services: services.clone(),
         session_manager: SessionManager::in_memory(Some(&cwd), None, None)?,
+        session_start_event: None,
         model: Some(model.clone()),
-        thinking_level: Some(ThinkingLevel::High),
+        thinking_level: Some(ModelThinkingLevel::High),
+        scoped_models: None,
+        tools: None,
+        exclude_tools: None,
         no_tools: Some(NoToolsMode::All),
-        ..Default::default()
+        custom_tools: None,
     })
     .await?
     .session;

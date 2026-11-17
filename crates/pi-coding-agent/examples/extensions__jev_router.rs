@@ -12,10 +12,11 @@ use pi_ai::types::{
     Message, ModelThinkingLevel, ModelType, ProviderRequestOptions, UserContentBlock, UserMessageContent,
 };
 use pi_coding_agent::core::extensions::types::{
-    Extension, ExtensionApi, ExtensionContext, ExtensionFactory, ExtensionVirtualModel, InlineExtension, mcp_wire,
+    Extension, ExtensionApi, ExtensionContext, ExtensionFactory, ExtensionVirtualModel, InlineExtension,
 };
+use pi_coding_agent::core::virtual_models::{ModelRoute, ModelRouteReason, ModelRouteRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 const PROVIDER: &str = "openai-codex";
 const SOL: &str = "gpt-5.6-sol";
@@ -36,19 +37,19 @@ struct JevState {
 }
 
 fn route_to(
-    request: &mcp_wire::ModelRouteRequest,
+    request: &ModelRouteRequest,
     ctx: &ExtensionContext,
     id: &str,
     state: Option<&JevState>,
-) -> pi_js::Result<mcp_wire::ModelRoute> {
+) -> pi_js::Result<ModelRoute> {
     let model = ctx
         .model_registry()?
-        .get_available_models()
+        .get_available()
         .into_iter()
         .find(|m| m.provider == PROVIDER && m.id == id)
         .ok_or_else(|| pi_js::Error::msg(format!("Model {PROVIDER}/{id} is not in the catalog")))?;
     let serialized_state = state.and_then(|s| serde_json::to_value(s).ok());
-    Ok(mcp_wire::ModelRoute {
+    Ok(ModelRoute {
         model,
         thinking_level: request.thinking_level,
         state: serialized_state,
@@ -87,8 +88,17 @@ fn edited_this_turn(messages: &[Message]) -> bool {
     })
 }
 
-async fn choose_planning_model(request: &mcp_wire::ModelRouteRequest) -> &'static str {
-    // WIRE(@mcp-w3): ModelRouteRequest omits `previous`; keep planning continuity when added.
+async fn choose_planning_model(request: &ModelRouteRequest) -> &'static str {
+    if let Some(prev) = request.previous.as_ref().map(|p| &p.model)
+        && prev.provider == PROVIDER
+    {
+        if prev.id == SOL {
+            return SOL;
+        }
+        if prev.id == TERRA {
+            return TERRA;
+        }
+    }
     let Some(AnyModel::Classifier(jev)) =
         builtin_models().get_model_of_type(ModelType::Classifier, "typesafe", "jev-latest")
     else {
@@ -96,7 +106,7 @@ async fn choose_planning_model(request: &mcp_wire::ModelRouteRequest) -> &'stati
     };
 
     let prompt_excerpt: String = last_user_text(&request.messages).chars().take(16_000).collect();
-    let mut state_map = Map::new();
+    let mut state_map = IndexMap::new();
     state_map.insert("prompt".to_string(), Value::String(prompt_excerpt));
 
     let mut criteria = IndexMap::new();
@@ -165,7 +175,7 @@ impl Extension for JevRouterExtension {
             ]),
             route: Arc::new(|request, ctx| {
                 Box::pin(async move {
-                    if request.reason == mcp_wire::ModelRouteReason::Direct {
+                    if request.reason == ModelRouteReason::Direct {
                         return route_to(&request, &ctx, LUNA, None);
                     }
 

@@ -208,7 +208,7 @@ struct StreamingOverflowState {
 }
 
 struct StreamingOverflowInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     max_visible_lines: usize,
     disposed: AtomicBool,
@@ -222,7 +222,7 @@ struct StreamingOverflowComponent {
 }
 
 impl StreamingOverflowComponent {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let inner = Arc::new(StreamingOverflowInner {
             tui,
             theme,
@@ -278,7 +278,7 @@ impl StreamingOverflowComponent {
             else {
                 if let Some(st) = weak.upgrade() {
                     st.mutable.lock().unwrap_or_else(|e| e.into_inner()).finished = true;
-                    st.tui.request_render(false);
+                    st.tui.request_render(Some(false));
                 }
                 return;
             };
@@ -309,7 +309,7 @@ impl StreamingOverflowComponent {
                             }
                             m.scroll_offset = m.lines.len().saturating_sub(st.max_visible_lines);
                         }
-                        st.tui.request_render(false);
+                        st.tui.request_render(Some(false));
                     }
                 }
             });
@@ -336,7 +336,7 @@ impl StreamingOverflowComponent {
                                 .unwrap_or_else(|e| e.into_inner())
                                 .lines
                                 .push(err_line);
-                            st.tui.request_render(false);
+                            st.tui.request_render(Some(false));
                         }
                     }
                 }
@@ -354,7 +354,7 @@ impl StreamingOverflowComponent {
                 let _ = err_task.await;
                 if !st.disposed.load(Ordering::SeqCst) {
                     st.mutable.lock().unwrap_or_else(|e| e.into_inner()).finished = true;
-                    st.tui.request_render(false);
+                    st.tui.request_render(Some(false));
                 }
             }
         });
@@ -383,14 +383,14 @@ impl Component for StreamingOverflowComponent {
                 let mut m = self.inner.mutable.lock().unwrap_or_else(|e| e.into_inner());
                 m.scroll_offset = m.scroll_offset.saturating_sub(1);
             }
-            self.inner.tui.request_render(false);
+            self.inner.tui.request_render(Some(false));
         } else if matches_key(data, Key::down) {
             {
                 let mut m = self.inner.mutable.lock().unwrap_or_else(|e| e.into_inner());
                 let max_scroll = m.lines.len().saturating_sub(self.inner.max_visible_lines);
                 m.scroll_offset = (m.scroll_offset + 1).min(max_scroll);
             }
-            self.inner.tui.request_render(false);
+            self.inner.tui.request_render(Some(false));
         }
     }
 
@@ -427,16 +427,12 @@ impl Component for StreamingOverflowComponent {
             .saturating_sub(self.inner.max_visible_lines)
             .saturating_sub(scroll_offset);
         let scroll_info = format!("↑{scroll_offset} | ↓{below}");
-        result.push(format!(
-            "{}{}{}",
-            border("│"),
-            pad_line(if can_up || can_down {
-                &th.fg("dim", &format!(" {scroll_info}"))
-            } else {
-                ""
-            }),
-            border("│")
-        ));
+        let info_line = if can_up || can_down {
+            th.fg("dim", &format!(" {scroll_info}"))
+        } else {
+            String::new()
+        };
+        result.push(format!("{}{}{}", border("│"), pad_line(&info_line), border("│")));
 
         let end = (scroll_offset + self.inner.max_visible_lines).min(lines_snapshot.len());
         let visible_slice = if scroll_offset < end {
@@ -579,7 +575,7 @@ impl Component for MaxHeightTestComponent {
 }
 
 struct SidepanelComponent {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     items: [&'static str; 5],
     selected_index: Mutex<usize>,
@@ -587,7 +583,7 @@ struct SidepanelComponent {
 }
 
 impl SidepanelComponent {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         Self {
             tui,
             theme,
@@ -611,15 +607,15 @@ impl Component for SidepanelComponent {
                 let mut idx = self.selected_index.lock().unwrap_or_else(|e| e.into_inner());
                 *idx = idx.saturating_sub(1);
             }
-            self.tui.request_render(false);
+            self.tui.request_render(Some(false));
         } else if matches_key(data, Key::down) {
             {
                 let mut idx = self.selected_index.lock().unwrap_or_else(|e| e.into_inner());
                 *idx = (*idx + 1).min(self.items.len() - 1);
             }
-            self.tui.request_render(false);
+            self.tui.request_render(Some(false));
         } else if matches_key(data, Key::r#return) {
-            self.tui.request_render(false);
+            self.tui.request_render(Some(false));
         }
     }
 
@@ -706,12 +702,12 @@ struct AnimationState {
     frame: usize,
     interval: Option<pi_js::time::Interval>,
     fps: usize,
-    last_fps_update: f64,
+    last_fps_update: i64,
     frames_since_last_fps: usize,
 }
 
 struct AnimationDemoInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     done: DoneFn,
     mutable: Mutex<AnimationState>,
@@ -722,7 +718,7 @@ struct AnimationDemoComponent {
 }
 
 impl AnimationDemoComponent {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let inner = Arc::new(AnimationDemoInner {
             tui,
             theme,
@@ -745,13 +741,13 @@ impl AnimationDemoComponent {
                 m.frame += 1;
                 m.frames_since_last_fps += 1;
                 let now = pi_js::time::now_ms();
-                if now - m.last_fps_update >= 1000.0 {
+                if now - m.last_fps_update >= 1000 {
                     m.fps = m.frames_since_last_fps;
                     m.frames_since_last_fps = 0;
                     m.last_fps_update = now;
                 }
             }
-            st.tui.request_render(false);
+            st.tui.request_render(Some(false));
         });
         inner.mutable.lock().unwrap_or_else(|e| e.into_inner()).interval = Some(handle);
         Self { inner }
@@ -931,7 +927,7 @@ struct ToggleDemoState {
 }
 
 struct ToggleDemoInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     done: DoneFn,
     global_handle: Arc<Mutex<Option<OverlayHandle>>>,
@@ -981,7 +977,7 @@ impl Component for ToggleDemoComponent {
                 if let Some(rh) = restore_handle {
                     rh.set_hidden(false);
                     st.mutable.lock().unwrap_or_else(|e| e.into_inner()).is_toggling = false;
-                    st.tui.request_render(false);
+                    st.tui.request_render(Some(false));
                 }
             });
         }
@@ -1055,7 +1051,7 @@ struct PassiveState {
 }
 
 struct PassiveDemoInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     focused: AtomicBool,
     timer_component: Arc<TimerPanel>,
@@ -1068,7 +1064,7 @@ struct PassiveDemoController {
 }
 
 impl PassiveDemoController {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let timer_component = Arc::new(TimerPanel {
             theme: theme.clone(),
             seconds: Mutex::new(0),
@@ -1109,7 +1105,7 @@ impl PassiveDemoController {
                 return;
             };
             st.timer_component.tick();
-            st.tui.request_render(false);
+            st.tui.request_render(Some(false));
         });
         inner.mutable.lock().unwrap_or_else(|e| e.into_inner()).interval = Some(handle);
         Self { inner }
@@ -1251,7 +1247,7 @@ struct FocusPanelEntry {
 }
 
 struct FocusDemoInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     done: DoneFn,
     entries: Mutex<Vec<FocusPanelEntry>>,
@@ -1364,8 +1360,7 @@ impl Component for FocusPanel {
                 .push("Backspace".to_string());
         } else {
             self.input.handle_input(data);
-            let encoded =
-                pi_js::json::stringify(&Value::String(data.to_string())).unwrap_or_else(|_| format!("{data:?}"));
+            let encoded = pi_js::json::stringify(&Value::String(data.to_string()));
             self.inputs.lock().unwrap_or_else(|e| e.into_inner()).push(encoded);
         }
     }
@@ -1442,7 +1437,7 @@ struct FocusDemoController {
 }
 
 impl FocusDemoController {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let inner = Arc::new(FocusDemoInner {
             tui: Arc::clone(&tui),
             theme: theme.clone(),
@@ -1481,7 +1476,7 @@ impl FocusDemoController {
         };
         if let Some(handle) = first_handle {
             handle.focus();
-            inner.tui.request_render(false);
+            inner.tui.request_render(Some(false));
         }
     }
 
@@ -1501,7 +1496,7 @@ impl FocusDemoController {
         };
         if let Some(handle) = next_handle {
             handle.focus();
-            inner.tui.request_render(false);
+            inner.tui.request_render(Some(false));
         }
     }
 
@@ -1538,7 +1533,7 @@ impl FocusDemoController {
         }
         if let Some(nh) = next_handle {
             nh.focus();
-            inner.tui.request_render(false);
+            inner.tui.request_render(Some(false));
         }
     }
 
@@ -1760,7 +1755,7 @@ struct StreamingControllerState {
 }
 
 struct StreamingInputControllerInner {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     done: DoneFn,
     mutable: Mutex<StreamingControllerState>,
@@ -1771,7 +1766,7 @@ struct StreamingInputController {
 }
 
 impl StreamingInputController {
-    fn new(tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let inner = Arc::new(StreamingInputControllerInner {
             tui: Arc::clone(&tui),
             theme: theme.clone(),
@@ -1840,7 +1835,7 @@ impl StreamingInputController {
                     m.stream_lines.drain(..excess);
                 }
             }
-            st.tui.request_render(false);
+            st.tui.request_render(Some(false));
         });
 
         {
@@ -1878,7 +1873,7 @@ impl StreamingInputController {
         if let Some(h) = new_handle {
             h.focus();
         }
-        inner.tui.request_render(false);
+        inner.tui.request_render(Some(false));
     }
 
     fn cleanup_inner(inner: &StreamingInputControllerInner) {

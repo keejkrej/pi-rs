@@ -19,14 +19,14 @@ impl Extension for HiddenThinkingLabelExtension {
 
         {
             let label_ss = Arc::clone(&label);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let label = Arc::clone(&label_ss);
                 Box::pin(async move {
                     let current = label.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     ctx.ui()?.set_hidden_thinking_label(Some(&current));
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {

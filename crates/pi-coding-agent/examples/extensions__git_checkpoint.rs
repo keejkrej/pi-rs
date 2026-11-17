@@ -20,7 +20,7 @@ impl Extension for GitCheckpointExtension {
 
         {
             let entry_ref = Arc::clone(&current_entry_id);
-            pi.on::<ToolResultEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<ToolResultEvent>(move |_event, ctx| {
                 let entry_ref = Arc::clone(&entry_ref);
                 Box::pin(async move {
                     if let Some(leaf_id) = ctx.session_manager()?.get_leaf_id() {
@@ -29,14 +29,14 @@ impl Extension for GitCheckpointExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_ts = pi.clone();
             let cp_ts = Arc::clone(&checkpoints);
             let entry_ts = Arc::clone(&current_entry_id);
-            pi.on::<TurnStartEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<TurnStartEvent>(move |_event, _ctx| {
                 let pi = pi_ts.clone();
                 let cp = Arc::clone(&cp_ts);
                 let entry_ref = Arc::clone(&entry_ts);
@@ -54,13 +54,13 @@ impl Extension for GitCheckpointExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_fk = pi.clone();
             let cp_fk = Arc::clone(&checkpoints);
-            pi.on::<SessionBeforeForkEvent>(Arc::new(move |event, ctx| {
+            pi.on::<SessionBeforeForkEvent>(move |event, ctx| {
                 let pi = pi_fk.clone();
                 let cp = Arc::clone(&cp_fk);
                 Box::pin(async move {
@@ -96,18 +96,18 @@ impl Extension for GitCheckpointExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let cp_as = Arc::clone(&checkpoints);
-            pi.on::<AgentSettledEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<AgentSettledEvent>(move |_event, _ctx| {
                 let cp = Arc::clone(&cp_as);
                 Box::pin(async move {
                     cp.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

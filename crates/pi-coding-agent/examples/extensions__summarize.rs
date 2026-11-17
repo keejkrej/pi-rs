@@ -125,7 +125,7 @@ fn extract_tool_call_lines(content: Option<&Value>) -> Vec<String> {
         {
             let args_json = part
                 .get("arguments")
-                .and_then(|v| pi_js::json::stringify(v).ok())
+                .map(pi_js::json::stringify)
                 .unwrap_or_else(|| "{}".to_string());
             calls.push(format!("Tool {name} was called with args {args_json}"));
         }
@@ -133,13 +133,13 @@ fn extract_tool_call_lines(content: Option<&Value>) -> Vec<String> {
     calls
 }
 
-fn build_conversation_text(entries: &[pi_coding_agent::core::extensions::types::mcp_wire::SessionEntry]) -> String {
+fn build_conversation_text(entries: &[pi_coding_agent::core::session_manager::SessionEntry]) -> String {
     let mut sections = Vec::new();
     for entry in entries {
-        if entry.r#type != "message" {
+        let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry else {
             continue;
-        }
-        let Some(msg) = entry.fields.get("message") else {
+        };
+        let Ok(msg) = serde_json::to_value(&msg_entry.message) else {
             continue;
         };
         let Some(role) = msg.get("role").and_then(|v| v.as_str()) else {
@@ -258,7 +258,7 @@ impl Extension for SummarizeExtension {
 
                         let registry = base.model_registry()?;
                         let Some(model) = registry
-                            .get_available_models()
+                            .get_available()
                             .into_iter()
                             .find(|m| m.provider == "openai" && m.id == "gpt-5.2")
                         else {
@@ -268,7 +268,10 @@ impl Extension for SummarizeExtension {
                             return Ok(());
                         };
 
-                        let api_key = registry.get_api_key(&model).await?;
+                        let api_key = match registry.get_api_key_and_headers(&model).await {
+                            pi_coding_agent::core::model_registry::ResolvedRequestAuth::Ok { api_key, .. } => api_key,
+                            pi_coding_agent::core::model_registry::ResolvedRequestAuth::Err { .. } => None,
+                        };
                         let has_auth = api_key.as_ref().is_some_and(|k| !k.is_empty())
                             || get_env_api_key(&model.provider, None).is_some();
                         if !has_auth {
@@ -296,7 +299,7 @@ impl Extension for SummarizeExtension {
                             base: StreamOptions {
                                 api_key,
                                 cache_retention: Some(CacheRetention::None),
-                                session_id: Some(uuidv7()),
+                                session_id: uuidv7(None).ok(),
                                 ..Default::default()
                             },
                             reasoning: Some(ThinkingLevel::High),

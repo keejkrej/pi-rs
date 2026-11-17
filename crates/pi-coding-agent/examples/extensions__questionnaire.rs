@@ -110,7 +110,7 @@ struct QuestionnaireModal {
     questions: Vec<Question>,
     is_multi: bool,
     total_tabs: usize,
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     editor: Editor,
     done: DoneFn,
@@ -118,7 +118,7 @@ struct QuestionnaireModal {
 }
 
 impl QuestionnaireModal {
-    fn new(questions: Vec<Question>, tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(questions: Vec<Question>, tui: Arc<dyn TUI + Send + Sync>, theme: Theme, done: DoneFn) -> Self {
         let is_multi = questions.len() > 1;
         let total_tabs = questions.len() + 1;
         let t_border = theme.clone();
@@ -456,7 +456,7 @@ impl Component for QuestionnaireModal {
                     guard.option_index = 0;
                     guard.cached_lines = None;
                     post = PostAction::Render;
-                } else if matches_key(data, Key::shift("tab")) || matches_key(data, Key::left) {
+                } else if matches_key(data, &Key::shift("tab")) || matches_key(data, Key::left) {
                     guard.current_tab = (guard.current_tab + self.total_tabs - 1) % self.total_tabs;
                     guard.option_index = 0;
                     guard.cached_lines = None;

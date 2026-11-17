@@ -503,6 +503,9 @@ pub trait ExtensionContextBackend: Send + Sync {
     ) -> BoxFuture<AgentToolCallOutcome>;
     fn send_message(&self, message: CustomMessageDraft, options: Option<SendMessageOptions>);
     fn send_user_message(&self, content: CustomMessageContent, options: Option<SendUserMessageOptions>);
+    fn has_session_environment(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -537,6 +540,10 @@ impl ExtensionContext {
     pub fn has_ui(&self) -> pi_js::Result<bool> {
         self.backend.assert_active()?;
         Ok(self.backend.has_ui())
+    }
+
+    pub fn has_session_environment(&self) -> bool {
+        self.backend.has_session_environment()
     }
 
     pub fn cwd(&self) -> pi_js::Result<String> {
@@ -2788,6 +2795,7 @@ pub struct ExtensionContextActions {
     pub get_callable_tools: Option<Arc<dyn Fn() -> Vec<AgentTool> + Send + Sync>>,
 }
 
+#[derive(Clone)]
 pub struct ExtensionCommandContextActions {
     pub wait_for_idle: Arc<dyn Fn() -> BoxFuture<pi_js::Result<()>> + Send + Sync>,
     pub new_session: Arc<dyn Fn(Option<NewSessionOptions>) -> BoxFuture<pi_js::Result<CancelledResult>> + Send + Sync>,

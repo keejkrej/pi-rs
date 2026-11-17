@@ -14,7 +14,7 @@ pub struct WidgetPlacementExtension;
 #[async_trait]
 impl Extension for WidgetPlacementExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<SessionStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 if !ctx.has_ui()? {
                     return Ok(None);
@@ -30,7 +30,7 @@ impl Extension for WidgetPlacementExtension {
                 );
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

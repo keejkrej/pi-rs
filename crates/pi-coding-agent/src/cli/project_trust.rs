@@ -195,3 +195,69 @@ pub fn create_project_trust_context(options: CreateProjectTrustContextOptions) -
         }),
     }
 }
+
+struct CliProjectTrustRuntimeUi {
+    ui: Arc<dyn ExtensionUIContext>,
+}
+
+#[async_trait]
+impl crate::core::project_trust::ProjectTrustUi for CliProjectTrustRuntimeUi {
+    async fn select(&self, prompt: &str, options: &[String]) -> Option<String> {
+        self.ui.select(prompt, options.to_vec(), None).await.ok().flatten()
+    }
+}
+
+struct CliProjectTrustRuntimeContext {
+    mode: AppMode,
+    has_ui: bool,
+    ui: Arc<CliProjectTrustRuntimeUi>,
+}
+
+impl crate::core::project_trust::ProjectTrustContext for CliProjectTrustRuntimeContext {
+    fn has_ui(&self) -> bool {
+        self.has_ui
+    }
+
+    fn ui(&self) -> &dyn crate::core::project_trust::ProjectTrustUi {
+        self.ui.as_ref()
+    }
+
+    fn ui_arc(&self) -> Option<Arc<dyn crate::core::project_trust::ProjectTrustUi>> {
+        Some(self.ui.clone())
+    }
+
+    fn mode(&self) -> AppMode {
+        self.mode
+    }
+}
+
+pub fn create_project_trust_runtime_context(
+    options: CreateProjectTrustContextOptions,
+) -> Arc<dyn crate::core::project_trust::ProjectTrustContext> {
+    let inner = Arc::new(CliProjectTrustUi {
+        mode: options.mode,
+        has_ui: options.has_ui,
+        settings_manager: options.settings_manager,
+    });
+    Arc::new(CliProjectTrustRuntimeContext {
+        mode: options.mode,
+        has_ui: options.has_ui,
+        ui: Arc::new(CliProjectTrustRuntimeUi { ui: inner }),
+    })
+}
+
+pub fn extension_project_trust_to_runtime_context(
+    ctx: ProjectTrustContext,
+) -> Arc<dyn crate::core::project_trust::ProjectTrustContext> {
+    let mode = match ctx.mode {
+        ExtensionMode::Tui => AppMode::Interactive,
+        ExtensionMode::Print => AppMode::Print,
+        ExtensionMode::Json => AppMode::Json,
+        ExtensionMode::Rpc => AppMode::Rpc,
+    };
+    Arc::new(CliProjectTrustRuntimeContext {
+        mode,
+        has_ui: ctx.has_ui,
+        ui: Arc::new(CliProjectTrustRuntimeUi { ui: ctx.ui }),
+    })
+}

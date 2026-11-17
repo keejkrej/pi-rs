@@ -234,9 +234,10 @@ async fn does_not_start_post_run_auto_compaction_after_abort() {
             && message.role() == Some("assistant")
         {
             session_c.abort_compaction();
+            session_c.request_abort();
             let s = session_c.clone();
             tokio::spawn(async move {
-                let _ = s.abort().await;
+                s.wait_for_idle().await;
             });
         }
     });

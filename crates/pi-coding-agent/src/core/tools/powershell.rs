@@ -33,7 +33,7 @@ use crate::core::tools::tool_definition_wrapper::{
     wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
-use crate::utils::shell::{get_power_shell_config, get_shell_env};
+use crate::utils::shell::get_power_shell_config;
 
 struct LocalPowerShellOperations;
 
@@ -88,7 +88,7 @@ pub fn powershell_tool_system_prompt_contribution(
         None
     } else {
         Some(vec![
-            "Prefer dedicated read, grep, find, and ls tools instead of running PowerShell file/search commands when possible.".to_string(),
+            "You can inspect PI_* environment variables for current model and session details.".to_string(),
         ])
     };
     ShellSystemPromptContribution {
@@ -101,6 +101,7 @@ pub fn create_power_shell_tool_definition(cwd: &str, options: Option<PowerShellT
     let contribution = powershell_tool_system_prompt_contribution(options.as_ref());
     let default_cwd = cwd.to_string();
     let spawn_hook = options.as_ref().and_then(|o| o.spawn_hook.clone());
+    let expose_session_environment = options.as_ref().and_then(|o| o.expose_session_environment);
     let ops = options
         .and_then(|o| o.operations)
         .unwrap_or_else(create_local_power_shell_operations);
@@ -139,20 +140,13 @@ pub fn create_power_shell_tool_definition(cwd: &str, options: Option<PowerShellT
                 let input: PowerShellToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid powershell parameters: {e}")))?;
 
-                let initial_env = get_shell_env();
-                let spawn_ctx = if let Some(hook) = &spawn_hook {
-                    hook(BashSpawnContext {
-                        command: input.command,
-                        cwd: base_cwd,
-                        env: initial_env,
-                    })
-                } else {
-                    BashSpawnContext {
-                        command: input.command,
-                        cwd: base_cwd,
-                        env: initial_env,
-                    }
-                };
+                let spawn_ctx = crate::core::tools::bash::resolve_shell_spawn_context(
+                    input.command,
+                    base_cwd,
+                    spawn_hook.as_ref(),
+                    expose_session_environment,
+                    &ctx,
+                );
 
                 run_shell_tool_execute(
                     spawn_ctx.command.clone(),

@@ -25,7 +25,7 @@ use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use support::model_runtime_test_utils::{create_model_registry, get_model_runtime};
-use support::utilities::{TestExtensionInput, create_test_extensions_result, create_test_resource_loader};
+use support::suite::harness::{create_suite_extensions_result, create_suite_resource_loader};
 
 fn make_assistant_message(text: &str, stop_reason: StopReason, error_message: Option<&str>) -> AssistantMessage {
     AssistantMessage {
@@ -89,7 +89,7 @@ async fn create_retry_session(
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -101,7 +101,9 @@ async fn create_retry_session(
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -134,14 +136,14 @@ async fn create_retry_session(
             pi.on::<MessageEndEvent>(move |ev, _ctx| {
                 Box::pin(async move {
                     if ev.message.role() == Some("assistant") {
-                        pi_js::time::sleep(delay_message_end_ms).await;
+                        let _ = pi_js::time::sleep(delay_message_end_ms, None).await;
                     }
                     Ok(None)
                 })
             });
             Ok(())
         }));
-        Some(create_test_extensions_result(&[TestExtensionInput::Inline(ext)], &temp_dir).await)
+        Some(create_suite_extensions_result(&[ext], &temp_dir).await)
     } else {
         None
     };
@@ -152,7 +154,7 @@ async fn create_retry_session(
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(ext_res),
+        resource_loader: create_suite_resource_loader(ext_res),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -163,7 +165,7 @@ async fn create_retry_session(
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
     if delay_message_end_ms > 0 {
@@ -310,7 +312,7 @@ async fn retries_provider_network_error_failures() {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -322,7 +324,9 @@ async fn retries_provider_network_error_failures() {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -354,7 +358,7 @@ async fn retries_provider_network_error_failures() {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -365,7 +369,7 @@ async fn retries_provider_network_error_failures() {
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
 
@@ -410,7 +414,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -422,8 +426,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("echoed"))],
                     details: None,
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -485,7 +488,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -497,7 +500,9 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -532,7 +537,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         base_tools_override: Some(base_tools),
         scoped_models: None,
         custom_tools: None,
@@ -543,7 +548,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
         excluded_tool_names: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
 

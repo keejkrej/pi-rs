@@ -12,8 +12,8 @@ fn setup_dirs() -> (String, String, String) {
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-session-test-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&cwd, true).unwrap();
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&cwd, true, None).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
     (temp_dir, cwd, agent_dir)
 }
 
@@ -82,7 +82,7 @@ async fn derives_cwd_from_an_explicit_session_manager_when_cwd_is_omitted() {
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
 
     let session_cwd = pi_js::path::join(&[&temp_dir, "session-project"]);
-    pi_js::fs::mkdir(&session_cwd, true).unwrap();
+    pi_js::fs::mkdir(&session_cwd, true, None).unwrap();
     let session_manager = SessionManager::in_memory(Some(&session_cwd), None, None).unwrap();
 
     let created = create_agent_session(Some(CreateAgentSessionOptions {

@@ -3,16 +3,16 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult, StreamFn, TransformContextFn};
 use pi_ai::auth::types::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth, ProviderAuth};
-use pi_ai::models::{NativeProvider, Provider};
+use pi_ai::models::Provider;
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxModelDefinition, FauxResponseStep,
     faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{
@@ -23,17 +23,17 @@ use pi_ai::types::{
 use pi_ai::utils::event_stream::create_assistant_message_event_stream;
 use pi_ai::{get_current_system_prompt, get_current_tools};
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, CompactionReason};
-use pi_coding_agent::core::compaction::estimate_messages_tokens;
+use pi_coding_agent::core::compaction::{
+    CompactionResult, CompactionSettings as WireCompactionSettings, estimate_tokens,
+};
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionCompactFailedEvent,
     SessionEntry,
 };
-use pi_coding_agent::core::session_manager::CustomMessageEntry;
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::{CompactionResult, CompactionSettings as WireCompactionSettings};
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
-use serde_json::{Value, json};
+use serde_json::json;
 use support::suite::harness::{Harness, HarnessOptions, create_harness, get_user_texts};
 use tokio::sync::Notify;
 
@@ -130,7 +130,7 @@ fn use_summary_stream_fn(harness: &Harness, summary: &str) -> SummaryStreamRecor
 }
 
 fn seed_compactable_session(harness: &Harness) {
-    harness.settings_manager.apply_overrides(Settings {
+    harness.settings_manager.apply_overrides(&Settings {
         compaction: Some(CompactionSettings {
             keep_recent_tokens: Some(1),
             ..Default::default()
@@ -171,7 +171,7 @@ async fn create_abortable_compaction_harness() -> (Harness, Arc<Notify>) {
                     let aborted = Arc::new(Notify::new());
                     let ab_c = Arc::clone(&aborted);
                     let _sub = signal.as_ref().map(|s| {
-                        s.on_abort(move || {
+                        s.on_abort(move |_| {
                             ab_c.notify_one();
                         })
                     });
@@ -275,7 +275,7 @@ async fn manually_compacts_using_an_extension_provided_summary() {
             _ => None,
         })
         .collect();
-    let estimated_tokens_after = estimate_messages_tokens(&harness.session.messages());
+    let estimated_tokens_after: i64 = harness.session.messages().iter().map(estimate_tokens).sum();
 
     assert_eq!(result.summary, "summary from extension");
     assert_eq!(result.usage.as_ref(), Some(&summary_usage));
@@ -528,7 +528,7 @@ impl ApiKeyAuth for AmbientBearerKeyAuth {
 
     async fn resolve(&self, _input: ApiKeyAuthInput) -> pi_js::Result<Option<AuthResult>> {
         let mut headers = IndexMap::new();
-        headers.insert("Authorization".to_string(), "Bearer ambient-token".to_string());
+        headers.insert("Authorization".to_string(), Some("Bearer ambient-token".to_string()));
         Ok(Some(AuthResult {
             auth: ModelAuth {
                 api_key: None,
@@ -608,10 +608,10 @@ async fn manually_compacts_with_provider_resolved_bearer_auth() {
 
     harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(|_ctx, opts, _st, _mdl| {
         Box::pin(async move {
-            assert_eq!(opts.base.api_key, None);
+            assert_eq!(opts.as_ref().and_then(|o| o.base.api_key.as_deref()), None);
             let mut expected = ProviderHeaders::new();
-            expected.insert("Authorization".to_string(), "Bearer ambient-token".to_string());
-            assert_eq!(opts.base.headers, Some(expected));
+            expected.insert("Authorization".to_string(), Some("Bearer ambient-token".to_string()));
+            assert_eq!(opts.as_ref().and_then(|o| o.base.headers.as_ref()), Some(&expected));
             Ok(faux_assistant_message(
                 FauxAssistantMessageContent::Text("summary with bearer auth".to_string()),
                 None,
@@ -622,7 +622,7 @@ async fn manually_compacts_with_provider_resolved_bearer_auth() {
     let result = harness.session.compact(None).await.unwrap();
 
     assert!(result.summary.contains("summary with bearer auth"));
-    assert_eq!(harness.faux.state().call_count, 1);
+    assert_eq!(harness.faux.state().call_count(), 1);
     harness.cleanup();
 }
 
@@ -831,9 +831,13 @@ async fn compacts_and_resumes_after_a_length_stop_below_the_desired_output_limit
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -863,7 +867,7 @@ async fn compacts_and_resumes_after_a_length_stop_below_the_desired_output_limit
 
     harness.session.prompt(&"x".repeat(5_000), None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let last_end = harness
         .events()
         .into_iter()
@@ -887,13 +891,13 @@ async fn compacts_and_resumes_after_a_length_stop_below_the_desired_output_limit
 }
 
 async fn run_oversized_tool_result_compaction(model_override: bool) {
-    let tool_result = format!("large-tool-result:{}", "x".repeat(8_000));
+    let tool_result = format!("large-tool-result:{}", "x".repeat(7_200));
     let tr_c = tool_result.clone();
     let large_tool = AgentTool {
         name: "large_result".to_string(),
         label: "Large result".to_string(),
         description: "Returns enough content to cross the compaction threshold".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -904,8 +908,7 @@ async fn run_oversized_tool_result_compaction(model_override: bool) {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(txt))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -971,9 +974,13 @@ async fn run_oversized_tool_result_compaction(model_override: bool) {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(2_600),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(compaction_settings),
@@ -998,7 +1005,11 @@ async fn run_oversized_tool_result_compaction(model_override: bool) {
             None,
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("large_result", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "large_result",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1082,7 +1093,7 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
         name: "large_result".to_string(),
         label: "Large result".to_string(),
         description: "Returns enough content to cross the compaction threshold".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1095,8 +1106,7 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
                         "x".repeat(6_800)
                     )))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -1139,9 +1149,13 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(2_600),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1170,7 +1184,11 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
             None,
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("large_result", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "large_result",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1199,7 +1217,7 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
     let prompt_fut = harness.session.prompt("run the large tool", None);
     let steer_fut = async {
         cs_wait.await;
-        harness.session.steer("change direction", None).await.unwrap();
+        harness.session.steer("change direction", None, None).await.unwrap();
         compaction_released.notify_one();
     };
     let (prompt_res, ()) = tokio::join!(prompt_fut, steer_fut);
@@ -1211,7 +1229,7 @@ async fn includes_steering_queued_during_compaction_in_the_resumed_assistant_req
             .unwrap_or_else(PoisonError::into_inner)
             .contains("change direction")
     );
-    assert_eq!(harness.faux.state().call_count, 4);
+    assert_eq!(harness.faux.state().call_count(), 4);
     harness.cleanup();
 }
 
@@ -1221,7 +1239,7 @@ async fn does_not_compact_after_a_terminating_tool_result() {
         name: "terminate_with_large_result".to_string(),
         label: "Terminate with large result".to_string(),
         description: "Returns enough content to cross the compaction threshold, then terminates".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1264,9 +1282,13 @@ async fn does_not_compact_after_a_terminating_tool_result() {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(2_600),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1293,7 +1315,11 @@ async fn does_not_compact_after_a_terminating_tool_result() {
             None,
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("terminate_with_large_result", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "terminate_with_large_result",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1327,9 +1353,13 @@ async fn does_not_compact_when_a_length_stop_reaches_the_desired_output_limit() 
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         ..Default::default()
     })
@@ -1344,7 +1374,7 @@ async fn does_not_compact_when_a_length_stop_reaches_the_desired_output_limit() 
 
     harness.session.prompt("hello", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 1);
+    assert_eq!(harness.faux.state().call_count(), 1);
     assert!(
         !harness
             .events()
@@ -1378,9 +1408,13 @@ async fn stops_after_one_compact_and_retry_when_a_second_response_is_also_trunca
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1424,7 +1458,7 @@ async fn stops_after_one_compact_and_retry_when_a_second_response_is_also_trunca
 
     harness.session.prompt(&"x".repeat(5_000), None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let overflow_starts = harness
         .events()
         .into_iter()
@@ -1459,9 +1493,13 @@ async fn keeps_overflow_wording_when_a_repeated_length_stop_fills_the_context_wi
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(100),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         with_configured_auth: Some(false),
         ..Default::default()
@@ -1697,9 +1735,13 @@ async fn compacts_successful_overflow_responses_without_retrying() {
         }),
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         extension_factories: Some(vec![ext]),
         ..Default::default()
@@ -1727,7 +1769,7 @@ async fn compacts_successful_overflow_responses_without_retrying() {
             ..
         }
     ));
-    assert_eq!(harness.faux.state().call_count, 1);
+    assert_eq!(harness.faux.state().call_count(), 1);
     harness.cleanup();
 }
 
@@ -1780,22 +1822,39 @@ async fn ignores_stale_pre_compaction_assistant_usage_on_pre_prompt_checks() {
 
 #[tokio::test]
 async fn triggers_threshold_compaction_for_error_messages_using_the_last_successful_usage() {
-    let harness = create_harness(HarnessOptions::default()).await;
+    let harness = create_harness(HarnessOptions {
+        settings: Some(Settings {
+            compaction: Some(CompactionSettings {
+                enabled: Some(true),
+                keep_recent_tokens: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
     let now = pi_js::time::now_ms();
+    let first_user = AgentMessage::from(Message::User(UserMessage {
+        content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("hello"))]),
+        timestamp: now - 1000,
+    }));
     let successful_assistant = create_assistant(&harness, StopReason::Stop, None, 190_000, Some(now));
+    let retry_user = AgentMessage::from(Message::User(UserMessage {
+        content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("retry"))]),
+        timestamp: now + 500,
+    }));
     let error_assistant = create_assistant(&harness, StopReason::Error, Some("529 overloaded"), 0, Some(now + 1000));
-    harness.session.agent().replace_messages(vec![
-        AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("hello"))]),
-            timestamp: now - 1000,
-        })),
+    let messages = vec![
+        first_user,
         AgentMessage::from(Message::Assistant(successful_assistant)),
-        AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("retry"))]),
-            timestamp: now + 500,
-        })),
+        retry_user,
         AgentMessage::from(Message::Assistant(error_assistant.clone())),
-    ]);
+    ];
+    for msg in &messages {
+        harness.session_manager.append_message(msg.clone()).unwrap();
+    }
+    harness.session.agent().replace_messages(messages);
 
     harness.session.check_compaction_for_test(&error_assistant, true).await;
 
@@ -1906,8 +1965,13 @@ async fn does_not_trigger_threshold_compaction_below_the_threshold_or_when_disab
         }),
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(200_000),
-            ..Default::default()
+            max_tokens: None,
         }]),
         ..Default::default()
     })

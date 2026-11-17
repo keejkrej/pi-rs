@@ -30,7 +30,7 @@ use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use support::model_runtime_test_utils::{create_model_registry, get_model_runtime};
-use support::utilities::{TestExtensionInput, create_test_extensions_result, create_test_resource_loader};
+use support::suite::harness::{create_suite_extensions_result, create_suite_resource_loader};
 
 fn create_assistant_message(text: &str) -> AssistantMessage {
     AssistantMessage {
@@ -74,7 +74,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
                         });
                         break;
                     }
-                    pi_js::time::sleep(5).await;
+                    let _ = pi_js::time::sleep(5, None).await;
                 }
             });
             Ok(stream)
@@ -84,7 +84,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -96,7 +96,9 @@ async fn create_abortable_session() -> (AgentSession, String) {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -119,7 +121,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -130,7 +132,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
     (session, temp_dir)
@@ -142,7 +144,7 @@ async fn should_throw_when_prompt_called_while_streaming() {
 
     let session_bg = session.clone();
     let first_task = tokio::spawn(async move { session_bg.prompt("First message", None).await });
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
 
     assert!(session.is_streaming());
     let err = session.prompt("Second message", None).await.unwrap_err();
@@ -162,7 +164,7 @@ async fn should_allow_steer_while_streaming() {
 
     let session_bg = session.clone();
     let first_task = tokio::spawn(async move { session_bg.prompt("First message", None).await });
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
 
     let res = session.steer("Steering message", None, None).await.unwrap();
     assert_eq!(res, QueuedInputDisposition::Queued);
@@ -180,7 +182,7 @@ async fn should_allow_follow_up_while_streaming() {
 
     let session_bg = session.clone();
     let first_task = tokio::spawn(async move { session_bg.prompt("First message", None).await });
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
 
     let res = session.follow_up("Follow-up message", None, None).await.unwrap();
     assert_eq!(res, QueuedInputDisposition::Queued);
@@ -249,7 +251,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
                         });
                         break;
                     }
-                    pi_js::time::sleep(5).await;
+                    let _ = pi_js::time::sleep(5, None).await;
                 }
             });
             Ok(stream)
@@ -259,7 +261,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -271,7 +273,9 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -312,11 +316,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
             Ok(())
         }
     }));
-    let extensions_result = create_test_extensions_result(
-        &[TestExtensionInput::Inline(ext1), TestExtensionInput::Inline(ext2)],
-        &temp_dir,
-    )
-    .await;
+    let extensions_result = create_suite_extensions_result(&[ext1, ext2], &temp_dir).await;
 
     let session = AgentSession::new(AgentSessionConfig {
         agent,
@@ -324,7 +324,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(Some(extensions_result)),
+        resource_loader: create_suite_resource_loader(Some(extensions_result)),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -335,7 +335,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
@@ -352,7 +352,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
 
     let session_bg = session.clone();
     let first_task = tokio::spawn(async move { session_bg.prompt("First message", None).await });
-    pi_js::time::sleep(10).await;
+    let _ = pi_js::time::sleep(10, None).await;
     assert!(session.is_streaming());
 
     let api = ext_api_slot
@@ -361,14 +361,14 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
         .clone()
         .unwrap();
     api.send_user_message(
-        pi_coding_agent::core::tools::mcp_wire::CustomMessageContent::Text("Steer from extension".to_string()),
+        pi_coding_agent::core::messages::CustomMessageContent::Text("Steer from extension".to_string()),
         Some(SendUserMessageOptions {
             deliver_as: Some(InputDeliveryBehavior::Steer),
             expand_prompt_templates: None,
         }),
     )
     .unwrap();
-    pi_js::time::sleep(25).await;
+    let _ = pi_js::time::sleep(25, None).await;
 
     assert_eq!(session.pending_message_count(), 1);
     assert!(
@@ -422,7 +422,7 @@ async fn should_allow_prompt_after_previous_completes() {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![]),
             ..Default::default()
@@ -434,7 +434,9 @@ async fn should_allow_prompt_after_previous_completes() {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -457,7 +459,7 @@ async fn should_allow_prompt_after_previous_completes() {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(None),
+        resource_loader: create_suite_resource_loader(None),
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
@@ -468,7 +470,7 @@ async fn should_allow_prompt_after_previous_completes() {
         base_tools_override: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
 
@@ -489,7 +491,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
         name: "dummy".to_string(),
         label: "dummy".to_string(),
         description: "Dummy tool".to_string(),
-        parameters: t::object(&[t::prop("q", t::string())]),
+        parameters: t::object([("q", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -500,8 +502,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("result:{q}")))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -580,7 +581,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![dummy_tool.clone()]),
             ..Default::default()
@@ -592,7 +593,9 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -637,7 +640,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
             Ok(())
         }
     }));
-    let extensions_result = create_test_extensions_result(&[TestExtensionInput::Inline(ext)], &temp_dir).await;
+    let extensions_result = create_suite_extensions_result(&[ext], &temp_dir).await;
 
     let mut base_tools = IndexMap::new();
     base_tools.insert("dummy".to_string(), dummy_tool);
@@ -648,7 +651,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(Some(extensions_result)),
+        resource_loader: create_suite_resource_loader(Some(extensions_result)),
         base_tools_override: Some(base_tools),
         scoped_models: None,
         custom_tools: None,
@@ -659,7 +662,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
         excluded_tool_names: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
@@ -688,7 +691,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         name: "dummy".to_string(),
         label: "dummy".to_string(),
         description: "Dummy tool".to_string(),
-        parameters: t::object(&[t::prop("q", t::string())]),
+        parameters: t::object([("q", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -699,8 +702,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(format!("result:{q}")))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -771,7 +773,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(Arc::new(|_| Box::pin(async { Ok(Some("test-key".to_string())) }))),
         initial_state: Some(AgentInitialState {
-            model: Some(model),
+            model: Some(model.clone()),
             system_prompt: Some("Test".to_string()),
             tools: Some(vec![dummy_tool.clone()]),
             ..Default::default()
@@ -783,7 +785,9 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
-    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
+    let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir))
+        .await
+        .unwrap();
     auth_storage
         .modify(
             "anthropic",
@@ -804,14 +808,14 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         pi.on::<MessageEndEvent>(|ev, _ctx| {
             Box::pin(async move {
                 if ev.message.role() == Some("assistant") {
-                    pi_js::time::sleep(40).await;
+                    let _ = pi_js::time::sleep(40, None).await;
                 }
                 Ok(None)
             })
         });
         Ok(())
     }));
-    let extensions_result = create_test_extensions_result(&[TestExtensionInput::Inline(ext)], &temp_dir).await;
+    let extensions_result = create_suite_extensions_result(&[ext], &temp_dir).await;
 
     let mut base_tools = IndexMap::new();
     base_tools.insert("dummy".to_string(), dummy_tool);
@@ -822,7 +826,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         settings_manager,
         cwd: temp_dir.clone(),
         model_runtime: get_model_runtime(&model_registry),
-        resource_loader: create_test_resource_loader(Some(extensions_result)),
+        resource_loader: create_suite_resource_loader(Some(extensions_result)),
         base_tools_override: Some(base_tools),
         scoped_models: None,
         custom_tools: None,
@@ -833,14 +837,14 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         excluded_tool_names: None,
         extension_runner_ref: None,
         session_start_event: None,
-        initial_model: None,
+        initial_model: Some(model),
         initial_thinking_level: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
 
     session.prompt("hi", None).await.unwrap();
     session.agent().wait_for_idle().await;
-    pi_js::time::sleep(100).await;
+    let _ = pi_js::time::sleep(100, None).await;
 
     let roles: Vec<String> = session_manager
         .get_entries()

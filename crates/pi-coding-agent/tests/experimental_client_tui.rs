@@ -11,7 +11,7 @@ use pi_ai::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_messag
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::node::{
     FACET_BUNDLE_ARTIFACT_FORMAT, FACET_BUNDLE_ARTIFACT_FORMAT_VERSION, FacetBundleArtifact, FacetBundleEntry,
-    FacetBundlePluginInfo,
+    FacetBundlePlugin,
 };
 use pi_chord::services::handle::ServiceObject;
 use pi_chord::types::{RemoteServiceSourceOpenOptions, ServiceIdRef};
@@ -43,10 +43,8 @@ use pi_coding_agent::experimental::services::worker::{
 };
 use pi_coding_agent::experimental::session_catalog::SessionCatalogMetadata;
 use pi_js::path::resolve;
-use pi_server::{
-    RoutedServerServiceHost, RoutedSessionAttachment, RoutedSessionHandle, ServerHost, UnixServerOptions,
-    create_unix_server,
-};
+use pi_server::transports::unix::{UnixServerOptions, create_unix_server};
+use pi_server::{RoutedServerServiceHost, RoutedSessionAttachment, RoutedSessionHandle, ServerHost};
 use tempfile::tempdir;
 
 use support::experimental_durable_support::open_faux_conversation;
@@ -218,7 +216,7 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
         let presentation_artifact = FacetBundleArtifact {
             format: FACET_BUNDLE_ARTIFACT_FORMAT.to_string(),
             format_version: FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
-            plugin: FacetBundlePluginInfo {
+            plugin: FacetBundlePlugin {
                 id: "test-tui-plugin".to_string(),
                 version: None,
             },
@@ -227,8 +225,10 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
                 file: "tui.cjs".to_string(),
                 integrity: "sha256-deadbeef".to_string(),
                 external_imports: vec!["@earendil-works/chord".to_string()],
+                source_map: None,
             },
             source: "// unsupported js bundle placeholder".to_string(),
+            source_map_contents: None,
         };
         let presentation_data = create_presentation_facet_data(&[presentation_artifact]);
 
@@ -327,6 +327,7 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
             },
         )
         .expect("unix server");
+        server.start().await.expect("start unix server");
 
         let client = Client::connect_options(ClientOptions {
             server_id: SERVER_ID.to_string(),
@@ -367,7 +368,7 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
         );
 
         // PORT: §2.6 presentation artifacts deserialize cleanly; invoking the JS bundle loader returns the canonical unsupported error.
-        let loaders = create_presentation_facet_loaders(&prepared.presentation_plugins);
+        let loaders = create_presentation_facet_loaders(&prepared.presentation_plugins).expect("loaders");
         assert_eq!(loaders.len(), 1);
         let load_err = loaders[0]
             .load()
@@ -386,8 +387,8 @@ async fn prepares_new_continued_and_plugin_selected_sessions_and_binds_session_s
                 .view_state(BACKGROUND_CONTEXT.clone())
                 .await
                 .expect("view");
-            let view_val = view.value().expect("view value");
-            assert!(live_of(&view_val).active_run.is_none());
+            let view_val = view.value();
+            assert!(live_of(&view_val).run.is_none());
 
             let session_remote = tui_server.session.open(RemoteServiceSourceOpenOptions {
                 services: vec![

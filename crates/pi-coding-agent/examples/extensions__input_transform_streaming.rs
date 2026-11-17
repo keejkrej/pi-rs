@@ -17,7 +17,7 @@ pub struct InputTransformStreamingExtension;
 impl Extension for InputTransformStreamingExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         let pi_in = pi.clone();
-        pi.on::<InputEvent>(Arc::new(move |event, _ctx| {
+        pi.on::<InputEvent>(move |event, _ctx| {
             let pi = pi_in.clone();
             Box::pin(async move {
                 if event.streaming_behavior == Some(InputDeliveryBehavior::Steer) {
@@ -45,7 +45,7 @@ impl Extension for InputTransformStreamingExtension {
                     images: None,
                 }))
             })
-        }));
+        });
 
         Ok(())
     }

@@ -4,31 +4,27 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pi_coding_agent::config::get_agent_dir;
-use pi_coding_agent::core::resource_loader::{
-    AgentsFilesResult, ContextFile, DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader,
-};
+use pi_coding_agent::core::resource_loader::{ContextFile, DefaultResourceLoader, DefaultResourceLoaderOptions};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::SessionManager;
 
 async fn run() -> pi_coding_agent::Result<()> {
     let loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(pi_js::env::cwd()),
-        agent_dir: Some(get_agent_dir()),
+        cwd: pi_js::env::cwd(),
+        agent_dir: get_agent_dir(),
         agents_files_override: Some(Arc::new(|mut current| {
-            current.agents_files.push(ContextFile {
+            current.push(ContextFile {
                 path: "/virtual/AGENTS.md".to_string(),
                 content: "# Project Guidelines\n\n## Code Style\n- Prefer Result over panic\n- Prefer immutable data\n"
                     .to_string(),
             });
-            AgentsFilesResult {
-                agents_files: current.agents_files,
-            }
+            current
         })),
         ..Default::default()
     }));
     loader.reload(None).await?;
 
-    let discovered = loader.get_agents_files().agents_files;
+    let discovered = loader.get_agents_files();
     pi_js::console::log("Discovered context files:");
     for file in &discovered {
         pi_js::console::log(&format!("  - {} ({} chars)", file.path, file.content.len()));

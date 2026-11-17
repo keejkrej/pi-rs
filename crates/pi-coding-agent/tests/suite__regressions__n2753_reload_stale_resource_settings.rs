@@ -7,8 +7,8 @@ mod part_2;
 
 use std::sync::Arc;
 
-use indexmap::IndexMap;
-use pi_ai::providers::faux::{FauxModelDefinition, RegisterFauxProviderOptions, register_faux_provider};
+use pi_ai::compat::register_faux_provider;
+use pi_ai::providers::faux::{FauxModelDefinition, RegisterFauxProviderOptions};
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session_runtime::{
     CreateAgentSessionFromServicesOptions, CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeOptions,
@@ -30,7 +30,7 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-2753-"])).unwrap();
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     let prompts_dir = pi_js::path::join(&[&agent_dir, "prompts"]);
-    pi_js::fs::mkdir(&prompts_dir, true).unwrap();
+    pi_js::fs::mkdir(&prompts_dir, true, None).unwrap();
     pi_js::fs::write_file(
         &pi_js::path::join(&[&prompts_dir, "test.md"]),
         b"Echo test prompt\n",
@@ -72,7 +72,7 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
 
     let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
         credentials: Some(auth_storage),
-        models_path: Some(pi_js::path::join(&[&agent_dir, "models.json"])),
+        models_path: Some(Some(pi_js::path::join(&[&agent_dir, "models.json"]))),
         allow_model_network: Some(false),
         ..Default::default()
     })
@@ -115,8 +115,6 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
                             })
                         })
                         .collect();
-                    let mut headers = IndexMap::new();
-                    let _ = &mut headers;
                     pi.register_provider(
                         &base_model.provider,
                         ProviderConfig {
@@ -136,9 +134,11 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
                 agent_dir: Some(agent_dir_inner),
                 model_runtime: Some(mr_inner),
                 resource_loader_options: Some(DefaultResourceLoaderOptions {
-                    extension_factories: Some(vec![InlineExtension::Factory(factory)]),
-                    no_skills: Some(true),
-                    no_themes: Some(true),
+                    extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(
+                        InlineExtension::Factory(factory),
+                    )],
+                    no_skills: true,
+                    no_themes: true,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -184,7 +184,7 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
 
     assert!(runtime.session().prompt_templates().iter().any(|p| p.name == "test"));
 
-    let settings_json = pi_js::json::stringify_pretty(&json!({ "prompts": ["-prompts/test.md"] }), 2);
+    let settings_json = pi_js::json::stringify_pretty(&json!({ "prompts": ["-prompts/test.md"] }), "  ");
     pi_js::fs::write_file(
         &pi_js::path::join(&[&agent_dir, "settings.json"]),
         format!("{settings_json}\n").as_bytes(),
@@ -192,7 +192,7 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
     )
     .unwrap();
 
-    runtime.session().reload().await.unwrap();
+    runtime.session().reload(None).await.unwrap();
 
     assert_eq!(
         runtime.services().settings_manager.get_global_settings().prompts,

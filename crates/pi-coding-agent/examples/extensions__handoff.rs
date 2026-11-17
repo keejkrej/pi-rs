@@ -10,13 +10,14 @@ use pi_ai::types::{
     AssistantContentBlock, CacheRetention, Context, Message, SimpleStreamOptions, StopReason, StreamOptions,
     TextContent, UserContentBlock, UserMessage, UserMessageContent,
 };
+use pi_coding_agent::core::compaction::serialize_conversation;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, ExtensionMode, InlineExtension, NewSessionOptions, NotifyType,
-    RegisteredCommandOptions, Theme, mcp_wire,
+    RegisteredCommandOptions, Theme,
 };
-// WIRE(@mcp-w3): switch serialize_conversation import if re-exported by pi_coding_agent::core::compaction
 use pi_coding_agent::core::messages::convert_to_llm;
-use pi_durable::harness::compaction::serialize_conversation;
+use pi_coding_agent::core::model_registry::ResolvedRequestAuth;
+use pi_coding_agent::core::session_manager::SessionEntry;
 use pi_tui::components::cancellable_loader::CancellableLoader;
 use pi_tui::{Component, Container, Text};
 use serde_json::{Value, json};
@@ -111,42 +112,38 @@ impl Component for FallbackBorderedLoader {
     }
 }
 
-fn entry_to_message(entry: &mcp_wire::SessionEntry) -> Option<AgentMessage> {
-    if entry.r#type == "message" {
-        let msg_val = entry.fields.get("message")?;
-        return serde_json::from_value::<AgentMessage>(msg_val.clone()).ok();
+fn entry_to_message(entry: &SessionEntry) -> Option<AgentMessage> {
+    match entry {
+        SessionEntry::Message(m) => Some(m.message.clone()),
+        SessionEntry::Compaction(c) => {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&c.timestamp)
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|_| pi_js::time::now_ms() as i64);
+            Some(AgentMessage::Custom(json!({
+                "role": "compactionSummary",
+                "summary": c.summary,
+                "tokensBefore": c.tokens_before,
+                "timestamp": timestamp,
+            })))
+        }
+        _ => None,
     }
-    if entry.r#type == "compaction" {
-        let summary = entry.fields.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-        let tokens_before = entry.fields.get("tokensBefore").and_then(|v| v.as_i64()).unwrap_or(0);
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|_| pi_js::time::now_ms() as i64);
-        return Some(AgentMessage::Custom(json!({
-            "role": "compactionSummary",
-            "summary": summary,
-            "tokensBefore": tokens_before,
-            "timestamp": timestamp,
-        })));
-    }
-    None
 }
 
-fn get_handoff_messages(branch: &[mcp_wire::SessionEntry]) -> Vec<AgentMessage> {
-    let compaction_index = branch.iter().rposition(|e| e.r#type == "compaction");
+fn get_handoff_messages(branch: &[SessionEntry]) -> Vec<AgentMessage> {
+    let compaction_index = branch.iter().rposition(|e| matches!(e, SessionEntry::Compaction(_)));
     let Some(compaction_idx) = compaction_index else {
         return branch.iter().filter_map(entry_to_message).collect();
     };
 
     let compaction = &branch[compaction_idx];
-    let first_kept_id = compaction
-        .fields
-        .get("firstKeptEntryId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let first_kept_idx = branch.iter().position(|e| e.id == first_kept_id);
+    let first_kept_id = match compaction {
+        SessionEntry::Compaction(c) => c.first_kept_entry_id.as_str(),
+        _ => "",
+    };
+    let first_kept_idx = branch.iter().position(|e| e.id() == first_kept_id);
 
-    let mut compacted: Vec<&mcp_wire::SessionEntry> = vec![compaction];
+    let mut compacted: Vec<&SessionEntry> = vec![compaction];
     if let Some(fk_idx) = first_kept_idx
         && fk_idx <= compaction_idx
     {
@@ -224,7 +221,10 @@ impl Extension for HandoffExtension {
                                                 timestamp: pi_js::time::now_ms() as i64,
                                             });
 
-                                            let api_key = reg.get_api_key(&model_clone).await.ok().flatten();
+                                            let api_key = match reg.get_api_key_and_headers(&model_clone).await {
+                                                ResolvedRequestAuth::Ok { api_key, .. } => api_key,
+                                                ResolvedRequestAuth::Err { .. } => None,
+                                            };
                                             let response = complete_simple(
                                                 &model_clone,
                                                 &Context {
@@ -237,7 +237,7 @@ impl Extension for HandoffExtension {
                                                         api_key,
                                                         signal: Some(signal),
                                                         cache_retention: Some(CacheRetention::None),
-                                                        session_id: Some(pi_ai::uuidv7()),
+                                                        session_id: pi_ai::uuidv7(None).ok(),
                                                         ..Default::default()
                                                     },
                                                     ..Default::default()
@@ -253,7 +253,7 @@ impl Extension for HandoffExtension {
                                                 let msg = response
                                                     .error_message
                                                     .unwrap_or_else(|| "Unknown error".to_string());
-                                                pi_js::console::error(&[&format!("Handoff generation failed: {msg}")]);
+                                                pi_js::console::error(&format!("Handoff generation failed: {msg}"));
                                                 done_task(Value::Null);
                                                 return;
                                             }

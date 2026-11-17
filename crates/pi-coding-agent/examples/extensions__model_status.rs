@@ -21,7 +21,7 @@ pub struct ModelStatusExtension;
 #[async_trait]
 impl Extension for ModelStatusExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<ModelSelectEvent>(Arc::new(|event, ctx| {
+        pi.on::<ModelSelectEvent>(|event, ctx| {
             Box::pin(async move {
                 let next = format!("{}/{}", event.model.provider, event.model.id);
                 let prev = event
@@ -43,7 +43,7 @@ impl Extension for ModelStatusExtension {
                 ));
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

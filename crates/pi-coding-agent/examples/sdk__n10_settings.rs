@@ -11,7 +11,7 @@ async fn run() -> pi_coding_agent::Result<()> {
     let cwd = pi_js::env::cwd();
 
     let settings_from_disk = SettingsManager::create(&cwd, None, None);
-    let global_json = pi_js::json::stringify_pretty(&settings_from_disk.get_global_settings(), 2)?;
+    let global_json = pi_js::json::stringify_pretty(&settings_from_disk.get_global_settings(), "  ");
     pi_js::console::log(&format!("Current settings: {global_json}"));
 
     let settings_manager = SettingsManager::create(&cwd, None, None);

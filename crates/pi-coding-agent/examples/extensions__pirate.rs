@@ -44,7 +44,7 @@ impl Extension for PirateExtension {
 
         {
             let pirate_bas = Arc::clone(&pirate_mode);
-            pi.on::<BeforeAgentStartEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<BeforeAgentStartEvent>(move |event, _ctx| {
                 let pirate_mode = Arc::clone(&pirate_bas);
                 Box::pin(async move {
                     if !pirate_mode.load(Ordering::SeqCst) {
@@ -62,7 +62,7 @@ impl Extension for PirateExtension {
                         system_prompt: Some(format!("{}{appendix}", event.system_prompt)),
                     }))
                 })
-            }));
+            });
         }
 
         Ok(())

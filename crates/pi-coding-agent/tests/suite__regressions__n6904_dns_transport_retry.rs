@@ -1,20 +1,23 @@
 //! Port of packages/coding-agent/test/suite/regressions/6904-dns-transport-retry.test.ts
 
+#[path = "support/mod.rs"]
 mod support;
 
-use pi_ai::StopReason;
+use pi_ai::providers::faux::{
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message,
+};
+use pi_ai::types::StopReason;
+use pi_coding_agent::core::agent_session::AgentSessionEvent;
 use pi_coding_agent::core::settings_manager::{RetrySettings, Settings};
-
-use support::test_harness::{FauxResponse, FauxResponseInput, HarnessOptions, HarnessSessionEvent, create_harness};
+use pretty_assertions::assert_eq;
+use support::suite::harness::{HarnessOptions, create_harness};
 
 const WRAPPED_DNS_LOOKUP_ERROR: &str =
     "The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
 
 #[tokio::test(flavor = "current_thread")]
 async fn retries_a_transient_dns_lookup_failure() {
-    // WIRE(@ca-cli-w3): switches from HarnessSession adapter to `pi_coding_agent::core::agent_session::AgentSession`
-    // once `core-session` lands; verifies retry policy handles DNS lookup failures.
-    let harness = create_harness(Some(HarnessOptions {
+    let harness = create_harness(HarnessOptions {
         settings: Some(Settings {
             retry: Some(RetrySettings {
                 enabled: Some(true),
@@ -24,40 +27,45 @@ async fn retries_a_transient_dns_lookup_failure() {
             }),
             ..Default::default()
         }),
-        responses: Some(vec![
-            FauxResponseInput::Spec(FauxResponse {
-                text: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+
+    harness.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text(String::new()),
+            Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::Error),
-                error: Some(WRAPPED_DNS_LOOKUP_ERROR.to_owned()),
+                error_message: Some(WRAPPED_DNS_LOOKUP_ERROR.to_owned()),
                 ..Default::default()
             }),
-            FauxResponseInput::from("recovered after DNS retry"),
-        ]),
-        ..Default::default()
-    }))
-    .await
-    .expect("create harness");
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("recovered after DNS retry".to_owned()),
+            None,
+        )),
+    ]);
 
-    harness.session.prompt("test").await.expect("prompt");
+    harness.session.prompt("test", None).await.expect("prompt");
 
-    assert_eq!(harness.faux().call_count, 2);
-    let events = harness.events_snapshot();
+    assert_eq!(harness.faux.state().call_count(), 2);
+    let events = harness.events();
     let retry_starts: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
-            HarnessSessionEvent::AutoRetryStart { error_message, .. } => Some(error_message.clone()),
+            AgentSessionEvent::AutoRetryStart { error_message, .. } => Some(error_message.clone()),
             _ => None,
         })
         .collect();
     let retry_ends: Vec<bool> = events
         .iter()
         .filter_map(|e| match e {
-            HarnessSessionEvent::AutoRetryEnd { success, .. } => Some(*success),
+            AgentSessionEvent::AutoRetryEnd { success, .. } => Some(*success),
             _ => None,
         })
         .collect();
-    pretty_assertions::assert_eq!(retry_starts, vec![WRAPPED_DNS_LOOKUP_ERROR.to_owned()]);
-    pretty_assertions::assert_eq!(retry_ends, vec![true]);
+    assert_eq!(retry_starts, vec![WRAPPED_DNS_LOOKUP_ERROR.to_owned()]);
+    assert_eq!(retry_ends, vec![true]);
 
     harness.cleanup();
 }

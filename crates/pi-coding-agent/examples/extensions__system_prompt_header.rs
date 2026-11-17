@@ -13,7 +13,7 @@ pub struct SystemPromptHeaderExtension;
 #[async_trait]
 impl Extension for SystemPromptHeaderExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<AgentStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<AgentStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 let prompt = ctx.get_system_prompt()?;
                 ctx.ui()?.set_status(
@@ -22,14 +22,14 @@ impl Extension for SystemPromptHeaderExtension {
                 );
                 Ok(None)
             })
-        }));
+        });
 
-        pi.on::<SessionShutdownEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionShutdownEvent>(|_event, ctx| {
             Box::pin(async move {
                 ctx.ui()?.set_status("system-prompt", None);
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

@@ -9,12 +9,12 @@ use pi_agent_core::types::AgentMessage;
 use pi_ai::providers::faux::{FauxAssistantMessageContent, faux_assistant_message};
 use pi_ai::types::{Message, TextContent, UserContentBlock, UserMessage, UserMessageContent};
 use pi_coding_agent::core::agent_session::NavigateTreeOptions;
+use pi_coding_agent::core::compaction::CompactionResult;
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeTreeEvent,
     SessionEntry,
 };
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::CompactionResult;
 use pretty_assertions::assert_eq;
 use support::suite::harness::{HarnessOptions, create_harness, get_message_text};
 use tokio::sync::Notify;
@@ -57,6 +57,7 @@ async fn rejects_navigation_while_manual_compaction_is_waiting_before_leaf_chang
                             summary: "summary".to_string(),
                             first_kept_entry_id: event.preparation.first_kept_entry_id,
                             tokens_before: event.preparation.tokens_before,
+                            estimated_tokens_after: None,
                             details: Some(serde_json::json!({})),
                             usage: None,
                         }),

@@ -2,34 +2,33 @@
 
 use std::sync::{Arc, Mutex, Once, Weak};
 
-use indexmap::IndexSet;
 use pi_agent_core::agent::{Agent, AgentInitialState, AgentOptions};
 use pi_agent_core::stream_fn::set_default_stream_fn;
-use pi_agent_core::types::{AgentMessage, OnPayloadFn, StreamFn, TransformContextFn};
+use pi_agent_core::types::{AgentMessage, OnPayloadFn, QueueMode, StreamFn, TransformContextFn};
 use pi_ai::compat::stream_simple;
 use pi_ai::types::{
-    Message, Model, ModelThinkingLevel, OnProviderStreamEventFn, OnResponseFn, ProviderHeaders, SimpleStreamOptions,
-    TextContent, UserContentBlock, UserMessageContent,
+    Message, Model, ModelThinkingLevel, OnProviderStreamEventFn, OnResponseFn, ProviderHeaders, TextContent,
+    ThinkingBudgets, UserContentBlock, UserMessageContent,
 };
 use pi_ai::{ModelsSimpleStreamOptions, clamp_thinking_level};
-use pi_js::BoxFuture;
 
 use crate::config::get_agent_dir;
-use crate::core::agent_session::{AgentSession, AgentSessionConfig};
+use crate::core::agent_session::{AgentSession, AgentSessionConfig, ExtensionRunnerRef};
 use crate::core::auth_guidance::format_no_models_available_message;
-use crate::core::cache_warmer::CacheWarmer;
+use crate::core::cache_warmer::{CacheWarmRequest, CacheWarmer, CacheWarmingAction, CacheWarmingDecider};
 use crate::core::defaults::{DEFAULT_THINKING_LEVEL, to_agent_thinking_level};
 use crate::core::extensions::types::{
-    AfterProviderResponseEvent, CacheWarmingDecisionEvent, ExtensionRunnerRef, LoadExtensionsResult,
-    ProviderStreamEvent, SessionStartEvent, ToolDefinition,
+    AfterProviderResponseEvent, CacheWarmingDecisionEvent, LoadExtensionsResult, ProviderStreamEvent,
+    SessionStartEvent, ToolDefinition,
 };
+use crate::core::http_dispatcher::DEFAULT_HTTP_IDLE_TIMEOUT_MS;
 use crate::core::messages::convert_to_llm;
-use crate::core::model_resolver::{FindInitialModelOptions, find_initial_model};
+use crate::core::model_resolver::{FindInitialModelOptions, find_initial_model, parse_valid_thinking_level};
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
 use crate::core::provider_attribution::merge_provider_attribution_headers;
 use crate::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
 use crate::core::session_manager::{SessionEntry, SessionManager, get_default_session_dir};
-use crate::core::settings_manager::{DEFAULT_TOOL_NAMES, SettingsManager};
+use crate::core::settings_manager::{DEFAULT_TOOL_NAMES, QueueModeSetting, SettingsManager};
 use crate::core::timings::{TimingNamespaceKind, time};
 use crate::core::virtual_models::get_branch_selection;
 use crate::utils::paths::{PathInputOptions, resolve_path};
@@ -49,7 +48,7 @@ pub use crate::core::tools::file_mutation_queue::with_file_mutation_queue;
 pub use crate::core::tools::find::create_find_tool;
 pub use crate::core::tools::grep::create_grep_tool;
 pub use crate::core::tools::ls::create_ls_tool;
-pub use crate::core::tools::powershell::create_powershell_tool;
+pub use crate::core::tools::powershell::create_power_shell_tool;
 pub use crate::core::tools::read::create_read_tool;
 pub use crate::core::tools::write::create_write_tool;
 pub use crate::core::tools::{Tool, create_coding_tools, create_read_only_tools};
@@ -220,7 +219,7 @@ pub async fn create_agent_session(
         None => {
             ModelRuntime::create(ModelRuntimeCreateOptions {
                 auth_path,
-                models_path,
+                models_path: models_path.map(Some),
                 ..Default::default()
             })
             .await?
@@ -233,15 +232,15 @@ pub async fn create_agent_session(
     };
     let session_manager = match options.session_manager {
         Some(sm) => sm,
-        None => SessionManager::create(&cwd, Some(&get_default_session_dir(&cwd, Some(&agent_dir))), None)?,
+        None => SessionManager::create(&cwd, Some(&get_default_session_dir(&cwd, Some(&agent_dir))?), None)?,
     };
 
     let resource_loader: Arc<dyn ResourceLoader> = match options.resource_loader {
         Some(rl) => rl,
         None => {
             let rl = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-                cwd: Some(cwd.clone()),
-                agent_dir: Some(agent_dir.clone()),
+                cwd: cwd.clone(),
+                agent_dir: agent_dir.clone(),
                 settings_manager: Some(settings_manager.clone()),
                 ..Default::default()
             }));
@@ -267,27 +266,32 @@ pub async fn create_agent_session(
 
     if model.is_none()
         && has_existing_session
-        && let Some(sm) = &session_model
+        && let Some((ref provider, ref model_id)) = session_model
     {
-        if let Some(restored) = model_runtime.get_model(&sm.provider, &sm.model_id)
+        if let Some(restored) = model_runtime.get_model(provider, model_id)
             && model_runtime.has_configured_auth(&restored.provider)
         {
             model = Some(restored);
         }
         if model.is_none() {
-            model_fallback_message = Some(format!("Could not restore model {}/{}", sm.provider, sm.model_id));
+            model_fallback_message = Some(format!("Could not restore model {provider}/{model_id}"));
         }
     }
 
     if model.is_none() {
+        let default_provider = settings_manager.get_default_provider();
+        let default_model_id = settings_manager.get_default_model();
+        let model_thinking_levels = settings_manager.get_all_model_thinking_levels();
         let initial_result = find_initial_model(FindInitialModelOptions {
-            scoped_models: Vec::new(),
+            cli_provider: None,
+            cli_model: None,
+            scoped_models: &[],
             is_continuing: has_existing_session,
-            default_provider: settings_manager.get_default_provider(),
-            default_model_id: settings_manager.get_default_model(),
+            default_provider: default_provider.as_deref(),
+            default_model_id: default_model_id.as_deref(),
             default_thinking_level: settings_manager.get_default_thinking_level(),
-            model_thinking_levels: settings_manager.get_all_model_thinking_levels(),
-            model_runtime: model_runtime.clone(),
+            model_thinking_levels: Some(&model_thinking_levels),
+            model_runtime: &model_runtime,
         })
         .await?;
         model = initial_result.model;
@@ -303,7 +307,7 @@ pub async fn create_agent_session(
     let mut thinking_level = options.thinking_level;
     if thinking_level.is_none() && has_existing_session {
         thinking_level = if has_thinking_entry {
-            existing_session.thinking_level
+            parse_valid_thinking_level(&existing_session.thinking_level)
         } else {
             settings_manager
                 .get_default_thinking_level()
@@ -333,8 +337,6 @@ pub async fn create_agent_session(
         None
     };
     let excluded_tool_names = options.exclude_tools.clone();
-    let excluded_set: Option<IndexSet<String>> =
-        excluded_tool_names.as_ref().map(|list| list.iter().cloned().collect());
     let base_initial_tools: Vec<String> = if let Some(ref tools) = options.tools {
         tools.clone()
     } else if options.no_tools.is_some() {
@@ -346,35 +348,48 @@ pub async fn create_agent_session(
     };
     let initial_active_tool_names: Vec<String> = base_initial_tools
         .into_iter()
-        .filter(|name| !excluded_set.as_ref().is_some_and(|set| set.contains(name)))
+        .filter(|name| {
+            !excluded_tool_names
+                .as_ref()
+                .is_some_and(|excluded| crate::core::agent_session::tool_name_matches_entries(excluded, name))
+        })
         .collect();
 
     let settings_for_llm = settings_manager.clone();
     let convert_to_llm_with_block_images: pi_agent_core::types::ConvertToLlmFn = Arc::new(move |messages| {
-        let converted = convert_to_llm(&messages);
-        if !settings_for_llm.get_block_images() {
-            return converted;
-        }
-        filter_blocked_images(converted)
+        let settings = settings_for_llm.clone();
+        Box::pin(async move {
+            let converted = convert_to_llm(&messages);
+            if !settings.get_block_images() {
+                return Ok(converted);
+            }
+            Ok(filter_blocked_images(converted))
+        })
     });
 
     let extension_runner_ref: ExtensionRunnerRef = Arc::new(Mutex::new(None));
-    let runner_ref_for_cache = Arc::clone(&extension_runner_ref);
+    struct RunnerCacheWarmingDecider {
+        runner_ref: ExtensionRunnerRef,
+    }
+    #[async_trait::async_trait]
+    impl CacheWarmingDecider for RunnerCacheWarmingDecider {
+        async fn decide(&self, event: CacheWarmingDecisionEvent) -> pi_js::Result<CacheWarmingAction> {
+            let runner_opt = self.runner_ref.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            Ok(if let Some(runner) = runner_opt {
+                runner.emit_cache_warming_decision(event).await
+            } else {
+                event.action
+            })
+        }
+    }
     let settings_for_cache = settings_manager.clone();
     let cache_warmer = Arc::new(CacheWarmer::new(
-        model_runtime.clone(),
-        session_manager.clone(),
+        Arc::new(model_runtime.clone()),
+        Arc::new(session_manager.clone()),
         Arc::new(move || settings_for_cache.get_cache_warming_mode()),
-        Arc::new(move |event: CacheWarmingDecisionEvent| {
-            let runner_opt = runner_ref_for_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            Box::pin(async move {
-                if let Some(runner) = runner_opt {
-                    runner.emit_cache_warming_decision(event).await
-                } else {
-                    event.action
-                }
-            })
-        }),
+        Some(Arc::new(RunnerCacheWarmingDecider {
+            runner_ref: Arc::clone(&extension_runner_ref),
+        })),
     ));
 
     let agent_slot: Arc<Mutex<Option<Agent>>> = Arc::new(Mutex::new(None));
@@ -391,7 +406,7 @@ pub async fn create_agent_session(
             if !runner.has_handlers("before_provider_request") {
                 return Ok(None);
             }
-            let updated = runner.emit_before_provider_request(payload).await?;
+            let updated = runner.emit_before_provider_request(payload).await;
             Ok(Some(updated))
         })
     });
@@ -409,12 +424,13 @@ pub async fn create_agent_session(
             if !runner.has_handlers("after_provider_response") {
                 return Ok(());
             }
-            runner
-                .emit_after_provider_response(AfterProviderResponseEvent {
-                    status: response.status,
+            let _ = runner
+                .emit(AfterProviderResponseEvent {
+                    status: i64::from(response.status),
                     headers: response.headers,
                 })
-                .await
+                .await;
+            Ok(())
         })
     });
 
@@ -424,6 +440,10 @@ pub async fn create_agent_session(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let data = data.clone();
+        let provider = event_model.provider.clone();
+        let api = event_model.api.clone();
+        let model = event_model.id.clone();
         Box::pin(async move {
             let Some(runner) = runner_opt else {
                 return Ok(());
@@ -431,14 +451,15 @@ pub async fn create_agent_session(
             if !runner.has_handlers("provider_stream_event") {
                 return Ok(());
             }
-            runner
-                .emit_provider_stream_event(ProviderStreamEvent {
+            let _ = runner
+                .emit(ProviderStreamEvent {
                     data,
-                    provider: event_model.provider,
-                    api: event_model.api,
-                    model: event_model.id,
+                    provider,
+                    api,
+                    model,
                 })
-                .await
+                .await;
+            Ok(())
         })
     });
 
@@ -449,7 +470,7 @@ pub async fn create_agent_session(
             let Some(runner) = runner_opt else {
                 return Ok(messages);
             };
-            runner.emit_context(messages).await
+            Ok(runner.emit_context(messages).await)
         })
     });
 
@@ -476,7 +497,9 @@ pub async fn create_agent_session(
 
         Box::pin(async move {
             let provider_retry = settings.get_provider_retry_settings();
-            let http_idle_timeout_ms = settings.get_http_idle_timeout_ms();
+            let http_idle_timeout_ms = settings
+                .get_http_idle_timeout_ms()
+                .unwrap_or(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
             let effective_timeout_ms = if http_idle_timeout_ms == 0 {
                 2_147_483_647
             } else {
@@ -492,16 +515,21 @@ pub async fn create_agent_session(
                 base.reasoning = Some(pi_ai::types::ThinkingLevel::Max);
             }
             if base.base.timeout_ms.is_none() {
-                base.base.timeout_ms = Some(provider_retry.timeout_ms.unwrap_or(effective_timeout_ms));
+                base.base.timeout_ms = Some(
+                    provider_retry
+                        .timeout_ms
+                        .and_then(|v| u64::try_from(v).ok())
+                        .unwrap_or(effective_timeout_ms),
+                );
             }
             if base.base.websocket_connect_timeout_ms.is_none() {
-                base.base.websocket_connect_timeout_ms = settings.get_websocket_connect_timeout_ms();
+                base.base.websocket_connect_timeout_ms = settings.get_web_socket_connect_timeout_ms().ok().flatten();
             }
             if base.base.max_retries.is_none() {
-                base.base.max_retries = provider_retry.max_retries;
+                base.base.max_retries = provider_retry.max_retries.and_then(|v| u32::try_from(v).ok());
             }
             if base.base.max_retry_delay_ms.is_none() {
-                base.base.max_retry_delay_ms = provider_retry.max_retry_delay_ms;
+                base.base.max_retry_delay_ms = u64::try_from(provider_retry.max_retry_delay_ms).ok();
             }
             if base.base.on_response.is_none() {
                 base.base.on_response = Some(on_response);
@@ -524,13 +552,14 @@ pub async fn create_agent_session(
                         &req_model,
                         &settings,
                         session_id.as_deref(),
-                        Some(request_headers),
-                    );
+                        &[Some(&request_headers)],
+                    )
+                    .unwrap_or(request_headers);
                     let runner_opt = runner_ref.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     if let Some(runner) = runner_opt
                         && runner.has_handlers("before_provider_headers")
                     {
-                        runner.emit_before_provider_headers(headers).await
+                        Ok(runner.emit_before_provider_headers(headers).await)
                     } else {
                         Ok(headers)
                     }
@@ -555,11 +584,29 @@ pub async fn create_agent_session(
                         && captured_messages.len() <= st.messages.len()
                         && captured_messages.iter().zip(st.messages.iter()).all(|(a, b)| a == b)
                 });
-                cache_warmer.start(&req_model, &context, &models_opts, is_current);
+                cache_warmer.start(
+                    CacheWarmRequest {
+                        model: req_model.clone(),
+                        context: context.clone(),
+                        options: models_opts.clone(),
+                    },
+                    is_current,
+                );
             }
 
             Ok(model_runtime.stream_simple(&req_model, &context, Some(models_opts)))
         })
+    });
+
+    let map_queue_mode = |mode: QueueModeSetting| match mode {
+        QueueModeSetting::All => QueueMode::All,
+        QueueModeSetting::OneAtATime => QueueMode::OneAtATime,
+    };
+    let thinking_budgets = settings_manager.get_thinking_budgets().map(|tb| ThinkingBudgets {
+        minimal: tb.minimal,
+        low: tb.low,
+        medium: tb.medium,
+        high: tb.high,
     });
 
     let agent = Agent::new(AgentOptions {
@@ -572,14 +619,14 @@ pub async fn create_agent_session(
         }),
         convert_to_llm: Some(convert_to_llm_with_block_images),
         transform_context: Some(transform_context),
-        steering_mode: Some(settings_manager.get_steering_mode()),
-        follow_up_mode: Some(settings_manager.get_follow_up_mode()),
+        steering_mode: Some(map_queue_mode(settings_manager.get_steering_mode())),
+        follow_up_mode: Some(map_queue_mode(settings_manager.get_follow_up_mode())),
         stream_fn: Some(stream_fn),
         session_id: Some(session_manager.get_session_id()),
         on_payload: Some(on_payload),
-        thinking_budgets: Some(settings_manager.get_thinking_budgets()),
+        thinking_budgets,
         transport: Some(settings_manager.get_transport()),
-        max_retry_delay_ms: settings_manager.get_provider_retry_settings().max_retry_delay_ms,
+        max_retry_delay_ms: u64::try_from(settings_manager.get_provider_retry_settings().max_retry_delay_ms).ok(),
         ..Default::default()
     });
     *agent_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent.clone());
@@ -618,7 +665,7 @@ pub async fn create_agent_session(
     });
     *session_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&session.inner));
 
-    let extensions_result = resource_loader.get_extensions();
+    let extensions_result = resource_loader.get_core_extensions();
     Ok(CreateAgentSessionResult {
         session,
         extensions_result,

@@ -5,7 +5,7 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::types::{AgentMessage, AgentTool};
-use pi_ai::compat::clear_api_providers;
+use pi_ai::compat::register_built_in_api_providers;
 use pi_ai::types::{AssistantMessage, Model, StopReason, Usage};
 use pi_ai::utils::retry::{RetryCallbacks, RetryPolicy};
 use pi_ai::{content_text, is_context_overflow, is_recoverable_length, is_retryable_assistant_error, retry_delay_ms};
@@ -19,16 +19,18 @@ use crate::core::compaction::branch_summarization::{
     BranchSummaryDetails, GenerateBranchSummaryOptions, collect_entries_for_branch_summary, generate_branch_summary,
 };
 use crate::core::compaction::compaction::{
-    CompactionPreparation, CompactionResult, calculate_context_tokens, compact as run_compact, estimate_context_tokens,
-    estimate_projected_context_tokens, prepare_compaction, should_compact,
+    CompactOptions, CompactionPreparation, CompactionResult, calculate_context_tokens, compact as run_compact,
+    estimate_context_tokens, estimate_projected_context_tokens, prepare_compaction, should_compact,
 };
 use crate::core::defaults::{from_agent_thinking_level, to_agent_thinking_level};
 use crate::core::export_html::{ExportOptions, export_session_to_html};
-use crate::core::extensions::runner::{ExtensionRunner, emit_session_shutdown_event};
+use crate::core::extensions::runner::{
+    DiscoveredResourcePathEntry, ExtensionRunner, ProviderActions, emit_session_shutdown_event,
+};
 use crate::core::extensions::types::{
-    CompactionReason as ExtCompactionReason, ContextUsage, ExtensionActions, ExtensionContextActions,
-    ExtensionProviderActions, FlagValue, ReplacedSessionContext, ResourcesDiscoverReason, SessionBeforeCompactEvent,
-    SessionBeforeTreeEvent, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
+    CompactionReason as ExtCompactionReason, ContextUsage, DeliverAs, ExtensionActions, ExtensionContextActions,
+    ExtensionError, FlagValue, InputDeliveryBehavior, ReplacedSessionContext, ResourcesDiscoverReason,
+    SessionBeforeCompactEvent, SessionBeforeTreeEvent, SessionCompactEvent, SessionInfoChangedEvent,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent,
     SlashCommandInfo, SlashCommandSource, ToolDefinition, TreePreparation,
 };
@@ -44,13 +46,22 @@ use crate::core::source_info::{
     BUILTIN_PATH_PREFIX, SourceInfo, SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
     is_synthetic_path,
 };
-use crate::core::tools::bash::{LocalBashOperationsOptions, create_local_bash_operations};
+use crate::core::tools::bash::create_local_bash_operations_with_shell;
 use crate::core::tools::tool_definition_wrapper::create_tool_definition_from_agent_tool;
 use crate::core::tools::{ToolsOptions, create_all_tool_definitions};
 use crate::core::usage_totals::{add_usage_to_totals, create_usage_totals};
 use crate::utils::sleep::sleep;
 
 use super::*;
+
+fn to_retry_policy(rs: crate::core::settings_manager::ResolvedRetrySettings) -> RetryPolicy {
+    RetryPolicy {
+        enabled: rs.enabled,
+        max_retries: u32::try_from(rs.max_retries).unwrap_or(0),
+        base_delay_ms: u64::try_from(rs.base_delay_ms).unwrap_or(0),
+        max_agent_delay_ms: u64::try_from(rs.max_agent_delay_ms).ok(),
+    }
+}
 
 fn to_ext_compaction_reason(reason: CompactionReason) -> ExtCompactionReason {
     match reason {
@@ -139,24 +150,37 @@ impl AgentSession {
         let request = self
             ._get_summarization_request_auth(model, Some(signal.clone()))
             .await?;
-        let retry: RetryPolicy = self.inner.settings_manager.get_retry_settings();
+        let retry = to_retry_policy(self.inner.settings_manager.get_retry_settings());
         let callbacks = self._summarization_retry_callbacks(SummarizationRetrySource::Compaction, Some(reason));
         let stream_fn = self.inner.agent.stream_fn();
-        run_compact(
+        let headers = request
+            .headers
+            .map(|h| h.into_iter().map(|(k, v)| (k, Some(v))).collect());
+        let res = run_compact(
             preparation,
             &request.model,
-            request.api_key.as_deref(),
-            request.headers.as_ref(),
-            custom_instructions,
-            Some(signal),
-            Some(request.thinking_level),
-            stream_fn.as_ref(),
-            request.env.as_ref(),
-            Some(&retry),
-            Some(callbacks.as_ref()),
-            None,
+            Some(CompactOptions {
+                api_key: request.api_key,
+                headers,
+                custom_instructions: custom_instructions.map(str::to_string),
+                signal: Some(signal.clone()),
+                thinking_level: Some(to_agent_thinking_level(request.thinking_level)),
+                stream_fn,
+                env: request.env,
+                retry: Some(retry),
+                callbacks: Some(callbacks),
+                session_id: Some(self.session_id()),
+            }),
         )
-        .await
+        .await?;
+        Ok(CompactionResult {
+            summary: res.summary,
+            first_kept_entry_id: res.first_kept_entry_id,
+            tokens_before: res.tokens_before,
+            estimated_tokens_after: res.estimated_tokens_after,
+            usage: res.usage,
+            details: res.details.and_then(|d| serde_json::to_value(d).ok()),
+        })
     }
 
     fn _clear_manual_compaction_state(&self) {
@@ -173,7 +197,7 @@ impl AgentSession {
     /// Manually compact the session context.
     pub async fn compact(&self, custom_instructions: Option<&str>) -> pi_js::Result<CompactionResult> {
         self.abort().await;
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         {
             self.inner
@@ -193,7 +217,7 @@ impl AgentSession {
             let Some(model) = self.model() else {
                 return Err(pi_js::Error::msg(format_no_model_selected_message()));
             };
-            let settings = self.inner.settings_manager.get_compaction_settings(Some(&model));
+            let settings = resolved_compaction_settings(&self.inner.settings_manager, Some(&model));
             let path_entries = self.inner.session_manager.get_branch(None);
             let Some(preparation) = prepare_compaction(&path_entries, &settings) else {
                 if let Some(SessionEntry::Compaction(_)) = path_entries.last() {
@@ -287,7 +311,7 @@ impl AgentSession {
 
             if let (Some(r), Some(compaction_entry)) = (runner, saved_entry) {
                 let _ = r
-                    .emit_session_compact(SessionCompactEvent {
+                    .emit(SessionCompactEvent {
                         compaction_entry,
                         from_extension,
                         reason: to_ext_compaction_reason(CompactionReason::Manual),
@@ -300,7 +324,7 @@ impl AgentSession {
                 summary: compact_res.summary,
                 first_kept_entry_id: compact_res.first_kept_entry_id,
                 tokens_before: compact_res.tokens_before,
-                estimated_tokens_after,
+                estimated_tokens_after: Some(estimated_tokens_after),
                 usage: compact_res.usage,
                 details: compact_res.details,
             })
@@ -357,10 +381,10 @@ impl AgentSession {
             )
         };
         if let Some(c) = manual {
-            c.abort();
+            c.abort(None);
         }
         if let Some(c) = auto {
-            c.abort();
+            c.abort(None);
         }
     }
 
@@ -374,7 +398,7 @@ impl AgentSession {
             .branch_summary_abort_controller
             .clone();
         if let Some(c) = controller {
-            c.abort();
+            c.abort(None);
         }
     }
 
@@ -385,7 +409,7 @@ impl AgentSession {
         tool_results: &[AgentMessage],
     ) -> bool {
         let model = self.model();
-        let settings = self.inner.settings_manager.get_compaction_settings(model.as_ref());
+        let settings = resolved_compaction_settings(&self.inner.settings_manager, model.as_ref());
         if !settings.enabled {
             return false;
         }
@@ -511,14 +535,12 @@ impl AgentSession {
             estimate_projected_context_tokens(&current_projection, &branch).tokens
         } else if assistant_message.stop_reason == StopReason::Error || direct_context_tokens == 0 {
             let messages = self.inner.agent.state().messages;
-            let llm_msgs = crate::core::messages::convert_to_llm(&messages);
-            let estimate = estimate_context_tokens(&llm_msgs);
+            let estimate = estimate_context_tokens(&messages);
             if let Some(usage_idx) = estimate.last_usage_index
                 && let Some(ref comp) = compaction_entry
                 && let Some(comp_ts) = entry_timestamp_ms(&comp.timestamp)
-                && let Some(usage_msg) = llm_msgs.get(usage_idx)
-                && usage_msg.role() == "assistant"
-                && usage_msg.timestamp() <= comp_ts
+                && let Some(usage_msg) = messages.get(usage_idx)
+                && usage_msg.as_assistant().is_some_and(|a| a.timestamp <= comp_ts)
             {
                 return false;
             }
@@ -537,13 +559,13 @@ impl AgentSession {
         let Some(model) = self.model() else {
             return false;
         };
-        let settings = self.inner.settings_manager.get_compaction_settings(Some(&model));
+        let settings = resolved_compaction_settings(&self.inner.settings_manager, Some(&model));
         let path_entries = self.inner.session_manager.get_branch(None);
         let Some(preparation) = prepare_compaction(&path_entries, &settings) else {
             return false;
         };
 
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         {
             self.inner
@@ -637,7 +659,7 @@ impl AgentSession {
 
             if let (Some(r), Some(compaction_entry)) = (runner, saved_entry) {
                 let _ = r
-                    .emit_session_compact(SessionCompactEvent {
+                    .emit(SessionCompactEvent {
                         compaction_entry,
                         from_extension,
                         reason: to_ext_compaction_reason(reason),
@@ -650,7 +672,7 @@ impl AgentSession {
                 summary: compact_res.summary,
                 first_kept_entry_id: compact_res.first_kept_entry_id,
                 tokens_before: compact_res.tokens_before,
-                estimated_tokens_after,
+                estimated_tokens_after: Some(estimated_tokens_after),
                 usage: compact_res.usage,
                 details: compact_res.details,
             })
@@ -742,7 +764,7 @@ impl AgentSession {
 
         if let Some(runner) = runner {
             self._apply_extension_bindings(&runner);
-            let _ = runner.emit_session_start(start_event.clone()).await;
+            let _ = runner.emit(start_event.clone()).await;
             runner.report_unhandled_mcp_servers();
         }
         let reason = if start_event.reason == SessionStartReason::Reload {
@@ -784,10 +806,7 @@ impl AgentSession {
         self._rebuild_system_prompt(&active);
     }
 
-    fn build_extension_resource_paths(
-        &self,
-        entries: &[crate::core::extensions::runner::DiscoveredResourcePath],
-    ) -> Vec<ExtensionResourcePath> {
+    fn build_extension_resource_paths(&self, entries: &[DiscoveredResourcePathEntry]) -> Vec<ExtensionResourcePath> {
         entries
             .iter()
             .map(|entry| {
@@ -841,7 +860,7 @@ impl AgentSession {
         if let Some(unsub) = prev_unsub {
             unsub.call();
         }
-        let next_unsub = error_listener.map(|listener| runner.on_error(listener));
+        let next_unsub = error_listener.map(|listener| runner.on_error_typed(listener));
         self.inner
             .state
             .lock()
@@ -882,7 +901,7 @@ impl AgentSession {
                 .collect();
             let templates: Vec<SlashCommandInfo> = resource_loader
                 .get_prompts()
-                .prompts
+                .0
                 .into_iter()
                 .map(|t| SlashCommandInfo {
                     name: t.name,
@@ -893,7 +912,7 @@ impl AgentSession {
                 .collect();
             let skills: Vec<SlashCommandInfo> = resource_loader
                 .get_skills()
-                .skills
+                .0
                 .into_iter()
                 .map(|s| SlashCommandInfo {
                     name: format!("skill:{}", s.name),
@@ -917,71 +936,95 @@ impl AgentSession {
                 let weak = weak.clone();
                 let runner = runner_for_err.clone();
                 Arc::new(move |msg, options| {
-                    let weak = weak.clone();
-                    let runner = runner.clone();
-                    tokio::spawn(async move {
-                        if let Some(inner) = weak.upgrade() {
-                            let session = AgentSession { inner };
-                            let draft = SendCustomMessageDraft {
-                                custom_type: msg.custom_type,
-                                content: msg.content,
-                                display: msg.display,
-                                details: msg.details,
-                            };
-                            let send_opts = options.map(|o| SendCustomMessageOptions {
-                                trigger_turn: o.trigger_turn,
-                                deliver_as: o.deliver_as.map(|d| match d {
-                                    crate::core::extensions::types::SendMessageDelivery::Steer => {
-                                        CustomMessageDelivery::Steer
-                                    }
-                                    crate::core::extensions::types::SendMessageDelivery::FollowUp => {
-                                        CustomMessageDelivery::FollowUp
-                                    }
-                                    crate::core::extensions::types::SendMessageDelivery::NextTurn => {
-                                        CustomMessageDelivery::NextTurn
-                                    }
-                                }),
-                            });
-                            if let Err(err) = session.send_custom_message(draft, send_opts).await {
-                                runner.emit_error_parts("<runtime>", "send_message", &err.to_string());
-                            }
-                        }
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    let session = AgentSession { inner };
+                    let draft = SendCustomMessageDraft {
+                        custom_type: msg.custom_type,
+                        content: msg.content,
+                        display: msg.display,
+                        details: msg.details,
+                    };
+                    let send_opts = options.map(|o| SendCustomMessageOptions {
+                        trigger_turn: o.trigger_turn,
+                        deliver_as: o.deliver_as.map(|d| match d {
+                            DeliverAs::Steer => CustomMessageDelivery::Steer,
+                            DeliverAs::FollowUp => CustomMessageDelivery::FollowUp,
+                            DeliverAs::NextTurn => CustomMessageDelivery::NextTurn,
+                        }),
                     });
+                    if let Some(agent_msg) = session._try_send_custom_message_sync(draft, send_opts) {
+                        let runner = runner.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = session
+                                ._run_agent_prompt(pi_agent_core::agent::PromptInput::Message(agent_msg))
+                                .await
+                            {
+                                runner.emit_error(ExtensionError {
+                                    extension_path: "<runtime>".to_string(),
+                                    event: "send_message".to_string(),
+                                    error: err.to_string(),
+                                    stack: None,
+                                });
+                            }
+                        });
+                    }
                 })
             },
             send_user_message: {
                 let weak = weak.clone();
                 let runner = runner_for_err.clone();
                 Arc::new(move |content, options| {
-                    let weak = weak.clone();
-                    let runner = runner.clone();
-                    tokio::spawn(async move {
-                        if let Some(inner) = weak.upgrade() {
-                            let session = AgentSession { inner };
-                            let input = match content {
-                                crate::core::extensions::types::CustomMessageContent::Text(s) => {
-                                    UserMessageInput::Text(s)
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    let session = AgentSession { inner };
+                    let input = match content {
+                        crate::core::extensions::types::CustomMessageContent::Text(s) => UserMessageInput::Text(s),
+                        crate::core::extensions::types::CustomMessageContent::Blocks(b) => UserMessageInput::Blocks(b),
+                    };
+                    let send_opts = options.map(|o| SendUserMessageOptions {
+                        deliver_as: o.deliver_as.map(|d| match d {
+                            InputDeliveryBehavior::Steer => StreamingBehavior::Steer,
+                            InputDeliveryBehavior::FollowUp => StreamingBehavior::FollowUp,
+                        }),
+                        expand_prompt_templates: o.expand_prompt_templates,
+                    });
+                    match session._try_send_user_message_sync(input, send_opts) {
+                        Ok(None) => {}
+                        Ok(Some((track, fut))) => {
+                            let runner = runner.clone();
+                            let session_for_track = session.clone();
+                            let handle = tokio::spawn(async move {
+                                if let Err(err) = fut.await {
+                                    runner.emit_error(ExtensionError {
+                                        extension_path: "<runtime>".to_string(),
+                                        event: "send_user_message".to_string(),
+                                        error: err.to_string(),
+                                        stack: None,
+                                    });
                                 }
-                                crate::core::extensions::types::CustomMessageContent::Blocks(b) => {
-                                    UserMessageInput::Blocks(b)
-                                }
-                            };
-                            let send_opts = options.map(|o| SendUserMessageOptions {
-                                deliver_as: o.deliver_as.map(|d| match d {
-                                    crate::core::extensions::types::UserMessageDelivery::Steer => {
-                                        StreamingBehavior::Steer
-                                    }
-                                    crate::core::extensions::types::UserMessageDelivery::FollowUp => {
-                                        StreamingBehavior::FollowUp
-                                    }
-                                }),
-                                expand_prompt_templates: None,
                             });
-                            if let Err(err) = session.send_user_message(input, send_opts).await {
-                                runner.emit_error_parts("<runtime>", "send_user_message", &err.to_string());
+                            if track {
+                                session_for_track
+                                    .inner
+                                    .state
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .pending_extension_send_tasks
+                                    .push(handle);
                             }
                         }
-                    });
+                        Err(err) => {
+                            runner.emit_error(ExtensionError {
+                                extension_path: "<runtime>".to_string(),
+                                event: "send_user_message".to_string(),
+                                error: err.to_string(),
+                                stack: None,
+                            });
+                        }
+                    }
                 })
             },
             append_entry: {
@@ -1102,7 +1145,16 @@ impl AgentSession {
                 let weak = weak.clone();
                 Arc::new(move || {
                     weak.upgrade()
-                        .map(|inner| AgentSession { inner }.scoped_models())
+                        .map(|inner| {
+                            AgentSession { inner }
+                                .scoped_models()
+                                .into_iter()
+                                .map(|entry| crate::core::model_resolver::ScopedModel {
+                                    model: entry.model,
+                                    thinking_level: entry.thinking_level,
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default()
                 })
             },
@@ -1139,9 +1191,13 @@ impl AgentSession {
                         if let Some(handler) = handler {
                             handler();
                         } else {
-                            tokio::spawn(async move {
-                                AgentSession { inner }.abort().await;
-                            });
+                            let session = AgentSession { inner };
+                            session.request_abort();
+                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                handle.spawn(async move {
+                                    session.wait_for_idle().await;
+                                });
+                            }
                         }
                     }
                 })
@@ -1213,13 +1269,8 @@ impl AgentSession {
                 Arc::new(move || {
                     weak.upgrade()
                         .map(|inner| {
-                            inner
-                                .state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .base_system_prompt_options
-                                .clone()
-                                .into()
+                            let guard = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                            normalized_to_build_options(&guard.base_system_prompt_options)
                         })
                         .unwrap_or_default()
                 })
@@ -1242,9 +1293,20 @@ impl AgentSession {
                                 is_error: true,
                             };
                         };
+                        let name_fallback = name.clone();
+                        let caller_fallback = caller_id.clone();
                         AgentSession { inner }
                             ._execute_nested_tool_call(&caller_id, &name, args, options)
                             .await
+                            .unwrap_or_else(|err| pi_agent_core::types::AgentToolCallOutcome {
+                                tool_call: pi_agent_core::types::AgentToolCall {
+                                    id: caller_fallback,
+                                    name: name_fallback,
+                                    arguments: Default::default(),
+                                },
+                                result: pi_agent_core::types::AgentToolResult::text(err.to_string()),
+                                is_error: true,
+                            })
                     })
                 })
             }),
@@ -1258,17 +1320,17 @@ impl AgentSession {
             }),
         };
 
-        let provider_actions = ExtensionProviderActions {
-            register_provider: {
+        let provider_actions = ProviderActions {
+            register_provider: Some({
                 let weak = weak.clone();
                 Arc::new(move |name, config| {
                     if let Some(inner) = weak.upgrade() {
-                        inner.model_runtime.register_provider(name, config);
+                        let _ = inner.model_runtime.register_provider(name, config.into());
                         AgentSession { inner }._refresh_current_model_from_registry();
                     }
                 })
-            },
-            register_native_provider: {
+            }),
+            register_native_provider: Some({
                 let weak = weak.clone();
                 Arc::new(move |provider| {
                     if let Some(inner) = weak.upgrade() {
@@ -1276,8 +1338,8 @@ impl AgentSession {
                         AgentSession { inner }._refresh_current_model_from_registry();
                     }
                 })
-            },
-            unregister_provider: {
+            }),
+            unregister_provider: Some({
                 let weak = weak.clone();
                 Arc::new(move |name| {
                     if let Some(inner) = weak.upgrade() {
@@ -1285,8 +1347,8 @@ impl AgentSession {
                         AgentSession { inner }._refresh_current_model_from_registry();
                     }
                 })
-            },
-            register_virtual_model: {
+            }),
+            register_virtual_model: Some({
                 let weak = weak.clone();
                 Arc::new(move |definition| {
                     if let Some(inner) = weak.upgrade() {
@@ -1294,8 +1356,8 @@ impl AgentSession {
                         AgentSession { inner }._refresh_current_model_from_registry();
                     }
                 })
-            },
-            unregister_virtual_model: {
+            }),
+            unregister_virtual_model: Some({
                 let weak = weak.clone();
                 Arc::new(move |provider, id| {
                     if let Some(inner) = weak.upgrade() {
@@ -1303,10 +1365,10 @@ impl AgentSession {
                         AgentSession { inner }._refresh_current_model_from_registry();
                     }
                 })
-            },
+            }),
         };
 
-        runner.bind_core(actions, context_actions, provider_actions);
+        runner.bind_core(actions, context_actions, Some(provider_actions));
     }
 
     pub(crate) fn _refresh_tool_registry(
@@ -1437,7 +1499,7 @@ impl AgentSession {
                 guard.tool_registry.keys().cloned().collect()
             };
             for tool_name in keys {
-                if allowed.contains(&tool_name) && self._is_declarable(&tool_name) {
+                if super::tool_name_matches_entries(allowed, &tool_name) && self._is_declarable(&tool_name) {
                     next_active.push(tool_name);
                 }
             }
@@ -1512,23 +1574,26 @@ impl AgentSession {
         let base_tool_defs: IndexMap<String, ToolDefinition> = match base_tools_override {
             Some(ref overrides) => overrides
                 .iter()
-                .map(|(name, tool)| (name.clone(), create_tool_definition_from_agent_tool(tool)))
+                .map(|(name, tool)| (name.clone(), create_tool_definition_from_agent_tool(tool.clone())))
                 .collect(),
             None => create_all_tool_definitions(
                 &cwd,
-                Some(ToolsOptions {
+                Some(&ToolsOptions {
                     read: Some(crate::core::tools::read::ReadToolOptions {
                         auto_resize_images: Some(auto_resize_images),
                         ..Default::default()
                     }),
                     bash: Some(crate::core::tools::bash::BashToolOptions {
+                        operations: shell_path.map(|sp| create_local_bash_operations_with_shell(Some(sp))),
                         command_prefix: shell_command_prefix,
-                        shell_path,
                         ..Default::default()
                     }),
                     ..Default::default()
                 }),
-            ),
+            )
+            .into_iter()
+            .map(|(name, def)| (name.as_str().to_string(), def))
+            .collect(),
         };
 
         let default_active_tool_names: Vec<String> = match base_tools_override {
@@ -1536,7 +1601,7 @@ impl AgentSession {
             None => DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect(),
         };
 
-        let extensions_result = self.inner.resource_loader.get_extensions();
+        let extensions_result = self.inner.resource_loader.get_core_extensions();
         if let Some(flags) = flag_values {
             let mut runtime_flags = extensions_result
                 .runtime
@@ -1607,7 +1672,7 @@ impl AgentSession {
 
         self.inner.settings_manager.reload().await;
         self.sync_queue_modes_from_settings();
-        clear_api_providers();
+        register_built_in_api_providers();
         self.inner.resource_loader.reload(None).await?;
 
         let added_default_tools: Vec<String> = if uses_default_tools {
@@ -1650,7 +1715,7 @@ impl AgentSession {
             }
             if let Some(runner) = runner {
                 let _ = runner
-                    .emit_session_start(SessionStartEvent {
+                    .emit(SessionStartEvent {
                         reason: SessionStartReason::Reload,
                         previous_session_file: None,
                     })
@@ -1709,7 +1774,7 @@ impl AgentSession {
     }
 
     pub(crate) async fn _prepare_retry(&self, message: &AssistantMessage) -> bool {
-        let settings = self.inner.settings_manager.get_retry_settings();
+        let settings = to_retry_policy(self.inner.settings_manager.get_retry_settings());
         if !settings.enabled {
             return false;
         }
@@ -1745,7 +1810,7 @@ impl AgentSession {
 
         let _ = self._omit_recovery_attempt(message, &[]);
 
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         {
             self.inner
@@ -1781,7 +1846,7 @@ impl AgentSession {
             .retry_abort_controller
             .clone();
         if let Some(c) = controller {
-            c.abort();
+            c.abort(None);
         }
     }
 
@@ -1813,7 +1878,7 @@ impl AgentSession {
         options: Option<ExecuteBashOptions>,
     ) -> pi_js::Result<BashResult> {
         let opts = options.unwrap_or_default();
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         let bash_id = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1832,7 +1897,7 @@ impl AgentSession {
 
         let operations: Arc<dyn BashOperations> = match opts.operations {
             Some(ops) => ops,
-            None => create_local_bash_operations(Some(LocalBashOperationsOptions { shell_path })),
+            None => create_local_bash_operations_with_shell(shell_path),
         };
         let weak = Arc::downgrade(&self.inner);
         let event_id = opts.id.clone();
@@ -1884,7 +1949,7 @@ impl AgentSession {
             role: "bashExecution".to_string(),
             command: command.to_string(),
             output: result.output.clone(),
-            exit_code: result.exit_code,
+            exit_code: result.exit_code.map(i64::from),
             cancelled: result.cancelled,
             truncated: result.truncated,
             full_output_path: result.full_output_path.clone(),
@@ -1908,12 +1973,16 @@ impl AgentSession {
     }
 
     pub fn abort_bash(&self) {
-        let controllers: Vec<AbortController> = {
+        let controllers: Vec<Arc<AbortController>> = {
             let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            guard.bash_abort_controllers.iter().map(|(_, c)| c.clone()).collect()
+            guard
+                .bash_abort_controllers
+                .iter()
+                .map(|(_, c)| Arc::clone(c))
+                .collect()
         };
         for c in controllers {
-            c.abort();
+            c.abort(None);
         }
     }
 
@@ -1972,7 +2041,15 @@ impl AgentSession {
             .extension_runner
             .clone();
         if let Some(runner) = runner {
-            runner.emit_session_info_changed_background(SessionInfoChangedEvent { name: session_name });
+            let mut fut = Box::pin(async move {
+                let _ = runner.emit(SessionInfoChangedEvent { name: session_name }).await;
+            });
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            if std::future::Future::poll(fut.as_mut(), &mut cx).is_pending()
+                && let Ok(handle) = tokio::runtime::Handle::try_current()
+            {
+                handle.spawn(fut);
+            }
         }
     }
 
@@ -2028,7 +2105,7 @@ impl AgentSession {
             label: label.clone(),
         };
 
-        let controller = AbortController::new();
+        let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         {
             self.inner
@@ -2101,16 +2178,18 @@ impl AgentSession {
                 ._get_summarization_request_auth(&model, Some(signal.clone()))
                 .await?;
             let bs_settings = self.inner.settings_manager.get_branch_summary_settings();
-            let retry: RetryPolicy = self.inner.settings_manager.get_retry_settings();
+            let retry = to_retry_policy(self.inner.settings_manager.get_retry_settings());
             let callbacks = self._summarization_retry_callbacks(SummarizationRetrySource::BranchSummary, None);
+            let headers = auth.headers.map(|h| h.into_iter().map(|(k, v)| (k, Some(v))).collect());
             let res = generate_branch_summary(
                 &collected.entries,
                 GenerateBranchSummaryOptions {
                     model: auth.model,
                     api_key: auth.api_key,
-                    headers: auth.headers,
+                    headers,
                     env: auth.env,
-                    signal,
+                    signal: Some(signal),
+                    thinking_level: Some(to_agent_thinking_level(auth.thinking_level)),
                     custom_instructions,
                     replace_instructions,
                     reserve_tokens: Some(bs_settings.reserve_tokens),
@@ -2119,7 +2198,7 @@ impl AgentSession {
                     callbacks: Some(callbacks),
                 },
             )
-            .await?;
+            .await;
             if res.aborted == Some(true) {
                 return Ok(NavigateTreeResult {
                     editor_text: None,
@@ -2154,7 +2233,10 @@ impl AgentSession {
                 (m.parent_id.clone(), Some(text))
             }
             SessionEntry::CustomMessage(cm) => {
-                let text = content_text(&cm.content, Some(""));
+                let text = match &cm.content {
+                    crate::core::extensions::types::CustomMessageContent::Text(s) => s.clone(),
+                    crate::core::extensions::types::CustomMessageContent::Blocks(b) => content_text(b, Some("")),
+                };
                 (cm.parent_id.clone(), Some(text))
             }
             _ => (Some(target_id.to_string()), None),
@@ -2203,7 +2285,7 @@ impl AgentSession {
 
         if let Some(ref r) = runner {
             let _ = r
-                .emit_session_tree(SessionTreeEvent {
+                .emit(SessionTreeEvent {
                     new_leaf_id: self.inner.session_manager.get_leaf_id(),
                     old_leaf_id,
                     summary_entry: summary_entry.clone(),
@@ -2356,11 +2438,12 @@ impl AgentSession {
         let theme_name = requested_theme.or(settings_theme);
         export_session_to_html(
             &self.inner.session_manager,
-            &self.inner.agent.state(),
+            Some(&self.inner.agent.state()),
             Some(ExportOptions {
                 output_path: output_path.map(str::to_string),
                 theme_name,
                 tool_renderer: None,
+                theme_override: None,
             }),
         )
         .await
@@ -2377,16 +2460,17 @@ impl AgentSession {
         let auth = self
             ._get_summarization_request_auth(&model, Some(options.signal.clone()))
             .await?;
-        let retry = self.inner.settings_manager.get_retry_settings();
+        let retry = to_retry_policy(self.inner.settings_manager.get_retry_settings());
+        let headers = auth.headers.map(|h| h.into_iter().map(|(k, v)| (k, Some(v))).collect());
         generate_bug_report_summary(GenerateBugReportSummaryOptions {
             model: auth.model,
             api_key: auth.api_key,
-            headers: auth.headers,
+            headers,
             env: auth.env,
             messages: self.messages(),
             hint: options.hint,
-            signal: options.signal,
-            thinking_level: Some(auth.thinking_level),
+            signal: Some(options.signal),
+            thinking_level: Some(to_agent_thinking_level(auth.thinking_level)),
             stream_fn: self.inner.agent.stream_fn(),
             retry: Some(retry),
             session_id: Some(self.session_id()),

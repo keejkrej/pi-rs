@@ -95,7 +95,7 @@ pub struct GitMergeAndResolveExtension;
 impl Extension for GitMergeAndResolveExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         let pi_ae = pi.clone();
-        pi.on::<AgentEndEvent>(Arc::new(move |_event, ctx| {
+        pi.on::<AgentEndEvent>(move |_event, ctx| {
             let pi = pi_ae.clone();
             Box::pin(async move {
                 let rev_parse = pi
@@ -178,7 +178,7 @@ impl Extension for GitMergeAndResolveExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

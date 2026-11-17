@@ -17,15 +17,30 @@ use pi_ai::types::{
 };
 use pi_ai::utils::transcript::get_current_system_prompt;
 use pi_coding_agent::core::agent_session::{ExtensionBindings, ModelMutationOptions};
+use pi_coding_agent::core::extensions::runner::ShutdownHandler;
 use pi_coding_agent::core::extensions::types::{
     BeforeAgentStartEvent, BeforeAgentStartEventResult, ContextEvent, ContextEventResult, CustomMessageDraft,
     ExtensionApi, InlineExtension, InputEvent, InputEventResult, ModelSelectEvent, ModelSelectSource,
-    RegisteredCommandOptions, SessionShutdownEvent, SessionStartEvent, ShutdownHandler, ToolCallEvent,
-    ToolCallEventResult, ToolResultContentBlock, ToolResultEvent, ToolResultEventResult,
+    RegisteredCommandOptions, SessionShutdownEvent, SessionStartEvent, ToolCallEvent, ToolCallEventResult,
+    ToolResultContentBlock, ToolResultEvent, ToolResultEventResult,
 };
+use pi_coding_agent::core::messages::CustomMessageContent;
 use pi_coding_agent::core::session_manager::SessionEntry;
 use pi_coding_agent::core::settings_manager::Settings;
-use pi_coding_agent::core::tools::mcp_wire::CustomMessageContent;
+
+fn user_content_text(content: &UserMessageContent) -> String {
+    match content {
+        UserMessageContent::Text(s) => s.clone(),
+        UserMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|p| match p {
+                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -402,7 +417,7 @@ async fn allows_extension_tool_call_handlers_to_block_tool_execution() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -431,7 +446,7 @@ async fn allows_extension_tool_call_handlers_to_block_tool_execution() {
         ..Default::default()
     })
     .await;
-    let mut args = serde_json::Map::new();
+    let mut args = IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -447,7 +462,7 @@ async fn allows_extension_tool_call_handlers_to_block_tool_execution() {
                     .messages
                     .iter()
                     .find_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::ToolResult(tr) => Some(
+                        Message::ToolResult(tr) => Some(
                             tr.content
                                 .iter()
                                 .filter_map(|p| match p {
@@ -517,7 +532,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object(&[t::prop("text", t::string())]),
+        parameters: t::object([("text", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -528,8 +543,8 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(text))],
                     details: Some(json!({ "text": text })),
-                    structured_content: None,
                     usage: Some(u_for_tool),
+                    ..Default::default()
                 })
             })
         }),
@@ -567,7 +582,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
         ..Default::default()
     })
     .await;
-    let mut args = serde_json::Map::new();
+    let mut args = IndexMap::new();
     args.insert("text".to_string(), Value::String("hello".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
@@ -583,7 +598,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
                     .messages
                     .iter()
                     .find_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::ToolResult(tr) => Some(
+                        Message::ToolResult(tr) => Some(
                             tr.content
                                 .iter()
                                 .filter_map(|p| match p {
@@ -667,16 +682,7 @@ async fn allows_extension_context_handlers_to_modify_messages_before_the_llm_cal
                     .messages
                     .iter()
                     .find_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::User(u) => Some(
-                            u.content
-                                .iter()
-                                .filter_map(|p| match p {
-                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
+                        Message::User(u) => Some(user_content_text(&u.content)),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -742,16 +748,7 @@ async fn allows_extension_input_handlers_to_transform_or_handle_input() {
                     .messages
                     .iter()
                     .find_map(|m| match m {
-                        pi_ai::types::TranscriptMessage::User(u) => Some(
-                            u.content
-                                .iter()
-                                .filter_map(|p| match p {
-                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
+                        Message::User(u) => Some(user_content_text(&u.content)),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -805,7 +802,7 @@ async fn allows_extension_commands_to_inspect_live_system_prompt_options() {
                             cwds_inner
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
-                                .push(options.cwd);
+                                .push(Some(options.cwd));
                             tools_inner
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
@@ -872,10 +869,13 @@ async fn allows_before_agent_start_handlers_to_inject_custom_messages_and_modify
             Box::pin(async move {
                 *ps.lock().unwrap_or_else(PoisonError::into_inner) = get_current_system_prompt(&ctx.messages);
                 let found = ctx.messages.iter().any(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                        UserContentBlock::Text(t) => t.text == "injected",
-                        _ => false,
-                    }),
+                    Message::User(u) => match &u.content {
+                        UserMessageContent::Text(s) => s == "injected",
+                        UserMessageContent::Blocks(blocks) => blocks.iter().any(|p| match p {
+                            UserContentBlock::Text(t) => t.text == "injected",
+                            _ => false,
+                        }),
+                    },
                     _ => false,
                 });
                 si.store(found, std::sync::atomic::Ordering::SeqCst);
@@ -956,7 +956,7 @@ async fn bind_extensions_emits_session_start_and_reload_emits_session_shutdown_t
     })
     .await;
 
-    let shutdown_cb: ShutdownHandler = Arc::new(|| Box::pin(async {}));
+    let shutdown_cb: ShutdownHandler = Arc::new(|| {});
     harness
         .session
         .bind_extensions(ExtensionBindings {
@@ -965,7 +965,7 @@ async fn bind_extensions_emits_session_start_and_reload_emits_session_shutdown_t
         })
         .await
         .unwrap();
-    harness.session.reload().await.unwrap();
+    harness.session.reload(None).await.unwrap();
 
     assert_eq!(
         *lifecycle_events.lock().unwrap_or_else(PoisonError::into_inner),

@@ -15,13 +15,13 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 fn make_jwt(account_id: &str) -> String {
-    let header = pi_js::b64::btoa(r#"{"alg":"none","typ":"JWT"}"#);
+    let header = pi_js::b64::btoa(r#"{"alg":"none","typ":"JWT"}"#).unwrap();
     let payload_json = pi_js::json::stringify(&json!({
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account_id,
         }
     }));
-    let payload = pi_js::b64::btoa(&payload_json);
+    let payload = pi_js::b64::btoa(&payload_json).unwrap();
     format!("{header}.{payload}.sig")
 }
 
@@ -193,9 +193,10 @@ async fn parses_credential_commands_and_rejects_invalid_arguments_or_credential_
     let unknown_err = parse_auth_command(&["auth", "unknown"]).unwrap_err();
     assert!(unknown_err.to_string().contains("Unknown auth command"));
 
-    let missing_err = resolve_credential_for_print(&parse_args(&[]), &runtime, AuthCommandKind::ApiKey, None, None)
-        .await
-        .unwrap_err();
+    let missing_err =
+        resolve_credential_for_print(&parse_args::<&str>(&[]), &runtime, AuthCommandKind::ApiKey, None, None)
+            .await
+            .unwrap_err();
     assert!(
         missing_err
             .to_string()

@@ -17,6 +17,7 @@ pub mod vendor;
 // @generated-mods end
 
 pub use pi_js::{Error, Result};
+pub use pi_tui;
 
 // Core session management
 pub use crate::cli::args::{Args, parse_args};
@@ -41,16 +42,16 @@ pub use crate::core::compaction::utils::{FileOperations, serialize_conversation}
 pub use crate::core::event_bus::{EventBus, EventBusController, create_event_bus};
 pub use crate::core::extensions::types::{
     AfterProviderResponseEvent, AgentActivityOutcome, AgentBeforeSettleEvent, AgentBeforeSettleEventResult,
-    AgentEndEvent, AgentSettledEvent, AgentStartEvent, AgentToolResult, AgentToolUpdateCallback, AppKeybinding,
-    AutocompleteProviderFactory, BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderHeadersEvent,
-    BeforeProviderRequestEvent, BeforeProviderRequestEventResult, BoundaryContextPreview, BoundaryResult,
-    BoundaryState, BuildSystemPromptOptions, CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult,
-    CompactOptions, ContextEvent, ContextEventResult, ContextUsage, ContextWithSystemEvent, EntryRenderOptions,
-    EntryRenderer, ExecOptions, ExecResult, ExecuteToolOptions, Extension, ExtensionAPI, ExtensionActions,
-    ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError,
-    ExtensionEvent, ExtensionFactory, ExtensionFlag, ExtensionRuntime, ExtensionShortcut, ExtensionToolContext,
-    ExtensionUIContext, ExtensionUIDialogOptions, ExtensionVirtualModel, ExtensionWidgetOptions, InlineExtension,
-    InputEvent, InputEventResult, InputSource, KeybindingsManager, LoadExtensionsResult, MarkdownTransformContext,
+    AgentEndEvent, AgentSettledEvent, AgentStartEvent, AppKeybinding, AutocompleteProviderFactory,
+    BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
+    BeforeProviderRequestEventResult, BoundaryContextPreview, BoundaryResult, BuildSystemPromptOptions,
+    CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult, CompactOptions, ContextEvent, ContextEventResult,
+    ContextUsage, ContextWithSystemEvent, EntryRenderOptions, EntryRenderer, ExecOptions, ExecResult,
+    ExecuteToolOptions, Extension, ExtensionAPI, ExtensionActions, ExtensionCommandContext,
+    ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent,
+    ExtensionFactory, ExtensionFlag, ExtensionRuntime, ExtensionShortcut, ExtensionToolContext, ExtensionUIContext,
+    ExtensionUIDialogOptions, ExtensionVirtualModel, ExtensionWidgetOptions, InlineExtension, InputEvent,
+    InputEventResult, InputSource, KeybindingsManager, LoadExtensionsResult, MarkdownTransformContext,
     MarkdownTransformer, McpServersChangeEvent, MessageEndEvent, MessageEndEventResult, MessageRenderOptions,
     MessageRenderer, MessageStartEvent, MessageUpdateEvent, ModelSelectEvent, ModelSelectSource,
     NormalizedBuildSystemPromptOptions, ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision,
@@ -61,10 +62,9 @@ pub use crate::core::extensions::types::{
     SessionBoundaryDraft, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
     SessionShutdownEvent, SessionStartEvent, SessionTreeEvent, SlashCommandInfo, SlashCommandSource, SourceInfo,
     TerminalInputHandler, ThinkingLevelSelectEvent, ToolAnnotations, ToolCallEvent, ToolCallEventResult,
-    ToolDefinition, ToolExecutionEndEvent, ToolExecutionMode, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
-    ToolExposure, ToolInfo, ToolLoadoutChanges, ToolNamespace, ToolRenderResultOptions, ToolResultEvent,
-    ToolResultEventResult, TurnEndEvent, TurnEndEventResult, TurnStartEvent, UserBashEvent, UserBashEventResult,
-    UserBashOperations,
+    ToolDefinition, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolExposure, ToolInfo,
+    ToolLoadoutChanges, ToolNamespace, ToolRenderResultOptions, ToolResultEvent, ToolResultEventResult, TurnEndEvent,
+    TurnEndEventResult, TurnStartEvent, UserBashEvent, UserBashEventResult,
 };
 pub use crate::core::model_registry::ModelRegistry;
 pub use crate::core::model_runtime::{
@@ -94,11 +94,12 @@ pub use crate::core::tools::{
     LsToolInput, LsToolOptions, PowerShellOperations, PowerShellToolDetails, PowerShellToolInput,
     PowerShellToolOptions, ReadToolDetails, ReadToolInput, ReadToolOptions, Tool, TruncationResult, WriteToolInput,
     WriteToolOptions, create_bash_tool, create_coding_tools, create_edit_tool, create_find_tool, create_grep_tool,
-    create_ls_tool, create_powershell_tool, create_read_only_tools, create_read_tool, create_write_tool,
+    create_ls_tool, create_power_shell_tool, create_read_only_tools, create_read_tool, create_write_tool,
     with_file_mutation_queue,
 };
 pub use crate::core::trust_manager::{
     ProjectTrustDecision, ProjectTrustStore, ProjectTrustStoreEntry, has_trust_requiring_project_resources,
 };
+pub use pi_agent_core::types::{AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode};
 
 // WIRE(@tui-w3): re-export InteractiveMode, InteractiveModeOptions, JsonAgentSessionEvent, ModelInfo, PrintModeOptions, RpcClient, RpcClientOptions, RpcCommand, RpcEventListener, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, RpcSessionState, run_print_mode, run_rpc_mode, and theme helpers from modes::* once @tui merges.

@@ -79,7 +79,7 @@ impl Extension for TitlebarSpinnerExtension {
             let pi_as = pi.clone();
             let t_as = Arc::clone(&timer);
             let f_as = Arc::clone(&frame_index);
-            pi.on::<AgentStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<AgentStartEvent>(move |_event, ctx| {
                 let pi = pi_as.clone();
                 let timer = Arc::clone(&t_as);
                 let frame_index = Arc::clone(&f_as);
@@ -87,14 +87,14 @@ impl Extension for TitlebarSpinnerExtension {
                     start_animation(&pi, &timer, &frame_index, &ctx);
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_st = pi.clone();
             let t_st = Arc::clone(&timer);
             let f_st = Arc::clone(&frame_index);
-            pi.on::<AgentSettledEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<AgentSettledEvent>(move |_event, ctx| {
                 let pi = pi_st.clone();
                 let timer = Arc::clone(&t_st);
                 let frame_index = Arc::clone(&f_st);
@@ -102,14 +102,14 @@ impl Extension for TitlebarSpinnerExtension {
                     stop_animation(&pi, &timer, &frame_index, &ctx);
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_sh = pi.clone();
             let t_sh = Arc::clone(&timer);
             let f_sh = Arc::clone(&frame_index);
-            pi.on::<SessionShutdownEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionShutdownEvent>(move |_event, ctx| {
                 let pi = pi_sh.clone();
                 let timer = Arc::clone(&t_sh);
                 let frame_index = Arc::clone(&f_sh);
@@ -117,7 +117,7 @@ impl Extension for TitlebarSpinnerExtension {
                     stop_animation(&pi, &timer, &frame_index, &ctx);
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

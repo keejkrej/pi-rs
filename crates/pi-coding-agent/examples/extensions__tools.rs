@@ -125,9 +125,9 @@ fn restore_from_branch(pi: &ExtensionApi, state: &Mutex<SharedState>, ctx: &Exte
     let mut saved_tools: Option<Vec<String>> = None;
 
     for entry in branch_entries {
-        if entry.r#type == "custom"
-            && entry.fields.get("customType").and_then(|v| v.as_str()) == Some("tools-config")
-            && let Some(data_val) = entry.fields.get("data")
+        if let pi_coding_agent::core::session_manager::SessionEntry::Custom(custom) = entry
+            && custom.custom_type == "tools-config"
+            && let Some(data_val) = custom.data.as_ref()
             && let Ok(parsed) = serde_json::from_value::<ToolsState>(data_val.clone())
         {
             saved_tools = Some(parsed.enabled_tools);
@@ -262,27 +262,27 @@ impl Extension for ToolsExtension {
         {
             let pi_ss = pi.clone();
             let state_ss = Arc::clone(&state);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let pi = pi_ss.clone();
                 let state = Arc::clone(&state_ss);
                 Box::pin(async move {
                     restore_from_branch(&pi, &state, &ctx)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_st = pi.clone();
             let state_st = Arc::clone(&state);
-            pi.on::<SessionTreeEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionTreeEvent>(move |_event, ctx| {
                 let pi = pi_st.clone();
                 let state = Arc::clone(&state_st);
                 Box::pin(async move {
                     restore_from_branch(&pi, &state, &ctx)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

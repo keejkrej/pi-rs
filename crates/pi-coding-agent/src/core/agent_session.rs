@@ -4,7 +4,6 @@
 mod part_2;
 pub use part_2::*;
 mod part_3;
-pub use part_3::*;
 // @generated-mods end
 
 use std::sync::{Arc, Mutex};
@@ -15,14 +14,15 @@ use pi_agent_core::agent::Agent;
 use pi_agent_core::agent_loop::run_tool_call;
 use pi_agent_core::types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool,
-    AgentToolCall, AgentToolCallOutcome, BeforeToolCallContext, BeforeToolCallResult, FinishTurnAction,
-    FinishTurnContext, FinishTurnDecision, PrepareNextTurnContext, PrepareRequestContext, PrepareRequestResult,
+    AgentToolCall, AgentToolCallOutcome, AgentToolResult, BeforeToolCallContext, BeforeToolCallResult,
+    FinishTurnAction, FinishTurnContext, FinishTurnDecision, PrepareNextTurnContext, PrepareRequestContext,
+    PrepareRequestResult,
 };
+use pi_ai::AnyModel;
 use pi_ai::types::{
     AssistantMessage, AssistantMessageEvent, ImageContent, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders,
-    SystemMessage, ToolResultMessage, Usage,
+    ToolResultMessage, UserContentBlock,
 };
-use pi_ai::{AnyModel, clamp_thinking_level, content_text, get_current_system_message, retry_delay_ms};
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::{BoxFuture, Unsubscribe};
 use regex::Regex;
@@ -31,34 +31,85 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::core::auth_guidance::format_no_api_key_found_message;
-use crate::core::bash_executor::BashResult;
-use crate::core::cache_warmer::{CacheWarmer, CacheWarmingStatus};
+use crate::core::cache_warmer::CacheWarmer;
 use crate::core::compaction::{CompactionResult, estimate_projected_context_tokens, should_compact};
 use crate::core::defaults::{from_agent_thinking_level, to_agent_thinking_level};
-use crate::core::extensions::runner::ExtensionRunner;
+use crate::core::extensions::runner::{
+    BoundaryBaseEvent, ExtensionErrorListener, ExtensionRunner, RunnerEmitEvent, ShutdownHandler,
+};
 use crate::core::extensions::types::{
-    AgentActivityOutcome, AgentBeforeSettleEvent, AgentEndEvent, AgentSettledEvent, AgentStartEvent,
-    BoundaryContextPreview, BoundaryEntryBuilder, BoundaryResult, ContextUsage, ExecuteToolOptions,
-    ExtensionCommandContextActions, ExtensionErrorListener, ExtensionMode, ExtensionRunnerRef, ExtensionUIContext,
-    MessageEndEvent, MessageStartEvent, MessageUpdateEvent, ReplacedSessionContext, SessionBoundaryDraft,
-    SessionCompactFailedEvent, SessionStartEvent, SessionStartReason, ShutdownHandler, ToolCallEvent, ToolDefinition,
-    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, TurnEndEvent,
-    TurnStartEvent,
+    AgentActivityOutcome, AgentEndEvent, AgentSettledEvent, AgentStartEvent, BashToolResultEvent,
+    BoundaryContextPreview, CompactionReason as ExtCompactionReason, ContextUsage, CustomToolResultEvent,
+    EditToolResultEvent, ExecuteToolOptions, ExtensionCommandContextActions, ExtensionError, ExtensionMode,
+    ExtensionUIContext, FindToolResultEvent, GrepToolResultEvent, LsToolResultEvent, MessageEndEvent,
+    MessageStartEvent, MessageUpdateEvent, PowerShellToolResultEvent, ReadToolResultEvent, SessionBoundaryDraft,
+    SessionCompactFailedEvent, SessionStartEvent, SessionStartReason, ToolCallEvent, ToolDefinition,
+    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultContentBlock, ToolResultEvent,
+    TurnStartEvent, WriteToolResultEvent,
 };
 use crate::core::messages::{BashExecutionMessage, convert_to_llm};
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeAuthOverrides, ResolveModelOptions};
 use crate::core::nested_tool_calls::{
-    NestedToolCallHost, NestedToolCallRunner, NestedToolExecutionEvent, NestedToolUpdateAsyncCallback,
+    NestedCallSummary, NestedToolCallHost, NestedToolCallOptions, NestedToolCallRunner, NestedToolExecutionEvent,
+    NestedToolUpdateAsyncCallback,
 };
 use crate::core::resource_loader::ResourceLoader;
 use crate::core::sdk::ScopedModelEntry;
-use crate::core::session_manager::{
-    BranchSummaryEntry, CompactionEntry, FileEntry, SessionEntry, SessionManager, SessionProjection,
-    get_latest_compaction_entry,
-};
-use crate::core::settings_manager::SettingsManager;
+use crate::core::session_manager::{BranchSummaryEntry, FileEntry, SessionEntry, SessionManager, SessionProjection};
+use crate::core::settings_manager::{ModelRef, SettingsManager};
 use crate::core::source_info::SourceInfo;
-use crate::core::system_prompt::{NormalizedBuildSystemPromptOptions, build_system_prompt_sections};
+use crate::core::tools::{
+    BashToolDetails, EditToolDetails, FindToolDetails, GrepToolDetails, LsToolDetails, PowerShellToolDetails,
+    ReadToolDetails,
+};
+
+pub type ExtensionRunnerRef = Arc<Mutex<Option<ExtensionRunner>>>;
+use crate::core::system_prompt::{
+    BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions, normalize_build_system_prompt_options,
+};
+
+pub(crate) fn normalized_to_build_options(opts: &NormalizedBuildSystemPromptOptions) -> BuildSystemPromptOptions {
+    BuildSystemPromptOptions {
+        custom_prompt: opts.custom_prompt.clone(),
+        force_system_prompt: opts.force_system_prompt.clone(),
+        selected_tools: Some(opts.selected_tools.clone()),
+        hidden_tools: Some(opts.hidden_tools.clone()),
+        tool_snippets: Some(opts.tool_snippets.clone()),
+        tool_guidelines: Some(opts.tool_guidelines.clone()),
+        prompt_guidelines: Some(opts.prompt_guidelines.clone()),
+        append_system_prompt: Some(opts.append_system_prompt.clone()),
+        sections: Some(opts.sections.clone()),
+        cwd: opts.cwd.clone(),
+        context_files: Some(opts.context_files.clone()),
+        skills: Some(opts.skills.clone()),
+    }
+}
+
+pub(crate) fn resolved_compaction_settings(
+    settings_manager: &SettingsManager,
+    model: Option<&Model>,
+) -> crate::core::compaction::compaction::CompactionSettings {
+    let model_ref = model.map(|m| ModelRef {
+        provider: m.provider.clone(),
+        id: m.id.clone(),
+    });
+    match settings_manager.get_compaction_settings(model_ref.as_ref()) {
+        Ok(s) => crate::core::compaction::compaction::CompactionSettings {
+            enabled: s.enabled,
+            reserve_tokens: s.reserve_tokens,
+            keep_recent_tokens: s.keep_recent_tokens,
+        },
+        Err(_) => crate::core::compaction::compaction::DEFAULT_COMPACTION_SETTINGS,
+    }
+}
+
+pub(crate) fn to_ext_compaction_reason(reason: CompactionReason) -> ExtCompactionReason {
+    match reason {
+        CompactionReason::Manual => ExtCompactionReason::Manual,
+        CompactionReason::Threshold => ExtCompactionReason::Threshold,
+        CompactionReason::Overflow => ExtCompactionReason::Overflow,
+    }
+}
 use crate::core::usage_totals::combine_usage;
 use crate::core::virtual_models::{
     ModelRouteReason, VIRTUAL_MODEL_STATE_ENTRY, VirtualModelStateData, get_branch_selection, get_virtual_model_state,
@@ -170,7 +221,7 @@ pub enum AgentSessionEvent {
         tool_name: String,
         args: Value,
         #[serde(rename = "partialResult")]
-        partial_result: crate::core::extensions::types::AgentToolResult,
+        partial_result: AgentToolResult,
         #[serde(rename = "parentToolCallId", default, skip_serializing_if = "Option::is_none")]
         parent_tool_call_id: Option<String>,
     },
@@ -180,7 +231,7 @@ pub enum AgentSessionEvent {
         tool_call_id: String,
         #[serde(rename = "toolName")]
         tool_name: String,
-        result: crate::core::extensions::types::AgentToolResult,
+        result: AgentToolResult,
         #[serde(rename = "isError")]
         is_error: bool,
         #[serde(rename = "parentToolCallId", default, skip_serializing_if = "Option::is_none")]
@@ -474,16 +525,16 @@ pub(crate) struct AgentSessionState {
     pub unsubscribe_agent: Option<Unsubscribe>,
     pub has_model: bool,
     pub thinking_level: ModelThinkingLevel,
-    pub compaction_abort_controller: Option<AbortController>,
-    pub auto_compaction_abort_controller: Option<AbortController>,
-    pub branch_summary_abort_controller: Option<AbortController>,
-    pub retry_abort_controller: Option<AbortController>,
+    pub compaction_abort_controller: Option<Arc<AbortController>>,
+    pub auto_compaction_abort_controller: Option<Arc<AbortController>>,
+    pub branch_summary_abort_controller: Option<Arc<AbortController>>,
+    pub retry_abort_controller: Option<Arc<AbortController>>,
     pub retry_attempt: u32,
     pub retry_waiters: Vec<oneshot::Sender<()>>,
     pub steering_messages: Vec<String>,
     pub follow_up_messages: Vec<String>,
     pub pending_next_turn_messages: Vec<AgentMessage>,
-    pub bash_abort_controllers: Vec<(u64, AbortController)>,
+    pub bash_abort_controllers: Vec<(u64, Arc<AbortController>)>,
     pub next_bash_id: u64,
     pub pending_bash_messages: Vec<BashExecutionMessage>,
     pub pending_custom_messages: Vec<AgentMessage>,
@@ -497,7 +548,9 @@ pub(crate) struct AgentSessionState {
     pub last_assistant_tool_results: Vec<ToolResultMessage>,
     pub failed_response: Option<AssistantMessage>,
     pub entry_ids_by_message: Vec<(AgentMessage, String)>,
+    pub message_end_replacements: Vec<(AgentMessage, AgentMessage)>,
     pub boundary_dispatched_messages: Vec<AssistantMessage>,
+    pub pending_extension_send_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub last_activity_outcome: AgentActivityOutcome,
     pub is_before_settle: bool,
     pub abort_during_before_settle: bool,
@@ -524,6 +577,7 @@ pub(crate) struct AgentSessionState {
     pub extension_error_unsubscriber: Option<Unsubscribe>,
     pub tool_registry: IndexMap<String, AgentTool>,
     pub nested_tool_calls: Option<Arc<NestedToolCallRunner>>,
+    pub completed_nested_call_summaries: IndexMap<String, NestedCallSummary>,
     pub hidden_declarations: IndexSet<String>,
     pub tool_definitions: IndexMap<String, ToolDefinitionEntry>,
     pub tool_prompt_snippets: IndexMap<String, String>,
@@ -548,16 +602,22 @@ pub struct AgentSession {
     pub(crate) inner: Arc<AgentSessionInner>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoundaryKind {
+    TurnEnd,
+    AgentBeforeSettle,
+}
+
 impl AgentSession {
     pub fn new(config: AgentSessionConfig) -> Self {
         let has_model = config.initial_model.is_some();
         let thinking_level = config
             .initial_thinking_level
             .unwrap_or_else(|| from_agent_thinking_level(config.agent.state().thinking_level));
-        let base_prompt_opts = NormalizedBuildSystemPromptOptions {
+        let base_prompt_opts = normalize_build_system_prompt_options(&BuildSystemPromptOptions {
             cwd: config.cwd.clone(),
             ..Default::default()
-        };
+        });
 
         let state = AgentSessionState {
             event_listeners: Vec::new(),
@@ -588,7 +648,9 @@ impl AgentSession {
             last_assistant_tool_results: Vec::new(),
             failed_response: None,
             entry_ids_by_message: Vec::new(),
+            message_end_replacements: Vec::new(),
             boundary_dispatched_messages: Vec::new(),
+            pending_extension_send_tasks: Vec::new(),
             last_activity_outcome: AgentActivityOutcome::Completed,
             is_before_settle: false,
             abort_during_before_settle: false,
@@ -618,6 +680,7 @@ impl AgentSession {
             extension_error_unsubscriber: None,
             tool_registry: IndexMap::new(),
             nested_tool_calls: None,
+            completed_nested_call_summaries: IndexMap::new(),
             hidden_declarations: IndexSet::new(),
             tool_definitions: IndexMap::new(),
             tool_prompt_snippets: IndexMap::new(),
@@ -642,7 +705,9 @@ impl AgentSession {
             let weak = Arc::downgrade(&session.inner);
             warmer.set_on_warmed(Some(Arc::new(move |entry| {
                 if let Some(inner) = weak.upgrade() {
-                    AgentSession { inner }._emit(AgentSessionEvent::EntryAppended { entry });
+                    AgentSession { inner }._emit(AgentSessionEvent::EntryAppended {
+                        entry: SessionEntry::Usage(entry.clone()),
+                    });
                 }
             })));
         }
@@ -841,16 +906,16 @@ impl AgentSession {
         let recorded = get_branch_selection(&branch, |provider, model_id| {
             self.inner.model_runtime.get_model(provider, model_id)
         });
-        let Some(recorded) = recorded else {
+        let Some((recorded_provider, recorded_model_id)) = recorded else {
             return;
         };
-        if recorded.provider == model.provider && recorded.model_id == model.id {
+        if recorded_provider == model.provider && recorded_model_id == model.id {
             return;
         }
         let recorded_model = self
             .inner
             .model_runtime
-            .get_model(&recorded.provider, &recorded.model_id);
+            .get_model(&recorded_provider, &recorded_model_id);
         if !is_virtual_model(&model) && !recorded_model.as_ref().is_some_and(is_virtual_model) {
             return;
         }
@@ -906,23 +971,31 @@ impl AgentSession {
             return Ok(None);
         }
 
-        let input_obj = context.args.as_object().cloned().unwrap_or_default();
-        runner
-            .emit_tool_call(ToolCallEvent {
-                tool_name: context.tool_call.name,
-                tool_call_id: context.tool_call.id,
-                parent_tool_call_id: parent_tool_call_id.map(str::to_string),
-                input: input_obj,
+        let mut event = ToolCallEvent::from_tool_name_and_input(
+            context.tool_call.id,
+            parent_tool_call_id.map(str::to_string),
+            &context.tool_call.name,
+            context.args,
+        );
+        let original_input = event.input_value();
+        let res = runner.emit_tool_call(&mut event).await?;
+        let next_input = event.input_value();
+        let updated_args = (next_input != original_input).then_some(next_input);
+        Ok(res
+            .map(|r| BeforeToolCallResult {
+                block: r.block,
+                reason: r.reason,
+                terminate: r.terminate,
+                args: updated_args.clone(),
             })
-            .await
-            .map(|res| {
-                res.map(|r| BeforeToolCallResult {
-                    block: r.block,
-                    reason: r.reason,
-                    terminate: r.terminate,
-                    args: r.args,
+            .or_else(|| {
+                updated_args.map(|args| BeforeToolCallResult {
+                    block: None,
+                    reason: None,
+                    terminate: None,
+                    args: Some(args),
                 })
-            })
+            }))
     }
 
     pub(crate) async fn _after_tool_call(
@@ -936,27 +1009,162 @@ impl AgentSession {
         };
         let hook_result = match runner {
             Some(runner) if runner.has_handlers("tool_result") => {
-                let input_obj = context.args.as_object().cloned().unwrap_or_default();
-                runner
-                    .emit_tool_result(ToolResultEvent {
-                        tool_name: context.tool_call.name,
-                        tool_call_id: context.tool_call.id,
-                        parent_tool_call_id: parent_tool_call_id.map(str::to_string),
-                        input: input_obj,
-                        content: context.result.content.clone(),
-                        details: context.result.details.clone(),
-                        structured_content: context.result.structured_content.clone(),
-                        is_error: context.is_error,
-                        usage: context.result.usage.clone(),
+                let input_map: IndexMap<String, Value> = context
+                    .args
+                    .as_object()
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+                let ev_content: Vec<ToolResultContentBlock> = context
+                    .result
+                    .content
+                    .iter()
+                    .map(|b| match b {
+                        UserContentBlock::Text(t) => ToolResultContentBlock::Text(t.clone()),
+                        UserContentBlock::Image(i) => ToolResultContentBlock::Image(i.clone()),
                     })
-                    .await?
+                    .collect();
+                let parent_id = parent_tool_call_id.map(str::to_string);
+                let tool_call_id = context.tool_call.id.clone();
+                let structured_content = context.result.structured_content.clone();
+                let is_error = context.is_error;
+                let usage = context.result.usage.clone();
+                let event = match context.tool_call.name.as_str() {
+                    "bash" => ToolResultEvent::Bash(BashToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<BashToolDetails>(d.clone()).ok()),
+                    }),
+                    "powershell" => ToolResultEvent::PowerShell(PowerShellToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<PowerShellToolDetails>(d.clone()).ok()),
+                    }),
+                    "read" => ToolResultEvent::Read(ReadToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<ReadToolDetails>(d.clone()).ok()),
+                    }),
+                    "edit" => ToolResultEvent::Edit(EditToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<EditToolDetails>(d.clone()).ok()),
+                    }),
+                    "write" => ToolResultEvent::Write(WriteToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                    }),
+                    "grep" => ToolResultEvent::Grep(GrepToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<GrepToolDetails>(d.clone()).ok()),
+                    }),
+                    "find" => ToolResultEvent::Find(FindToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<FindToolDetails>(d.clone()).ok()),
+                    }),
+                    "ls" => ToolResultEvent::Ls(LsToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context
+                            .result
+                            .details
+                            .as_ref()
+                            .and_then(|d| serde_json::from_value::<LsToolDetails>(d.clone()).ok()),
+                    }),
+                    tool_name => ToolResultEvent::Custom(CustomToolResultEvent {
+                        tool_call_id,
+                        parent_tool_call_id: parent_id,
+                        tool_name: tool_name.to_string(),
+                        input: input_map,
+                        content: ev_content,
+                        structured_content,
+                        is_error,
+                        usage,
+                        details: context.result.details.clone(),
+                    }),
+                };
+                runner.emit_tool_result(event).await
             }
             _ => None,
         };
 
-        let content = hook_result
+        let content: Vec<UserContentBlock> = hook_result
             .as_ref()
-            .and_then(|r| r.content.clone())
+            .and_then(|r| r.content.as_ref())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .map(|b| match b {
+                        ToolResultContentBlock::Text(t) => UserContentBlock::Text(t.clone()),
+                        ToolResultContentBlock::Image(i) => UserContentBlock::Image(i.clone()),
+                    })
+                    .collect()
+            })
             .unwrap_or_else(|| context.result.content.clone());
 
         let resize_options = self
@@ -965,11 +1173,11 @@ impl AgentSession {
             .and_then(|il| il.images)
             .and_then(|imgs| imgs.resize);
         let normalized_content = normalize_tool_result_images(
-            &content,
-            NormalizeToolResultImagesOptions {
+            content.clone(),
+            Some(NormalizeToolResultImagesOptions {
                 auto_resize_images: Some(self.inner.settings_manager.get_image_auto_resize()),
                 resize_options,
-            },
+            }),
         )
         .await;
 
@@ -991,7 +1199,7 @@ impl AgentSession {
                     .unwrap_or(context.is_error),
             ),
             usage: hook_result.as_ref().and_then(|r| r.usage.clone()),
-            terminate: hook_result.as_ref().and_then(|r| r.terminate),
+            terminate: None,
         }))
     }
 
@@ -1036,9 +1244,7 @@ impl AgentSession {
                         let Some(inner) = self.weak.upgrade() else {
                             return AgentToolCallOutcome {
                                 tool_call,
-                                result: crate::core::extensions::types::AgentToolResult::text(
-                                    "No assistant message issued this call",
-                                ),
+                                result: AgentToolResult::text("No assistant message issued this call"),
                                 is_error: true,
                             };
                         };
@@ -1046,9 +1252,7 @@ impl AgentSession {
                         let Some(assistant_message) = session._find_last_assistant_message() else {
                             return AgentToolCallOutcome {
                                 tool_call,
-                                result: crate::core::extensions::types::AgentToolResult::text(
-                                    "No assistant message issued this call",
-                                ),
+                                result: AgentToolResult::text("No assistant message issued this call"),
                                 is_error: true,
                             };
                         };
@@ -1088,7 +1292,14 @@ impl AgentSession {
                                     })
                                 })),
                                 signal,
-                                on_update,
+                                on_update: Some(Arc::new(move |partial| {
+                                    let cb = on_update.clone();
+                                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                        handle.spawn(async move {
+                                            cb(partial).await;
+                                        });
+                                    }
+                                })),
                             },
                         )
                         .await
@@ -1097,44 +1308,70 @@ impl AgentSession {
                     async fn emit(&self, event: NestedToolExecutionEvent) {
                         if let Some(inner) = self.weak.upgrade() {
                             let session = AgentSession { inner };
-                            let session_event = match event {
+                            let (runner_event, session_event) = match event {
                                 NestedToolExecutionEvent::ToolExecutionStart {
                                     tool_call_id,
                                     tool_name,
                                     args,
                                     parent_tool_call_id,
-                                } => AgentSessionEvent::ToolExecutionStart {
-                                    tool_call_id,
-                                    tool_name,
-                                    args,
-                                    parent_tool_call_id: Some(parent_tool_call_id),
-                                },
+                                } => (
+                                    RunnerEmitEvent::ToolExecutionStart(ToolExecutionStartEvent {
+                                        tool_call_id: tool_call_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        args: args.clone(),
+                                        parent_tool_call_id: Some(parent_tool_call_id.clone()),
+                                    }),
+                                    AgentSessionEvent::ToolExecutionStart {
+                                        tool_call_id,
+                                        tool_name,
+                                        args,
+                                        parent_tool_call_id: Some(parent_tool_call_id),
+                                    },
+                                ),
                                 NestedToolExecutionEvent::ToolExecutionUpdate {
                                     tool_call_id,
                                     tool_name,
                                     args,
                                     partial_result,
                                     parent_tool_call_id,
-                                } => AgentSessionEvent::ToolExecutionUpdate {
-                                    tool_call_id,
-                                    tool_name,
-                                    args,
-                                    partial_result,
-                                    parent_tool_call_id: Some(parent_tool_call_id),
-                                },
+                                } => (
+                                    RunnerEmitEvent::ToolExecutionUpdate(ToolExecutionUpdateEvent {
+                                        tool_call_id: tool_call_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        args: args.clone(),
+                                        partial_result: serde_json::to_value(&partial_result).unwrap_or(Value::Null),
+                                        parent_tool_call_id: Some(parent_tool_call_id.clone()),
+                                    }),
+                                    AgentSessionEvent::ToolExecutionUpdate {
+                                        tool_call_id,
+                                        tool_name,
+                                        args,
+                                        partial_result,
+                                        parent_tool_call_id: Some(parent_tool_call_id),
+                                    },
+                                ),
                                 NestedToolExecutionEvent::ToolExecutionEnd {
                                     tool_call_id,
                                     tool_name,
                                     result,
                                     is_error,
                                     parent_tool_call_id,
-                                } => AgentSessionEvent::ToolExecutionEnd {
-                                    tool_call_id,
-                                    tool_name,
-                                    result,
-                                    is_error,
-                                    parent_tool_call_id: Some(parent_tool_call_id),
-                                },
+                                } => (
+                                    RunnerEmitEvent::ToolExecutionEnd(ToolExecutionEndEvent {
+                                        tool_call_id: tool_call_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        result: serde_json::to_value(&result).unwrap_or(Value::Null),
+                                        is_error,
+                                        parent_tool_call_id: Some(parent_tool_call_id.clone()),
+                                    }),
+                                    AgentSessionEvent::ToolExecutionEnd {
+                                        tool_call_id,
+                                        tool_name,
+                                        result,
+                                        is_error,
+                                        parent_tool_call_id: Some(parent_tool_call_id),
+                                    },
+                                ),
                             };
                             let runner = session
                                 .inner
@@ -1144,7 +1381,7 @@ impl AgentSession {
                                 .extension_runner
                                 .clone();
                             if let Some(runner) = runner {
-                                runner.emit_session_event(&session_event).await;
+                                let _ = runner.emit(runner_event).await;
                             }
                             session._emit(session_event);
                         }
@@ -1159,7 +1396,17 @@ impl AgentSession {
             }
         };
 
-        runner.execute(parent_tool_call_id, name, args, options).await
+        Ok(runner
+            .execute(
+                parent_tool_call_id,
+                name,
+                args,
+                Some(NestedToolCallOptions {
+                    signal: options.signal,
+                    on_update: options.on_update,
+                }),
+            )
+            .await)
     }
 
     pub(crate) fn _exceeds_compaction_threshold(&self, model: &Model, projection: &SessionProjection) -> bool {
@@ -1168,7 +1415,7 @@ impl AgentSession {
         }
         let branch = self.inner.session_manager.get_branch(None);
         let tokens = estimate_projected_context_tokens(projection, &branch).tokens;
-        let settings = self.inner.settings_manager.get_compaction_settings(Some(model));
+        let settings = resolved_compaction_settings(&self.inner.settings_manager, Some(model));
         should_compact(tokens, model.context_window, &settings)
     }
 
@@ -1298,7 +1545,7 @@ impl AgentSession {
                         let data = VirtualModelStateData {
                             provider: model.provider.clone(),
                             model_id: model.id.clone(),
-                            state: route.state,
+                            state: route.state.clone().unwrap_or(Value::Null),
                         };
                         let val = pi_js::json::parse(&pi_js::json::stringify(&data))?;
                         if let Ok(entry_id) = session
@@ -1352,11 +1599,12 @@ impl AgentSession {
         }
         let assistant_agent_msg = AgentMessage::from(message.clone());
         let Some(message_entry_id) = self._find_persisted_message_entry_id(&assistant_agent_msg) else {
-            runner.emit_error_parts(
-                "<boundary>",
-                "turn_end",
-                "turn_end could not resolve the persisted assistant entry ID",
-            );
+            runner.emit_error(ExtensionError {
+                extension_path: "<boundary>".to_string(),
+                event: "turn_end".to_string(),
+                error: "turn_end could not resolve the persisted assistant entry ID".to_string(),
+                stack: None,
+            });
             return false;
         };
         let tool_result_entry_ids: Vec<String> = tool_results
@@ -1365,29 +1613,34 @@ impl AgentSession {
             .collect();
 
         let weak_preview = Arc::downgrade(&self.inner);
-        let build_ctx: BoundaryEntryBuilder = Arc::new(move |entries| {
-            weak_preview
-                .upgrade()
-                .map(|inner| AgentSession { inner }._build_boundary_context(&entries))
-                .unwrap_or_default()
-        });
-
         let boundary = runner
-            .emit_turn_end_boundary(
-                TurnEndEvent {
-                    turn_index,
-                    message: message.clone(),
+            .emit_boundary(
+                BoundaryBaseEvent::TurnEnd {
+                    turn_index: turn_index as i64,
+                    message: AgentMessage::from(message.clone()),
                     tool_results: tool_results.to_vec(),
                     message_entry_id,
                     tool_result_entry_ids,
                     outcome,
                 },
-                build_ctx,
+                move |entries: &[SessionBoundaryDraft]| {
+                    let entries = entries.to_vec();
+                    let weak_preview = weak_preview.clone();
+                    Box::pin(async move {
+                        Ok(weak_preview
+                            .upgrade()
+                            .map(|inner| {
+                                AgentSession { inner }._build_boundary_context(&entries, BoundaryKind::TurnEnd)
+                            })
+                            .unwrap_or_default())
+                    })
+                },
             )
             .await;
 
+        self._await_pending_extension_sends().await;
         self._commit_boundary_drafts(&boundary.entries);
-        if boundary.r#continue && !self._build_boundary_context(&[]).can_continue {
+        if boundary.r#continue && !self._build_boundary_context(&[], BoundaryKind::TurnEnd).can_continue {
             self._report_invalid_boundary_continuation("turn_end");
             return false;
         }
@@ -1399,7 +1652,7 @@ impl AgentSession {
         let weak = Arc::downgrade(&self.inner);
         self.inner
             .agent
-            .set_finish_turn(Some(Arc::new(move |turn: FinishTurnContext, signal| {
+            .set_finish_turn(Some(Arc::new(move |mut turn: FinishTurnContext, signal| {
                 let prev = previous.clone();
                 let weak = weak.clone();
                 Box::pin(async move {
@@ -1407,6 +1660,10 @@ impl AgentSession {
                         return Ok(None);
                     };
                     let session = AgentSession { inner };
+                    let resolved_msg = session._resolve_message_replacement(AgentMessage::from(turn.message.clone()));
+                    if let Some(resolved_assistant) = resolved_msg.as_assistant() {
+                        turn.message = resolved_assistant.clone();
+                    }
                     {
                         let mut guard = session.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                         guard.boundary_dispatched_messages.push(turn.message.clone());
@@ -1491,7 +1748,7 @@ impl AgentSession {
                     run_options.tool_guidelines = merged_guidelines;
 
                     let update_message =
-                        session._prepare_prompt_and_tool_loadout(&mut run_options, &next_context.messages);
+                        session._prepare_prompt_and_tool_loadout(&mut run_options, Some(&next_context.messages));
                     {
                         let mut guard = session.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                         guard.run_system_prompt_options = Some(run_options);
@@ -1603,7 +1860,7 @@ impl AgentSession {
                 .into_iter()
                 .map(FileEntry::from_session_entry),
         );
-        let manager = SessionManager::in_memory(Some(&self.cwd()), None, Some(initial))?;
+        let manager = SessionManager::in_memory(Some(&self.inner.session_manager.get_cwd()), None, Some(initial))?;
         self._apply_boundary_drafts(&manager, drafts);
         Ok(manager)
     }
@@ -1615,7 +1872,11 @@ impl AgentSession {
         pending
     }
 
-    pub(crate) fn _build_boundary_context(&self, drafts: &[SessionBoundaryDraft]) -> BoundaryContextPreview {
+    pub(crate) fn _build_boundary_context(
+        &self,
+        drafts: &[SessionBoundaryDraft],
+        boundary: BoundaryKind,
+    ) -> BoundaryContextPreview {
         let Ok(preview_mgr) = self._create_boundary_preview_manager(drafts) else {
             return BoundaryContextPreview::default();
         };
@@ -1624,12 +1885,26 @@ impl AgentSession {
         let llm_messages = convert_to_llm(&projection.messages);
         let final_role = llm_messages.last().map(pi_ai::types::Message::role);
         let has_non_system_context = llm_messages.iter().any(|m| m.role() != "system");
-        let context_can_continue = matches!(final_role, Some("user" | "toolResult"))
-            || (final_role == Some("assistant") && has_non_system_context);
-        let can_continue = context_can_continue || !pending_messages.is_empty();
+        let context_can_continue = has_non_system_context && final_role != Some("assistant");
+        let pending_custom_context = !self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_custom_messages
+            .is_empty();
+        let queued_can_continue = match boundary {
+            BoundaryKind::TurnEnd => self.inner.agent.has_queued_messages(),
+            BoundaryKind::AgentBeforeSettle => {
+                final_role == Some("assistant") && self.inner.agent.has_queued_messages()
+            }
+        };
+        let can_continue = context_can_continue || pending_custom_context || queued_can_continue;
 
         BoundaryContextPreview {
-            messages: projection.messages,
+            context_entries: projection.entries,
+            context_messages: projection.messages,
+            llm_messages,
             pending_messages,
             can_continue,
         }
@@ -1655,11 +1930,12 @@ impl AgentSession {
             .extension_runner
             .clone();
         if let Some(runner) = runner {
-            runner.emit_error_parts(
-                "<boundary>",
-                event,
-                &format!("{event} requested continuation without runnable model context"),
-            );
+            runner.emit_error(ExtensionError {
+                extension_path: "<boundary>".to_string(),
+                event: event.to_string(),
+                error: format!("{event} requested continuation without runnable model context"),
+                stack: None,
+            });
         }
     }
 
@@ -1698,8 +1974,8 @@ impl AgentSession {
             && runner.has_handlers("session_compact_failed")
         {
             let _ = runner
-                .emit_session_compact_failed(SessionCompactFailedEvent {
-                    reason,
+                .emit(SessionCompactFailedEvent {
+                    reason: to_ext_compaction_reason(reason),
                     error_message,
                     aborted,
                     will_retry,
@@ -1741,7 +2017,7 @@ impl AgentSession {
         };
 
         if let Some(runner) = runner {
-            let _ = runner.emit_agent_settled(AgentSettledEvent {}).await;
+            let _ = runner.emit(AgentSettledEvent {}).await;
         }
         self._emit(AgentSessionEvent::AgentSettled);
 
@@ -1757,31 +2033,152 @@ impl AgentSession {
         self._resolve_idle_wait_if_idle();
     }
 
+    pub(crate) async fn _await_pending_extension_sends(&self) {
+        loop {
+            let handles = {
+                let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.pending_extension_send_tasks.is_empty() {
+                    return;
+                }
+                std::mem::take(&mut guard.pending_extension_send_tasks)
+            };
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
+    }
+
+    pub(crate) fn _resolve_message_replacement(&self, mut message: AgentMessage) -> AgentMessage {
+        let replacements = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .message_end_replacements
+            .clone();
+        if replacements.is_empty() {
+            return message;
+        }
+        for (old, new) in &replacements {
+            if &message == old {
+                message = new.clone();
+            }
+        }
+        message
+    }
+
     pub(crate) async fn _handle_agent_event(&self, event: AgentEvent) {
+        let mut event = event;
+        match &mut event {
+            AgentEvent::AgentStart => {
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .message_end_replacements
+                    .clear();
+            }
+            AgentEvent::TurnEnd { message, .. } => {
+                *message = self._resolve_message_replacement(message.clone());
+            }
+            AgentEvent::AgentEnd { messages } => {
+                for msg in messages.iter_mut() {
+                    *msg = self._resolve_message_replacement(msg.clone());
+                }
+            }
+            _ => {}
+        }
+
         let nested = {
             let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             guard.nested_tool_calls.clone()
         };
-        let mut event = event;
         if let Some(nested) = nested {
+            let apply_nested_summary = |tr: &mut ToolResultMessage, summary: &NestedCallSummary| {
+                if let Some(ref calls) = summary.calls {
+                    tr.nested_calls = Some(calls.clone());
+                }
+                if let Some(ref usage) = summary.usage {
+                    tr.usage = Some(match tr.usage {
+                        Some(ref existing) => combine_usage(existing, usage),
+                        None => usage.clone(),
+                    });
+                }
+            };
+
             match &mut event {
                 AgentEvent::MessageStart { message } => {
                     if let Some(mut tr) = message.as_tool_result().cloned()
                         && let Some(summary) = nested.take_record(&tr.tool_call_id)
                     {
-                        if let Some(calls) = summary.calls {
-                            tr.nested_calls = Some(calls);
-                        }
-                        if let Some(usage) = summary.usage {
-                            tr.usage = Some(match tr.usage {
-                                Some(existing) => combine_usage(&existing, &usage),
-                                None => usage,
-                            });
-                        }
+                        apply_nested_summary(&mut tr, &summary);
+                        self.inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .completed_nested_call_summaries
+                            .insert(tr.tool_call_id.clone(), summary);
                         *message = AgentMessage::from(tr);
                     }
                 }
-                AgentEvent::AgentEnd { .. } => {
+                AgentEvent::MessageEnd { message } => {
+                    if let Some(mut tr) = message.as_tool_result().cloned() {
+                        let summary = {
+                            self.inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .completed_nested_call_summaries
+                                .get(&tr.tool_call_id)
+                                .cloned()
+                        }
+                        .or_else(|| nested.take_record(&tr.tool_call_id));
+                        if let Some(summary) = summary {
+                            apply_nested_summary(&mut tr, &summary);
+                            let updated_msg = AgentMessage::from(tr.clone());
+                            *message = updated_msg.clone();
+                            let mut agent_msgs = self.inner.agent.state().messages;
+                            if let Some(slot) = agent_msgs.iter_mut().rev().find(|m| {
+                                m.as_tool_result()
+                                    .is_some_and(|existing| existing.tool_call_id == tr.tool_call_id)
+                            }) {
+                                *slot = updated_msg;
+                                self.inner.agent.replace_messages(agent_msgs);
+                            }
+                        }
+                    }
+                }
+                AgentEvent::TurnEnd { tool_results, .. } => {
+                    let summaries = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .completed_nested_call_summaries
+                        .clone();
+                    if !summaries.is_empty() {
+                        for tr in tool_results.iter_mut() {
+                            if let Some(summary) = summaries.get(&tr.tool_call_id) {
+                                apply_nested_summary(tr, summary);
+                            }
+                        }
+                    }
+                }
+                AgentEvent::AgentEnd { messages } => {
+                    let summaries = {
+                        let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                        std::mem::take(&mut guard.completed_nested_call_summaries)
+                    };
+                    if !summaries.is_empty() {
+                        for msg in messages.iter_mut() {
+                            if let Some(mut tr) = msg.as_tool_result().cloned()
+                                && let Some(summary) = summaries.get(&tr.tool_call_id)
+                            {
+                                apply_nested_summary(&mut tr, summary);
+                                *msg = AgentMessage::from(tr);
+                            }
+                        }
+                    }
                     nested.clear();
                 }
                 _ => {}
@@ -1952,7 +2349,7 @@ impl AgentSession {
             return false;
         }
         let settings = self.inner.settings_manager.get_retry_settings();
-        if !settings.enabled || retry_attempt >= settings.max_retries {
+        if !settings.enabled || i64::from(retry_attempt) >= settings.max_retries {
             return false;
         }
         for message in messages.iter().rev() {
@@ -2046,6 +2443,12 @@ impl AgentSession {
             current_msgs[idx] = replacement.clone();
             self.inner.agent.replace_messages(current_msgs);
         }
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .message_end_replacements
+            .push((target.clone(), replacement.clone()));
         *target = replacement;
     }
 
@@ -2061,20 +2464,21 @@ impl AgentSession {
         match event {
             AgentEvent::AgentStart => {
                 self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).turn_index = 0;
-                let _ = runner.emit_agent_start(AgentStartEvent {}).await;
+                let _ = runner.emit(AgentStartEvent {}).await;
             }
             AgentEvent::AgentEnd { messages } => {
                 let _ = runner
-                    .emit_agent_end(AgentEndEvent {
+                    .emit(AgentEndEvent {
                         messages: messages.clone(),
                     })
                     .await;
+                self._await_pending_extension_sends().await;
             }
             AgentEvent::TurnStart => {
                 let turn_index = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).turn_index;
                 let _ = runner
-                    .emit_turn_start(TurnStartEvent {
-                        turn_index,
+                    .emit(TurnStartEvent {
+                        turn_index: turn_index as i64,
                         timestamp: pi_js::time::now_ms(),
                     })
                     .await;
@@ -2098,7 +2502,7 @@ impl AgentSession {
             }
             AgentEvent::MessageStart { message } => {
                 let _ = runner
-                    .emit_message_start(MessageStartEvent {
+                    .emit(MessageStartEvent {
                         message: message.clone(),
                     })
                     .await;
@@ -2108,20 +2512,21 @@ impl AgentSession {
                 assistant_message_event,
             } => {
                 let _ = runner
-                    .emit_message_update(MessageUpdateEvent {
+                    .emit(MessageUpdateEvent {
                         message: message.clone(),
                         assistant_message_event: assistant_message_event.clone(),
                     })
                     .await;
             }
             AgentEvent::MessageEnd { message } => {
-                if let Ok(Some(replacement)) = runner
+                if let Some(replacement) = runner
                     .emit_message_end(MessageEndEvent {
                         message: message.clone(),
                     })
                     .await
                 {
-                    self._replace_message_in_place(message, replacement);
+                    let normalized = crate::core::session_manager::repair_null_content_agent_message(&replacement);
+                    self._replace_message_in_place(message, normalized);
                 }
             }
             AgentEvent::ToolExecutionStart {
@@ -2130,7 +2535,7 @@ impl AgentSession {
                 args,
             } => {
                 let _ = runner
-                    .emit_tool_execution_start(ToolExecutionStartEvent {
+                    .emit(ToolExecutionStartEvent {
                         tool_call_id: tool_call_id.clone(),
                         tool_name: tool_name.clone(),
                         args: args.clone(),
@@ -2145,11 +2550,11 @@ impl AgentSession {
                 partial_result,
             } => {
                 let _ = runner
-                    .emit_tool_execution_update(ToolExecutionUpdateEvent {
+                    .emit(ToolExecutionUpdateEvent {
                         tool_call_id: tool_call_id.clone(),
                         tool_name: tool_name.clone(),
                         args: args.clone(),
-                        partial_result: partial_result.clone(),
+                        partial_result: serde_json::to_value(partial_result).unwrap_or(Value::Null),
                         parent_tool_call_id: None,
                     })
                     .await;
@@ -2161,10 +2566,10 @@ impl AgentSession {
                 is_error,
             } => {
                 let _ = runner
-                    .emit_tool_execution_end(ToolExecutionEndEvent {
+                    .emit(ToolExecutionEndEvent {
                         tool_call_id: tool_call_id.clone(),
                         tool_name: tool_name.clone(),
-                        result: result.clone(),
+                        result: serde_json::to_value(result).unwrap_or(Value::Null),
                         is_error: *is_error,
                         parent_tool_call_id: None,
                     })
@@ -2231,6 +2636,6 @@ impl AgentSession {
             warmer.set_on_warmed(None);
             warmer.cancel();
         }
-        pi_ai::cleanup_session_resources(&self.session_id());
+        pi_ai::cleanup_session_resources(Some(&self.session_id()));
     }
 }

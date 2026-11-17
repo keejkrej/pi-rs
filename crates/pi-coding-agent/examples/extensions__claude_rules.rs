@@ -44,7 +44,7 @@ impl Extension for ClaudeRulesExtension {
 
         {
             let rule_files_ss = Arc::clone(&rule_files);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let rule_files = Arc::clone(&rule_files_ss);
                 Box::pin(async move {
                     let rules_dir = pi_js::path::join(&[&ctx.cwd()?, ".claude", "rules"]);
@@ -62,12 +62,12 @@ impl Extension for ClaudeRulesExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let rule_files_bas = Arc::clone(&rule_files);
-            pi.on::<BeforeAgentStartEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<BeforeAgentStartEvent>(move |event, _ctx| {
                 let rule_files = Arc::clone(&rule_files_bas);
                 Box::pin(async move {
                     let files = rule_files.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -87,7 +87,7 @@ impl Extension for ClaudeRulesExtension {
                         system_prompt: Some(format!("{}{}", event.system_prompt, appendix)),
                     }))
                 })
-            }));
+            });
         }
 
         Ok(())

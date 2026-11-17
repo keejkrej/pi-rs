@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use pi_agent_core::AgentMessage;
-use pi_ai::{ContentTextSource, content_text};
+use pi_ai::content_text;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -53,21 +53,25 @@ pub fn suite() -> EvalSuite {
                         tools: Some(tools),
                         output: Some(Arc::new(|session, response, _system_prompt, _agent_dir| {
                             let response = response.to_string();
-                            let extensions = session.resource_loader().get_extensions();
+                            let extensions = session.resource_loader().get_core_extensions();
                             let messages = session.messages();
                             let result_text = messages
                                 .iter()
                                 .rev()
                                 .filter_map(AgentMessage::as_tool_result)
                                 .find(|tr| tr.tool_name == TOOL_NAME && !tr.is_error)
-                                .map(|tr| content_text(ContentTextSource::ToolResult(&tr.content), None));
+                                .map(|tr| content_text(&tr.content, None));
                             let tool_loaded = extensions.extensions.iter().any(|ext| {
                                 ext.tools
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .contains_key(TOOL_NAME)
                             });
-                            let extension_errors = extensions.errors.iter().map(serialize_to_json_value).collect();
+                            let extension_errors = extensions
+                                .errors
+                                .iter()
+                                .map(|e| json!({ "path": e.path, "error": e.error }))
+                                .collect();
                             let out = ExtensionEvalOutput {
                                 response,
                                 extension_errors,

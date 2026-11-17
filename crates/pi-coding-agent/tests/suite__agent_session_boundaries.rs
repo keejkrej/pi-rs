@@ -8,20 +8,20 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxModelDefinition, FauxResponseStep,
     faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, TextContent, Usage, UserContentBlock, UserMessage, UserMessageContent};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
+use pi_coding_agent::core::compaction::CompactionResult;
 use pi_coding_agent::core::extensions::types::{
     AgentActivityOutcome, AgentBeforeSettleEvent, AgentEndEvent, AgentSettledEvent, AgentStartEvent, BoundaryResult,
-    ContextEditReplacement, CustomMessageContent, DeliverAs, ExtensionApi, InlineExtension, InputDeliveryBehavior,
-    MessageEndEvent, MessageEndEventResult, SendMessageOptions, SendUserMessageOptions, SessionBeforeCompactEvent,
-    SessionBeforeCompactResult, SessionBoundaryDraft, SessionEntry, TurnEndEvent,
+    ContextEditReplacement, CustomMessageContent, CustomMessageDraft, ExtensionApi, InlineExtension,
+    InputDeliveryBehavior, MessageEndEvent, MessageEndEventResult, SendMessageOptions, SendUserMessageOptions,
+    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBoundaryDraft, SessionEntry, TurnEndEvent,
 };
-use pi_coding_agent::core::session_manager::CompactionEntry;
+use pi_coding_agent::core::session_manager::{CompactionEntry, ContextEditableContent};
 use pi_coding_agent::core::settings_manager::{CompactionSettings, RetrySettings, Settings};
-use pi_coding_agent::core::tools::mcp_wire::CompactionResult;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -241,14 +241,14 @@ async fn run_queue_scheduling_around_handoff(queue_kind: &str) {
     let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert!(recorded[0].contains("exact handoff"));
     if queue_kind == "steering" {
-        assert_eq!(harness.faux.state().call_count, 2);
+        assert_eq!(harness.faux.state().call_count(), 2);
         assert!(recorded[0].contains("queued steering"));
         assert!(!recorded[0].contains("queued follow-up"));
     } else if queue_kind == "follow-up" {
-        assert_eq!(harness.faux.state().call_count, 2);
+        assert_eq!(harness.faux.state().call_count(), 2);
         assert!(recorded[0].contains("queued follow-up"));
     } else {
-        assert_eq!(harness.faux.state().call_count, 3);
+        assert_eq!(harness.faux.state().call_count(), 3);
         assert!(recorded[0].contains("queued steering"));
         assert!(!recorded[0].contains("queued follow-up"));
         assert!(recorded[1].contains("queued follow-up"));
@@ -304,7 +304,7 @@ async fn keeps_a_boundary_replacement_verbatim_through_threshold_compaction() {
                             SessionBoundaryDraft::ContextEdit {
                                 target_id: user_id,
                                 replacement: Some(ContextEditReplacement {
-                                    content: Value::String(instr),
+                                    content: ContextEditableContent::Text(instr),
                                 }),
                             },
                             SessionBoundaryDraft::ContextEdit {
@@ -342,9 +342,13 @@ async fn keeps_a_boundary_replacement_verbatim_through_threshold_compaction() {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(2_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -467,9 +471,13 @@ async fn keeps_boundary_input_verbatim_through_threshold_compaction_when_metadat
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(2_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -674,7 +682,7 @@ async fn persists_custom_context_queued_by_agent_end_before_pre_settlement_conti
                         return Ok(None);
                     }
                     pi_h.send_message(
-                        pi_coding_agent::core::tools::mcp_wire::CustomMessageDraft {
+                        CustomMessageDraft {
                             custom_type: "agent-end-context".to_string(),
                             content: CustomMessageContent::Text("queued after agent end".to_string()),
                             display: false,
@@ -825,7 +833,7 @@ async fn keeps_a_pre_settlement_follow_up_deferred_until_the_explicit_continuati
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 3);
+    assert_eq!(harness.faux.state().call_count(), 3);
     let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert!(recorded[0].contains("boundary context"));
     assert!(!recorded[0].contains("queued follow-up"));
@@ -870,7 +878,7 @@ async fn defers_runs_started_by_agent_settled_handlers_until_every_settled_handl
                         return Ok(None);
                     }
                     pi_h.send_message(
-                        pi_coding_agent::core::tools::mcp_wire::CustomMessageDraft {
+                        CustomMessageDraft {
                             custom_type: "settled-trigger".to_string(),
                             content: CustomMessageContent::Text("start later".to_string()),
                             display: false,
@@ -938,7 +946,7 @@ async fn does_not_let_an_invalid_explicit_continuation_suppress_natural_tool_con
         name: "noop".to_string(),
         label: "Noop".to_string(),
         description: "Noop".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -948,8 +956,7 @@ async fn does_not_let_an_invalid_explicit_continuation_suppress_natural_tool_con
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("done"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -995,7 +1002,11 @@ async fn does_not_let_an_invalid_explicit_continuation_suppress_natural_tool_con
     .await;
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("noop", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "noop",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1009,7 +1020,7 @@ async fn does_not_let_an_invalid_explicit_continuation_suppress_natural_tool_con
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     harness.cleanup();
 }
 
@@ -1050,7 +1061,7 @@ async fn dispatches_actionable_turn_end_for_synthetic_run_failures() {
     harness.session.prompt("start", None).await.unwrap();
 
     assert_eq!(turn_ends.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.faux.state().call_count, 0);
+    assert_eq!(harness.faux.state().call_count(), 0);
     assert!(harness.session_manager.get_entries().into_iter().any(|e| match e {
         SessionEntry::Custom(c) => c.custom_type == "failure-boundary",
         _ => false,
@@ -1100,9 +1111,13 @@ async fn does_not_compact_from_usage_belonging_to_a_boundary_omitted_assistant()
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(10_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1181,9 +1196,13 @@ async fn does_not_trigger_successful_response_overflow_from_usage_captured_befor
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(5_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1220,9 +1239,13 @@ async fn does_not_trigger_threshold_compaction_from_post_edit_usage_captured_bef
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(10_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1250,7 +1273,7 @@ async fn does_not_trigger_threshold_compaction_from_post_edit_usage_captured_bef
         .append_context_edit(
             &user_id,
             Some(ContextEditReplacement {
-                content: Value::String("edited input".to_string()),
+                content: ContextEditableContent::Text("edited input".to_string()),
             }),
         )
         .unwrap();
@@ -1325,7 +1348,7 @@ async fn persists_custom_context_sent_during_pre_settlement_before_continuing() 
                         return Ok(None);
                     }
                     pi_h.send_message(
-                        pi_coding_agent::core::tools::mcp_wire::CustomMessageDraft {
+                        CustomMessageDraft {
                             custom_type: "pending-boundary".to_string(),
                             content: CustomMessageContent::Text("persist before continue".to_string()),
                             display: false,
@@ -1374,7 +1397,7 @@ async fn persists_custom_context_sent_during_pre_settlement_before_continuing() 
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert!(recorded[0].contains("persist before continue"));
     assert!(harness.session_manager.get_entries().into_iter().any(|e| match e {
@@ -1450,7 +1473,7 @@ async fn does_not_consume_queued_input_when_pre_settlement_drafts_leave_system_o
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 1);
+    assert_eq!(harness.faux.state().call_count(), 1);
     assert_eq!(harness.session.pending_message_count(), 1);
     harness.cleanup();
 }
@@ -1502,21 +1525,24 @@ async fn commits_pre_settlement_drafts_but_suppresses_continuation_when_aborted_
         )),
     ]);
 
-    let prompt_fut = harness.session.prompt("start", None);
-    let started_wait = started.notified();
-    tokio::pin!(prompt_fut);
-    let ((), prompt_res) = tokio::join!(
-        async {
-            started_wait.await;
-            let abort_fut = harness.session.abort();
-            release.notify_one();
-            abort_fut.await;
-        },
-        &mut prompt_fut,
-    );
+    let prompt_res = {
+        let prompt_fut = harness.session.prompt("start", None);
+        let started_wait = started.notified();
+        tokio::pin!(prompt_fut);
+        let ((), prompt_res) = tokio::join!(
+            async {
+                started_wait.await;
+                let abort_fut = harness.session.abort();
+                release.notify_one();
+                abort_fut.await;
+            },
+            &mut prompt_fut,
+        );
+        prompt_res
+    };
     prompt_res.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 1);
+    assert_eq!(harness.faux.state().call_count(), 1);
     assert!(harness.session_manager.get_entries().into_iter().any(|e| match e {
         SessionEntry::Custom(c) => c.custom_type == "committed-after-abort" && c.data == Some(Value::Bool(true)),
         _ => false,
@@ -1536,7 +1562,7 @@ async fn keeps_truncated_tool_attempts_in_context_for_the_natural_next_turn() {
         name: "restricted_truncated_tool".to_string(),
         label: "Restricted truncated tool".to_string(),
         description: "Must not execute from a length response".to_string(),
-        parameters: t::object(&[t::prop("value", t::string())]),
+        parameters: t::object([("value", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1548,8 +1574,7 @@ async fn keeps_truncated_tool_attempts_in_context_for_the_natural_next_turn() {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("executed"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -1566,10 +1591,11 @@ async fn keeps_truncated_tool_attempts_in_context_for_the_natural_next_turn() {
     let reqs_c = Arc::clone(&requests);
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
                 "restricted_truncated_tool",
-                json!({ "value": "partial" }),
-            )]),
+                [("value".to_string(), json!("partial"))].into_iter().collect(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::Length),
                 ..Default::default()
@@ -1592,7 +1618,7 @@ async fn keeps_truncated_tool_attempts_in_context_for_the_natural_next_turn() {
     harness.session.prompt("start", None).await.unwrap();
 
     assert!(!executed.load(Ordering::SeqCst));
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert!(recorded[0].contains("may be truncated"));
     assert!(
@@ -1611,7 +1637,7 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
         name: "noop".to_string(),
         label: "Noop".to_string(),
         description: "Noop".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1621,8 +1647,7 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("done"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -1651,9 +1676,13 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1678,7 +1707,11 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("noop", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "noop",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1735,7 +1768,7 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
     for id in &length_ids {
         assert!(omitted_ids.contains(id));
     }
-    assert_eq!(harness.faux.state().call_count, 3);
+    assert_eq!(harness.faux.state().call_count(), 3);
     harness.cleanup();
 }
 
@@ -1788,9 +1821,13 @@ async fn gives_a_distinct_queued_follow_up_its_own_length_recovery_budget() {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1868,7 +1905,7 @@ async fn gives_a_distinct_queued_follow_up_its_own_length_recovery_budget() {
     for id in &length_ids {
         assert!(omitted.contains(id));
     }
-    assert_eq!(harness.faux.state().call_count, 4);
+    assert_eq!(harness.faux.state().call_count(), 4);
     harness.cleanup();
 }
 
@@ -1909,7 +1946,7 @@ async fn finishes_retry_bookkeeping_when_a_retry_receives_a_nonretryable_error()
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     assert!(harness.events().into_iter().any(|ev| matches!(
         ev,
         AgentSessionEvent::AutoRetryEnd {
@@ -1938,9 +1975,13 @@ async fn omits_a_recoverable_projected_replacement_by_its_source_entry_id() {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -1981,7 +2022,7 @@ async fn omits_a_recoverable_projected_replacement_by_its_source_entry_id() {
         .append_context_edit(
             &partial_id,
             Some(ContextEditReplacement {
-                content: json!([{ "type": "text", "text": "edited partial" }]),
+                content: ContextEditableContent::Blocks(vec![json!({ "type": "text", "text": "edited partial" })]),
             }),
         )
         .unwrap();
@@ -2037,7 +2078,9 @@ async fn recovers_an_explicit_overflow_error_after_a_retained_boundary_replaceme
                         entries: Some(vec![SessionBoundaryDraft::ContextEdit {
                             target_id: event.message_entry_id,
                             replacement: Some(ContextEditReplacement {
-                                content: json!([{ "type": "text", "text": "retained error" }]),
+                                content: ContextEditableContent::Blocks(vec![
+                                    json!({ "type": "text", "text": "retained error" }),
+                                ]),
                             }),
                         }]),
                         r#continue: None,
@@ -2066,9 +2109,13 @@ async fn recovers_an_explicit_overflow_error_after_a_retained_boundary_replaceme
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -2101,7 +2148,7 @@ async fn recovers_an_explicit_overflow_error_after_a_retained_boundary_replaceme
 
     harness.session.prompt(&"x".repeat(5_000), None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let ov_id = overflow_id
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -2219,7 +2266,7 @@ async fn keeps_follow_up_work_behind_an_automatic_error_retry() {
 
     harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 3);
+    assert_eq!(harness.faux.state().call_count(), 3);
     let recorded = requests.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert!(!recorded[0].contains("queued follow-up"));
     assert!(recorded[1].contains("queued follow-up"));
@@ -2290,9 +2337,13 @@ async fn keeps_omissions_and_does_not_retry_when_recovery_compaction_fails() {
     let harness = create_harness(HarnessOptions {
         models: Some(vec![FauxModelDefinition {
             id: "faux-1".to_string(),
+            name: None,
+            reasoning: None,
+            input: None,
+            input_limits: None,
+            cost: None,
             context_window: Some(1_000),
             max_tokens: Some(100),
-            ..Default::default()
         }]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -2351,6 +2402,6 @@ async fn keeps_omissions_and_does_not_retry_when_recovery_compaction_fails() {
             .iter()
             .any(|m| get_message_text(m) == "partial response")
     );
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     harness.cleanup();
 }

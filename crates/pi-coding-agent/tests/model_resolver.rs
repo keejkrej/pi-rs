@@ -1,6 +1,7 @@
 //! Port of packages/coding-agent/test/model-resolver.test.ts
-//!
-//! // WIRE(@core-session-w3): add persisted default-model scoping tests using `AgentSession` once `core::agent_session` lands.
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::sync::Arc;
 
@@ -466,4 +467,78 @@ async fn default_model_per_provider_and_find_initial_and_restore() {
     assert_eq!(restored.model.as_ref().unwrap().id, "claude-sonnet-4-5");
     assert!(restored.fallback_message.is_none());
     let _unused: Option<Arc<dyn ModelResolverRuntime>> = None;
+}
+
+#[tokio::test]
+async fn agent_session_restores_persisted_model_and_cycles_scoped_models() {
+    use pi_ai::providers::faux::FauxModelDefinition;
+    use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, ScopedModelEntry, create_agent_session};
+    use pi_coding_agent::core::session_manager::SessionManager;
+    use pi_coding_agent::core::settings_manager::SettingsManager;
+    use support::suite::harness::{HarnessOptions, create_harness};
+
+    let harness = create_harness(HarnessOptions {
+        models: Some(vec![
+            FauxModelDefinition {
+                id: "m1".to_owned(),
+                name: None,
+                reasoning: Some(true),
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
+            },
+            FauxModelDefinition {
+                id: "m2".to_owned(),
+                name: None,
+                reasoning: Some(false),
+                input: None,
+                input_limits: None,
+                cost: None,
+                context_window: None,
+                max_tokens: None,
+            },
+        ]),
+        ..Default::default()
+    })
+    .await;
+
+    let m1 = harness.get_model_by_id("m1").unwrap();
+    let m2 = harness.get_model_by_id("m2").unwrap();
+    let sm = SessionManager::in_memory(Some(&harness.temp_dir), None, None).unwrap();
+    sm.append_model_change(&m2.provider, &m2.id).unwrap();
+    sm.append_message(pi_agent_core::AgentMessage::Message(pi_ai::Message::User(
+        pi_ai::UserMessage {
+            content: pi_ai::UserMessageContent::Text("persisted prompt".to_owned()),
+            timestamp: 1,
+        },
+    )))
+    .unwrap();
+
+    let created = create_agent_session(Some(CreateAgentSessionOptions {
+        cwd: Some(harness.temp_dir.clone()),
+        agent_dir: Some(harness.temp_dir.clone()),
+        session_manager: Some(sm),
+        settings_manager: Some(SettingsManager::in_memory(None, None)),
+        model_runtime: Some(harness.session.model_runtime().clone()),
+        scoped_models: Some(vec![
+            ScopedModelEntry {
+                model: m1.clone(),
+                thinking_level: Some(ModelThinkingLevel::Medium),
+            },
+            ScopedModelEntry {
+                model: m2.clone(),
+                thinking_level: None,
+            },
+        ]),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    assert_eq!(created.session.model().map(|m| m.id), Some("m2".to_owned()));
+    let cycled = created.session.cycle_model(None, None).await.unwrap().unwrap();
+    assert_eq!(cycled.model.id, "m1");
+    created.session.dispose();
+    harness.cleanup();
 }

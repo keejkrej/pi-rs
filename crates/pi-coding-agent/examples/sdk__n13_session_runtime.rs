@@ -38,12 +38,11 @@ async fn run() -> pi_coding_agent::Result<()> {
             })
             .await?;
             let diagnostics = services.diagnostics.clone();
-            Ok(CreateAgentSessionRuntimeResult {
-                session: created.session,
+            Ok(CreateAgentSessionRuntimeResult::from_session_result(
+                created,
                 services,
-                model_fallback_message: created.model_fallback_message,
                 diagnostics,
-            })
+            ))
         })
     });
 

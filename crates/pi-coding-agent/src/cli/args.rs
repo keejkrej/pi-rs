@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR};
 use crate::core::extensions::types::{ExtensionFlag, FlagType};
+pub use crate::core::model_resolver::VALID_THINKING_LEVELS;
 use crate::vendor::chalk;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ pub struct Args {
     pub version: Option<bool>,
     // PORT: --gui flag for dispatching to sibling pi-gui binary
     pub gui: Option<bool>,
+    pub cwd: Option<String>,
     pub mode: Option<Mode>,
     pub name: Option<String>,
     pub no_session: Option<bool>,
@@ -97,23 +99,12 @@ pub struct Args {
     pub diagnostics: Vec<ArgDiagnostic>,
 }
 
-const VALID_THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
 pub fn is_valid_thinking_level(level: &str) -> bool {
-    VALID_THINKING_LEVELS.contains(&level)
+    crate::core::model_resolver::is_valid_thinking_level(level)
 }
 
 pub fn parse_thinking_level(level: &str) -> Option<ModelThinkingLevel> {
-    match level {
-        "off" => Some(ModelThinkingLevel::Off),
-        "minimal" => Some(ModelThinkingLevel::Minimal),
-        "low" => Some(ModelThinkingLevel::Low),
-        "medium" => Some(ModelThinkingLevel::Medium),
-        "high" => Some(ModelThinkingLevel::High),
-        "xhigh" => Some(ModelThinkingLevel::XHigh),
-        "max" => Some(ModelThinkingLevel::Max),
-        _ => None,
-    }
+    crate::core::model_resolver::parse_valid_thinking_level(level)
 }
 
 pub fn normalize_session_name(value: &str) -> Option<String> {
@@ -145,6 +136,11 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Args {
         } else if arg == "--gui" {
             // PORT: --gui flag for dispatching to sibling pi-gui executable
             result.gui = Some(true);
+        } else if arg == "--cwd" && i + 1 < args.len() {
+            i += 1;
+            result.cwd = Some(args[i].as_ref().to_string());
+        } else if let Some(val) = arg.strip_prefix("--cwd=") {
+            result.cwd = Some(val.to_string());
         } else if arg == "--mode" {
             let mode = args.get(i + 1).map(AsRef::as_ref);
             let Some(mode) = mode else {

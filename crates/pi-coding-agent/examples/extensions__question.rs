@@ -57,7 +57,7 @@ struct SelectorState {
 struct QuestionSelector {
     question: String,
     all_options: Vec<DisplayOption>,
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     theme: Theme,
     done: DoneFn,
     editor: Editor,
@@ -65,7 +65,13 @@ struct QuestionSelector {
 }
 
 impl QuestionSelector {
-    fn new(question: String, all_options: Vec<DisplayOption>, tui: Arc<dyn TUI>, theme: Theme, done: DoneFn) -> Self {
+    fn new(
+        question: String,
+        all_options: Vec<DisplayOption>,
+        tui: Arc<dyn TUI + Send + Sync>,
+        theme: Theme,
+        done: DoneFn,
+    ) -> Self {
         let t_border = theme.clone();
         let t_prefix = theme.clone();
         let t_text = theme.clone();
@@ -104,7 +110,7 @@ impl QuestionSelector {
                     guard.cached_lines = None;
                 }
                 editor_ref.set_text("");
-                tui_ref.request_render(false);
+                tui_ref.request_render(Some(false));
             }
         })));
 
@@ -124,7 +130,7 @@ impl QuestionSelector {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             guard.cached_lines = None;
         }
-        self.tui.request_render(false);
+        self.tui.request_render(Some(false));
     }
 }
 
@@ -143,7 +149,7 @@ impl Component for QuestionSelector {
                     guard.cached_lines = None;
                 }
                 self.editor.set_text("");
-                self.tui.request_render(false);
+                self.tui.request_render(Some(false));
                 return;
             }
             self.editor.handle_input(data);
@@ -157,7 +163,7 @@ impl Component for QuestionSelector {
                 guard.option_index = guard.option_index.saturating_sub(1);
                 guard.cached_lines = None;
             }
-            self.tui.request_render(false);
+            self.tui.request_render(Some(false));
             return;
         }
 
@@ -168,7 +174,7 @@ impl Component for QuestionSelector {
                 guard.option_index = (guard.option_index + 1).min(max_idx);
                 guard.cached_lines = None;
             }
-            self.tui.request_render(false);
+            self.tui.request_render(Some(false));
             return;
         }
 
@@ -181,7 +187,7 @@ impl Component for QuestionSelector {
                         guard.edit_mode = true;
                         guard.cached_lines = None;
                     }
-                    self.tui.request_render(false);
+                    self.tui.request_render(Some(false));
                 } else {
                     (self.done)(json!({
                         "answer": selected.label,
@@ -336,7 +342,7 @@ impl Extension for QuestionExtension {
                         .map_err(|e| pi_js::Error::msg(format!("Invalid question parameters: {e}")))?;
                     let simple_options: Vec<String> = params.options.iter().map(|o| o.label.clone()).collect();
 
-                    if ctx.mode()? != ExtensionMode::Tui {
+                    if ctx.as_context().mode()? != ExtensionMode::Tui {
                         let details = QuestionDetails {
                             question: params.question,
                             options: simple_options,

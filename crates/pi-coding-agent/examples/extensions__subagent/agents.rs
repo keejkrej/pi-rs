@@ -122,7 +122,7 @@ fn is_directory(p: &str) -> bool {
 fn find_nearest_project_agents_dir(cwd: &str) -> Option<String> {
     let mut current_dir = cwd.to_string();
     loop {
-        let candidate = pi_js::path::join(&[&current_dir, CONFIG_DIR_NAME, "agents"]);
+        let candidate = pi_js::path::join(&[&current_dir, *CONFIG_DIR_NAME, "agents"]);
         if is_directory(&candidate) {
             return Some(candidate);
         }

@@ -18,7 +18,7 @@ impl Extension for DynamicResourcesExtension {
         let prompt_path = pi_js::path::join(&[&base_dir, "dynamic.md"]);
         let theme_path = pi_js::path::join(&[&base_dir, "dynamic.json"]);
 
-        pi.on::<ResourcesDiscoverEvent>(Arc::new(move |_event, _ctx| {
+        pi.on::<ResourcesDiscoverEvent>(move |_event, _ctx| {
             let skill_path = skill_path.clone();
             let prompt_path = prompt_path.clone();
             let theme_path = theme_path.clone();
@@ -29,7 +29,7 @@ impl Extension for DynamicResourcesExtension {
                     theme_paths: Some(vec![theme_path]),
                 }))
             })
-        }));
+        });
 
         Ok(())
     }

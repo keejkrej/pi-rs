@@ -15,7 +15,7 @@ pub struct WorkingMessageTestExtension;
 #[async_trait]
 impl Extension for WorkingMessageTestExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<SessionStartEvent>(Arc::new(|_event, ctx| {
+        pi.on::<SessionStartEvent>(|_event, ctx| {
             Box::pin(async move {
                 let ui = ctx.ui()?;
                 ui.set_working_message(Some(CUSTOM_MESSAGE));
@@ -25,7 +25,7 @@ impl Extension for WorkingMessageTestExtension {
                 }));
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

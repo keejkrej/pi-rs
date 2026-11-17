@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, ToolExecutionMode};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
@@ -28,7 +29,7 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
         name: "external_write".to_string(),
         label: "External Write".to_string(),
         description: "Test external write tool".to_string(),
-        parameters: t::object(&[t::prop("value", t::string())]),
+        parameters: t::object([("value", t::string())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: Some(ToolExecutionMode::Parallel),
@@ -45,8 +46,7 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new(value))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -78,9 +78,18 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
             pi.on::<ToolResultEvent>(move |event, _ctx| {
                 let rh = Arc::clone(&rh);
                 Box::pin(async move {
-                    rh.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(event.tool_call_id().to_string());
+                    let call_id = match &event {
+                        ToolResultEvent::Bash(e) => &e.tool_call_id,
+                        ToolResultEvent::PowerShell(e) => &e.tool_call_id,
+                        ToolResultEvent::Read(e) => &e.tool_call_id,
+                        ToolResultEvent::Edit(e) => &e.tool_call_id,
+                        ToolResultEvent::Write(e) => &e.tool_call_id,
+                        ToolResultEvent::Grep(e) => &e.tool_call_id,
+                        ToolResultEvent::Find(e) => &e.tool_call_id,
+                        ToolResultEvent::Ls(e) => &e.tool_call_id,
+                        ToolResultEvent::Custom(e) => &e.tool_call_id,
+                    };
+                    rh.lock().unwrap_or_else(PoisonError::into_inner).push(call_id.clone());
                     Ok(None)
                 })
             });
@@ -97,8 +106,16 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
 
     harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
         FauxAssistantMessageContent::Blocks(vec![
-            faux_tool_call("external_write", json!({ "value": "first" })),
-            faux_tool_call("external_write", json!({ "value": "second" })),
+            FauxContentBlock::ToolCall(faux_tool_call(
+                "external_write",
+                [("value".to_string(), json!("first"))].into_iter().collect(),
+                None,
+            )),
+            FauxContentBlock::ToolCall(faux_tool_call(
+                "external_write",
+                [("value".to_string(), json!("second"))].into_iter().collect(),
+                None,
+            )),
         ]),
         Some(FauxAssistantMessageOptions {
             stop_reason: Some(StopReason::ToolUse),

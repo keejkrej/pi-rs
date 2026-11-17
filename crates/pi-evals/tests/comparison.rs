@@ -1,12 +1,11 @@
 //! Port of packages/evals/test/comparison.test.ts
 
+use pi_coding_agent::pi_tui::utils::strip_terminal_sequences;
 use pi_evals::plan::DocumentationVariant;
 use pi_evals::report::{
     EvalMetrics, EvalObservation, EvalOutcome, EvalRunIdentity, ExpectedEvalRun, OperationalMetricTotal,
     PairedMetricSummary, format_eval_comparison_report, summarize_eval_observations,
 };
-use pi_tui::utils::strip_terminal_sequences;
-use pretty_assertions::assert_eq;
 
 fn scored(
     variant: DocumentationVariant,

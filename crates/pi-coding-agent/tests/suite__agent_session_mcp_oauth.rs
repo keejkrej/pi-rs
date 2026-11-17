@@ -11,6 +11,7 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::{Message, StopReason, ToolResultMessage};
 use pi_coding_agent::core::agent_session::ExtensionBindings;
+use pi_coding_agent::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend, LockResult};
 use pi_coding_agent::core::extensions::types::{ExtensionUIContext, ExtensionUIDialogOptions, NotifyType};
 use pi_coding_agent::extensions::mcp::cli::{McpCommandOptions, run_mcp_command};
 use pi_coding_agent::extensions::mcp::config::{
@@ -18,8 +19,6 @@ use pi_coding_agent::extensions::mcp::config::{
 };
 use pi_coding_agent::extensions::mcp::oauth::McpOAuthCredentialStore;
 use pi_coding_agent::extensions::mcp::{McpExtensionOptions, create_mcp_extension};
-// WIRE(@mcp-w3): switch to crate::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend, auth_with_lock} once landed
-use pi_coding_agent::extensions::wire::{InMemoryAuthStorageBackend, auth_with_lock};
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use support::suite::harness::{Harness, HarnessOptions, create_harness, get_message_text};
@@ -75,7 +74,7 @@ impl ExtensionUIContext for OAuthUiContext {
         let n_c = Arc::clone(&notify);
         let signal = opts.and_then(|o| o.signal);
         let _sub = signal.as_ref().map(|s| {
-            s.on_abort(move || {
+            s.on_abort(move |_| {
                 n_c.notify_one();
             })
         });
@@ -205,8 +204,8 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
             url: server.url.clone(),
             headers: None,
             oauth,
+            auth: None,
         }),
-        auth_provider: None,
         source: "test".to_string(),
         scope: None,
     };
@@ -219,7 +218,7 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
     let op_c = Arc::clone(&opened);
     let rtx_c = Arc::clone(&redirect_tx);
     let entry_c = entry.clone();
-    let backend_dyn: Arc<dyn pi_coding_agent::extensions::wire::AuthStorageBackend> = backend.clone();
+    let backend_dyn: Arc<dyn AuthStorageBackend> = backend.clone();
     let creds = McpOAuthCredentialStore::new(Some(backend_dyn), None);
     let harness = create_harness(HarnessOptions {
         initial_active_tool_names: Some(vec![]),
@@ -298,7 +297,9 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
 async fn call_whoami(harness: &Harness) -> ToolResultMessage {
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("mcp__issues__whoami", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![pi_ai::providers::faux::FauxContentBlock::ToolCall(
+                faux_tool_call("mcp__issues__whoami", Default::default(), None),
+            )]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -352,7 +353,9 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
         Some("Signed in to MCP server \"issues\" (1 tools).")
     );
     assert_eq!(ts.server.log(), vec!["401 none", "register", "token code"]);
-    let stored = auth_with_lock(ts.backend.as_ref(), |curr| Ok((curr.map(str::to_string), None)))
+    let stored = ts
+        .backend
+        .with_lock(|curr| Ok(LockResult::unchanged(curr.map(str::to_string))))
         .unwrap()
         .unwrap_or_default();
     assert!(stored.contains("\"access_token\": \"access-1\"") || stored.contains("\"access_token\":\"access-1\""));
@@ -375,18 +378,19 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
         &["401 access-1", "token refresh", "call access-2"]
     );
 
-    auth_with_lock(ts.backend.as_ref(), |curr| {
-        let mut states: indexmap::IndexMap<String, Value> =
-            curr.and_then(|s| pi_js::json::parse_as(s).ok()).unwrap_or_default();
-        let expired_at = Value::from(pi_js::time::now_ms() - 1_000);
-        for val in states.values_mut() {
-            if let Some(obj) = val.as_object_mut() {
-                obj.insert("tokensExpireAt".to_string(), expired_at.clone());
+    ts.backend
+        .with_lock(|curr| {
+            let mut states: indexmap::IndexMap<String, Value> =
+                curr.and_then(|s| pi_js::json::parse_as(s).ok()).unwrap_or_default();
+            let expired_at = Value::from(pi_js::time::now_ms() - 1_000);
+            for val in states.values_mut() {
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert("tokensExpireAt".to_string(), expired_at.clone());
+                }
             }
-        }
-        Ok(((), Some(pi_js::json::stringify(&states))))
-    })
-    .unwrap();
+            Ok(LockResult::write((), pi_js::json::stringify(&states)))
+        })
+        .unwrap();
     let who3 = call_whoami(&ts.harness).await;
     assert_eq!(
         get_message_text(&AgentMessage::from(Message::ToolResult(who3))),
@@ -600,7 +604,7 @@ async fn uses_credentials_from_pi_mcp_login_on_the_next_turn() {
     let output = Arc::new(Mutex::new(Vec::<String>::new()));
     let out1 = Arc::clone(&output);
     let out2 = Arc::clone(&output);
-    let backend_dyn: Arc<dyn pi_coding_agent::extensions::wire::AuthStorageBackend> = ts.backend.clone();
+    let backend_dyn: Arc<dyn AuthStorageBackend> = ts.backend.clone();
     let exit_code = run_mcp_command(
         &["login".to_string(), "issues".to_string()],
         McpCommandOptions {

@@ -16,11 +16,11 @@ fn rewrites_old_key_names_to_namespaced_ids() {
             "cursorUp": ["up", "ctrl+p"],
             "expandTools": "ctrl+x",
         }),
-        2,
+        "  ",
     );
     pi_js::fs::write_file(&kb_path, format!("{content}\n").as_bytes(), None).unwrap();
 
-    let _guard = pi_js::env::testing::set(ENV_AGENT_DIR, Some(&agent_dir));
+    let _guard = pi_js::env::testing::EnvGuard::set(*ENV_AGENT_DIR, Some(&agent_dir));
     run_migrations(&agent_dir);
     drop(_guard);
 
@@ -47,11 +47,11 @@ fn keeps_the_namespaced_value_when_old_and_new_names_both_exist() {
             "expandTools": "ctrl+x",
             "app.tools.expand": "ctrl+y",
         }),
-        2,
+        "  ",
     );
     pi_js::fs::write_file(&kb_path, format!("{content}\n").as_bytes(), None).unwrap();
 
-    let _guard = pi_js::env::testing::set(ENV_AGENT_DIR, Some(&agent_dir));
+    let _guard = pi_js::env::testing::EnvGuard::set(*ENV_AGENT_DIR, Some(&agent_dir));
     run_migrations(&agent_dir);
     drop(_guard);
 

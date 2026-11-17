@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use pi_chord::node::{
-    FACET_BUNDLE_ARTIFACT_FORMAT, FACET_BUNDLE_ARTIFACT_FORMAT_VERSION, FACET_BUNDLE_MANIFEST_FILE,
-    FacetBundleArtifact, FacetBundleEntry, FacetBundleManifest, FacetBundlePluginInfo, write_facet_bundle_manifest,
+    FACET_BUNDLE_ARTIFACT_FORMAT, FACET_BUNDLE_ARTIFACT_FORMAT_VERSION, FACET_BUNDLE_FORMAT,
+    FACET_BUNDLE_FORMAT_VERSION, FACET_BUNDLE_MANIFEST_FILE, FacetBundleArtifact, FacetBundleEntry,
+    FacetBundleManifest, FacetBundlePlugin,
 };
 use pi_coding_agent::cli::experimental::command_options::TransportAddress;
 use pi_coding_agent::cli::experimental::commands::client::ClientCommand;
@@ -93,11 +94,12 @@ async fn persists_and_normalizes_session_plugin_package_profiles() {
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = random_uuid();
     let session_path = join(&[&directory, "sessions", "s1"]);
-    let raw_paths = vec![
-        join(&[&directory, "plugin-a"]),
-        join(&[&directory, ".", "plugin-a"]),
-        join(&[&directory, "plugin-b"]),
-    ];
+    let dup_paths = vec![join(&[&directory, "plugin-a"]), join(&[&directory, ".", "plugin-a"])];
+    let dup_err =
+        normalize_plugin_package_paths(&dup_paths).expect_err("duplicate plugin package paths must be rejected");
+    assert!(dup_err.message().contains("must be unique"));
+
+    let raw_paths = vec![join(&[&directory, ".", "plugin-a"]), join(&[&directory, "plugin-b"])];
     let normalized = normalize_plugin_package_paths(&raw_paths).expect("normalize");
     assert_eq!(normalized.len(), 2);
 
@@ -153,20 +155,31 @@ async fn reports_unsupported_js_bundling_and_loads_manifest_and_artifact_contrac
         build_err.message()
     );
 
-    // Manifest without `session` entry loads an empty LoadedFacets cleanly.
+    // Manifest without `session` entry (e.g., `tui`-only) loads an empty LoadedFacets cleanly.
     let manifest_dir = join(&[&directory, "manifest-no-session"]);
     mkdir(&manifest_dir, true, None).await.expect("mkdir manifest");
     let manifest_path = join(&[&manifest_dir, FACET_BUNDLE_MANIFEST_FILE]);
+    let mut entries = indexmap::IndexMap::new();
+    entries.insert(
+        "tui".to_string(),
+        FacetBundleEntry {
+            file: "tui.cjs".to_string(),
+            integrity: "sha256-test".to_string(),
+            external_imports: Vec::new(),
+            source_map: None,
+        },
+    );
     let manifest = FacetBundleManifest {
-        format: FACET_BUNDLE_ARTIFACT_FORMAT.to_string(),
-        format_version: FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
-        plugin: Some(FacetBundlePluginInfo {
+        format: FACET_BUNDLE_FORMAT.to_string(),
+        format_version: FACET_BUNDLE_FORMAT_VERSION,
+        plugin: FacetBundlePlugin {
             id: "@test/no-session".to_string(),
             version: Some("1.0.0".to_string()),
-        }),
-        entries: Default::default(),
+        },
+        entries,
     };
-    write_facet_bundle_manifest(&manifest_path, &manifest)
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    write_file(&manifest_path, &manifest_bytes, None)
         .await
         .expect("write manifest");
     let session_loader = create_session_plugin_facet_loader(&[manifest_path]).expect("some loader");
@@ -178,17 +191,19 @@ async fn reports_unsupported_js_bundling_and_loads_manifest_and_artifact_contrac
     let artifact = FacetBundleArtifact {
         format: FACET_BUNDLE_ARTIFACT_FORMAT.to_string(),
         format_version: FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
-        plugin: Some(FacetBundlePluginInfo {
+        plugin: FacetBundlePlugin {
             id: "@test/plugin".to_string(),
             version: Some("1.0.0".to_string()),
-        }),
+        },
         entry_name: "tui".to_string(),
         entry: FacetBundleEntry {
             file: "tui.cjs".to_string(),
             integrity: "sha256-test".to_string(),
             external_imports: vec!["@earendil-works/chord".to_string()],
+            source_map: None,
         },
         source: "// js".to_string(),
+        source_map_contents: None,
     };
     let data = create_presentation_facet_data(&[artifact]);
     let loaders = create_presentation_facet_loaders(&data).expect("loaders");

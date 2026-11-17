@@ -5,14 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use indexmap::IndexSet;
-use pi_agent_core::types::{AgentToolResult, ToolExecutionMode};
-use pi_ai::types::{TextContent, UserContentBlock};
+use pi_agent_core::types::{AgentMessage, AgentToolResult, ToolExecutionMode};
+use pi_ai::types::{Message, TextContent, UserContentBlock};
 use pi_ai::utils::typebox_helpers::{StringEnumOptions, string_enum};
 use pi_coding_agent::core::extensions::types::{
-    BeforeAgentStartEvent, BeforeAgentStartEventResult, Extension, ExtensionApi, ExtensionContext, ExtensionFactory,
-    ExtensionMode, InlineExtension, NotifyType, RegisteredCommandOptions, SendMessageOptions, SessionStartEvent,
-    SessionTreeEvent, Theme, ToolDefinition, ToolRenderResultOptions, mcp_wire,
+    BeforeAgentStartEvent, BeforeAgentStartEventResult, CustomMessageContent, CustomMessageDraft, Extension,
+    ExtensionApi, ExtensionContext, ExtensionFactory, ExtensionMode, InlineExtension, NotifyType,
+    RegisteredCommandOptions, SendMessageOptions, SessionStartEvent, SessionTreeEvent, Theme, ToolDefinition,
+    ToolRenderResultOptions,
 };
+use pi_coding_agent::core::session_manager::SessionEntry;
 use pi_js::vendor::typebox::t;
 use pi_tui::{Component, Key, TUI, Text, matches_key, truncate_to_width, visible_width};
 use serde::{Deserialize, Serialize};
@@ -396,7 +398,7 @@ struct ComponentMutable {
 }
 
 struct TicTacToeComponent {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     on_close: Arc<dyn Fn() + Send + Sync>,
     on_user_play: Arc<dyn Fn(usize, usize) + Send + Sync>,
     mutable: Mutex<ComponentMutable>,
@@ -404,7 +406,7 @@ struct TicTacToeComponent {
 
 impl TicTacToeComponent {
     fn new(
-        tui: Arc<dyn TUI>,
+        tui: Arc<dyn TUI + Send + Sync>,
         on_close: Arc<dyn Fn() + Send + Sync>,
         on_user_play: Arc<dyn Fn(usize, usize) + Send + Sync>,
         state: GameState,
@@ -429,7 +431,7 @@ impl TicTacToeComponent {
             m.state = state;
             m.version += 1;
         }
-        self.tui.request_render(false);
+        self.tui.request_render(Some(false));
     }
 }
 
@@ -493,7 +495,7 @@ impl Component for TicTacToeComponent {
         match outcome {
             ActionOutcome::None => {}
             ActionOutcome::Close => (self.on_close)(),
-            ActionOutcome::Render => self.tui.request_render(false),
+            ActionOutcome::Render => self.tui.request_render(Some(false)),
             ActionOutcome::UserPlay(r, c) => (self.on_user_play)(r, c),
         }
     }
@@ -709,21 +711,17 @@ fn reconstruct_state(shared: &Mutex<TicTacToeShared>, ctx: &ExtensionContext) {
     guard.game_active = false;
 
     for entry in branch {
-        if entry.r#type != "message" {
-            continue;
-        }
-        let Some(msg) = entry.fields.get("message") else {
+        let SessionEntry::Message(msg_entry) = entry else {
             continue;
         };
-        if msg.get("role").and_then(|v| v.as_str()) != Some("toolResult") {
+        let AgentMessage::Message(Message::ToolResult(tr)) = msg_entry.message else {
+            continue;
+        };
+        if tr.tool_name != "tic_tac_toe" && tr.tool_name != "tic_tac_toe_see_board" {
             continue;
         }
-        let tool_name = msg.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-        if tool_name != "tic_tac_toe" && tool_name != "tic_tac_toe_see_board" {
-            continue;
-        }
-        if let Some(details_val) = msg.get("details")
-            && let Ok(details) = serde_json::from_value::<BoardDetails>(details_val.clone())
+        if let Some(details_val) = tr.details
+            && let Ok(details) = serde_json::from_value::<BoardDetails>(details_val)
         {
             guard.game_state.board = details.board;
             guard.game_state.agent_cursor_row = details.agent_cursor_row;
@@ -742,9 +740,9 @@ fn emit_game_over_message(pi: &ExtensionApi, status: GameStatus, details: &Board
         GameStatus::Playing => "Game over",
     };
     let _ = pi.send_message(
-        mcp_wire::CustomMessageDraft {
+        CustomMessageDraft {
             custom_type: GAME_OVER_MESSAGE_TYPE.to_string(),
-            content: mcp_wire::CustomMessageContent::Text(format!("Game over: {label}.")),
+            content: CustomMessageContent::Text(format!("Game over: {label}.")),
             display: true,
             details: serde_json::to_value(details).ok(),
         },
@@ -952,9 +950,9 @@ Decide the target cell first, then dump every action for the turn in one go.\n\n
                                                         snapshot.agent_cursor_col,
                                                     );
                                                     let _ = pi_play.send_message(
-                                                        mcp_wire::CustomMessageDraft {
+                                                        CustomMessageDraft {
                                                             custom_type: MOVE_MESSAGE_TYPE.to_string(),
-                                                            content: mcp_wire::CustomMessageContent::Text(format!(
+                                                            content: CustomMessageContent::Text(format!(
                                                                 "Player X played at (row={row}, col={col}). It is now Player O's turn.\n\n\
 Board (your cursor marked with <>):\n{board_ascii}\n\n\
 Your cursor is at (row={}, col={}). \
@@ -1279,7 +1277,7 @@ as separate tic_tac_toe tool calls in THIS response.",
                 .to_string(),
             prompt_snippet: Some("Inspect the tic-tac-toe board and your cursor".to_string()),
             prompt_guidelines: None,
-            parameters: t::object([]),
+            parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,

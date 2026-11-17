@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::types::{AgentMessage, AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
+    faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, SendCustomMessageDraft, SendCustomMessageOptions};
@@ -41,7 +42,7 @@ fn build_wait_tool(started: Arc<Notify>, release: Arc<Notify>) -> AgentTool {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for a release signal".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -56,8 +57,7 @@ fn build_wait_tool(started: Arc<Notify>, release: Arc<Notify>) -> AgentTool {
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("waited"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -76,7 +76,11 @@ async fn setup_active_tool_with_custom_message() -> Harness {
 
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("wait", json!({}))]),
+            FauxAssistantMessageContent::Blocks(vec![FauxContentBlock::ToolCall(faux_tool_call(
+                "wait",
+                Default::default(),
+                None,
+            ))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -163,7 +167,7 @@ async fn records_branch_entries_and_events_in_matching_tool_result_then_custom_o
         .collect();
     assert_eq!(
         roles(&event_messages),
-        vec!["user", "assistant", "toolResult", "custom", "assistant"]
+        vec!["system", "user", "assistant", "toolResult", "custom", "assistant"]
     );
     harness.cleanup();
 }

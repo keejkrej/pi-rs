@@ -217,7 +217,7 @@ pub fn get_auth_credential(auth: Option<&AuthResult>) -> Option<String> {
         .as_ref()?
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-        .map(|(_, val)| val.as_str())?;
+        .and_then(|(_, val)| val.as_deref())?;
     static BEARER_RE: std::sync::LazyLock<Option<regex::Regex>> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^Bearer\s+(.+)$").ok());
     BEARER_RE

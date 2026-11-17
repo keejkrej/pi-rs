@@ -96,14 +96,14 @@ impl Extension for WorkingIndicatorExtension {
 
         {
             let mode_ss = Arc::clone(&mode);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let mode_ref = Arc::clone(&mode_ss);
                 Box::pin(async move {
                     let current = *mode_ref.lock().unwrap_or_else(|e| e.into_inner());
                     apply_indicator(&ctx, current)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {

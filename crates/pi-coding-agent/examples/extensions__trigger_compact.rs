@@ -47,7 +47,7 @@ impl Extension for TriggerCompactExtension {
 
         {
             let prev_te = Arc::clone(&previous_tokens);
-            pi.on::<TurnEndEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<TurnEndEvent>(move |_event, ctx| {
                 let prev_ref = Arc::clone(&prev_te);
                 Box::pin(async move {
                     let usage = ctx.get_context_usage()?;
@@ -67,7 +67,7 @@ impl Extension for TriggerCompactExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         pi.register_command(

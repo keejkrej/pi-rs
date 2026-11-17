@@ -29,7 +29,7 @@ fn screenshot_tool() -> AgentTool {
         name: "screenshot".to_string(),
         label: "Screenshot".to_string(),
         description: "Return a screenshot".to_string(),
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -45,8 +45,7 @@ fn screenshot_tool() -> AgentTool {
                         }),
                     ],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -88,7 +87,7 @@ async fn respects_auto_resize_false_when_model_specifies_resize_profile() {
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "screenshot",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {
@@ -146,7 +145,7 @@ async fn applies_current_model_resize_profile_to_tool_result_images_by_default()
         FauxResponseStep::Message(faux_assistant_message(
             FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                 "screenshot",
-                serde_json::Map::new(),
+                indexmap::IndexMap::new(),
                 None,
             ))),
             Some(FauxAssistantMessageOptions {

@@ -16,12 +16,14 @@ use pi_durable::harness::types::{
 };
 use pi_durable::tools::coding_tools;
 
-use crate::core::http_dispatcher::{apply_http_proxy_settings, configure_http_dispatcher};
+use crate::core::http_dispatcher::{
+    DEFAULT_HTTP_IDLE_TIMEOUT_MS, apply_http_proxy_settings, configure_http_dispatcher,
+};
 use crate::core::model_resolver::{
     FindInitialModelOptions, ResolveCliModelOptions, find_initial_model, resolve_cli_model,
 };
 use crate::core::model_runtime::ModelRuntime;
-use crate::core::settings_manager::SettingsManager;
+use crate::core::settings_manager::{QueueModeSetting, SettingsManager};
 use crate::experimental::durable::prompt::create_pi_prompt;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -31,7 +33,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// pi's HTTP setup: proxy, idle timeouts, and one dispatcher for fetch.
 pub fn configure_harness_http(settings_manager: &SettingsManager) {
     apply_http_proxy_settings(settings_manager.get_global_settings().http_proxy.as_deref());
-    configure_http_dispatcher(Some(settings_manager.get_http_idle_timeout_ms()));
+    let idle_ms = settings_manager
+        .get_http_idle_timeout_ms()
+        .unwrap_or(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+    configure_http_dispatcher(Some(idle_ms));
 }
 
 struct SettingsBackedHarnessSettings {
@@ -41,44 +46,52 @@ struct SettingsBackedHarnessSettings {
 impl HarnessSettings for SettingsBackedHarnessSettings {
     fn get(&self) -> HarnessSettingsSnapshot {
         let provider = self.settings_manager.get_provider_retry_settings();
-        let idle = self.settings_manager.get_http_idle_timeout_ms();
-        let compaction = self.settings_manager.get_compaction_settings();
+        let idle = self
+            .settings_manager
+            .get_http_idle_timeout_ms()
+            .unwrap_or(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+        let compaction = self.settings_manager.get_compaction_settings(None).ok();
         let retry = self.settings_manager.get_retry_settings();
+        let timeout_ms = provider
+            .timeout_ms
+            .and_then(|v| u64::try_from(v).ok())
+            .or(Some(if idle == 0 { 2_147_483_647 } else { idle }));
         HarnessSettingsSnapshot {
             extensions: None,
             stream: Some(ConversationStreamOptions {
-                timeout_ms: Some(
-                    provider
-                        .timeout_ms
-                        .unwrap_or(if idle == 0 { 2_147_483_647 } else { idle }),
-                ),
-                max_retries: provider.max_retries,
-                max_retry_delay_ms: provider.max_retry_delay_ms,
+                timeout_ms,
+                max_retries: provider.max_retries.and_then(|v| u32::try_from(v).ok()),
+                max_retry_delay_ms: u64::try_from(provider.max_retry_delay_ms).ok(),
                 ..Default::default()
             }),
             retry: Some(PartialRetryPolicy {
-                enabled: retry.enabled,
-                max_retries: retry.max_retries,
-                base_delay_ms: retry.base_delay_ms,
-                max_agent_delay_ms: retry.max_agent_delay_ms,
+                enabled: Some(retry.enabled),
+                max_retries: u32::try_from(retry.max_retries).ok(),
+                base_delay_ms: u64::try_from(retry.base_delay_ms).ok(),
+                max_agent_delay_ms: Some(u64::try_from(retry.max_agent_delay_ms).ok()),
             }),
             compaction: Some(PartialCompactionPolicy {
-                enabled: compaction.enabled,
-                reserve_tokens: compaction.reserve_tokens,
-                keep_recent_tokens: compaction.keep_recent_tokens,
+                enabled: Some(compaction.as_ref().is_none_or(|c| c.enabled)),
+                reserve_tokens: Some(compaction.as_ref().map_or(16_384, |c| c.reserve_tokens)),
+                keep_recent_tokens: Some(
+                    compaction
+                        .as_ref()
+                        .and_then(|c| u64::try_from(c.keep_recent_tokens).ok())
+                        .unwrap_or(20_000),
+                ),
                 background_tokens: None,
             }),
             tool_execution: None,
-            steering_mode: Some(parse_queue_mode(&self.settings_manager.get_steering_mode())),
-            follow_up_mode: Some(parse_queue_mode(&self.settings_manager.get_follow_up_mode())),
+            steering_mode: Some(to_durable_queue_mode(self.settings_manager.get_steering_mode())),
+            follow_up_mode: Some(to_durable_queue_mode(self.settings_manager.get_follow_up_mode())),
         }
     }
 }
 
-fn parse_queue_mode(raw: &str) -> QueueMode {
-    match raw {
-        "all" => QueueMode::All,
-        _ => QueueMode::OneAtATime,
+fn to_durable_queue_mode(mode: QueueModeSetting) -> QueueMode {
+    match mode {
+        QueueModeSetting::All => QueueMode::All,
+        QueueModeSetting::OneAtATime => QueueMode::OneAtATime,
     }
 }
 
@@ -161,8 +174,8 @@ pub async fn find_initial_agent_model(
 ) -> pi_js::Result<InitialModel> {
     if let Some(cli) = cli {
         let resolved = resolve_cli_model(ResolveCliModelOptions {
-            cli_provider: cli.provider.clone(),
-            cli_model: Some(cli.model.clone()),
+            cli_provider: cli.provider.as_deref(),
+            cli_model: Some(cli.model.as_str()),
             cli_thinking: None,
             model_runtime,
         });
@@ -183,11 +196,15 @@ pub async fn find_initial_agent_model(
         });
     }
 
+    let default_provider = settings_manager.get_default_provider();
+    let default_model_id = settings_manager.get_default_model();
     let initial = find_initial_model(FindInitialModelOptions {
-        scoped_models: Vec::new(),
+        cli_provider: None,
+        cli_model: None,
+        scoped_models: &[],
         is_continuing: false,
-        default_provider: settings_manager.get_default_provider(),
-        default_model_id: settings_manager.get_default_model(),
+        default_provider: default_provider.as_deref(),
+        default_model_id: default_model_id.as_deref(),
         default_thinking_level: settings_manager.get_default_thinking_level(),
         model_thinking_levels: None,
         model_runtime,

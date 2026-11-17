@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::AgentMessage;
 use pi_ai::{
-    AnyModel, AssistantContentBlock, AuthOperationOptions, ContentTextSource, CredentialStore, InMemoryCredentialStore,
-    StopReason, UserContentBlock, content_text, utils::transcript::get_current_system_prompt,
+    AnyModel, AssistantContentBlock, AuthOperationOptions, CredentialStore, InMemoryCredentialStore,
+    ModelThinkingLevel, StopReason, UserContentBlock, content_text, utils::transcript::get_current_system_prompt,
 };
 use pi_coding_agent::config::get_agent_dir;
 use pi_coding_agent::core::agent_session::AgentSession;
@@ -1287,16 +1287,16 @@ fn resolve_sandbox_identity() -> Result<Option<SandboxIdentity>> {
 }
 
 #[cfg(unix)]
-fn chown_tree<'a>(path: &'a str, identity: SandboxIdentity) -> BoxFuture<'a, Result<()>> {
+fn chown_tree(path: String, identity: SandboxIdentity) -> BoxFuture<Result<()>> {
     Box::pin(async move {
-        let stats = pi_js::fs::promises::lstat(path).await?;
+        let stats = pi_js::fs::promises::lstat(&path).await?;
         if stats.is_directory() && !stats.is_symbolic_link() {
-            for entry in pi_js::fs::promises::readdir(path).await? {
-                let child = pi_js::path::join(&[path, &entry]);
-                chown_tree(&child, identity).await?;
+            for entry in pi_js::fs::promises::readdir(&path).await? {
+                let child = pi_js::path::join(&[&path, &entry]);
+                chown_tree(child, identity).await?;
             }
         }
-        pi_js::fs::promises::chown(path, identity.uid, identity.gid).await
+        pi_js::fs::promises::chown(&path, identity.uid, identity.gid).await
     })
 }
 
@@ -1318,7 +1318,7 @@ async fn enter_tool_sandbox(root: &str, identity: Option<SandboxIdentity>) -> Re
         }
         // PORT: TS calls protectTransformedModules() for Vitest /tmp/*/ssr JS transform caches;
         // native Rust binaries contain no /tmp JS SSR cache.
-        chown_tree(root, identity).await?;
+        chown_tree(root.to_string(), identity).await?;
         #[cfg(all(
             unix,
             not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))
@@ -1343,15 +1343,12 @@ fn to_transcript_events(messages: &[AgentMessage]) -> Vec<TranscriptEvent> {
             AgentMessage::Message(pi_ai::Message::User(user)) => {
                 events.push(TranscriptEvent::Message {
                     role: TranscriptRole::User,
-                    content: Some(Value::String(content_text(
-                        ContentTextSource::User(&user.content),
-                        None,
-                    ))),
+                    content: Some(Value::String(content_text(&user.content, None))),
                     metadata: None,
                 });
             }
             AgentMessage::Message(pi_ai::Message::Assistant(assistant)) => {
-                let text = content_text(ContentTextSource::Assistant(&assistant.content), None);
+                let text = content_text(&assistant.content, None);
                 if !text.is_empty() {
                     events.push(TranscriptEvent::Message {
                         role: TranscriptRole::Assistant,
@@ -1374,7 +1371,7 @@ fn to_transcript_events(messages: &[AgentMessage]) -> Vec<TranscriptEvent> {
                 }
             }
             AgentMessage::Message(pi_ai::Message::ToolResult(tr)) => {
-                let text = content_text(ContentTextSource::ToolResult(&tr.content), None);
+                let text = content_text(&tr.content, None);
                 let all_text = tr.content.iter().all(|part| matches!(part, UserContentBlock::Text(_)));
                 let content = if all_text {
                     Value::String(text.clone())
@@ -1567,10 +1564,10 @@ async fn run_pi_coding_agent(
                 .await?;
         }
 
-        let model_runtime = ModelRuntime::create(Some(CreateModelRuntimeOptions {
+        let model_runtime = ModelRuntime::create(CreateModelRuntimeOptions {
             credentials: Some(credentials as Arc<dyn CredentialStore>),
             ..Default::default()
-        }))
+        })
         .await?;
 
         pi_js::fs::promises::mkdir(&workspace, true, None).await?;
@@ -1611,7 +1608,7 @@ async fn run_pi_coding_agent(
             cwd: workspace.clone(),
             model_runtime: Some(model_runtime),
             resource_loader_options: Some(DefaultResourceLoaderOptions {
-                extension_factories: Some(extension_factories.clone()),
+                extension_factories: extension_factories.iter().cloned().map(Into::into).collect(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1629,12 +1626,14 @@ async fn run_pi_coding_agent(
         let created = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
             services,
             session_manager: mgr,
+            session_start_event: None,
             model: Some(model.clone()),
-            thinking_level: Some(pi_agent_core::ThinkingLevel::Off),
+            thinking_level: Some(ModelThinkingLevel::Off),
+            scoped_models: None,
             tools: options.tools.clone(),
+            exclude_tools: None,
             no_tools: options.no_tools,
             custom_tools: options.custom_tools.clone(),
-            ..Default::default()
         })
         .await?;
         let active_session = created.session;
@@ -1650,7 +1649,9 @@ async fn run_pi_coding_agent(
                 .collect();
             let unexpected: Vec<String> = active_session
                 .extension_runner()
-                .get_extension_paths()
+                .as_ref()
+                .map(|r| r.get_extension_paths())
+                .unwrap_or_default()
                 .into_iter()
                 .filter(|p| !expected_inline.contains(p))
                 .collect();
@@ -1686,10 +1687,10 @@ async fn run_pi_coding_agent(
                                     let _ = active_session.abort().await;
                                     return Err(Error::Abort(sig.reason().unwrap_or_else(AbortReason::abort)));
                                 }
-                                res = active_session.reload() => res?,
+                                res = active_session.reload(None) => res?,
                             }
                         } else {
-                            active_session.reload().await?;
+                            active_session.reload(None).await?;
                         }
                     }
                     PiCodingAgentStep::Prompt { content } => {

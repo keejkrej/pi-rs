@@ -7,17 +7,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use indexmap::IndexSet;
-use pi_chord::api::DefineServiceOptions;
 use pi_chord::context::BACKGROUND_CONTEXT;
 use pi_chord::node::{
-    FACET_BUNDLE_MANIFEST_FILE, FacetBundleEntry, FacetBundleManifest, FacetBundlePluginInfo,
-    write_facet_bundle_manifest,
+    FACET_BUNDLE_FORMAT, FACET_BUNDLE_FORMAT_VERSION, FACET_BUNDLE_MANIFEST_FILE, FacetBundleEntry,
+    FacetBundleManifest, FacetBundlePlugin,
 };
 use pi_chord::services::handle::ServiceObject;
-use pi_chord::types::ServiceIdRef;
 use pi_chord::{
-    Facet, FacetOptions, Service, ServiceCall, ServiceMode, create_facet_host, create_static_facet_loader,
-    define_facet, define_service,
+    Facet, FacetOptions, ServiceCall, ServiceMode, create_facet_host, create_static_facet_loader, define_facet,
+    define_service,
 };
 use pi_client::unix::{UnixTransportOptions, create_unix_transport_factory};
 use pi_client::{Client, ClientOptions};
@@ -139,10 +137,21 @@ struct TestEnv {
     _env: EnvRestore,
 }
 
+fn short_tmp_root() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from("/tmp")
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
+    }
+}
+
 async fn setup_test_env() -> TestEnv {
     let agent_temp = tempfile::Builder::new()
         .prefix("pi-experimental-agent-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("create agent tempdir");
     let agent_dir = agent_temp.path().to_string_lossy().into_owned();
     configure_experimental_worker_model(&agent_dir)
@@ -277,7 +286,7 @@ async fn uses_pi_server_dir_and_pi_server_id() {
     let mut env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pi-server-dir-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("server tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = "00000000-0000-4000-8000-000000000001";
@@ -337,7 +346,10 @@ async fn uses_pi_server_dir_and_pi_server_id() {
 #[serial]
 async fn rejects_a_provider_without_a_model() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let err = start_server(StartServerOptions {
         directory: Some(dir.path().to_string_lossy().into_owned()),
         provider: Some(PROVIDER.to_string()),
@@ -370,7 +382,10 @@ async fn preserves_an_existing_session_model_when_the_server_default_changes() {
     .await
     .expect("write settings");
 
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let first = start_server(StartServerOptions {
         directory: Some(directory.clone()),
@@ -405,7 +420,10 @@ async fn preserves_an_existing_session_model_when_the_server_default_changes() {
 #[serial]
 async fn rejects_model_options_when_discovery_selects_an_existing_server() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let runtime = make_server(&directory).await;
 
@@ -433,7 +451,10 @@ async fn rejects_model_options_when_discovery_selects_an_existing_server() {
 #[serial]
 async fn rechecks_an_auto_discovered_server_after_a_version_mismatch() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pe-ver-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pe-ver-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = "00000000-0000-4000-8000-000000000001";
 
@@ -441,6 +462,22 @@ async fn rechecks_an_auto_discovered_server_after_a_version_mismatch() {
     let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind stale version socket");
     let sock_cleanup = sock_path.clone();
     let stale_task = tokio::spawn(async move {
+        // First connection comes from `discover_unix_servers` probing reachability/hello.
+        if let Ok((mut probe_stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 512];
+            let _ = probe_stream.read(&mut buf).await;
+            let hello_ok = encode_server_message(
+                &ServerMessage::Hello(pi_protocol::ServerHello {
+                    version: pi_protocol::PROTOCOL_VERSION,
+                    server_id: server_id.to_string(),
+                }),
+                None,
+            )
+            .expect("encode hello ok");
+            let _ = probe_stream.write_all(&hello_ok).await;
+            let _ = probe_stream.shutdown().await;
+        }
+        // Second connection comes from `open_client_runtime`'s `Client::connect`; reject as stale.
         if let Ok((mut stream, _)) = listener.accept().await {
             let mut buf = [0u8; 512];
             let _ = stream.read(&mut buf).await;
@@ -486,7 +523,7 @@ async fn serializes_concurrent_cold_activation_and_retires_after_both_clients_le
     let mut env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pi-auto-server-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = "00000000-0000-4000-8000-000000000001";
@@ -529,7 +566,7 @@ async fn passes_client_plugin_packages_to_a_cold_server_and_restores_them_for_it
     let mut env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pi-auto-plugin-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = "00000000-0000-4000-8000-000000000001";
@@ -572,9 +609,18 @@ async fn passes_client_plugin_packages_to_a_cold_server_and_restores_them_for_it
         .await
         .expect_err("JS bundle prepare_session must fail cleanly");
     assert!(
-        err.message().contains("unsupported") || err.message().contains("not supported"),
+        err.message().contains("Internal server error"),
         "unexpected error: {}",
         err.message()
+    );
+    let local_err = create_server_plugin_package(&directory, &server_id.to_string(), &pkg_dir)
+        .build()
+        .await
+        .expect_err("direct JS bundle build must fail with unsupported error");
+    assert!(
+        local_err.message().contains("unsupported") || local_err.message().contains("not supported"),
+        "unexpected local build error: {}",
+        local_err.message()
     );
     first.dispose().await.expect("dispose first");
 
@@ -582,11 +628,12 @@ async fn passes_client_plugin_packages_to_a_cold_server_and_restores_them_for_it
     poll_until(15_000, || !path_exists(&public_sock)).await;
 
     let session_path = join(&[&env.agent_dir, "experimental", "sessions", "demo-1"]);
-    write_session_plugin_package_profile(&directory, server_id, &session_path, &[pkg_dir.clone()])
+    let server_id_str = server_id.to_string();
+    write_session_plugin_package_profile(&directory, &server_id_str, &session_path, &[pkg_dir.clone()])
         .await
         .expect("write session plugin profile");
     assert_eq!(
-        read_session_plugin_package_profile(&directory, server_id, &session_path)
+        read_session_plugin_package_profile(&directory, &server_id_str, &session_path)
             .await
             .expect("read restored profile"),
         Some(vec![pkg_dir])
@@ -595,7 +642,7 @@ async fn passes_client_plugin_packages_to_a_cold_server_and_restores_them_for_it
     let artifact = pi_chord::node::FacetBundleArtifact {
         format: pi_chord::node::FACET_BUNDLE_ARTIFACT_FORMAT.to_string(),
         format_version: pi_chord::node::FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
-        plugin: FacetBundlePluginInfo {
+        plugin: FacetBundlePlugin {
             id: "@earendil-works/pi-example-plugin".to_string(),
             version: None,
         },
@@ -604,11 +651,18 @@ async fn passes_client_plugin_packages_to_a_cold_server_and_restores_them_for_it
             file: "tui.cjs".to_string(),
             integrity: "sha256-deadbeef".to_string(),
             external_imports: Vec::new(),
+            source_map: None,
         },
         source: "// placeholder".to_string(),
+        source_map_contents: None,
     };
     let presentation_data = create_presentation_facet_data(&[artifact]);
-    assert_eq!(create_presentation_facet_loaders(&presentation_data).len(), 1);
+    assert_eq!(
+        create_presentation_facet_loaders(&presentation_data)
+            .expect("loaders")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -617,7 +671,7 @@ async fn retires_a_cold_server_after_its_only_session_attachment_disconnects() {
     let mut env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pi-auto-session-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let server_id = "00000000-0000-4000-8000-000000000001";
@@ -652,7 +706,7 @@ async fn runs_and_discovers_multiple_logical_servers_from_one_directory() {
     let _env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pi-multi-server-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let first_id = "00000000-0000-4000-8000-000000000001";
@@ -741,7 +795,10 @@ async fn runs_and_discovers_multiple_logical_servers_from_one_directory() {
 #[serial]
 async fn hydrates_and_mutates_server_session_services_across_framed_clients() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let runtime = make_server(&directory).await;
 
@@ -898,7 +955,10 @@ async fn hydrates_and_mutates_server_session_services_across_framed_clients() {
 #[serial]
 async fn hydrates_and_updates_the_models_service_across_concurrent_framed_clients() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let runtime = make_server(&directory).await;
 
@@ -982,7 +1042,7 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
     let _env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pes-plugin-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let first_pkg = join(&[&directory, "first-plugin"]);
@@ -1001,7 +1061,11 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
     // static facets compose multi-plugin services cleanly inside `SessionWorkerServices`.
     let normalized = normalize_plugin_package_paths(&[first_pkg.clone(), second_pkg.clone()]).expect("normalize");
     assert_eq!(normalized.len(), 2);
-    let server_pkg = create_server_plugin_package(&directory, "00000000-0000-4000-8000-000000000001", &second_pkg);
+    let server_pkg = create_server_plugin_package(
+        &directory,
+        &"00000000-0000-4000-8000-000000000001".to_string(),
+        &second_pkg,
+    );
     let err = server_pkg.build().await.expect_err("JS bundle build must reject");
     assert!(
         err.message().contains("unsupported") || err.message().contains("not supported"),
@@ -1016,21 +1080,25 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
             file: "session.cjs".to_string(),
             integrity: "sha256-deadbeef".to_string(),
             external_imports: Vec::new(),
+            source_map: None,
         },
     );
     let manifest_dir = join(&[&directory, "manifest-check"]);
     mkdir(&manifest_dir, true, None).await.expect("mkdir manifest");
-    write_facet_bundle_manifest(
-        &join(&[&manifest_dir, FACET_BUNDLE_MANIFEST_FILE]),
-        &FacetBundleManifest {
-            format: pi_chord::node::FACET_BUNDLE_MANIFEST_FORMAT.to_string(),
-            format_version: pi_chord::node::FACET_BUNDLE_MANIFEST_FORMAT_VERSION,
-            plugin: FacetBundlePluginInfo {
-                id: "multi-plugin".to_string(),
-                version: None,
-            },
-            entries,
+    let manifest = FacetBundleManifest {
+        format: FACET_BUNDLE_FORMAT.to_string(),
+        format_version: FACET_BUNDLE_FORMAT_VERSION,
+        plugin: FacetBundlePlugin {
+            id: "multi-plugin".to_string(),
+            version: None,
         },
+        entries,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    write_file(
+        &join(&[&manifest_dir, FACET_BUNDLE_MANIFEST_FILE]),
+        &manifest_bytes,
+        None,
     )
     .await
     .expect("write manifest");
@@ -1053,9 +1121,7 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
             let mut members = indexmap::IndexMap::new();
             members.insert(
                 "greet".to_string(),
-                pi_chord::services::handle::ServiceValue::Object(make_async_fn(|_args, _ctx| {
-                    Box::pin(async { Ok(Some(json!({ "workerActivations": 1 }))) })
-                })),
+                make_async_fn(|_args, _ctx| Box::pin(async { Ok(Some(json!({ "workerActivations": 1 }))) })),
             );
             env.provide(&first_service_for_facet, ServiceObject::from_members(members))
         }),
@@ -1066,9 +1132,7 @@ async fn loads_conventional_session_facets_from_multiple_configured_plugin_packa
             let mut members = indexmap::IndexMap::new();
             members.insert(
                 "read".to_string(),
-                pi_chord::services::handle::ServiceValue::Object(make_async_fn(|_args, _ctx| {
-                    Box::pin(async { Ok(Some(Value::String("second".to_string()))) })
-                })),
+                make_async_fn(|_args, _ctx| Box::pin(async { Ok(Some(Value::String("second".to_string()))) })),
             );
             env.provide(&second_service_for_facet, ServiceObject::from_members(members))
         }),
@@ -1128,7 +1192,7 @@ async fn uses_the_most_recently_selected_model_for_a_new_session() {
     let _env = setup_test_env().await;
     let dir = tempfile::Builder::new()
         .prefix("pes-model-default-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let runtime = start_server(StartServerOptions {
         directory: Some(dir.path().to_string_lossy().into_owned()),
@@ -1202,7 +1266,10 @@ async fn uses_the_most_recently_selected_model_for_a_new_session() {
 #[serial]
 async fn composes_management_attachment_with_session_service_hydration() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
 
     let mut cmd = base_client_command();
@@ -1254,7 +1321,10 @@ async fn composes_management_attachment_with_session_service_hydration() {
 #[serial]
 async fn fences_superseded_attachment_hydration_by_attachment_generation() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let client = connect_unix_client(&runtime.server_id, &runtime.socket_path).await;
 
@@ -1332,7 +1402,10 @@ async fn fences_superseded_attachment_hydration_by_attachment_generation() {
 async fn observes_keyed_service_instances_and_fences_replacement_generations_over_framed_transport() {
     let _env = setup_test_env().await;
     let _hook = SpawnHookGuard::with_faux_worker();
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let client = attach_client(&runtime, "demo-1").await;
 
@@ -1363,17 +1436,20 @@ async fn observes_keyed_service_instances_and_fences_replacement_generations_ove
             env.observe::<ServiceObject>(
                 &*KEYED_PROBE_SERVICE,
                 Arc::new(move |obj, _ctx| {
-                    let probe = KeyedProbe::from_service(obj)?;
-                    let value = probe.state.value().map(|s| s.value);
-                    observed.lock().expect("lock").push((probe, value));
-                    Box::pin(futures::future::ready(Ok(())))
+                    let observed = Arc::clone(&observed);
+                    Box::pin(async move {
+                        let probe = KeyedProbe::from_service(obj)?;
+                        let value = probe.state.value().map(|s| s.value);
+                        observed.lock().expect("lock").push((probe, value));
+                        Ok(())
+                    })
                 }),
             )
         }),
     ));
     let facet_host = create_facet_host(FacetOptions {
         facets: vec![consumer],
-        service_sources: Some(vec![services.as_remote_source()]),
+        service_sources: Some(vec![services.as_remote_source().clone()]),
         on_error: None,
     })
     .await
@@ -1450,7 +1526,10 @@ async fn observes_keyed_service_instances_and_fences_replacement_generations_ove
 async fn answers_a_client_prompt_through_the_worker_owned_service_provider() {
     let _env = setup_test_env().await;
     let _hook = SpawnHookGuard::with_faux_worker();
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let runtime = make_server(&directory).await;
 
@@ -1482,7 +1561,10 @@ async fn answers_a_client_prompt_through_the_worker_owned_service_provider() {
 async fn replicates_the_transcript_after_consecutive_prompts() {
     let _env = setup_test_env().await;
     let _hook = SpawnHookGuard::with_faux_worker();
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let client = attach_client(&runtime, "demo-1").await;
 
@@ -1569,7 +1651,10 @@ async fn replicates_the_transcript_after_consecutive_prompts() {
 #[serial]
 async fn stops_an_idle_session_worker_after_its_client_disconnects() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let client = attach_client(&runtime, "demo-1").await;
     let pid = runtime.worker_pids().get("demo-1").copied().expect("worker pid");
@@ -1584,7 +1669,10 @@ async fn stops_an_idle_session_worker_after_its_client_disconnects() {
 #[serial]
 async fn starts_one_process_per_attached_session_and_stops_them_during_shutdown() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pes-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pes-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let (c1, c2) = tokio::join!(attach_client(&runtime, "demo-1"), attach_client(&runtime, "demo-2"));
 
@@ -1610,7 +1698,10 @@ async fn starts_one_process_per_attached_session_and_stops_them_during_shutdown(
 #[serial]
 async fn server_runtime_replaces_an_exited_worker_on_the_next_attach() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pew-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pew-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let runtime = make_server(&dir.path().to_string_lossy()).await;
     let client = attach_client(&runtime, "demo-1").await;
     let first_pid = runtime.worker_pids().get("demo-1").copied().expect("first pid");
@@ -1632,7 +1723,10 @@ async fn server_runtime_replaces_an_exited_worker_on_the_next_attach() {
 #[serial]
 async fn discovers_workers_after_replacing_the_server() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("per-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("per-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let first = make_server(&directory).await;
     let c1 = attach_client(&first, "demo-1").await;
@@ -1689,7 +1783,7 @@ async fn retires_an_unclaimed_idle_worker_after_replacement_demand_expires() {
     env._env.set(SESSION_WORKER_ORPHAN_DEMAND_GRACE_ENV, "50");
     let dir = tempfile::Builder::new()
         .prefix("pi-orphan-worker-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let first = make_server(&directory).await;
@@ -1712,10 +1806,13 @@ async fn retires_an_unclaimed_idle_worker_after_replacement_demand_expires() {
 #[serial]
 async fn restores_tracked_sessions_that_are_outside_the_replacement_catalog() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("pet-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("pet-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let empty_dir = tempfile::Builder::new()
         .prefix("pet-sessions-")
-        .tempdir()
+        .tempdir_in(short_tmp_root())
         .expect("tempdir");
     let directory = dir.path().to_string_lossy().into_owned();
     let empty_session_dir = empty_dir.path().to_string_lossy().into_owned();
@@ -1765,7 +1862,10 @@ async fn restores_tracked_sessions_that_are_outside_the_replacement_catalog() {
 #[serial]
 async fn reports_missing_and_ambiguous_session_selections() {
     let _env = setup_test_env().await;
-    let dir = tempfile::Builder::new().prefix("ped-").tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("ped-")
+        .tempdir_in(short_tmp_root())
+        .expect("tempdir");
     let shared_directory = dir.path().to_string_lossy().into_owned();
 
     let (first_shared, second_shared) = tokio::try_join!(

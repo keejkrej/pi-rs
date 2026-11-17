@@ -93,7 +93,7 @@ struct SnakeInnerState {
 }
 
 struct SnakeComponent {
-    tui: Arc<dyn TUI>,
+    tui: Arc<dyn TUI + Send + Sync>,
     on_close: Arc<dyn Fn() + Send + Sync>,
     on_save: Arc<dyn Fn(Option<GameState>) + Send + Sync>,
     inner: Arc<Mutex<SnakeInnerState>>,
@@ -101,7 +101,7 @@ struct SnakeComponent {
 
 impl SnakeComponent {
     fn new(
-        tui: Arc<dyn TUI>,
+        tui: Arc<dyn TUI + Send + Sync>,
         on_close: Arc<dyn Fn() + Send + Sync>,
         on_save: Arc<dyn Fn(Option<GameState>) + Send + Sync>,
         saved_state: Option<GameState>,
@@ -422,9 +422,9 @@ impl Extension for SnakeExtension {
                         let entries = base.session_manager()?.get_entries();
                         let mut saved_state: Option<GameState> = None;
                         for entry in entries.iter().rev() {
-                            if entry.r#type == "custom"
-                                && entry.fields.get("customType").and_then(|v| v.as_str()) == Some(SNAKE_SAVE_TYPE)
-                                && let Some(data_val) = entry.fields.get("data")
+                            if let pi_coding_agent::core::session_manager::SessionEntry::Custom(custom) = entry
+                                && custom.custom_type == SNAKE_SAVE_TYPE
+                                && let Some(data_val) = custom.data.as_ref()
                                 && let Ok(parsed) = serde_json::from_value::<GameState>(data_val.clone())
                             {
                                 saved_state = Some(parsed);

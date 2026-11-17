@@ -14,7 +14,7 @@ pub struct ConfirmDestructiveExtension;
 #[async_trait]
 impl Extension for ConfirmDestructiveExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
-        pi.on::<SessionBeforeSwitchEvent>(Arc::new(|event, ctx| {
+        pi.on::<SessionBeforeSwitchEvent>(|event, ctx| {
             Box::pin(async move {
                 if !ctx.has_ui()? {
                     return Ok(None);
@@ -38,12 +38,11 @@ impl Extension for ConfirmDestructiveExtension {
 
                 let entries = ctx.session_manager()?.get_entries();
                 let has_unsaved_work = entries.iter().any(|e| {
-                    e.r#type == "message"
-                        && e.fields
-                            .get("message")
-                            .and_then(|m| m.get("role"))
-                            .and_then(|v| v.as_str())
-                            == Some("user")
+                    matches!(
+                        e,
+                        pi_coding_agent::core::session_manager::SessionEntry::Message(m)
+                            if m.message.role() == Some("user")
+                    )
                 });
 
                 if has_unsaved_work {
@@ -62,9 +61,9 @@ impl Extension for ConfirmDestructiveExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
-        pi.on::<SessionBeforeForkEvent>(Arc::new(|event, ctx| {
+        pi.on::<SessionBeforeForkEvent>(|event, ctx| {
             Box::pin(async move {
                 if !ctx.has_ui()? {
                     return Ok(None);
@@ -92,7 +91,7 @@ impl Extension for ConfirmDestructiveExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

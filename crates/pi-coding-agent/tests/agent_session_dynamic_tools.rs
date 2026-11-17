@@ -25,7 +25,7 @@ fn empty_tool_def(name: &str, label: &str, description: &str) -> ToolDefinition 
         description: description.to_string(),
         prompt_snippet: None,
         prompt_guidelines: None,
-        parameters: t::object(&[]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
         constrained_sampling: None,
         render_shell: None,
         prepare_arguments: None,
@@ -41,8 +41,7 @@ fn empty_tool_def(name: &str, label: &str, description: &str) -> ToolDefinition 
                 Ok(AgentToolResult {
                     content: vec![UserContentBlock::Text(TextContent::new("ok"))],
                     details: Some(json!({})),
-                    structured_content: None,
-                    usage: None,
+                    ..Default::default()
                 })
             })
         }),
@@ -54,7 +53,7 @@ fn empty_tool_def(name: &str, label: &str, description: &str) -> ToolDefinition 
 fn setup_temp_dirs() -> (String, String) {
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-dynamic-tool-test-"])).unwrap();
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
-    pi_js::fs::mkdir(&agent_dir, true).unwrap();
+    pi_js::fs::mkdir(&agent_dir, true, None).unwrap();
     (temp_dir, agent_dir)
 }
 
@@ -114,10 +113,10 @@ async fn exposes_session_state_before_custom_bash_spawn_hooks_and_supports_optin
     }));
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: temp_dir.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
-        extension_factories: Some(vec![ext]),
+        extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(ext)],
         ..Default::default()
     }));
     resource_loader.reload(None).await.unwrap();
@@ -165,7 +164,10 @@ async fn exposes_session_state_before_custom_bash_spawn_hooks_and_supports_optin
     );
     assert_eq!(captured_env.get("PI_PROVIDER"), Some(&model.provider));
     assert_eq!(captured_env.get("PI_MODEL"), Some(&model.id));
-    assert_eq!(captured_env.get("PI_REASONING_LEVEL"), Some(&session.thinking_level()));
+    assert_eq!(
+        captured_env.get("PI_REASONING_LEVEL").map(String::as_str),
+        Some(session.thinking_level().as_str())
+    );
 
     let opted_tool = session
         .agent()
@@ -217,10 +219,10 @@ async fn refreshes_tool_registry_when_tools_are_registered_after_initialization(
     }));
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: temp_dir.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
-        extension_factories: Some(vec![ext]),
+        extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(ext)],
         ..Default::default()
     }));
     resource_loader.reload(None).await.unwrap();
@@ -283,8 +285,8 @@ async fn returns_source_metadata_for_sdk_custom_tools() {
     let session_manager = SessionManager::in_memory(Some(&temp_dir), None, None).unwrap();
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: temp_dir.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
         ..Default::default()
     }));
@@ -343,10 +345,10 @@ async fn keeps_custom_tools_active_but_omits_them_from_available_tools_when_prom
     }));
 
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
-        cwd: Some(temp_dir.clone()),
-        agent_dir: Some(agent_dir.clone()),
+        cwd: temp_dir.clone(),
+        agent_dir: agent_dir.clone(),
         settings_manager: Some(settings_manager.clone()),
-        extension_factories: Some(vec![ext]),
+        extension_factories: vec![pi_coding_agent::core::resource_loader::InlineExtension::Core(ext)],
         ..Default::default()
     }));
     resource_loader.reload(None).await.unwrap();

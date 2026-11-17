@@ -8,9 +8,10 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use pi_ai::api::{anthropic_messages, openai_responses};
 use pi_ai::types::{
-    AssistantMessage, AssistantMessageEvent, Model, ModelCompat, ModelCost, ModelInput, ModelThinkingLevel,
-    SimpleStreamOptions, StopReason, ThinkingLevelMap, TranscriptContext, Usage,
+    AnthropicMessagesCompat, AssistantMessage, AssistantMessageEvent, Model, ModelCompat, ModelCost, ModelInput,
+    ModelThinkingLevel, SimpleStreamOptions, StopReason, ThinkingLevelMap, TranscriptContext, Usage,
 };
+use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use pi_ai::{OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt};
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, ProviderChatModelConfig, ProviderConfig,
@@ -247,7 +248,7 @@ async fn get_direct_access_token(gitlab_access_token: &str) -> pi_js::Result<Dir
     let mut headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {gitlab_access_token}"));
     headers.set("Content-Type", "application/json");
-    let body = pi_js::json::stringify(&serde_json::json!({
+    let body = pi_js::json::try_stringify(&serde_json::json!({
         "feature_flags": { "DuoAgentPlatformNext": true }
     }))?;
     let response = fetch(Request {
@@ -401,8 +402,8 @@ pub fn stream_git_lab_duo(
     model: Model,
     context: TranscriptContext,
     options: Option<SimpleStreamOptions>,
-) -> pi_ai::types::AssistantMessageEventStream {
-    let stream = pi_ai::types::AssistantMessageEventStream::new();
+) -> AssistantMessageEventStream {
+    let stream = AssistantMessageEventStream::new();
     let stream_clone = stream.clone();
 
     tokio::spawn(async move {
@@ -438,9 +439,12 @@ pub fn stream_git_lab_duo(
 
             let mut inner_stream = match cfg.backend {
                 Backend::Anthropic => {
-                    let mut compat = model_with_base_url.compat.clone().unwrap_or_default();
+                    let mut compat: AnthropicMessagesCompat = match model_with_base_url.compat {
+                        Some(ModelCompat::AnthropicMessages(c)) => c,
+                        _ => AnthropicMessagesCompat::default(),
+                    };
                     compat.force_adaptive_thinking = Some(true);
-                    model_with_base_url.compat = Some(compat);
+                    model_with_base_url.compat = Some(ModelCompat::AnthropicMessages(compat));
                     anthropic_messages::provider_streams().stream_simple(
                         &model_with_base_url,
                         &context,

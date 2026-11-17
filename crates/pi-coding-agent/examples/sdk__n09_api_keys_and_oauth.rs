@@ -32,7 +32,9 @@ async fn run() -> pi_coding_agent::Result<()> {
     pi_js::console::log("Session with custom auth and models locations");
     custom_auth_session.session.dispose();
 
-    model_runtime.set_runtime_api_key("anthropic", "sk-my-temp-key");
+    model_runtime
+        .set_runtime_api_key("anthropic", "sk-my-temp-key", None)
+        .await?;
     let runtime_key_session = create_agent_session(Some(CreateAgentSessionOptions {
         session_manager: Some(SessionManager::in_memory(None, None, None)?),
         model_runtime: Some(model_runtime),

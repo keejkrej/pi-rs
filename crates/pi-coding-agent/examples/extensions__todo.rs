@@ -177,20 +177,18 @@ fn reconstruct_state(state: &Mutex<SharedTodos>, ctx: &ExtensionContext) -> pi_j
     let mut next_id = 1u64;
 
     for entry in ctx.session_manager()?.get_branch(None) {
-        if entry.r#type != "message" {
-            continue;
-        }
-        let Some(msg) = entry.fields.get("message") else {
+        let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry else {
             continue;
         };
-        if msg.get("role").and_then(|v| v.as_str()) != Some("toolResult") {
+        let pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::ToolResult(tr)) = msg_entry.message
+        else {
+            continue;
+        };
+        if tr.tool_name != "todo" {
             continue;
         }
-        if msg.get("toolName").and_then(|v| v.as_str()) != Some("todo") {
-            continue;
-        }
-        if let Some(details_val) = msg.get("details")
-            && let Ok(details) = serde_json::from_value::<TodoDetails>(details_val.clone())
+        if let Some(details_val) = tr.details
+            && let Ok(details) = serde_json::from_value::<TodoDetails>(details_val)
         {
             todos = details.todos;
             next_id = details.next_id;
@@ -215,24 +213,24 @@ impl Extension for TodoExtension {
 
         {
             let state_ss = Arc::clone(&state);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let state = Arc::clone(&state_ss);
                 Box::pin(async move {
                     reconstruct_state(&state, &ctx)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let state_st = Arc::clone(&state);
-            pi.on::<SessionTreeEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionTreeEvent>(move |_event, ctx| {
                 let state = Arc::clone(&state_st);
                 Box::pin(async move {
                     reconstruct_state(&state, &ctx)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         let params_schema = t::object([

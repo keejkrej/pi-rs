@@ -105,7 +105,7 @@ fn parse_thinking_level(raw: &str) -> Option<ThinkingLevel> {
 
 fn load_presets(cwd: &str) -> IndexMap<String, Preset> {
     let global_path = pi_js::path::join(&[&get_agent_dir(), "presets.json"]);
-    let project_path = pi_js::path::join(&[cwd, CONFIG_DIR_NAME, "presets.json"]);
+    let project_path = pi_js::path::join(&[cwd, *CONFIG_DIR_NAME, "presets.json"]);
     let mut merged: IndexMap<String, Preset> = IndexMap::new();
 
     if pi_js::fs::exists(&global_path) {
@@ -203,7 +203,7 @@ async fn apply_preset(
     if let (Some(prov), Some(model_id)) = (preset.provider.as_deref(), preset.model.as_deref()) {
         let model = ctx
             .model_registry()?
-            .get_available_models()
+            .get_available()
             .into_iter()
             .find(|m| m.provider == prov && m.id == model_id);
         match model {
@@ -301,7 +301,7 @@ async fn show_preset_selector(
             &format!(
                 "No presets defined. Add presets to {} or {}",
                 pi_js::path::join(&[&get_agent_dir(), "presets.json"]),
-                pi_js::path::join(&[&ctx.cwd()?, CONFIG_DIR_NAME, "presets.json"])
+                pi_js::path::join(&[&ctx.cwd()?, *CONFIG_DIR_NAME, "presets.json"])
             ),
             Some(NotifyType::Warning),
         );
@@ -423,7 +423,7 @@ async fn cycle_preset(pi: &ExtensionApi, state: &Mutex<SharedState>, ctx: &Exten
             &format!(
                 "No presets defined. Add presets to {} or {}",
                 pi_js::path::join(&[&get_agent_dir(), "presets.json"]),
-                pi_js::path::join(&[&ctx.cwd()?, CONFIG_DIR_NAME, "presets.json"])
+                pi_js::path::join(&[&ctx.cwd()?, *CONFIG_DIR_NAME, "presets.json"])
             ),
             Some(NotifyType::Warning),
         );
@@ -538,7 +538,7 @@ impl Extension for PresetExtension {
 
         {
             let state_bas = Arc::clone(&state);
-            pi.on::<BeforeAgentStartEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<BeforeAgentStartEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_bas);
                 Box::pin(async move {
                     let instr = {
@@ -557,13 +557,13 @@ impl Extension for PresetExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_ss = pi.clone();
             let state_ss = Arc::clone(&state);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let pi = pi_ss.clone();
                 let state = Arc::clone(&state_ss);
                 Box::pin(async move {
@@ -598,11 +598,14 @@ impl Extension for PresetExtension {
 
                     if preset_flag.is_none() {
                         let entries = ctx.session_manager()?.get_entries();
-                        if let Some(entry) = entries.iter().rev().find(|e| {
-                            e.r#type == "custom"
-                                && e.fields.get("customType").and_then(|v| v.as_str()) == Some("preset-state")
-                        }) && let Some(data_val) = entry.fields.get("data")
-                            && let Ok(parsed) = serde_json::from_value::<PresetStateEntry>(data_val.clone())
+                        if let Some(data_val) = entries.iter().rev().find_map(|e| match e {
+                            pi_coding_agent::core::session_manager::SessionEntry::Custom(custom)
+                                if custom.custom_type == "preset-state" =>
+                            {
+                                custom.data.as_ref()
+                            }
+                            _ => None,
+                        }) && let Ok(parsed) = serde_json::from_value::<PresetStateEntry>(data_val.clone())
                             && let Some(preset) = loaded.get(&parsed.name)
                         {
                             let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -621,13 +624,13 @@ impl Extension for PresetExtension {
                     update_status(&ctx, active.as_deref())?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_ts = pi.clone();
             let state_ts = Arc::clone(&state);
-            pi.on::<TurnStartEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<TurnStartEvent>(move |_event, _ctx| {
                 let pi = pi_ts.clone();
                 let state = Arc::clone(&state_ts);
                 Box::pin(async move {
@@ -645,7 +648,7 @@ impl Extension for PresetExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

@@ -33,11 +33,10 @@ impl Extension for BookmarkExtension {
 
                             let entries = base.session_manager()?.get_entries();
                             for entry in entries.iter().rev() {
-                                if entry.r#type == "message"
-                                    && let Some(msg) = entry.fields.get("message")
-                                    && msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                                if let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry
+                                    && msg_entry.message.role() == Some("assistant")
                                 {
-                                    pi.set_label(&entry.id, Some(&label))?;
+                                    pi.set_label(&msg_entry.id, Some(&label))?;
                                     base.ui()?
                                         .notify(&format!("Bookmarked as: {label}"), Some(NotifyType::Info));
                                     return Ok(());
@@ -67,8 +66,8 @@ impl Extension for BookmarkExtension {
                             let sm = base.session_manager()?;
                             let entries = sm.get_entries();
                             for entry in entries.iter().rev() {
-                                if let Some(label) = sm.get_label(&entry.id) {
-                                    pi.set_label(&entry.id, None)?;
+                                if let Some(label) = sm.get_label(entry.id()) {
+                                    pi.set_label(entry.id(), None)?;
                                     base.ui()?
                                         .notify(&format!("Removed bookmark: {label}"), Some(NotifyType::Info));
                                     return Ok(());

@@ -46,7 +46,8 @@ async fn prompts_the_root_conversation_through_the_service_catalogue() {
     .await
     .expect("create host");
 
-    let catalogue = host.services().catalogue();
+    let services = host.services();
+    let catalogue = services.catalogue();
     assert_eq!(catalogue.len(), 1);
     assert_eq!(catalogue[0].service_id, AGENT_CONTROLLER_SERVICE.id);
     assert_eq!(catalogue[0].mode, pi_chord::ServiceMode::Singleton);
@@ -177,7 +178,7 @@ async fn rejects_a_prompt_while_busy_and_queues_steering_and_follow_up_input() {
         .await
         .expect("inbox view state");
     let inbox_val = inbox_state.value().docs.get("pi.inbox").cloned().expect("pi.inbox doc");
-    let inbox: InboxState = serde_json::from_value(inbox_val).expect("parse InboxState");
+    let inbox: InboxState = serde_json::from_value(serde_json::Value::Object(inbox_val)).expect("parse InboxState");
     let modes: Vec<&str> = inbox
         .items
         .iter()

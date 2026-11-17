@@ -32,7 +32,7 @@ fn orchestrator_extension() -> InlineExtension {
             description: "Echo text.".to_string(),
             prompt_snippet: None,
             prompt_guidelines: None,
-            parameters: t::object(&[t::prop("text", t::string())]),
+            parameters: t::object([("text", t::string())]),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,
@@ -49,8 +49,7 @@ fn orchestrator_extension() -> InlineExtension {
                     Ok(AgentToolResult {
                         content: vec![UserContentBlock::Text(TextContent::new(format!("echo: {text}")))],
                         details: Some(json!({})),
-                        structured_content: None,
-                        usage: None,
+                        ..Default::default()
                     })
                 })
             }),
@@ -64,7 +63,7 @@ fn orchestrator_extension() -> InlineExtension {
             description: "Only reachable from other tools.".to_string(),
             prompt_snippet: None,
             prompt_guidelines: None,
-            parameters: t::object(&[]),
+            parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,
@@ -80,8 +79,7 @@ fn orchestrator_extension() -> InlineExtension {
                     Ok(AgentToolResult {
                         content: vec![UserContentBlock::Text(TextContent::new("helped"))],
                         details: Some(json!({})),
-                        structured_content: None,
-                        usage: None,
+                        ..Default::default()
                     })
                 })
             }),
@@ -95,7 +93,7 @@ fn orchestrator_extension() -> InlineExtension {
             description: "Runs tools.".to_string(),
             prompt_snippet: None,
             prompt_guidelines: None,
-            parameters: t::object(&[]),
+            parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,
@@ -137,8 +135,7 @@ fn orchestrator_extension() -> InlineExtension {
                     Ok(AgentToolResult {
                         content: vec![UserContentBlock::Text(TextContent::new(text))],
                         details: Some(json!({})),
-                        structured_content: None,
-                        usage: None,
+                        ..Default::default()
                     })
                 })
             }),
@@ -210,7 +207,7 @@ async fn supports_tools_that_call_other_tools_under_any_name_through_the_extensi
                 Ok(faux_assistant_message(
                     FauxAssistantMessageContent::Block(FauxContentBlock::ToolCall(faux_tool_call(
                         "run_tools",
-                        serde_json::Map::new(),
+                        Default::default(),
                         None,
                     ))),
                     Some(FauxAssistantMessageOptions {
@@ -347,7 +344,7 @@ async fn leaves_results_without_nested_calls_unchanged() {
         .bind_extensions(ExtensionBindings::default())
         .await
         .unwrap();
-    let mut args = serde_json::Map::new();
+    let mut args = IndexMap::new();
     args.insert("text".to_string(), Value::String("x".to_string()));
     harness.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(

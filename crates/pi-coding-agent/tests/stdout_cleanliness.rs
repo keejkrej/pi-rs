@@ -36,7 +36,7 @@ fn run_cli(args: &[&str]) -> (String, String, Option<i32>) {
     });
     std::fs::write(
         project_cfg.join("settings.json"),
-        pi_js::json::stringify_pretty(&settings, 2).unwrap(),
+        pi_js::json::stringify_pretty(&settings, "  "),
     )
     .unwrap();
 

@@ -1172,11 +1172,12 @@ fn with_usage_estimate(
             if let Some(previous_prompt) = prompt_cache.get(session_id) {
                 let prefix_bytes = common_prefix_byte_len(previous_prompt, &prompt_text);
                 cache_read = estimate_tokens(&previous_prompt[..prefix_bytes]);
-                cache_write = estimate_tokens(&prompt_text[prefix_bytes..]);
-                input = (prompt_tokens - cache_read).max(0);
+                cache_write = (prompt_tokens - cache_read).max(0);
             } else {
                 cache_write = prompt_tokens;
             }
+            // Every prompt token is either read from or written to the simulated cache.
+            input = 0;
             prompt_cache.insert(session_id.clone(), prompt_text);
         }
     }

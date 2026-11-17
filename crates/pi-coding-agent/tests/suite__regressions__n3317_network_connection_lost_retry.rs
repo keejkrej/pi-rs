@@ -45,7 +45,7 @@ async fn retries_transient_network_connection_lost_failures() {
 
     harness.session.prompt("test", None).await.unwrap();
 
-    assert_eq!(harness.faux.state().call_count, 2);
+    assert_eq!(harness.faux.state().call_count(), 2);
     let start_errors: Vec<String> = harness
         .events()
         .into_iter()

@@ -20,7 +20,6 @@ use pi_coding_agent::core::extensions::types::{
 };
 use pi_tui::Key;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use self::utils::{TodoItem, extract_todo_items, is_safe_command, mark_completed_steps};
 
@@ -304,7 +303,7 @@ impl Extension for PlanModeExtension {
 
         {
             let state_tc = Arc::clone(&state);
-            pi.on::<ToolCallEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<ToolCallEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_tc);
                 Box::pin(async move {
                     let enabled = state.lock().unwrap_or_else(|e| e.into_inner()).plan_mode_enabled;
@@ -325,12 +324,12 @@ impl Extension for PlanModeExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let state_ctx = Arc::clone(&state);
-            pi.on::<ContextEvent>(Arc::new(move |event, _ctx| {
+            pi.on::<ContextEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_ctx);
                 Box::pin(async move {
                     let enabled = state.lock().unwrap_or_else(|e| e.into_inner()).plan_mode_enabled;
@@ -358,12 +357,12 @@ impl Extension for PlanModeExtension {
                         messages: Some(messages),
                     }))
                 })
-            }));
+            });
         }
 
         {
             let state_bas = Arc::clone(&state);
-            pi.on::<BeforeAgentStartEvent>(Arc::new(move |_event, _ctx| {
+            pi.on::<BeforeAgentStartEvent>(move |_event, _ctx| {
                 let state = Arc::clone(&state_bas);
                 Box::pin(async move {
                     let (plan_enabled, exec_mode, items) = {
@@ -423,13 +422,13 @@ impl Extension for PlanModeExtension {
                     }
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_te = pi.clone();
             let state_te = Arc::clone(&state);
-            pi.on::<TurnEndEvent>(Arc::new(move |event, ctx| {
+            pi.on::<TurnEndEvent>(move |event, ctx| {
                 let pi = pi_te.clone();
                 let state = Arc::clone(&state_te);
                 Box::pin(async move {
@@ -458,13 +457,13 @@ impl Extension for PlanModeExtension {
                     persist_state(&pi, &state)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_ae = pi.clone();
             let state_ae = Arc::clone(&state);
-            pi.on::<AgentEndEvent>(Arc::new(move |event, ctx| {
+            pi.on::<AgentEndEvent>(move |event, ctx| {
                 let pi = pi_ae.clone();
                 let state = Arc::clone(&state_ae);
                 Box::pin(async move {
@@ -615,13 +614,13 @@ impl Extension for PlanModeExtension {
 
                     Ok(None)
                 })
-            }));
+            });
         }
 
         {
             let pi_ss = pi.clone();
             let state_ss = Arc::clone(&state);
-            pi.on::<SessionStartEvent>(Arc::new(move |_event, ctx| {
+            pi.on::<SessionStartEvent>(move |_event, ctx| {
                 let pi = pi_ss.clone();
                 let state = Arc::clone(&state_ss);
                 Box::pin(async move {
@@ -631,12 +630,17 @@ impl Extension for PlanModeExtension {
                     }
 
                     let entries = ctx.session_manager()?.get_entries();
-                    let plan_mode_entry = entries.iter().rev().find(|e| {
-                        e.r#type == "custom" && e.fields.get("customType").and_then(|v| v.as_str()) == Some("plan-mode")
+                    let plan_mode_entry = entries.iter().rev().find_map(|e| match e {
+                        pi_coding_agent::core::session_manager::SessionEntry::Custom(custom)
+                            if custom.custom_type == "plan-mode" =>
+                        {
+                            Some(custom)
+                        }
+                        _ => None,
                     });
 
                     if let Some(entry) = plan_mode_entry
-                        && let Some(data_val) = entry.fields.get("data")
+                        && let Some(data_val) = entry.data.as_ref()
                         && let Ok(parsed) = serde_json::from_value::<PlanModeState>(data_val.clone())
                     {
                         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -662,17 +666,19 @@ impl Extension for PlanModeExtension {
                         let execute_index = entries
                             .iter()
                             .rposition(|e| {
-                                e.fields.get("customType").and_then(|v| v.as_str()) == Some("plan-mode-execute")
+                                matches!(
+                                    e,
+                                    pi_coding_agent::core::session_manager::SessionEntry::Custom(custom)
+                                        if custom.custom_type == "plan-mode-execute"
+                                )
                             })
                             .map(|idx| idx + 1)
                             .unwrap_or(0);
 
                         let mut texts = Vec::new();
                         for entry in &entries[execute_index..] {
-                            if entry.r#type == "message"
-                                && let Some(msg_val) = entry.fields.get("message")
-                                && let Ok(msg) = serde_json::from_value::<AgentMessage>(msg_val.clone())
-                                && let Some(assistant) = assistant_message_from_agent(&msg)
+                            if let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry
+                                && let Some(assistant) = assistant_message_from_agent(&msg_entry.message)
                             {
                                 texts.push(get_assistant_text(assistant));
                             }
@@ -689,7 +695,7 @@ impl Extension for PlanModeExtension {
                     update_status(&ctx, &state)?;
                     Ok(None)
                 })
-            }));
+            });
         }
 
         Ok(())

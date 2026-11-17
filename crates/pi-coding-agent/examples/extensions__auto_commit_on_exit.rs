@@ -16,7 +16,7 @@ pub struct AutoCommitOnExitExtension;
 impl Extension for AutoCommitOnExitExtension {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()> {
         let pi_hook = pi.clone();
-        pi.on::<SessionShutdownEvent>(Arc::new(move |_event, ctx| {
+        pi.on::<SessionShutdownEvent>(move |_event, ctx| {
             let pi = pi_hook.clone();
             Box::pin(async move {
                 let status_res = pi
@@ -29,10 +29,8 @@ impl Extension for AutoCommitOnExitExtension {
                 let entries = ctx.session_manager()?.get_entries();
                 let mut last_assistant_text = String::new();
                 for entry in entries.iter().rev() {
-                    if entry.r#type == "message"
-                        && let Some(msg_val) = entry.fields.get("message")
-                        && let Ok(AgentMessage::Message(Message::Assistant(assistant))) =
-                            serde_json::from_value::<AgentMessage>(msg_val.clone())
+                    if let pi_coding_agent::core::session_manager::SessionEntry::Message(msg_entry) = entry
+                        && let AgentMessage::Message(Message::Assistant(assistant)) = &msg_entry.message
                     {
                         last_assistant_text = assistant
                             .content
@@ -73,7 +71,7 @@ impl Extension for AutoCommitOnExitExtension {
 
                 Ok(None)
             })
-        }));
+        });
 
         Ok(())
     }

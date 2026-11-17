@@ -6,35 +6,143 @@ use std::sync::{Arc, Mutex, PoisonError};
 use indexmap::IndexMap;
 use pi_agent_core::agent::{Agent, AgentInitialState, AgentOptions};
 use pi_agent_core::types::{AgentMessage, AgentTool, OnPayloadFn, TransformContextFn};
-use pi_ai::compat::stream_simple;
+use pi_ai::compat::register_faux_provider;
 use pi_ai::providers::faux::{
     FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, RegisterFauxProviderOptions,
-    register_faux_provider,
 };
 use pi_ai::types::{
-    AssistantContentBlock, Model, OnResponseFn, ToolResultMessage, UserContentBlock, UserMessageContent,
+    AssistantContentBlock, Model, SystemMessageContent, ToolResultMessage, UserContentBlock, UserMessageContent,
 };
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
-use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
+use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionRunnerRef};
 use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::diagnostics::ResourceDiagnostic;
+use pi_coding_agent::core::event_bus::create_event_bus;
+use pi_coding_agent::core::extensions::loader::{create_extension_runtime, load_extension_from_factory};
 use pi_coding_agent::core::extensions::types::{
-    AfterProviderResponseEvent, AutocompleteProviderFactory, CustomUiFactory, EditorFactory, ExtensionCustomOptions,
-    ExtensionRunnerRef, ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions, FooterFactory,
-    HeaderFactory, InlineExtension, NotifyType, ProviderChatModelConfig, ProviderConfig, ProviderModelConfig,
-    SetThemeResult, TerminalInputHandler, Theme, ThemeInfo, WidgetFactory, WorkingIndicatorOptions,
-    create_extension_runner_ref,
+    AutocompleteProviderFactory, CustomUiFactory, EditorFactory, ExtensionCustomOptions, ExtensionUIContext,
+    ExtensionUIDialogOptions, ExtensionWidgetOptions, FooterFactory, HeaderFactory, InlineExtension,
+    LoadExtensionErrorEntry, LoadExtensionsResult as CoreLoadExtensionsResult, NotifyType, ProviderChatModelConfig,
+    ProviderConfig, ProviderModelConfig, SetThemeResult, TerminalInputHandler, Theme, ThemeInfo, WidgetFactory,
+    WorkingIndicatorOptions,
 };
 use pi_coding_agent::core::messages::convert_to_llm;
-use pi_coding_agent::core::resource_loader::ResourceLoader;
+use pi_coding_agent::core::prompt_templates::PromptTemplate;
+use pi_coding_agent::core::resource_loader::{
+    ContextFile, LoadExtensionsResult as LoaderLoadExtensionsResult, PromptSource, ResourceExtensionPaths,
+    ResourceLoader, ResourceLoaderReloadOptions, Theme as LoaderTheme,
+};
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
-use pi_js::Unsubscribe;
+use pi_coding_agent::core::skills::Skill;
+use pi_js::{BoxFuture, Unsubscribe};
 use serde_json::Value;
 
 use super::super::model_runtime_test_utils::{
     create_in_memory_model_registry, create_model_registry, get_model_runtime,
 };
-use super::super::utilities::{TestExtensionInput, create_test_extensions_result, create_test_resource_loader};
+
+struct SuiteResourceLoader {
+    core_extensions: CoreLoadExtensionsResult,
+}
+
+impl ResourceLoader for SuiteResourceLoader {
+    fn get_extensions(&self) -> LoaderLoadExtensionsResult {
+        LoaderLoadExtensionsResult::default()
+    }
+
+    fn get_core_extensions(&self) -> CoreLoadExtensionsResult {
+        self.core_extensions.clone()
+    }
+
+    fn get_skills(&self) -> (Vec<Skill>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_prompts(&self) -> (Vec<PromptTemplate>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_themes(&self) -> (Vec<LoaderTheme>, Vec<ResourceDiagnostic>) {
+        (Vec::new(), Vec::new())
+    }
+
+    fn get_agents_files(&self) -> Vec<ContextFile> {
+        Vec::new()
+    }
+
+    fn get_system_prompt(&self) -> Option<String> {
+        None
+    }
+
+    fn get_system_prompt_source(&self) -> Option<PromptSource> {
+        None
+    }
+
+    fn get_append_system_prompt(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn get_append_system_prompt_sources(&self) -> Vec<PromptSource> {
+        Vec::new()
+    }
+
+    fn extend_resources(&self, _paths: ResourceExtensionPaths) {}
+
+    fn reload(&self, _options: Option<ResourceLoaderReloadOptions>) -> BoxFuture<pi_coding_agent::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub async fn create_suite_extensions_result(inputs: &[InlineExtension], cwd: &str) -> CoreLoadExtensionsResult {
+    let runtime = create_extension_runtime();
+    let event_bus: Arc<dyn pi_coding_agent::core::event_bus::EventBus> = create_event_bus();
+    let mut extensions = Vec::new();
+    let mut errors = Vec::new();
+
+    for (index, input) in inputs.iter().enumerate() {
+        let (path, factory, hidden, replaceable) = match input {
+            InlineExtension::Factory(f) => (format!("<inline:{}>", index + 1), f.clone(), false, false),
+            InlineExtension::Named(named) => (
+                format!("<inline:{}>", named.name),
+                named.factory.clone(),
+                named.hidden,
+                named.replaceable,
+            ),
+        };
+        match load_extension_from_factory(factory, cwd, Arc::clone(&event_bus), runtime.clone(), Some(&path)).await {
+            Ok(mut ext) => {
+                ext.hidden = hidden;
+                ext.replaceable = replaceable;
+                extensions.push(ext);
+            }
+            Err(err) => {
+                errors.push(LoadExtensionErrorEntry {
+                    path,
+                    error: err.to_string(),
+                });
+            }
+        }
+    }
+
+    CoreLoadExtensionsResult {
+        extensions,
+        errors,
+        warnings: Vec::new(),
+        runtime,
+    }
+}
+
+pub fn create_suite_resource_loader(extensions_result: Option<CoreLoadExtensionsResult>) -> Arc<dyn ResourceLoader> {
+    Arc::new(SuiteResourceLoader {
+        core_extensions: extensions_result.unwrap_or_else(|| CoreLoadExtensionsResult {
+            extensions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            runtime: create_extension_runtime(),
+        }),
+    })
+}
 
 pub fn get_message_text(message: &AgentMessage) -> String {
     match message {
@@ -67,7 +175,10 @@ pub fn get_message_text(message: &AgentMessage) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        AgentMessage::Message(pi_ai::types::Message::System(sys)) => sys.content.clone(),
+        AgentMessage::Message(pi_ai::types::Message::System(sys)) => match &sys.content {
+            SystemMessageContent::Text(s) => s.clone(),
+            SystemMessageContent::Blocks(blocks) => blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join(""),
+        },
         AgentMessage::Custom(val) => match val.get("content") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -260,7 +371,6 @@ pub struct HarnessOptions {
     pub excluded_tool_names: Option<Vec<String>>,
     pub resource_loader: Option<Arc<dyn ResourceLoader>>,
     pub extension_factories: Option<Vec<InlineExtension>>,
-    pub test_extensions: Option<Vec<TestExtensionInput>>,
     pub with_configured_auth: Option<bool>,
     pub models_json: Option<Value>,
     pub session_manager: Option<SessionManager>,
@@ -328,7 +438,7 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
             .collect::<IndexMap<String, AgentTool>>()
     });
     let with_configured_auth = options.with_configured_auth.unwrap_or(true);
-    let extension_runner_ref: ExtensionRunnerRef = create_extension_runner_ref();
+    let extension_runner_ref: ExtensionRunnerRef = Arc::new(std::sync::Mutex::new(None));
 
     let session_manager = options
         .session_manager
@@ -362,9 +472,13 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
         pi_js::fs::write_file(path, pi_js::json::stringify(val).as_bytes(), None).unwrap();
     }
     let model_registry = if let Some(ref path) = models_path {
-        create_model_registry(auth_storage.clone(), Some(path)).await
+        create_model_registry(auth_storage.clone(), Some(path))
+            .await
+            .expect("create_model_registry should succeed")
     } else {
-        create_in_memory_model_registry(auth_storage.clone()).await
+        create_in_memory_model_registry(auth_storage.clone())
+            .await
+            .expect("create_in_memory_model_registry should succeed")
     };
     if with_configured_auth {
         let models = faux_provider
@@ -390,17 +504,19 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
                 })
             })
             .collect();
-        model_registry.register_provider(
-            &model.provider,
-            ProviderConfig {
-                base_url: Some(model.base_url.clone()),
-                api_key: Some("faux-key".to_string()),
-                api: Some(faux_provider.api().to_string()),
-                models: Some(models),
-                ..Default::default()
-            },
-            None,
-        );
+        model_registry
+            .register_provider(
+                &model.provider,
+                ProviderConfig {
+                    base_url: Some(model.base_url.clone()),
+                    api_key: Some("faux-key".to_string()),
+                    api: Some(faux_provider.api().to_string()),
+                    models: Some(models),
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .expect("register_provider should succeed");
     }
 
     let runner_for_payload = Arc::clone(&extension_runner_ref);
@@ -413,26 +529,7 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
             if !runner.has_handlers("before_provider_request") {
                 return Ok(None);
             }
-            Ok(Some(runner.emit_before_provider_request(payload).await?))
-        })
-    });
-
-    let runner_for_response = Arc::clone(&extension_runner_ref);
-    let on_response: OnResponseFn<Model> = Arc::new(move |response, _model| {
-        let runner_opt = runner_for_response.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        Box::pin(async move {
-            let Some(runner) = runner_opt else {
-                return Ok(());
-            };
-            if !runner.has_handlers("after_provider_response") {
-                return Ok(());
-            }
-            runner
-                .emit_after_provider_response(AfterProviderResponseEvent {
-                    status: response.status,
-                    headers: response.headers,
-                })
-                .await
+            Ok(Some(runner.emit_before_provider_request(payload).await))
         })
     });
 
@@ -443,11 +540,11 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
             let Some(runner) = runner_opt else {
                 return Ok(messages);
             };
-            runner.emit_context(messages).await
+            Ok(runner.emit_context(messages).await)
         })
     });
 
-    let get_api_key = Arc::new(move |_provider: &str| {
+    let get_api_key: pi_agent_core::types::GetApiKeyFn = Arc::new(move |_provider: String| {
         Box::pin(async move {
             Ok(if with_configured_auth {
                 Some("faux-key".to_string())
@@ -457,48 +554,30 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
         })
     });
 
-    let on_response_cb = Arc::clone(&on_response);
-    let stream_fn = Arc::new(move |req_model: Model, ctx, opts: Option<pi_ai::SimpleStreamOptions>| {
-        let cb = Arc::clone(&on_response_cb);
-        Box::pin(async move {
-            let mut next_opts = opts.unwrap_or_default();
-            if next_opts.base.on_response.is_none() {
-                next_opts.base.on_response = Some(cb);
-            }
-            Ok(stream_simple(&req_model, &ctx, Some(next_opts)))
-        })
-    });
-
     let agent = Agent::new(AgentOptions {
         get_api_key: Some(get_api_key),
-        stream_fn: Some(stream_fn),
+        stream_fn: None,
         initial_state: Some(AgentInitialState {
             model: Some(model.clone()),
             system_prompt: Some(String::new()),
             tools: Some(vec![]),
             ..Default::default()
         }),
-        convert_to_llm: Some(Arc::new(|msgs| convert_to_llm(&msgs))),
+        convert_to_llm: Some(Arc::new(|msgs| Box::pin(async move { Ok(convert_to_llm(&msgs)) }))),
         on_payload: Some(on_payload),
         transform_context: Some(transform_context),
         ..Default::default()
     });
 
-    let mut ext_inputs: Vec<TestExtensionInput> = Vec::new();
-    if let Some(inline_exts) = options.extension_factories {
-        ext_inputs.extend(inline_exts.into_iter().map(TestExtensionInput::Inline));
-    }
-    if let Some(test_exts) = options.test_extensions {
-        ext_inputs.extend(test_exts);
-    }
-    let extensions_result = if ext_inputs.is_empty() {
-        None
-    } else {
-        Some(create_test_extensions_result(&ext_inputs, &temp_dir).await)
+    let extensions_result = match options.extension_factories {
+        Some(inline_exts) if !inline_exts.is_empty() => {
+            Some(create_suite_extensions_result(&inline_exts, &temp_dir).await)
+        }
+        _ => None,
     };
     let resource_loader = options
         .resource_loader
-        .unwrap_or_else(|| create_test_resource_loader(extensions_result));
+        .unwrap_or_else(|| create_suite_resource_loader(extensions_result));
 
     let session = AgentSession::new(AgentSessionConfig {
         agent,
