@@ -3494,6 +3494,10 @@ pub enum ProviderModelConfig {
 #[async_trait]
 pub trait Extension: Send + Sync + 'static {
     async fn register(&self, pi: ExtensionApi) -> pi_js::Result<()>;
+
+    fn host_keepalive(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
 }
 
 #[async_trait]
@@ -3583,6 +3587,8 @@ pub struct LoadedExtension {
     pub commands: Arc<Mutex<IndexMap<String, RegisteredCommand>>>,
     pub flags: Arc<Mutex<IndexMap<String, ExtensionFlag>>>,
     pub shortcuts: Arc<Mutex<IndexMap<KeyId, ExtensionShortcut>>>,
+    /// Opaque runtime handle kept alive as long as the loaded extension is active (`None` on `ExtensionApi`).
+    pub host_keepalive: Arc<Mutex<Option<Arc<dyn Any + Send + Sync>>>>,
 }
 
 impl LoadedExtension {
@@ -3602,6 +3608,7 @@ impl LoadedExtension {
             commands: Arc::new(Mutex::new(IndexMap::new())),
             flags: Arc::new(Mutex::new(IndexMap::new())),
             shortcuts: Arc::new(Mutex::new(IndexMap::new())),
+            host_keepalive: Arc::new(Mutex::new(None)),
         }
     }
 }
