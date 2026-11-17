@@ -1,5 +1,7 @@
 # pi v1 port: state and how to restart
 
+> Historical checkpoint from 2026-10-02 recorded mid-port. The Rust port and workspace integration are now complete; see [../../AGENTS.md](../../AGENTS.md) and [../README.md](../README.md) for current state.
+
 This file describes the state of the port of pi v1 (TypeScript) to Rust (`keejkrej/pi-rs`) and Go (`keejkrej/pi-go`), and how to restart the work. The same file is in both repos, on branch `port/v1`.
 
 ## Goal and user decisions

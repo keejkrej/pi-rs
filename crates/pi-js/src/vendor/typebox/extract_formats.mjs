@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
-const dir = "C:/Users/ctyja/workspace/pi/node_modules/typebox/build/format/";
+const tsRoot = process.env.PI_TS_ROOT ?? "../pi";
+const dir = `${tsRoot}/node_modules/typebox/build/format/`;
 const files = [
 	"uri",
 	"email",

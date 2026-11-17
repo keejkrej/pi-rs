@@ -2,10 +2,13 @@
 // Run: node crates/pi-js/src/vendor/typebox/gen_vectors.mjs
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { Type } from "file:///C:/Users/ctyja/workspace/pi/node_modules/typebox/build/index.mjs";
-import { Compile } from "file:///C:/Users/ctyja/workspace/pi/node_modules/typebox/build/compile/index.mjs";
-import * as Value from "file:///C:/Users/ctyja/workspace/pi/node_modules/typebox/build/value/value.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const tsRoot = process.env.PI_TS_ROOT ?? "../pi";
+const typeboxBuildDir = join(tsRoot, "node_modules", "typebox", "build");
+const { Type } = await import(pathToFileURL(join(typeboxBuildDir, "index.mjs")).href);
+const { Compile } = await import(pathToFileURL(join(typeboxBuildDir, "compile", "index.mjs")).href);
+const Value = await import(pathToFileURL(join(typeboxBuildDir, "value", "value.mjs")).href);
 
 const builders = {
 	object_basic: () =>

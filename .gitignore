@@ -1,3 +1,10 @@
-target/
+/target
+/target-*
+/legacy/target
+/dist
+**/*.rs.bk
+.DS_Store
 /.idea
-/.DS_Store
+/.vscode
+*.swp
+/.claude/worktrees
