@@ -7,18 +7,22 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use pi_ai::types::UserContentBlock;
-use pi_coding_agent::core::extensions::mcp_wire::{
-    ModelRegistry, SessionManager, SourceInfo, SourceOrigin, SourceScope, create_event_bus,
-};
+use pi_coding_agent::core::event_bus::{EventBus, create_event_bus};
 use pi_coding_agent::core::extensions::{
-    AutocompleteProviderFactory, CustomUiFactory, EditorFactory, ExtensionActions, ExtensionContextActions,
-    ExtensionCustomOptions, ExtensionMode, ExtensionRunner, ExtensionUIContext, ExtensionUIDialogOptions,
-    ExtensionWidgetOptions, FooterFactory, HeaderFactory, NotifyType, SessionStartEvent, SessionStartReason,
-    SetThemeResult, SlashCommandInfo, SlashCommandSource, TerminalInputHandler, Theme, ThemeInfo, ToolCallEvent,
-    WidgetFactory, WorkingIndicatorOptions, load_extensions, wrap_registered_tool,
+    AfterProviderResponseEvent, AgentStartEvent, AutocompleteProviderFactory, BashToolCallEvent, CustomUiFactory,
+    EditorFactory, ExtensionActions, ExtensionContextActions, ExtensionCustomOptions, ExtensionMode, ExtensionRunner,
+    ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions, FooterFactory, HeaderFactory,
+    InputEventResult, InputSource, NotifyType, SessionShutdownEvent, SessionShutdownReason, SessionStartEvent,
+    SessionStartReason, SetThemeResult, SlashCommandInfo, SlashCommandSource, TerminalInputHandler, Theme, ThemeInfo,
+    ToolCallEvent, WidgetFactory, WorkingIndicatorOptions, WriteToolCallEvent, load_extensions, wrap_registered_tool,
 };
+use pi_coding_agent::core::model_registry::ModelRegistry;
+use pi_coding_agent::core::session_manager::SessionManager;
+use pi_coding_agent::core::source_info::{SourceInfo, SourceOrigin, SourceScope};
 use pi_coding_agent::core::tools::bash::BashToolInput;
+use pi_coding_agent::core::tools::write::WriteToolInput;
 use pi_js::Unsubscribe;
 use serde_json::Value;
 
@@ -74,6 +78,7 @@ struct RecordedUiState {
     select_calls: Vec<(String, Vec<String>)>,
     confirm_calls: Vec<(String, String)>,
     notifications: Vec<(String, Option<NotifyType>)>,
+    statuses: IndexMap<String, Option<String>>,
     select_responses: VecDeque<Option<String>>,
     confirm_responses: VecDeque<bool>,
 }
@@ -126,7 +131,13 @@ impl ExtensionUIContext for MockUiContext {
     fn on_terminal_input(&self, _handler: TerminalInputHandler) -> Unsubscribe {
         Unsubscribe::noop()
     }
-    fn set_status(&self, _key: &str, _text: Option<&str>) {}
+    fn set_status(&self, key: &str, text: Option<&str>) {
+        self.state
+            .lock()
+            .unwrap()
+            .statuses
+            .insert(key.to_string(), text.map(str::to_string));
+    }
     fn set_working_message(&self, _message: Option<&str>) {}
     fn set_working_visible(&self, _visible: bool) {}
     fn set_working_indicator(&self, _options: Option<WorkingIndicatorOptions>) {}
@@ -246,6 +257,7 @@ async fn executes_commands_ts_example_completions_and_ui_flow() {
             scope: SourceScope::Project,
             origin: SourceOrigin::TopLevel,
             base_dir: None,
+            changelog_path: None,
         },
     }]));
 
@@ -467,7 +479,7 @@ async fn executes_permission_gate_ts_example_blocking_and_confirmation() {
 async fn executes_event_bus_ts_example_session_start_and_emit_command() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
-    let bus = create_event_bus() as Arc<dyn pi_coding_agent::core::extensions::mcp_wire::EventBus>;
+    let bus = create_event_bus() as Arc<dyn EventBus>;
     let result = load_extensions(&[example_path("event-bus.ts")], cwd, Some(bus), None).await;
     assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
 
@@ -509,5 +521,313 @@ async fn executes_event_bus_ts_example_session_start_and_emit_command() {
     assert!(
         msgs.contains(&"Event from /emit command: hello world"),
         "missing /emit event: {msgs:?}"
+    );
+}
+
+#[tokio::test]
+async fn executes_protected_paths_ts_example() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let result = load_extensions(&[example_path("protected-paths.ts")], cwd, None, None).await;
+    assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
+
+    let runner = ExtensionRunner::new(
+        result.extensions,
+        result.runtime,
+        cwd,
+        SessionManager::default(),
+        ModelRegistry::default(),
+    );
+    let ui_state = Arc::new(Mutex::new(RecordedUiState::default()));
+    runner.set_ui_context(
+        Some(Arc::new(MockUiContext {
+            state: Arc::clone(&ui_state),
+        })),
+        ExtensionMode::Tui,
+    );
+
+    let mut env_write = ToolCallEvent::Write(WriteToolCallEvent {
+        tool_call_id: "w1".to_string(),
+        parent_tool_call_id: None,
+        input: WriteToolInput {
+            path: "/tmp/project/.env".to_string(),
+            content: "SECRET=1".to_string(),
+        },
+    });
+    let env_res = runner.emit_tool_call(&mut env_write).await.unwrap().expect("blocked");
+    assert_eq!(env_res.block, Some(true));
+    assert_eq!(
+        env_res.reason.as_deref(),
+        Some(r#"Path "/tmp/project/.env" is protected"#)
+    );
+
+    let mut git_write = ToolCallEvent::Write(WriteToolCallEvent {
+        tool_call_id: "w2".to_string(),
+        parent_tool_call_id: None,
+        input: WriteToolInput {
+            path: "/tmp/project/.git/config".to_string(),
+            content: String::new(),
+        },
+    });
+    let git_res = runner.emit_tool_call(&mut git_write).await.unwrap().expect("blocked");
+    assert_eq!(git_res.block, Some(true));
+
+    let mut safe_write = ToolCallEvent::Write(WriteToolCallEvent {
+        tool_call_id: "w3".to_string(),
+        parent_tool_call_id: None,
+        input: WriteToolInput {
+            path: "/tmp/project/src/main.rs".to_string(),
+            content: "fn main() {}".to_string(),
+        },
+    });
+    assert_eq!(runner.emit_tool_call(&mut safe_write).await.unwrap(), None);
+
+    let st = ui_state.lock().unwrap();
+    assert_eq!(st.notifications.len(), 2);
+    assert_eq!(st.notifications[0].1, Some(NotifyType::Warning));
+    assert!(st.notifications[0].0.contains("/tmp/project/.env"));
+}
+
+#[tokio::test]
+async fn executes_provider_payload_ts_example() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    std::fs::create_dir_all(dir.path().join(".pi")).unwrap();
+
+    let result = load_extensions(&[example_path("provider-payload.ts")], cwd, None, None).await;
+    assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
+
+    let runner = ExtensionRunner::new(
+        result.extensions,
+        result.runtime,
+        cwd,
+        SessionManager::default(),
+        ModelRegistry::default(),
+    );
+
+    let payload = serde_json::json!({ "model": "claude-sonnet-4", "temperature": 0.5 });
+    let out = runner.emit_before_provider_request(payload.clone()).await;
+    assert_eq!(out, payload);
+
+    let mut headers = IndexMap::new();
+    headers.insert("x-request-id".to_string(), "req-42".to_string());
+    runner.emit(AfterProviderResponseEvent { status: 200, headers }).await;
+
+    let log_content = std::fs::read_to_string(dir.path().join(".pi/provider-payload.log")).unwrap();
+    assert!(log_content.contains("\"claude-sonnet-4\""), "log={log_content}");
+    assert!(
+        log_content.contains(r#"[200] {"x-request-id":"req-42"}"#),
+        "log={log_content}"
+    );
+}
+
+#[tokio::test]
+async fn executes_system_prompt_header_ts_example() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let result = load_extensions(&[example_path("system-prompt-header.ts")], cwd, None, None).await;
+    assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
+
+    let runner = ExtensionRunner::new(
+        result.extensions,
+        result.runtime,
+        cwd,
+        SessionManager::default(),
+        ModelRegistry::default(),
+    );
+    let mut ctx_actions = default_ctx_actions();
+    ctx_actions.get_system_prompt = Arc::new(|| "Custom system prompt!".to_string());
+    runner.bind_core(default_actions(Arc::new(Mutex::new(Vec::new()))), ctx_actions, None);
+
+    let ui_state = Arc::new(Mutex::new(RecordedUiState::default()));
+    runner.set_ui_context(
+        Some(Arc::new(MockUiContext {
+            state: Arc::clone(&ui_state),
+        })),
+        ExtensionMode::Tui,
+    );
+
+    runner.emit(AgentStartEvent {}).await;
+    {
+        let st = ui_state.lock().unwrap();
+        assert_eq!(
+            st.statuses.get("system-prompt").and_then(|v| v.as_deref()),
+            Some("System: 21 chars")
+        );
+    }
+
+    runner
+        .emit(SessionShutdownEvent {
+            reason: SessionShutdownReason::Quit,
+            target_session_file: None,
+        })
+        .await;
+    {
+        let st = ui_state.lock().unwrap();
+        assert_eq!(st.statuses.get("system-prompt"), Some(&None));
+    }
+}
+
+#[tokio::test]
+async fn executes_input_transform_ts_example() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let result = load_extensions(&[example_path("input-transform.ts")], cwd, None, None).await;
+    assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
+
+    let runner = ExtensionRunner::new(
+        result.extensions,
+        result.runtime,
+        cwd,
+        SessionManager::default(),
+        ModelRegistry::default(),
+    );
+    let ui_state = Arc::new(Mutex::new(RecordedUiState::default()));
+    runner.set_ui_context(
+        Some(Arc::new(MockUiContext {
+            state: Arc::clone(&ui_state),
+        })),
+        ExtensionMode::Tui,
+    );
+
+    let passthrough = runner.emit_input("hello", None, InputSource::Interactive, None).await;
+    assert_eq!(passthrough, InputEventResult::Continue);
+
+    let ext_skip = runner
+        .emit_input("?quick ignored", None, InputSource::Extension, None)
+        .await;
+    assert_eq!(ext_skip, InputEventResult::Continue);
+
+    let transformed = runner
+        .emit_input("?quick What is Rust?", None, InputSource::Interactive, None)
+        .await;
+    assert_eq!(
+        transformed,
+        InputEventResult::Transform {
+            text: "Respond briefly in 1-2 sentences: What is Rust?".to_string(),
+            images: None,
+        }
+    );
+
+    let empty_quick = runner
+        .emit_input("?quick   ", None, InputSource::Interactive, None)
+        .await;
+    assert_eq!(empty_quick, InputEventResult::Handled);
+
+    let ping = runner.emit_input("PING", None, InputSource::Interactive, None).await;
+    assert_eq!(ping, InputEventResult::Handled);
+
+    let st = ui_state.lock().unwrap();
+    assert_eq!(
+        st.notifications,
+        vec![
+            ("Usage: ?quick <question>".to_string(), Some(NotifyType::Warning)),
+            ("pong".to_string(), Some(NotifyType::Info)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn executes_js_mjs_and_cjs_extensions_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+
+    let js_path = dir.path().join("plain.js");
+    std::fs::write(
+        &js_path,
+        r#"export default function(pi) {
+            pi.on("tool_call", async (ev) => {
+                if (ev.toolName === "bash" && ev.input.command === "block-js") {
+                    return { block: true, reason: "blocked by js" };
+                }
+            });
+        }"#,
+    )
+    .unwrap();
+
+    let mjs_path = dir.path().join("esm.mjs");
+    std::fs::write(
+        &mjs_path,
+        r#"import { Type } from "typebox";
+        export default function(pi) {
+            pi.registerTool({
+                name: "mjs_ping",
+                label: "MJS Ping",
+                description: "Returns pong",
+                parameters: Type.Object({ msg: Type.String() }),
+                async execute(_id, params) {
+                    return { content: [{ type: "text", text: "mjs:" + params.msg }] };
+                }
+            });
+        }"#,
+    )
+    .unwrap();
+
+    let cjs_path = dir.path().join("legacy.cjs");
+    std::fs::write(
+        &cjs_path,
+        r#"module.exports = function(pi) {
+            pi.on("input", async (ev) => {
+                if (ev.text === "cjs") {
+                    return { action: "transform", text: "cjs-transformed" };
+                }
+                return { action: "continue" };
+            });
+        };"#,
+    )
+    .unwrap();
+
+    let paths = vec![
+        js_path.to_string_lossy().into_owned(),
+        mjs_path.to_string_lossy().into_owned(),
+        cjs_path.to_string_lossy().into_owned(),
+    ];
+    let result = load_extensions(&paths, cwd, None, None).await;
+    assert_eq!(result.errors, vec![], "load errors: {:?}", result.errors);
+    assert_eq!(result.extensions.len(), 3);
+
+    let runner = ExtensionRunner::new(
+        result.extensions,
+        result.runtime,
+        cwd,
+        SessionManager::default(),
+        ModelRegistry::default(),
+    );
+    runner.bind_core(
+        default_actions(Arc::new(Mutex::new(Vec::new()))),
+        default_ctx_actions(),
+        None,
+    );
+
+    let mut ev = ToolCallEvent::Bash(BashToolCallEvent {
+        tool_call_id: "b1".to_string(),
+        parent_tool_call_id: None,
+        input: BashToolInput {
+            command: "block-js".to_string(),
+            timeout: None,
+        },
+    });
+    let res = runner.emit_tool_call(&mut ev).await.unwrap().expect("blocked");
+    assert_eq!(res.block, Some(true));
+    assert_eq!(res.reason.as_deref(), Some("blocked by js"));
+
+    let tools = runner.get_all_registered_tools();
+    assert_eq!(tools.len(), 1);
+    let agent_tool = wrap_registered_tool(&tools[0], &runner);
+    let out = (agent_tool.execute)("call-mjs".to_string(), serde_json::json!({ "msg": "ok" }), None, None)
+        .await
+        .expect("execute mjs_ping");
+    let UserContentBlock::Text(t) = &out.content[0] else {
+        panic!("expected text block");
+    };
+    assert_eq!(t.text, "mjs:ok");
+
+    let transformed = runner.emit_input("cjs", None, InputSource::Interactive, None).await;
+    assert_eq!(
+        transformed,
+        InputEventResult::Transform {
+            text: "cjs-transformed".to_string(),
+            images: None,
+        }
     );
 }

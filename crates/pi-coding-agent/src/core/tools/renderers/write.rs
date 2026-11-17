@@ -5,10 +5,10 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderContext};
-use crate::core::tools::mcp_wire::format_path_relative_to_cwd_or_absolute;
 use crate::core::tools::render_utils::{shorten_path, str_val};
+use crate::core::tools::renderers::w3b_wire::{get_language_from_path, highlight_code, key_hint};
 use crate::core::tools::renderers::{extract_text_output, format_preview_lines, reuse_or_init_text};
-use crate::core::tools::w3b_wire::{get_language_from_path, highlight_code, key_hint};
+use crate::utils::paths::format_path_relative_to_cwd_or_absolute;
 
 const WRITE_PREVIEW_LINES: usize = 10;
 

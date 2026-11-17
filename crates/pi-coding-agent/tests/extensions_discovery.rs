@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use pi_coding_agent::config::CONFIG_DIR_NAME;
 use pi_coding_agent::core::extensions::discover_and_load_extensions;
-use pi_coding_agent::core::extensions::mcp_wire::CONFIG_DIR_NAME_WIRE;
 
 fn setup_dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -330,7 +330,7 @@ async fn resolves_dependencies_from_extension_own_node_modules_and_local_config_
     .unwrap();
 
     // Also test .pi/extensions local discovery + renderer registration
-    let local_pi_ext = root.join(CONFIG_DIR_NAME_WIRE).join("extensions");
+    let local_pi_ext = root.join(*CONFIG_DIR_NAME).join("extensions");
     fs::create_dir_all(&local_pi_ext).unwrap();
     let _ = ext_dir;
     fs::write(

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use pi_coding_agent::core::extensions::mcp_wire::{EventBus, create_event_bus}; // WIRE(@mcp-w3)
+use pi_coding_agent::core::event_bus::{EventBus, create_event_bus};
 use pi_coding_agent::core::extensions::{
     Extension, ExtensionApi, ExtensionFactory, FlagOptions, FlagType, FlagValue, ProviderConfig,
     create_extension_runtime, load_extension_from_factory,
@@ -69,7 +69,7 @@ async fn discards_runtime_changes_and_disables_the_failed_api() {
     let failing: ExtensionFactory = Arc::new(SyncFactory(move |pi: &ExtensionApi| {
         *captured_api_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(pi.clone());
         let calls = Arc::clone(&event_calls_clone);
-        let _ = pi.events().on(
+        let _ = pi.events().on_sync(
             "factory-failure",
             Arc::new(move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);

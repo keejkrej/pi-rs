@@ -9,8 +9,7 @@ pub mod tool;
 
 use std::sync::Arc;
 
-use crate::core::extensions::types::mcp_wire::CodemodeMode;
-use crate::core::extensions::types::{ExtensionApi, ExtensionFactory};
+use crate::core::extensions::types::{CodemodeMode, ExtensionApi, ExtensionFactory};
 use crate::extensions::codemode::tool::{CodemodeModelRuntime, CodemodeToolOptions, create_codemode_tool_definition};
 
 #[derive(Clone, Default)]

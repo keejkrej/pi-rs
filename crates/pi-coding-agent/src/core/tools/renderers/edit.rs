@@ -6,10 +6,10 @@ use serde_json::Value;
 
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderContext};
 use crate::core::tools::edit::EditToolDetails;
-use crate::core::tools::mcp_wire::format_path_relative_to_cwd_or_absolute;
 use crate::core::tools::render_utils::{shorten_path, str_val};
+use crate::core::tools::renderers::w3b_wire::render_diff;
 use crate::core::tools::renderers::{extract_text_output, reuse_or_init_text};
-use crate::core::tools::w3b_wire::render_diff;
+use crate::utils::paths::format_path_relative_to_cwd_or_absolute;
 
 pub fn render_call() -> RenderCallFn {
     Arc::new(|args: Value, theme, context: ToolRenderContext| {

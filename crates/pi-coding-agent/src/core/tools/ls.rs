@@ -184,7 +184,7 @@ pub fn create_ls_tool_definition(cwd: &str, options: Option<LsToolOptions>) -> T
                 let raw_limit = params.get("limit").cloned();
                 let mut clean_params = params;
                 if let Value::Object(ref mut map) = clean_params {
-                    map.remove("limit");
+                    map.shift_remove("limit");
                 }
                 let input: LsToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid ls parameters: {e}")))?;

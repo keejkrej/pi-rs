@@ -63,8 +63,7 @@ struct TestExtSpec {
     error: Option<String>,
 }
 
-/// Simulates JS/TS extension loading via `ExtensionLoaderHost` until the QuickJS/jiti runtime
-/// (// WIRE(@codemode-w3)) lands in `core/extensions/`.
+/// Scripted mock `ExtensionLoaderHost` that counts disk loads per path for cache & trust tests.
 struct ScriptedExtensionHost {
     fallback: BasicExtensionLoaderHost,
     specs_by_filename: Mutex<IndexMap<String, TestExtSpec>>,
@@ -433,7 +432,7 @@ async fn supports_no_flags_additional_paths_and_missing_diagnostics() {
     );
     ResourceFixture::write_file_rel(&fx.cwd, "AGENTS.md", "Project agents");
 
-    let cli_ext = ResourceFixture::write_file_rel(&fx.cwd, "cli-ext.ts", "");
+    let cli_ext = ResourceFixture::write_file_rel(&fx.cwd, "cli-ext.ts", "export default function() {}");
     let cli_skill = ResourceFixture::write_file_rel(
         &fx.cwd,
         "cli-skill/SKILL.md",

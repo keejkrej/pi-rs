@@ -89,13 +89,13 @@ use crate::core::tools::edit_diff::{
     normalize_to_lf,
 };
 use crate::core::tools::file_mutation_queue::with_file_mutation_queue;
-use crate::core::tools::mcp_wire::split_bom;
 use crate::core::tools::path_utils::resolve_to_cwd;
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
     BuiltinToolDefSpec, build_builtin_tool_definition, format_edit_access_error, resolve_effective_cwd,
     strict_prefer_sampling, wrap_tool_definition,
 };
+use crate::utils::text::split_bom;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolSystemPromptContribution {
@@ -164,7 +164,7 @@ pub fn prepare_edit_arguments(args: Value) -> Value {
         obj.get("oldText").is_some_and(Value::is_string) && obj.get("newText").is_some_and(Value::is_string);
 
     if has_legacy_pair {
-        if let (Some(old_text), Some(new_text)) = (obj.remove("oldText"), obj.remove("newText")) {
+        if let (Some(old_text), Some(new_text)) = (obj.shift_remove("oldText"), obj.shift_remove("newText")) {
             let mut item = Map::new();
             item.insert("oldText".to_string(), old_text);
             item.insert("newText".to_string(), new_text);

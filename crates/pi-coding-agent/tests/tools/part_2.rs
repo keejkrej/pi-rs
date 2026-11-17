@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use pi_agent_core::types::AgentToolResult;
 use pi_ai::types::UserContentBlock;
+use pi_coding_agent::core::bash_executor::{BashExecutorOptions, execute_bash_with_operations};
 use pi_coding_agent::core::extensions::types::{
-    ExtensionContext, ExtensionContextBackend, ExtensionMode, ExtensionToolContext, ExtensionUIContext,
+    CustomMessageContent, CustomMessageDraft, ExtensionContext, ExtensionContextBackend, ExtensionMode,
+    ExtensionToolContext, ExtensionUIContext, ModelRegistry, ReadonlySessionManager, ScopedModel,
 };
+use pi_coding_agent::core::tools::bash::testing::override_get_shell_config;
 use pi_coding_agent::core::tools::bash::{
     BashExecOptions, BashExecResult, BashOperations, BashToolDetails, BashToolOptions, create_bash_tool,
     create_bash_tool_definition, create_bash_tool_definition_with_shell, create_local_bash_operations,
@@ -18,11 +21,11 @@ use pi_coding_agent::core::tools::find::{
 };
 use pi_coding_agent::core::tools::grep::{GrepToolDetails, create_grep_tool, create_grep_tool_definition};
 use pi_coding_agent::core::tools::ls::create_ls_tool_definition;
-use pi_coding_agent::core::tools::mcp_wire::{self, CommandTransport, ShellConfig, get_shell_config};
 use pi_coding_agent::core::tools::read::create_read_tool_definition;
 use pi_coding_agent::core::tools::truncate::{TruncationOptions, truncate_head};
 use pi_coding_agent::core::tools::wrap_tool_definition;
 use pi_coding_agent::core::tools::write::create_write_tool_definition;
+use pi_coding_agent::utils::shell::{CommandTransport, ShellConfig, get_shell_config};
 use pi_js::BoxFuture;
 use pi_js::env::testing::EnvGuard;
 use serde_json::{Value, json};
@@ -166,16 +169,16 @@ impl ExtensionContextBackend for CwdOnlyBackend {
     fn cwd(&self) -> String {
         self.cwd.clone()
     }
-    fn session_manager(&self) -> pi_coding_agent::core::extensions::types::mcp_wire::ReadonlySessionManager {
+    fn session_manager(&self) -> ReadonlySessionManager {
         Default::default()
     }
-    fn model_registry(&self) -> pi_coding_agent::core::extensions::types::mcp_wire::ModelRegistry {
+    fn model_registry(&self) -> ModelRegistry {
         Default::default()
     }
     fn model(&self) -> Option<pi_ai::types::Model> {
         None
     }
-    fn scoped_models(&self) -> Vec<pi_coding_agent::core::extensions::types::mcp_wire::ScopedModel> {
+    fn scoped_models(&self) -> Vec<ScopedModel> {
         Vec::new()
     }
     fn thinking_level(&self) -> Option<pi_agent_core::types::ThinkingLevel> {
@@ -262,13 +265,13 @@ impl ExtensionContextBackend for CwdOnlyBackend {
     }
     fn send_message(
         &self,
-        _: pi_coding_agent::core::extensions::types::mcp_wire::CustomMessageDraft,
+        _: CustomMessageDraft,
         _: Option<pi_coding_agent::core::extensions::types::SendMessageOptions>,
     ) {
     }
     fn send_user_message(
         &self,
-        _: pi_coding_agent::core::extensions::types::mcp_wire::CustomMessageContent,
+        _: CustomMessageContent,
         _: Option<pi_coding_agent::core::extensions::types::SendUserMessageOptions>,
     ) {
     }
@@ -489,7 +492,7 @@ async fn bash_tool_spawn_errors_shell_path_stdin_prefix_utf8_and_long_line_n1206
 
     // Spawn error ENOENT via shell config override
     {
-        let _guard = mcp_wire::testing::override_get_shell_config(Arc::new(|_| {
+        let _guard = override_get_shell_config(Arc::new(|_| {
             Ok(ShellConfig {
                 shell: "/nonexistent-shell-path-xyz123".to_string(),
                 args: vec!["-c".to_string()],
@@ -517,7 +520,7 @@ async fn bash_tool_spawn_errors_shell_path_stdin_prefix_utf8_and_long_line_n1206
 
     // Stdin command transport (legacy WSL bash -s)
     {
-        let _guard = mcp_wire::testing::override_get_shell_config(Arc::new(|_| {
+        let _guard = override_get_shell_config(Arc::new(|_| {
             Ok(ShellConfig {
                 shell: "/bin/sh".to_string(),
                 args: vec!["-c".to_string(), "cat".to_string()],
@@ -1143,7 +1146,35 @@ async fn built_in_tools_use_ctx_cwd_when_provided() {
     assert!(get_text_output(&r_bash).contains(canon_dir.to_string_lossy().as_ref()));
 }
 
-// WIRE(@mcp-w3 / @w3-b): executeBashWithOperations sanitization/truncation (#815/#849) and
-// ToolExecutionComponent text-only model image warning renderer test enable after merge.
-#[cfg(any())]
-mod pending_wire_tests {}
+#[tokio::test]
+#[serial]
+async fn execute_bash_with_operations_sanitizes_ansi_and_persists_line_truncated_output() {
+    let dir = TempDir::new().unwrap();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let ops = create_local_bash_operations();
+
+    // Preserves executeBash sanitization when using local bash operations
+    let sanitized = execute_bash_with_operations(
+        "printf '\\033[31mred\\033[0m\\r\\n'",
+        &cwd,
+        ops.as_ref(),
+        Some(BashExecutorOptions::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sanitized.exit_code, Some(0));
+    assert_eq!(sanitized.output, "red\n");
+
+    // Persists full output when truncation happens by line count only
+    let truncated = execute_bash_with_operations("seq 3000", &cwd, ops.as_ref(), None)
+        .await
+        .unwrap();
+    assert!(truncated.truncated);
+    let full_path = truncated.full_output_path.expect("full_output_path");
+    assert!(std::path::Path::new(&full_path).exists(), "missing {full_path}");
+    let full_output = std::fs::read_to_string(&full_path).unwrap();
+    assert!(full_output.contains("1\n2\n3"));
+    assert!(full_output.contains("2998\n2999\n3000"));
+}
+
+// WIRE(@w3-b): ToolExecutionComponent text-only model image warning renderer test awaits Stage 3B.

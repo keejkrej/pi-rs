@@ -53,13 +53,15 @@ use tokio::process::Command;
 
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::tools::edit::ToolSystemPromptContribution;
-use crate::core::tools::mcp_wire::{ManagedTool, Minimatch, ensure_tool, get_shell_env};
 use crate::core::tools::path_utils::resolve_to_cwd;
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
     BuiltinToolDefSpec, build_builtin_tool_definition, resolve_effective_cwd, wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, TruncationOptions, format_size, truncate_head};
+use crate::utils::shell::get_shell_env;
+use crate::utils::tools_manager::{ManagedTool, ToolStatus, ensure_tool};
+use crate::vendor::minimatch::{Minimatch, MinimatchOptions};
 
 const DEFAULT_FIND_LIMIT: usize = 1000;
 
@@ -198,7 +200,7 @@ impl FindOperations for LocalFindOperations {
         let raw_pattern = pattern.to_string();
         let search_path = cwd.to_string();
         Box::pin(async move {
-            let Some(fd_bin) = ensure_tool(ManagedTool::Fd, true).await? else {
+            let Some(fd_bin) = ensure_tool(ManagedTool::Fd, None::<fn(ToolStatus)>).await else {
                 return Err(pi_js::Error::msg(
                     "fd binary not found. Please install fd or ensure it is available in ~/.pi/agent/bin.",
                 ));
@@ -298,10 +300,17 @@ impl FindOperations for LocalFindOperations {
                 .map(|rel| rel.trim_end_matches('/').to_string())
                 .collect();
 
-            if is_win32 && let Ok(matcher) = Minimatch::new(&clean_pattern, true) {
+            if is_win32 {
+                let matcher = Minimatch::new(
+                    &clean_pattern,
+                    MinimatchOptions {
+                        dot: true,
+                        ..Default::default()
+                    },
+                );
                 results.retain(|r| {
                     let base = r.rsplit('/').next().unwrap_or(r.as_str());
-                    matcher.is_match(base) || matcher.is_match(r)
+                    matcher.match_str(base) || matcher.match_str(r)
                 });
             }
 
@@ -398,7 +407,7 @@ pub fn create_find_tool_definition(cwd: &str, options: Option<FindToolOptions>) 
                 let raw_limit = params.get("limit").cloned();
                 let mut clean_params = params;
                 if let Value::Object(ref mut map) = clean_params {
-                    map.remove("limit");
+                    map.shift_remove("limit");
                 }
                 let input: FindToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid find parameters: {e}")))?;

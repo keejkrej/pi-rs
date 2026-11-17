@@ -19,11 +19,6 @@ pub mod truncate;
 pub mod write;
 // @generated-mods end
 
-#[doc(hidden)]
-pub mod mcp_wire;
-#[doc(hidden)]
-pub mod w3b_wire;
-
 use std::sync::LazyLock;
 
 use indexmap::{IndexMap, IndexSet};

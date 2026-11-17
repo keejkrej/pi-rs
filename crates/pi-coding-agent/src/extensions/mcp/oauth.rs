@@ -1,16 +1,15 @@
 //! Port of packages/coding-agent/src/extensions/mcp/oauth.ts
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use sha2::{Digest, Sha256};
 
-use crate::core::extensions::types::mcp_wire::mcp_namespace;
-use crate::extensions::wire::{
-    APP_NAME, AuthStorageBackend, FileAuthStorageBackend, acquire_lock_async, auth_with_lock, get_agent_dir,
-};
+use crate::config::{APP_NAME, get_agent_dir};
+use crate::core::auth_storage::{AuthStorageBackend, FileAuthStorageBackend, LockResult};
+use crate::core::mcp_servers::mcp_namespace;
+use crate::vendor::proper_lockfile::{LockOptions, LockRelease, RetryOptions, lock};
 use pi_ai::utils::oauth_page::{oauth_error_html, oauth_success_html};
 use pi_js::abort::{AbortController, AbortReason, AbortSignal};
 use pi_js::{BoxFuture, Error, Result};
@@ -22,11 +21,49 @@ use pi_mcp::oauth::{
     step_up_scope,
 };
 use pi_mcp::{AuthProvider, McpFetch, UnauthorizedContext};
+use serde_json::Value;
 
 const CALLBACK_HOST: &str = "127.0.0.1";
 const FALLBACK_REDIRECT_URL: &str = "http://127.0.0.1/callback";
 const REFRESH_SKEW_MS: i64 = 30_000;
 const REFRESH_REQUEST_TIMEOUT_MS: u64 = 15_000;
+
+fn auth_with_lock<T, F>(backend: &dyn AuthStorageBackend, mut f: F) -> Result<T>
+where
+    F: FnMut(Option<&str>) -> Result<(T, Option<String>)>,
+{
+    let mut out: Option<T> = None;
+    backend.with_lock_dyn(&mut |current| {
+        let (result, next) = f(current)?;
+        out = Some(result);
+        Ok(match next {
+            Some(content) => LockResult::write(Value::Null, content),
+            None => LockResult::unchanged(Value::Null),
+        })
+    })?;
+    out.ok_or_else(|| Error::msg("Auth lock callback did not return a result"))
+}
+
+async fn acquire_refresh_lock_async(lock_dir: &str, hash: &str) -> Result<LockRelease> {
+    let lockfile_path = pi_js::path::join(&[lock_dir, &format!("mcp-auth-refresh-{hash}.lock")]);
+    lock(
+        lock_dir,
+        LockOptions {
+            stale: Some(30_000),
+            realpath: Some(false),
+            lockfile_path: Some(lockfile_path),
+            retries: Some(RetryOptions {
+                retries: 25,
+                factor: 1.5,
+                min_timeout: 20,
+                max_timeout: 1_000,
+                randomize: true,
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct McpOAuthSettings {
@@ -246,17 +283,20 @@ impl McpOAuthCredentialStore {
             )
         };
         let _in_proc_guard = in_proc_mutex.lock().await;
-        let _dir_guard = if let Some(ref lock_dir) = self.lock_dir {
+        let lock_release = if let Some(ref lock_dir) = self.lock_dir {
             std::fs::create_dir_all(lock_dir).map_err(|e| Error::from_io(e, "mkdir", Some(lock_dir), None))?;
             let mut hasher = Sha256::new();
             hasher.update(key.as_bytes());
             let hash = &hex::encode(hasher.finalize())[..16];
-            let lock_path = PathBuf::from(lock_dir).join(format!("mcp-auth-refresh-{hash}"));
-            Some(acquire_lock_async(&lock_path, None).await?)
+            Some(acquire_refresh_lock_async(lock_dir, hash).await?)
         } else {
             None
         };
-        f().await
+        let res = f().await;
+        if let Some(release) = lock_release {
+            let _ = release.release().await;
+        }
+        res
     }
 }
 

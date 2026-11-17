@@ -264,16 +264,16 @@ impl crate::core::extensions::types::ExtensionContextBackend for NoopStandaloneB
     fn cwd(&self) -> String {
         String::new()
     }
-    fn session_manager(&self) -> crate::core::extensions::types::mcp_wire::ReadonlySessionManager {
+    fn session_manager(&self) -> crate::core::session_manager::ReadonlySessionManager {
         Default::default()
     }
-    fn model_registry(&self) -> crate::core::extensions::types::mcp_wire::ModelRegistry {
+    fn model_registry(&self) -> crate::core::model_registry::ModelRegistry {
         Default::default()
     }
     fn model(&self) -> Option<pi_ai::types::Model> {
         None
     }
-    fn scoped_models(&self) -> Vec<crate::core::extensions::types::mcp_wire::ScopedModel> {
+    fn scoped_models(&self) -> Vec<crate::core::model_resolver::ScopedModel> {
         Vec::new()
     }
     fn thinking_level(&self) -> Option<pi_agent_core::types::ThinkingLevel> {
@@ -360,13 +360,13 @@ impl crate::core::extensions::types::ExtensionContextBackend for NoopStandaloneB
     }
     fn send_message(
         &self,
-        _message: crate::core::extensions::types::mcp_wire::CustomMessageDraft,
+        _message: crate::core::extensions::types::CustomMessageDraft,
         _options: Option<crate::core::extensions::types::SendMessageOptions>,
     ) {
     }
     fn send_user_message(
         &self,
-        _content: crate::core::extensions::types::mcp_wire::CustomMessageContent,
+        _content: crate::core::messages::CustomMessageContent,
         _options: Option<crate::core::extensions::types::SendUserMessageOptions>,
     ) {
     }

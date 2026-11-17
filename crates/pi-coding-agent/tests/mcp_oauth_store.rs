@@ -2,9 +2,8 @@
 
 use std::sync::Arc;
 
+use pi_coding_agent::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend, LockResult};
 use pi_coding_agent::extensions::mcp::oauth::McpOAuthCredentialStore;
-// WIRE(@mcp-w3): switch to crate::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend, auth_with_lock} once landed
-use pi_coding_agent::extensions::wire::{AuthStorageBackend, InMemoryAuthStorageBackend, auth_with_lock};
 use pi_mcp::oauth::{McpOAuthState, OAuthTokens};
 use serde_json::{Value, json};
 
@@ -30,7 +29,8 @@ fn state(access_token: &str) -> McpOAuthState {
 }
 
 fn stored_keys(backend: &InMemoryAuthStorageBackend) -> Vec<String> {
-    let raw = auth_with_lock(backend, |current| Ok((current.map(String::from), None)))
+    let raw = backend
+        .with_lock(|current| Ok(LockResult::unchanged(current.map(String::from))))
         .expect("read in-memory backend")
         .unwrap_or_else(|| "{}".to_string());
     let val = pi_js::json::parse(&raw).unwrap_or(Value::Null);
@@ -102,7 +102,9 @@ async fn keeps_separate_credentials_for_servers_sharing_a_server_url() {
 async fn moves_credentials_stored_by_server_url_to_the_first_server_that_loads_them() {
     let backend = Arc::new(InMemoryAuthStorageBackend::new());
     let seed = pi_js::json::stringify(&json!({ SERVER_URL: state("legacy-token") }));
-    auth_with_lock(backend.as_ref(), |_| Ok(((), Some(seed.clone())))).expect("seed backend");
+    backend
+        .with_lock(|_| Ok(LockResult::write((), seed.clone())))
+        .expect("seed backend");
     let store = McpOAuthCredentialStore::new(Some(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>), None);
 
     // Reading tokens does not take the legacy state over.
@@ -145,7 +147,9 @@ async fn moves_credentials_stored_by_server_url_to_the_first_server_that_loads_t
 fn signs_out_of_credentials_stored_by_server_url() {
     let backend = Arc::new(InMemoryAuthStorageBackend::new());
     let seed = pi_js::json::stringify(&json!({ SERVER_URL: state("legacy-token") }));
-    auth_with_lock(backend.as_ref(), |_| Ok(((), Some(seed.clone())))).expect("seed backend");
+    backend
+        .with_lock(|_| Ok(LockResult::write((), seed.clone())))
+        .expect("seed backend");
     let store = McpOAuthCredentialStore::new(Some(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>), None);
 
     assert!(store.remove("work", SERVER_URL));

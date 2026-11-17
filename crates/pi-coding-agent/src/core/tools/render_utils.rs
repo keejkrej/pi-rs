@@ -4,7 +4,9 @@ use pi_tui::terminal_image::{get_capabilities, get_image_dimensions, hyperlink, 
 use serde_json::Value;
 
 use crate::core::extensions::types::Theme;
-use crate::core::extensions::types::mcp_wire::{resolve_path_wire, sanitize_binary_output_wire, strip_ansi_wire};
+use crate::utils::ansi::strip_ansi;
+use crate::utils::paths::{PathInputOptions, resolve_path};
+use crate::utils::shell::sanitize_binary_output;
 
 const COLLAPSED_ARGS_CHARS: usize = 100;
 
@@ -24,8 +26,14 @@ pub fn link_path(styled_text: &str, raw_path: &str, cwd: &str) -> String {
     if !get_capabilities().hyperlinks {
         return styled_text.to_string();
     }
-    // WIRE(@mcp-w3): switch to crate::utils::paths::resolve_path
-    let absolute_path = resolve_path_wire(raw_path, cwd);
+    let absolute_path = resolve_path(
+        raw_path,
+        Some(cwd),
+        PathInputOptions {
+            strip_at_prefix: Some(true),
+            ..Default::default()
+        },
+    );
     let url = url::Url::from_file_path(&absolute_path)
         .map(|u| u.to_string())
         .unwrap_or_else(|()| format!("file://{absolute_path}"));
@@ -56,8 +64,7 @@ pub fn get_text_output(content: &[Value], show_images: bool) -> String {
         let kind = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if kind == "text" {
             let txt = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            // WIRE(@mcp-w3): switch to crate::utils::ansi::strip_ansi & crate::utils::shell::sanitize_binary_output
-            let clean = sanitize_binary_output_wire(&strip_ansi_wire(txt)).replace('\r', "");
+            let clean = sanitize_binary_output(&strip_ansi(txt)).replace('\r', "");
             text_parts.push(clean);
         } else if kind == "image" {
             let mime = c.get("mimeType").and_then(|v| v.as_str()).unwrap_or("image/unknown");

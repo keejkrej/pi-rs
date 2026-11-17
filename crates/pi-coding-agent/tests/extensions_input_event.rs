@@ -5,8 +5,8 @@ use std::fs;
 
 use pi_ai::types::ImageContent;
 use pi_coding_agent::core::extensions::{
-    ExtensionRunner, InputDeliveryBehavior, InputEventResult, InputSource, discover_and_load_extensions,
-    mcp_wire::{ModelRegistry, SessionManager},
+    ExtensionRunner, InputDeliveryBehavior, InputEventResult, InputSource, ModelRegistry, SessionManager,
+    discover_and_load_extensions,
 };
 
 async fn create_runner(extensions: &[&str]) -> (tempfile::TempDir, ExtensionRunner) {

@@ -7,15 +7,15 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::extensions::types::mcp_wire::CodemodeMode;
+use crate::config::get_docs_path;
 use crate::core::extensions::types::{
-    ConstrainedSamplingOption, ToolDefinition, ToolExposure, ToolLoadoutBackend, ToolLoadoutChanges, ToolNamespace,
+    CodemodeMode, ConstrainedSamplingOption, ToolDefinition, ToolExposure, ToolLoadoutBackend, ToolLoadoutChanges,
+    ToolNamespace,
 };
 use crate::core::tools::tool_definition_wrapper::wrap_tool_definition;
 use crate::extensions::codemode::execute_lazy::execute_codemode_lazy;
 use crate::extensions::codemode::renderer::{codemode_render_call, codemode_render_result};
 use crate::extensions::tool_search::tool::resolve_schema_ref;
-use crate::extensions::wire::get_docs_path;
 use pi_agent_core::AgentTool;
 use pi_ai::{ConstrainedSamplingConfig, GrammarFormat};
 use pi_codemode::declarations::{
@@ -53,7 +53,6 @@ pub struct CodemodeStoreEntryData {
 }
 
 /// The part of the model registry that scripts reach through `models`.
-// WIRE(@mcp-w3): wire to ModelRegistry once ModelRegistryBackend adds typed lookup/classify/image methods
 #[async_trait]
 pub trait CodemodeModelRuntime: Send + Sync {
     fn get_models_of_type(&self, model_type: &str, provider: Option<&str>) -> Vec<Value>;

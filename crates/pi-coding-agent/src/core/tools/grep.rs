@@ -59,7 +59,6 @@ use tokio::process::Command;
 
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::tools::edit::ToolSystemPromptContribution;
-use crate::core::tools::mcp_wire::{ManagedTool, ensure_tool, get_shell_env};
 use crate::core::tools::path_utils::resolve_to_cwd;
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
@@ -68,6 +67,8 @@ use crate::core::tools::tool_definition_wrapper::{
 use crate::core::tools::truncate::{
     DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH, TruncationOptions, format_size, truncate_head, truncate_line,
 };
+use crate::utils::shell::get_shell_env;
+use crate::utils::tools_manager::{ManagedTool, ToolStatus, ensure_tool};
 
 const DEFAULT_GREP_LIMIT: usize = 100;
 
@@ -249,8 +250,8 @@ pub fn create_grep_tool_definition(cwd: &str, options: Option<GrepToolOptions>) 
                 let raw_context = params.get("context").cloned();
                 let mut clean_params = params;
                 if let Value::Object(ref mut map) = clean_params {
-                    map.remove("limit");
-                    map.remove("context");
+                    map.shift_remove("limit");
+                    map.shift_remove("context");
                 }
                 let input: GrepToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid grep parameters: {e}")))?;
@@ -258,7 +259,7 @@ pub fn create_grep_tool_definition(cwd: &str, options: Option<GrepToolOptions>) 
                 let effective_limit = parse_effective_limit(raw_limit.as_ref(), DEFAULT_GREP_LIMIT);
                 let effective_context = parse_effective_context(raw_context.as_ref());
 
-                let Some(rg_bin) = ensure_tool(ManagedTool::Rg, true).await? else {
+                let Some(rg_bin) = ensure_tool(ManagedTool::Rg, None::<fn(ToolStatus)>).await else {
                     return Err(pi_js::Error::msg(
                         "ripgrep (rg) binary not found. Please install rg or ensure it is available in ~/.pi/agent/bin.",
                     ));

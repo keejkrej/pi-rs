@@ -42,19 +42,18 @@ pub struct ReadToolOptions {
 }
 
 use std::io::Cursor;
+use std::sync::LazyLock;
 
 use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, ImageFormat};
 use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::types::{ImageContent, ModelModality, TextContent, UserContentBlock};
+use pi_js::seam::{Guard, Slot};
 use pi_js::vendor::typebox::{Schema, t};
 use serde_json::{Value, json};
 
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::tools::edit::ToolSystemPromptContribution;
-use crate::core::tools::mcp_wire::{
-    ResizeImageOptions, detect_supported_image_mime_type_from_file, format_dimension_note, resize_image,
-};
 use crate::core::tools::path_utils::resolve_read_path;
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
@@ -62,6 +61,22 @@ use crate::core::tools::tool_definition_wrapper::{
     wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncatedBy, format_size, truncate_head};
+pub use crate::utils::image_resize::ImageResizeOptions as ResizeImageOptions;
+use crate::utils::image_resize::{ResizedImage, format_dimension_note, resize_image as real_resize_image};
+use crate::utils::mime::detect_supported_image_mime_type_from_file;
+
+pub type ResizeImageOverrideFn =
+    Arc<dyn Fn(ImageContent, ResizeImageOptions) -> BoxFuture<pi_js::Result<Option<ResizedImage>>> + Send + Sync>;
+static RESIZE_IMAGE_SLOT: LazyLock<Slot<ResizeImageOverrideFn>> = LazyLock::new(Slot::new);
+
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    pub fn override_resize_image(func: ResizeImageOverrideFn) -> Guard {
+        RESIZE_IMAGE_SLOT.set(Arc::new(func))
+    }
+}
 
 struct LocalReadOperations;
 
@@ -82,7 +97,11 @@ impl ReadOperations for LocalReadOperations {
 
     fn detect_image_mime_type(&self, absolute_path: &str) -> BoxFuture<pi_js::Result<Option<String>>> {
         let path = absolute_path.to_string();
-        Box::pin(async move { detect_supported_image_mime_type_from_file(&path).await })
+        Box::pin(async move {
+            detect_supported_image_mime_type_from_file(&path)
+                .await
+                .map(|opt| opt.map(str::to_owned))
+        })
     }
 }
 
@@ -154,16 +173,16 @@ fn convert_bmp_to_png(bytes: &[u8]) -> Result<Vec<u8>, pi_js::Error> {
 
 fn apply_model_image_resize_options(opts: &mut ResizeImageOptions, src: &ModelImageResizeOptions) {
     if let Some(w) = src.max_width {
-        opts.max_width = w as u32;
+        opts.max_width = Some(w as u32);
     }
     if let Some(h) = src.max_height {
-        opts.max_height = h as u32;
+        opts.max_height = Some(h as u32);
     }
     if let Some(b) = src.max_bytes {
-        opts.max_bytes = b as usize;
+        opts.max_bytes = Some(b as usize);
     }
     if let Some(q) = src.jpeg_quality {
-        opts.jpeg_quality = q as u8;
+        opts.jpeg_quality = Some(q as u8);
     }
 }
 
@@ -200,8 +219,13 @@ async fn finish_image_read(
 
     let (final_data, final_mime, omitted) = if auto_resize_images {
         let resize_opts = resolve_resize_options(ctx, tool_resize_options);
-        let raw_img = ImageContent::new(encoded, mime_type);
-        match resize_image(raw_img, resize_opts).await? {
+        let resized = if let Some(func) = RESIZE_IMAGE_SLOT.get() {
+            let raw_img = ImageContent::new(encoded.clone(), mime_type);
+            func(raw_img, resize_opts).await?
+        } else {
+            real_resize_image(bytes, mime_type, Some(resize_opts)).await
+        };
+        match resized {
             Some(resized) => {
                 if let Some(dim) = format_dimension_note(&resized) {
                     notes.push(dim);
@@ -305,6 +329,19 @@ pub fn create_read_tool_definition(cwd: &str, options: Option<ReadToolOptions>) 
                     let buffer = ops.read_file(&absolute_path).await?;
                     if signal.as_ref().is_some_and(|s| s.aborted()) {
                         return Err(pi_js::Error::msg("Operation aborted"));
+                    }
+                    if mime_type == "image/bmp"
+                        && let Ok(png_bytes) = convert_bmp_to_png(&buffer)
+                    {
+                        return finish_image_read(
+                            &png_bytes,
+                            "image/png",
+                            Some("[Image converted from image/bmp to image/png.]"),
+                            auto_resize_images,
+                            &ctx,
+                            tool_resize_options.as_ref(),
+                        )
+                        .await;
                     }
                     return finish_image_read(
                         &buffer,

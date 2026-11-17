@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::core::extensions::types::{ExtensionCommandContext, NotifyType, Theme, mcp_wire::KeybindingsManager};
+use crate::core::extensions::types::{ExtensionCommandContext, KeybindingsManager, NotifyType, Theme};
 use crate::extensions::wire::{DynamicBorder, get_select_list_theme, key_hint};
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result, Unsubscribe};

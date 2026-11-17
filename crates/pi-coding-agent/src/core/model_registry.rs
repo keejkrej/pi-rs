@@ -68,6 +68,10 @@ impl ModelRegistry {
         Self { runtime }
     }
 
+    pub fn in_memory() -> Self {
+        Self::new(ModelRuntime::in_memory())
+    }
+
     pub fn runtime(&self) -> &ModelRuntime {
         &self.runtime
     }
@@ -279,5 +283,11 @@ impl ModelRegistry {
 
     pub fn get_registered_provider_ids(&self) -> Vec<String> {
         self.runtime.get_registered_provider_ids()
+    }
+}
+
+impl Default for ModelRegistry {
+    fn default() -> Self {
+        Self::in_memory()
     }
 }

@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::core::extensions::types::mcp_wire::{ModelRegistry, SessionEntry};
-use crate::core::extensions::types::{ExecuteToolOptions, ExtensionToolContext};
+use crate::core::extensions::types::{ExecuteToolOptions, ExtensionToolContext, ModelRegistry, SessionEntry};
+use crate::core::usage_totals::combine_usage;
 use crate::extensions::codemode::tool::{
     CODEMODE_STORE_ENTRY_TYPE, CodemodeModelRuntime, CodemodeNestedCall, CodemodeNestedCallStatus,
     CodemodeStoreEntryData, CodemodeToolDetails, CodemodeToolInput, CodemodeToolOptions, codemode_docs_path,
@@ -18,9 +18,13 @@ use crate::extensions::codemode::tool::{
 use crate::extensions::tool_search::tool::{
     Bm25Ranker, DEFAULT_TOOL_SEARCH_LIMIT, ToolSearchDocumentInput, create_tool_search_document,
 };
-use crate::extensions::wire::combine_usage;
 use pi_agent_core::{AgentTool, AgentToolCallOutcome, AgentToolResult};
-use pi_ai::{ImageContent, TextContent, Usage, UserContentBlock};
+use pi_ai::models::{ModelsClassifierOptions, ModelsImagesOptions};
+use pi_ai::types::{
+    AnyModel, ClassifierContext, ClassifierModel, ClassifierOptions, ImageModel, ImagesContext, ImagesOptions,
+    ModelType,
+};
+use pi_ai::{AuthOperationOptions, ImageContent, TextContent, Usage, UserContentBlock};
 use pi_codemode::declarations::{render_tool_sample, to_codemode_identifier};
 use pi_codemode::runtime::host::CodemodeSandbox;
 use pi_codemode::source::parse_codemode_source;
@@ -95,7 +99,7 @@ fn to_provider(value: Option<&Value>) -> Result<Option<String>> {
 /// Drop `headers` because models.json headers can carry credentials.
 fn redact_model_headers(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
-        obj.remove("headers");
+        obj.shift_remove("headers");
     }
     value
 }
@@ -283,13 +287,13 @@ fn check_images_context(context: Option<&Value>) -> Result<Value> {
 pub fn read_codemode_store(branch: &[SessionEntry]) -> IndexMap<String, Value> {
     let mut store = IndexMap::new();
     for entry in branch {
-        if entry.r#type != "custom" {
+        let SessionEntry::Custom(custom) = entry else {
+            continue;
+        };
+        if custom.custom_type != CODEMODE_STORE_ENTRY_TYPE {
             continue;
         }
-        if entry.fields.get("customType").and_then(Value::as_str) != Some(CODEMODE_STORE_ENTRY_TYPE) {
-            continue;
-        }
-        let Some(data) = entry.fields.get("data") else {
+        let Some(ref data) = custom.data else {
             continue;
         };
         let Ok(parsed) = pi_js::json::parse_as::<CodemodeStoreEntryData>(&pi_js::json::stringify(data)) else {
@@ -597,21 +601,31 @@ fn create_discovery_globals(
     vec![search_tools, describe_tool, describe_namespace]
 }
 
-// WIRE(@mcp-w3): delegate classifier and image calls to ModelRegistry once ModelRegistryBackend supports get_models_of_type/classify/generate_images
+fn parse_model_type(model_type: &str) -> Option<ModelType> {
+    match model_type {
+        "chat" => Some(ModelType::Chat),
+        "image" => Some(ModelType::Image),
+        "classifier" => Some(ModelType::Classifier),
+        _ => None,
+    }
+}
+
+fn any_model_to_value(model: &AnyModel) -> Option<Value> {
+    pi_js::json::parse(&pi_js::json::stringify(model)).ok()
+}
+
 struct RegistryCodemodeModelRuntime(ModelRegistry);
 
 #[async_trait]
 impl CodemodeModelRuntime for RegistryCodemodeModelRuntime {
     fn get_models_of_type(&self, model_type: &str, provider: Option<&str>) -> Vec<Value> {
-        if model_type != "chat" {
+        let Some(ty) = parse_model_type(model_type) else {
             return Vec::new();
-        }
+        };
         self.0
-            .0
-            .get_available_models()
-            .into_iter()
-            .filter(|m| provider.is_none_or(|p| m.provider == p))
-            .filter_map(|m| pi_js::json::parse(&pi_js::json::stringify(&m)).ok())
+            .get_models_of_type(ty, provider)
+            .iter()
+            .filter_map(any_model_to_value)
             .collect()
     }
 
@@ -619,36 +633,53 @@ impl CodemodeModelRuntime for RegistryCodemodeModelRuntime {
         &self,
         model_type: &str,
         provider: Option<&str>,
-        _signal: Option<AbortSignal>,
+        signal: Option<AbortSignal>,
     ) -> Result<Vec<Value>> {
-        if model_type != "chat" {
+        let Some(ty) = parse_model_type(model_type) else {
             return Ok(Vec::new());
-        }
-        Ok(self.get_models_of_type("chat", provider))
+        };
+        let opts = signal.map(|s| AuthOperationOptions { signal: Some(s) });
+        Ok(self
+            .0
+            .get_available_of_type(ty, provider, opts)
+            .await?
+            .iter()
+            .filter_map(any_model_to_value)
+            .collect())
     }
 
     fn get_model_of_type(&self, model_type: &str, provider: &str, id: &str) -> Option<Value> {
-        if model_type != "chat" {
-            return None;
-        }
+        let ty = parse_model_type(model_type)?;
         self.0
-            .0
-            .get_available_models()
-            .into_iter()
-            .find(|m| m.provider == provider && m.id == id)
-            .and_then(|m| pi_js::json::parse(&pi_js::json::stringify(&m)).ok())
+            .get_model_of_type(ty, provider, id)
+            .as_ref()
+            .and_then(any_model_to_value)
     }
 
-    async fn classify(&self, _model: Value, _context: Value, _signal: Option<AbortSignal>) -> Result<Value> {
-        Err(Error::msg(
-            "Classifier model execution requires ModelRegistryBackend typed classify support",
-        ))
+    async fn classify(&self, model: Value, context: Value, signal: Option<AbortSignal>) -> Result<Value> {
+        let parsed_model: ClassifierModel = pi_js::json::parse_as(&pi_js::json::stringify(&model))?;
+        let parsed_ctx: ClassifierContext = pi_js::json::parse_as(&pi_js::json::stringify(&context))?;
+        let mut base = ClassifierOptions::default();
+        base.base.signal = signal;
+        let opts = ModelsClassifierOptions {
+            base,
+            transform_headers: None,
+        };
+        let res = self.0.classify(&parsed_model, &parsed_ctx, Some(opts)).await;
+        pi_js::json::parse(&pi_js::json::stringify(&res))
     }
 
-    async fn generate_images(&self, _model: Value, _context: Value, _signal: Option<AbortSignal>) -> Result<Value> {
-        Err(Error::msg(
-            "Image generation requires ModelRegistryBackend typed generate_images support",
-        ))
+    async fn generate_images(&self, model: Value, context: Value, signal: Option<AbortSignal>) -> Result<Value> {
+        let parsed_model: ImageModel = pi_js::json::parse_as(&pi_js::json::stringify(&model))?;
+        let parsed_ctx: ImagesContext = pi_js::json::parse_as(&pi_js::json::stringify(&context))?;
+        let mut base = ImagesOptions::default();
+        base.base.signal = signal;
+        let opts = ModelsImagesOptions {
+            base,
+            transform_headers: None,
+        };
+        let res = self.0.generate_images(&parsed_model, &parsed_ctx, Some(opts)).await;
+        pi_js::json::parse(&pi_js::json::stringify(&res))
     }
 }
 

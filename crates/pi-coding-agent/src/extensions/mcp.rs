@@ -22,12 +22,12 @@ use futures::future::Shared;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::Value;
 
-use crate::core::extensions::types::mcp_wire::{ModelRegistry, RegisteredMcpServer};
+use crate::config::get_agent_dir;
 use crate::core::extensions::types::{
     BeforeAgentStartEvent, BeforeAgentStartEventResult, CommandHandlerFn, ExtensionApi, ExtensionCommandContext,
-    ExtensionContext, ExtensionFactory, ExtensionMode, ExtensionUIDialogOptions, McpServersChangeEvent, NotifyType,
-    RegisteredCommandOptions, SessionShutdownEvent, SessionStartEvent, ToolCallEvent, ToolCallEventResult,
-    ToolDefinition, ToolExposure, ToolNamespace, TurnStartEvent,
+    ExtensionContext, ExtensionFactory, ExtensionMode, ExtensionUIDialogOptions, McpServersChangeEvent, ModelRegistry,
+    NotifyType, RegisteredCommandOptions, RegisteredMcpServer, SessionShutdownEvent, SessionStartEvent, ToolCallEvent,
+    ToolCallEventResult, ToolDefinition, ToolExposure, ToolNamespace, TurnStartEvent,
 };
 use crate::extensions::codemode::tool::{CODEMODE_TOOL_NAME, is_codemode_tool};
 use crate::extensions::mcp::config::{
@@ -50,7 +50,7 @@ use crate::extensions::mcp::tools::{
 };
 use crate::extensions::mcp::ui::{McpMenu, McpSubscribeFn, McpUi, show_mcp_manager};
 use crate::extensions::tool_search::tool::{TOOL_SEARCH_TOOL_NAME, is_tool_search_tool};
-use crate::extensions::wire::{get_agent_dir, open_browser};
+use crate::utils::open_browser::open_browser;
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Error, Result, Unsubscribe};
 use pi_tui::autocomplete::AutocompleteItem;
@@ -537,7 +537,7 @@ impl McpManager {
     fn new(pi: ExtensionApi, options: McpExtensionOptions) -> Arc<Self> {
         let open_url: McpOpenUrlFn = options.open_url.clone().unwrap_or_else(|| {
             Arc::new(|url| {
-                let _ = open_browser(url);
+                open_browser(url);
             })
         });
         let update_config: McpUpdateConfigFn = options
@@ -654,7 +654,6 @@ impl McpManager {
                 entry: McpServerEntry {
                     name,
                     config,
-                    auth_provider: None,
                     source: extension_path,
                     scope: Some(crate::extensions::mcp::config::McpScope::Extension),
                 },
@@ -1005,13 +1004,7 @@ impl McpManager {
                 let provider = provider.to_string();
                 Box::pin(async move {
                     let reg = reg?;
-                    // WIRE(@mcp-w3): switch to ModelRegistry::get_api_key_for_provider once landed in types.rs
-                    let model = reg
-                        .0
-                        .get_available_models()
-                        .into_iter()
-                        .find(|m| m.provider == provider)?;
-                    reg.0.get_api_key(&model).await.ok().flatten()
+                    reg.get_api_key_for_provider(&provider).await
                 })
             }));
 
@@ -2036,7 +2029,6 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                             .collect()
                     };
                     let section = render_servers_section(&listings);
-                    // WIRE(@mcp-w3): BeforeAgentStartEvent applies mutated sections to system prompt once runner lands
                     if let Ok(mut opts) = event.system_prompt_options.lock() {
                         if let Some(sec) = section {
                             opts.sections.insert(MCP_SERVERS_SECTION.to_string(), sec);

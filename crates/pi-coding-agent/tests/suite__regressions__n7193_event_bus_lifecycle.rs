@@ -69,8 +69,8 @@ async fn removes_extension_owned_event_bus_listeners_on_reload_and_dispose() {
 
     assert_eq!(emit().await, (1, 1));
 
-    // WIRE(@ca-cli-w3, @codemode-w3): once `core::extensions::loader` and `AgentSession::{bind_extensions, reload, dispose}`
-    // land, test automatic extension-owned event-bus unsubscription on session reload and stale `firstApi.getCommands()` error.
+    // WIRE(@ca-cli-w3): once `AgentSession::{bind_extensions, reload, dispose}`
+    // lands, test automatic extension-owned event-bus unsubscription on session reload and stale `firstApi.getCommands()` error.
     if let Some(unsub) = unsub_holder.lock().expect("lock").take() {
         unsub.call();
     }

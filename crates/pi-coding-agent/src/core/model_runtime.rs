@@ -321,6 +321,19 @@ impl ModelRuntime {
         runtime
     }
 
+    pub fn in_memory() -> Self {
+        let base_credentials: Arc<dyn CredentialStore + Send + Sync> = Arc::new(DefaultAuthStorage::in_memory(None));
+        let credentials = Arc::new(RuntimeCredentials::new(base_credentials));
+        Self::from_parts(
+            credentials,
+            ModelConfig::default(),
+            None,
+            Arc::new(InMemoryCodingAgentModelsStore::new()),
+            Vec::new(),
+            false,
+        )
+    }
+
     pub async fn create(options: CreateModelRuntimeOptions) -> Result<Self> {
         let base_credentials: Arc<dyn CredentialStore + Send + Sync> = match options.credentials {
             Some(c) => c,

@@ -7,11 +7,14 @@ use serde_json::Value;
 
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderContext};
 use crate::core::tools::bash::BashToolDetails;
-use crate::core::tools::mcp_wire::now_epoch_ms;
 use crate::core::tools::render_utils::{replace_tabs, str_val};
+use crate::core::tools::renderers::w3b_wire::key_hint;
 use crate::core::tools::renderers::{extract_text_output, reuse_or_init_text};
 use crate::core::tools::truncate::format_size;
-use crate::core::tools::w3b_wire::key_hint;
+
+fn now_epoch_ms() -> u64 {
+    pi_js::time::now_ms().max(0) as u64
+}
 
 const BASH_PREVIEW_LINES: usize = 5;
 

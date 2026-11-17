@@ -220,12 +220,27 @@ impl AuthInteraction for ScriptedInteraction {
     fn notify(&self, _event: AuthEvent) {}
 }
 
-#[test]
-fn exposes_default_url_and_builds_extension_factory() {
+#[tokio::test]
+async fn exposes_default_url_and_builds_extension_factory() {
     assert_eq!(LLAMA_PROVIDER_ID, "llama.cpp");
     assert_eq!(DEFAULT_LLAMA_SERVER_URL, "http://127.0.0.1:9931");
-    let _factory = create_llama_extension();
-    // WIRE(@codemode): test pi.register_command("llama") & register_native_provider once core::extensions::loader lands
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rt = pi_coding_agent::core::extensions::create_extension_runtime();
+    let bus = pi_coding_agent::core::event_bus::create_event_bus();
+    let ext = pi_coding_agent::core::extensions::load_extension_from_factory(
+        create_llama_extension(),
+        &dir.path().to_string_lossy(),
+        bus,
+        rt.clone(),
+        Some("builtin:llama.cpp"),
+    )
+    .await
+    .expect("load llama extension");
+
+    assert!(ext.commands.lock().unwrap().contains_key("llama"));
+    let native = rt.inner.pending_native_provider_registrations.lock().unwrap();
+    assert!(native.iter().any(|p| p.provider.id() == LLAMA_PROVIDER_ID));
 }
 
 #[test]

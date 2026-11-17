@@ -11,7 +11,8 @@ use pi_js::BoxFuture;
 use pi_js::vendor::typebox::{Schema, compile, t, value as tb_value};
 use serde_json::Value;
 
-use crate::core::extensions::types::mcp_wire::{ExecOptions, ExecResult, exec_command_wire, get_agent_dir_wire};
+use crate::config::get_agent_dir;
+use crate::core::exec::{ExecOptions, ExecResult, exec_command};
 use crate::core::tools::truncate::{
     TruncationOptions, format_size, truncate_head, truncate_line, truncate_middle, truncate_tail,
 };
@@ -164,7 +165,7 @@ pub(crate) fn install_host_globals(
                     "arch" => vm_c.new_string(pi_js::env::arch()),
                     "release" => vm_c.new_string(&pi_js::env::os_release()),
                     "pid" => vm_c.new_number(pi_js::env::pid() as f64),
-                    "agentDir" => vm_c.new_string(&get_agent_dir_wire()),
+                    "agentDir" => vm_c.new_string(&get_agent_dir()),
                     _ => vm_c.undefined(),
                 }
             }),
@@ -566,7 +567,7 @@ pub(crate) fn install_host_globals(
                     .unwrap_or_else(pi_js::env::cwd);
                 let timeout = opts_val.get("timeout").and_then(|v| v.as_u64());
                 let fut: BoxFuture<pi_js::Result<HostJsResult>> = Box::pin(async move {
-                    let res = exec_command_wire(
+                    let res = exec_command(
                         &cmd,
                         &argv,
                         &cwd,
@@ -576,7 +577,7 @@ pub(crate) fn install_host_globals(
                             cwd: Some(cwd.clone()),
                         }),
                     )
-                    .await?;
+                    .await;
                     Ok(HostJsResult::ExecResult(res))
                 });
                 bridge_c.push_async(&vm_c, fut)

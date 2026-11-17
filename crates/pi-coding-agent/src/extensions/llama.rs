@@ -59,24 +59,28 @@ fn parse_hugging_face_model(value: &str) -> (String, Option<String>) {
     }
 }
 
-// WIRE(@mcp-w3): query ctx.base.model_registry().get_provider_auth(LLAMA_PROVIDER_ID) once ModelRegistryBackend exposes get_provider_auth/refresh
 async fn configured_client(ctx: &ExtensionCommandContext) -> Result<Option<LlamaClient>> {
-    let env_url = pi_js::env::var("LLAMA_BASE_URL").unwrap_or_default();
-    let trimmed = pi_js::str16::trim(&env_url);
-    if trimmed.is_empty() {
+    let Some(result) = ctx.base.model_registry()?.get_provider_auth(LLAMA_PROVIDER_ID).await? else {
         ctx.base.ui()?.notify(
             &format!("Configure llama.cpp with /login {LLAMA_PROVIDER_ID}"),
             Some(NotifyType::Warning),
         );
         return Ok(None);
-    }
-    let server_url = normalize_llama_server_url(trimmed)?;
-    let api_key = pi_js::env::var("LLAMA_API_KEY").filter(|k| !k.is_empty());
-    Ok(Some(LlamaClient::new(&server_url, api_key.as_deref())?))
+    };
+    let configured_url = result
+        .env
+        .as_ref()
+        .and_then(|env| env.get("LLAMA_BASE_URL"))
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .or(result.auth.base_url.as_deref())
+        .unwrap_or("");
+    let server_url = normalize_llama_server_url(configured_url)?;
+    Ok(Some(LlamaClient::new(&server_url, result.auth.api_key.as_deref())?))
 }
 
 async fn sync_catalog(
-    _ctx: &ExtensionCommandContext,
+    ctx: &ExtensionCommandContext,
     provider: &LlamaProviderController,
     client: &LlamaClient,
     catalog: Option<Vec<LlamaModelInfo>>,
@@ -88,13 +92,28 @@ async fn sync_catalog(
             client
                 .list(ListOptions {
                     reload: false,
-                    signal: Some(signal),
+                    signal: Some(signal.clone()),
                 })
                 .await?
         }
     };
     provider.set_catalog(&current, &client.server_url, SetCatalogOptions::default())?;
-    // WIRE(@mcp-w3): trigger ctx.base.model_registry().refresh({ providers: [LLAMA_PROVIDER_ID], allowNetwork: true, signal }) once ModelRegistryBackend exposes refresh
+    let result = ctx
+        .base
+        .model_registry()?
+        .refresh(Some(pi_ai::models::ModelsRefreshOptions {
+            providers: Some(vec![LLAMA_PROVIDER_ID.to_string()]),
+            allow_network: Some(true),
+            signal: Some(signal),
+            force: None,
+        }))
+        .await?;
+    if result.aborted {
+        return Err(Error::msg("Model catalog refresh timed out."));
+    }
+    if let Some(err) = result.errors.get(LLAMA_PROVIDER_ID) {
+        return Err(Error::msg(err.to_string()));
+    }
     Ok(current)
 }
 

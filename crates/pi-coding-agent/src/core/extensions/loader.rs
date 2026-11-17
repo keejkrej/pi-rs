@@ -25,17 +25,30 @@ use pi_tui::tui::Component;
 use serde_json::Value;
 
 use super::jiti_loader::{transpile_ts_to_js, wrap_commonjs_if_needed};
-use super::types::mcp_wire::{
-    CONFIG_DIR_NAME_WIRE, EventBus, ExecOptions, McpServerRegistry, create_event_bus, create_synthetic_source_info,
-    get_agent_dir_wire, get_synthetic_path_source, is_synthetic_path, read_pi_manifest_wire, resolve_path_wire,
-};
 use super::types::{
-    Extension, ExtensionApi, ExtensionApiInner, ExtensionCommandContext, ExtensionContext, ExtensionFactory,
-    ExtensionLoadState, ExtensionRuntime, ExtensionRuntimeInner, ExtensionToolContext, FlagOptions, FlagType,
-    FlagValue, LoadExtensionErrorEntry, LoadExtensionWarningEntry, LoadExtensionsResult, LoadedExtension,
-    ProviderConfig, RegisteredCommandOptions, RenderShell, ShortcutOptions, ToolAnnotations, ToolDefinition,
-    ToolExposure, ToolNamespace,
+    CustomMessageContent, CustomMessageDraft, EventBus, ExecOptions, Extension, ExtensionApi, ExtensionApiInner,
+    ExtensionCommandContext, ExtensionContext, ExtensionFactory, ExtensionLoadState, ExtensionRuntime,
+    ExtensionRuntimeInner, ExtensionToolContext, FlagOptions, FlagType, FlagValue, LoadExtensionErrorEntry,
+    LoadExtensionWarningEntry, LoadExtensionsResult, LoadedExtension, LocalEventBus, McpServerRegistry, ModelRegistry,
+    ProviderConfig, ReadonlySessionManager, RegisteredCommandOptions, RenderShell, ScopedModel, ShortcutOptions,
+    SyntheticSourceOptions, ToolAnnotations, ToolDefinition, ToolExposure, ToolNamespace, create_synthetic_source_info,
+    get_synthetic_path_source, is_synthetic_path,
 };
+use crate::config::{CONFIG_DIR_NAME, get_agent_dir};
+use crate::core::model_registry::ResolvedRequestAuth;
+use crate::core::pi_manifest::read_pi_manifest;
+use crate::utils::paths::{PathInputOptions, canonicalize_path, paths_equal, resolve_path};
+
+fn resolve_ext_path(input: &str, base_dir: &str) -> String {
+    resolve_path(
+        input,
+        Some(base_dir),
+        PathInputOptions {
+            strip_at_prefix: Some(true),
+            ..Default::default()
+        },
+    )
+}
 use super::virtual_modules::{
     HostJsResult, PendingHostTask, VmHostBridge, install_host_globals, is_virtual_module, resolve_virtual_module,
 };
@@ -97,10 +110,13 @@ pub fn clear_extension_cache() {
 }
 
 fn use_extension_cache_cwd(cwd: &str) -> ExtensionCacheToken {
-    // WIRE(@mcp-w3): switch resolve_path_wire -> crate::utils::paths::resolve_path & canonicalize/paths_equal
-    let resolved_cwd = resolve_path_wire(cwd, &pi_js::env::cwd());
+    let resolved_cwd = canonicalize_path(&resolve_ext_path(cwd, &pi_js::env::cwd()));
     let mut cache = EXTENSION_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.cwd.as_deref().is_some_and(|prev| prev != resolved_cwd) {
+    if cache
+        .cwd
+        .as_deref()
+        .is_some_and(|prev| !paths_equal(prev, &resolved_cwd))
+    {
         cache.entries.clear();
         cache.cwd = None;
         cache.generation += 1;
@@ -276,7 +292,16 @@ fn create_extension(extension_path: &str, resolved_path: &str) -> LoadedExtensio
             .and_then(|p| p.to_str())
             .map(|s| s.to_string())
     };
-    let source_info = create_synthetic_source_info(extension_path, source, None, None, base_dir);
+    let source_info = create_synthetic_source_info(
+        extension_path,
+        SyntheticSourceOptions {
+            source,
+            scope: None,
+            origin: None,
+            base_dir,
+            changelog_path: None,
+        },
+    );
     LoadedExtension::new(extension_path, resolved_path, source_info)
 }
 
@@ -313,7 +338,7 @@ pub async fn load_extension_from_factory(
     extension_path: Option<&str>,
 ) -> pi_js::Result<LoadedExtension> {
     let ext_path = extension_path.unwrap_or("<inline>");
-    let resolved_cwd = resolve_path_wire(cwd, &pi_js::env::cwd());
+    let resolved_cwd = resolve_ext_path(cwd, &pi_js::env::cwd());
     initialize_extension(&factory, ext_path, ext_path, &resolved_cwd, event_bus, runtime).await
 }
 
@@ -1532,7 +1557,7 @@ impl QuickJsExtensionVm {
                     .map(|h| self.vm.to_json_value(h))
                     .transpose()?
                     .unwrap_or(Value::Null);
-                let draft: super::types::mcp_wire::CustomMessageDraft = serde_json::from_value(msg_val)
+                let draft: CustomMessageDraft = serde_json::from_value(msg_val)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid sendMessage payload: {e}")))?;
                 let opts = if opts_val.is_null() {
                     None
@@ -1551,7 +1576,7 @@ impl QuickJsExtensionVm {
                     .map(|h| self.vm.to_json_value(h))
                     .transpose()?
                     .unwrap_or(Value::Null);
-                let content: super::types::mcp_wire::CustomMessageContent = serde_json::from_value(content_val)
+                let content: CustomMessageContent = serde_json::from_value(content_val)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid sendUserMessage content: {e}")))?;
                 let opts = if opts_val.is_null() {
                     None
@@ -1746,7 +1771,7 @@ impl QuickJsExtensionVm {
                 };
                 let fn_id = self.store_fn_handle(fn_h.clone())?;
                 let vm_weak = Arc::downgrade(self);
-                let unsub = api.events().on(
+                let unsub = api.events().on_sync(
                     &channel,
                     Arc::new(move |data| {
                         let Some(vm_arc) = vm_weak.upgrade() else {
@@ -1909,7 +1934,7 @@ impl QuickJsExtensionVm {
 
             // modelRegistry accessors
             "mr_getAvailable" => {
-                let models = base_ctx.model_registry()?.0.get_available_models();
+                let models = base_ctx.model_registry()?.get_available();
                 self.vm
                     .from_json_value(&serde_json::to_value(&models).unwrap_or(Value::Array(vec![])))
             }
@@ -1922,9 +1947,11 @@ impl QuickJsExtensionVm {
                     serde_json::from_value(model_val).map_err(|e| pi_js::Error::msg(format!("Invalid model: {e}")))?;
                 let mr = base_ctx.model_registry()?;
                 let fut: BoxFuture<pi_js::Result<HostJsResult>> = Box::pin(async move {
-                    match mr.0.get_api_key(&model).await? {
-                        Some(k) => Ok(HostJsResult::Json(Value::String(k))),
-                        None => Ok(HostJsResult::Undefined),
+                    match mr.get_api_key_and_headers(&model).await {
+                        ResolvedRequestAuth::Ok { api_key: Some(k), .. } => Ok(HostJsResult::Json(Value::String(k))),
+                        ResolvedRequestAuth::Ok { api_key: None, .. } | ResolvedRequestAuth::Err { .. } => {
+                            Ok(HostJsResult::Undefined)
+                        }
                     }
                 });
                 self.bridge.push_async(&self.vm, fut)
@@ -2823,16 +2850,16 @@ impl super::types::ExtensionContextBackend for TrustContextAdapter {
     fn cwd(&self) -> String {
         self.0.cwd.clone()
     }
-    fn session_manager(&self) -> super::types::mcp_wire::ReadonlySessionManager {
+    fn session_manager(&self) -> ReadonlySessionManager {
         Default::default()
     }
-    fn model_registry(&self) -> super::types::mcp_wire::ModelRegistry {
+    fn model_registry(&self) -> ModelRegistry {
         Default::default()
     }
     fn model(&self) -> Option<Model> {
         None
     }
-    fn scoped_models(&self) -> Vec<super::types::mcp_wire::ScopedModel> {
+    fn scoped_models(&self) -> Vec<ScopedModel> {
         Vec::new()
     }
     fn thinking_level(&self) -> Option<pi_agent_core::types::ThinkingLevel> {
@@ -2922,14 +2949,8 @@ impl super::types::ExtensionContextBackend for TrustContextAdapter {
             }
         })
     }
-    fn send_message(&self, _: super::types::mcp_wire::CustomMessageDraft, _: Option<super::types::SendMessageOptions>) {
-    }
-    fn send_user_message(
-        &self,
-        _: super::types::mcp_wire::CustomMessageContent,
-        _: Option<super::types::SendUserMessageOptions>,
-    ) {
-    }
+    fn send_message(&self, _: CustomMessageDraft, _: Option<super::types::SendMessageOptions>) {}
+    fn send_user_message(&self, _: CustomMessageContent, _: Option<super::types::SendUserMessageOptions>) {}
 }
 
 struct QuickJsBashOperations {
@@ -3053,7 +3074,7 @@ async fn load_extension(
     runtime: ExtensionRuntime,
     cache_token: Option<&ExtensionCacheToken>,
 ) -> (Option<LoadedExtension>, Option<String>) {
-    let resolved_path = resolve_path_wire(extension_path, cwd);
+    let resolved_path = resolve_ext_path(extension_path, cwd);
     match load_extension_module_factory(&resolved_path, cache_token).await {
         Ok(None) => (
             None,
@@ -3089,8 +3110,8 @@ async fn load_extensions_internal(
     let resolved_cwd = cache_token
         .as_ref()
         .map(|t| t.cwd.clone())
-        .unwrap_or_else(|| resolve_path_wire(cwd, &pi_js::env::cwd()));
-    let resolved_event_bus: Arc<dyn EventBus> = event_bus.unwrap_or_else(|| create_event_bus() as Arc<dyn EventBus>);
+        .unwrap_or_else(|| resolve_ext_path(cwd, &pi_js::env::cwd()));
+    let resolved_event_bus: Arc<dyn EventBus> = event_bus.unwrap_or_else(|| Arc::new(LocalEventBus::new()));
     let resolved_runtime = runtime.unwrap_or_else(create_extension_runtime);
 
     for ext_path in paths {
@@ -3153,18 +3174,19 @@ fn is_extension_file(name: &str) -> bool {
 fn resolve_extension_entries(dir: &str) -> Option<Vec<String>> {
     let pkg_json = pi_js::path::join(&[dir, "package.json"]);
     if pi_js::fs::exists(&pkg_json) {
-        if let Some(manifest) = read_pi_manifest_wire(&pkg_json) {
-            if !manifest.extensions.is_empty() {
-                let mut entries = Vec::new();
-                for ext_path in manifest.extensions {
-                    let resolved = pi_js::path::resolve(&[dir, &ext_path]);
-                    if pi_js::fs::exists(&resolved) {
-                        entries.push(resolved);
-                    }
+        if let Some(manifest) = read_pi_manifest(&pkg_json)
+            && let Some(manifest_exts) = manifest.extensions
+            && !manifest_exts.is_empty()
+        {
+            let mut entries = Vec::new();
+            for ext_path in manifest_exts {
+                let resolved = pi_js::path::resolve(&[dir, &ext_path]);
+                if pi_js::fs::exists(&resolved) {
+                    entries.push(resolved);
                 }
-                if !entries.is_empty() {
-                    return Some(entries);
-                }
+            }
+            if !entries.is_empty() {
+                return Some(entries);
             }
         }
     }
@@ -3207,9 +3229,9 @@ pub async fn discover_and_load_extensions(
     agent_dir: Option<&str>,
     event_bus: Option<Arc<dyn EventBus>>,
 ) -> LoadExtensionsResult {
-    let resolved_cwd = resolve_path_wire(cwd, &pi_js::env::cwd());
-    let agent_dir_str = agent_dir.map(|s| s.to_string()).unwrap_or_else(get_agent_dir_wire);
-    let resolved_agent_dir = resolve_path_wire(&agent_dir_str, &pi_js::env::cwd());
+    let resolved_cwd = resolve_ext_path(cwd, &pi_js::env::cwd());
+    let agent_dir_str = agent_dir.map(|s| s.to_string()).unwrap_or_else(get_agent_dir);
+    let resolved_agent_dir = resolve_ext_path(&agent_dir_str, &pi_js::env::cwd());
 
     let mut all_paths: Vec<String> = Vec::new();
     let mut seen: IndexSet<String> = IndexSet::new();
@@ -3224,7 +3246,7 @@ pub async fn discover_and_load_extensions(
     };
 
     // 1. Project-local extensions: cwd/${CONFIG_DIR_NAME}/extensions/
-    let local_ext_dir = pi_js::path::join(&[&resolved_cwd, CONFIG_DIR_NAME_WIRE, "extensions"]);
+    let local_ext_dir = pi_js::path::join(&[&resolved_cwd, *CONFIG_DIR_NAME, "extensions"]);
     add_paths(discover_extensions_in_dir(&local_ext_dir));
 
     // 2. Global extensions: agentDir/extensions/
@@ -3233,7 +3255,7 @@ pub async fn discover_and_load_extensions(
 
     // 3. Explicitly configured paths
     for p in configured_paths {
-        let resolved = resolve_path_wire(p, &resolved_cwd);
+        let resolved = resolve_ext_path(p, &resolved_cwd);
         if let Ok(st) = pi_js::fs::stat(&resolved) {
             if st.is_directory() {
                 if let Some(entries) = resolve_extension_entries(&resolved) {

@@ -22,34 +22,32 @@ use pi_tui::keys::KeyId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::types::mcp_wire::{
-    BashResult, BuildSystemPromptOptions, CacheWarmingAction, CacheWarmingDecisionEvent,
-    CacheWarmingDecisionEventResult, NormalizedBuildSystemPromptOptions, ResourceDiagnostic, ResourceDiagnosticType,
-    ScopedModel, SessionManager, VirtualModelDefinition, build_system_prompt, normalize_build_system_prompt_options,
-};
 use super::types::{
     AfterProviderResponseEvent, AgentActivityOutcome, AgentBeforeSettleEvent, AgentEndEvent, AgentSettledEvent,
-    AgentStartEvent, AutocompleteProviderFactory, BeforeAgentStartEvent, BeforeAgentStartEventResult,
-    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, BoundaryContextPreview, BoundaryResult, CancelledResult,
-    CompactOptions, ContextEvent, ContextEventResult, ContextUsage, ContextWithSystemEvent, CustomUiFactory,
-    EditorFactory, EntryRenderer, ExecuteToolOptions, ExtensionActions, ExtensionCommandContext,
-    ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionContextBackend, ExtensionError,
-    ExtensionFlag, ExtensionMode, ExtensionRuntime, ExtensionShortcut, ExtensionToolContext, ExtensionUIContext,
-    ExtensionUIDialogOptions, ExtensionWidgetOptions, FlagValue, FooterFactory, ForkOptions, HeaderFactory,
-    InputDeliveryBehavior, InputEvent, InputEventResult, InputSource, LoadExtensionsResult, LoadedExtension,
-    MarkdownTransformer, McpServersChangeEvent, MessageEndEvent, MessageEndEventResult, MessageRenderer,
-    ModelSelectEvent, NavigateTreeOptions, NewSessionOptions, NotifyType, ProjectTrustContext, ProjectTrustEvent,
-    ProjectTrustEventDecision, ProjectTrustEventResult, ProviderConfig, ProviderStreamEvent, RegisteredCommand,
-    RegisteredEventHandler, RegisteredTool, ResolvedCommand, ResourcesDiscoverEvent, ResourcesDiscoverReason,
-    ResourcesDiscoverResult, SendMessageOptions, SendUserMessageOptions, SessionBeforeCompactEvent,
-    SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
-    SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionBoundaryDraft,
-    SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent, SessionShutdownEvent, SessionStartEvent,
-    SessionTreeEvent, SetThemeResult, SwitchSessionOptions, TerminalInputHandler, Theme, ThemeInfo,
-    ThinkingLevelSelectEvent, ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolExecutionEndEvent,
-    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultContentBlock, ToolResultEvent, ToolResultEventResult,
-    TurnEndEvent, TurnStartEvent, UIPromptEndEvent, UIPromptKind, UIPromptStartEvent, UserBashEvent,
-    UserBashEventResult, WidgetFactory, WorkingIndicatorOptions,
+    AgentStartEvent, AutocompleteProviderFactory, BashResult, BeforeAgentStartEvent, BeforeAgentStartEventResult,
+    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, BoundaryContextPreview, BoundaryResult,
+    BuildSystemPromptOptions, CacheWarmingAction, CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult,
+    CancelledResult, CompactOptions, ContextEvent, ContextEventResult, ContextUsage, ContextWithSystemEvent,
+    CustomMessageContent, CustomMessageDraft, CustomUiFactory, EditorFactory, EntryRenderer, EventBusHandler,
+    ExecuteToolOptions, ExtensionActions, ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext,
+    ExtensionContextActions, ExtensionContextBackend, ExtensionError, ExtensionFlag, ExtensionMode, ExtensionRuntime,
+    ExtensionShortcut, ExtensionToolContext, ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions,
+    FlagValue, FooterFactory, ForkOptions, HeaderFactory, InputDeliveryBehavior, InputEvent, InputEventResult,
+    InputSource, LoadExtensionsResult, LoadedExtension, MarkdownTransformer, McpServersChangeEvent, MessageEndEvent,
+    MessageEndEventResult, MessageRenderer, ModelRegistry, ModelSelectEvent, NavigateTreeOptions, NewSessionOptions,
+    NormalizedBuildSystemPromptOptions, NotifyType, ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision,
+    ProjectTrustEventResult, ProviderConfig, ProviderStreamEvent, RegisteredCommand, RegisteredEventHandler,
+    RegisteredTool, ResolvedCommand, ResourceDiagnostic, ResourceDiagnosticType, ResourcesDiscoverEvent,
+    ResourcesDiscoverReason, ResourcesDiscoverResult, ScopedModel, SendMessageOptions, SendUserMessageOptions,
+    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult,
+    SessionBeforeSwitchEvent, SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult,
+    SessionBoundaryDraft, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent, SessionManager,
+    SessionShutdownEvent, SessionStartEvent, SessionTreeEvent, SetThemeResult, SwitchSessionOptions,
+    TerminalInputHandler, Theme, ThemeInfo, ThinkingLevelSelectEvent, ToolCallEvent, ToolCallEventResult,
+    ToolDefinition, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultContentBlock,
+    ToolResultEvent, ToolResultEventResult, TurnEndEvent, TurnStartEvent, UIPromptEndEvent, UIPromptKind,
+    UIPromptStartEvent, UserBashEvent, UserBashEventResult, VirtualModelDefinition, WidgetFactory,
+    WorkingIndicatorOptions, build_system_prompt_from_normalized, normalize_build_system_prompt_options,
 };
 
 const DEFAULT_STALE_MESSAGE: &str = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
@@ -172,7 +170,7 @@ pub fn validate_user_bash_json_result(value: &Value) -> std::result::Result<User
     Ok(UserBashEventResult::Result {
         result: BashResult {
             output: output.to_string(),
-            exit_code,
+            exit_code: exit_code.and_then(|c| i32::try_from(c).ok()),
             cancelled,
             truncated,
             full_output_path,
@@ -183,7 +181,7 @@ pub fn validate_user_bash_json_result(value: &Value) -> std::result::Result<User
 /// Combined result from all `before_agent_start` handlers.
 #[derive(Clone, Debug)]
 pub struct BeforeAgentStartCombinedResult {
-    pub messages: Vec<super::types::mcp_wire::CustomMessageDraft>,
+    pub messages: Vec<CustomMessageDraft>,
     pub system_prompt_options: NormalizedBuildSystemPromptOptions,
 }
 
@@ -673,6 +671,10 @@ pub async fn emit_project_trust_event(
     EmitProjectTrustOutput { result: None, errors }
 }
 
+pub(crate) fn noop_ui_context() -> Arc<dyn ExtensionUIContext> {
+    Arc::new(NoOpUIContext)
+}
+
 struct NoOpUIContext;
 
 #[async_trait]
@@ -840,7 +842,7 @@ struct RunnerContextState {
     mode: Mutex<ExtensionMode>,
     cwd: String,
     session_manager: SessionManager,
-    model_registry: super::types::mcp_wire::ModelRegistry,
+    model_registry: ModelRegistry,
     callbacks: Mutex<RunnerCallbacks>,
     stale_message: Mutex<Option<String>>,
 }
@@ -888,7 +890,7 @@ impl ExtensionRunner {
         runtime: ExtensionRuntime,
         cwd: impl Into<String>,
         session_manager: SessionManager,
-        model_registry: super::types::mcp_wire::ModelRegistry,
+        model_registry: ModelRegistry,
     ) -> Self {
         let cwd_str = cwd.into();
         let cwd_for_opts = cwd_str.clone();
@@ -1013,11 +1015,15 @@ impl ExtensionRunner {
                 .unwrap_or_else(|e| e.into_inner()),
         );
         for reg in pending_providers {
-            // WIRE(@mcp-w3): once ModelRegistry::register_provider returns Result, emit error via self.emit_error on Err.
             if let Some(ref f) = prov.register_provider {
                 f(&reg.name, reg.config);
-            } else {
-                cs.model_registry.0.register_provider(&reg.name, reg.config);
+            } else if let Err(err) = cs.model_registry.register_provider(&reg.name, reg.config.into()) {
+                self.emit_error(ExtensionError {
+                    extension_path: reg.extension_path,
+                    event: "bind_core".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         }
 
@@ -1032,8 +1038,13 @@ impl ExtensionRunner {
         for reg in pending_native {
             if let Some(ref f) = prov.register_native_provider {
                 f(reg.provider);
-            } else {
-                cs.model_registry.0.register_native_provider(reg.provider);
+            } else if let Err(err) = cs.model_registry.register_native_provider(reg.provider) {
+                self.emit_error(ExtensionError {
+                    extension_path: reg.extension_path,
+                    event: "bind_core".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         }
 
@@ -1048,37 +1059,58 @@ impl ExtensionRunner {
         for reg in pending_vm {
             if let Some(ref f) = prov.register_virtual_model {
                 f(reg.definition);
-            } else {
-                cs.model_registry.0.register_virtual_model(reg.definition);
+            } else if let Err(err) = cs.model_registry.register_virtual_model(reg.definition) {
+                self.emit_error(ExtensionError {
+                    extension_path: reg.extension_path,
+                    event: "bind_core".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         }
 
         // Immediate provider registration/unregistration from now on
         let mr_reg = cs.model_registry.clone();
         let cb_reg = prov.register_provider.clone();
+        let runner_weak_reg = Arc::downgrade(&self.inner);
         *cs.runtime
             .inner
             .register_provider_fn
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |name, cfg, _ext_path| {
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |name, cfg, ext_path| {
             if let Some(ref f) = cb_reg {
                 f(name, cfg);
-            } else {
-                mr_reg.0.register_provider(name, cfg);
+            } else if let Err(err) = mr_reg.register_provider(name, cfg.into())
+                && let Some(inner) = runner_weak_reg.upgrade()
+            {
+                ExtensionRunner { inner }.emit_error(ExtensionError {
+                    extension_path: ext_path.to_string(),
+                    event: "register_provider".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         });
 
         let mr_nreg = cs.model_registry.clone();
         let cb_nreg = prov.register_native_provider.clone();
+        let runner_weak_nreg = Arc::downgrade(&self.inner);
         *cs.runtime
             .inner
             .register_native_provider_fn
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |provider, _ext_path| {
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |provider, ext_path| {
             if let Some(ref f) = cb_nreg {
                 f(provider);
-            } else {
-                mr_nreg.0.register_native_provider(provider);
+            } else if let Err(err) = mr_nreg.register_native_provider(provider)
+                && let Some(inner) = runner_weak_nreg.upgrade()
+            {
+                ExtensionRunner { inner }.emit_error(ExtensionError {
+                    extension_path: ext_path.to_string(),
+                    event: "register_native_provider".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         });
 
@@ -1092,21 +1124,29 @@ impl ExtensionRunner {
             if let Some(ref f) = cb_unreg {
                 f(name);
             } else {
-                mr_unreg.0.unregister_provider(name);
+                mr_unreg.unregister_provider(name);
             }
         });
 
         let mr_vm = cs.model_registry.clone();
         let cb_vm = prov.register_virtual_model;
+        let runner_weak_vm = Arc::downgrade(&self.inner);
         *cs.runtime
             .inner
             .register_virtual_model_fn
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |def, _ext_path| {
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(move |def, ext_path| {
             if let Some(ref f) = cb_vm {
                 f(def);
-            } else {
-                mr_vm.0.register_virtual_model(def);
+            } else if let Err(err) = mr_vm.register_virtual_model(def)
+                && let Some(inner) = runner_weak_vm.upgrade()
+            {
+                ExtensionRunner { inner }.emit_error(ExtensionError {
+                    extension_path: ext_path.to_string(),
+                    event: "register_virtual_model".to_string(),
+                    error: err.to_string(),
+                    stack: None,
+                });
             }
         });
 
@@ -1120,7 +1160,7 @@ impl ExtensionRunner {
             if let Some(ref f) = cb_uvm {
                 f(provider, id);
             } else {
-                mr_uvm.0.unregister_virtual_model(provider, id);
+                mr_uvm.unregister_virtual_model(provider, id);
             }
         });
     }
@@ -1390,7 +1430,7 @@ impl ExtensionRunner {
         self.inner.ctx_state.assert_active()
     }
 
-    pub fn on_error(&self, listener: super::types::mcp_wire::EventBusHandler) -> Unsubscribe {
+    pub fn on_error(&self, listener: EventBusHandler) -> Unsubscribe {
         let wrapped: ExtensionErrorListener = Arc::new(move |err| {
             let val = serde_json::to_value(&err).unwrap_or(Value::Null);
             listener(val);
@@ -1569,7 +1609,7 @@ impl ExtensionRunner {
             .find(|cmd| cmd.invocation_name == name)
     }
 
-    pub fn get_model_registry(&self) -> &super::types::mcp_wire::ModelRegistry {
+    pub fn get_model_registry(&self) -> &ModelRegistry {
         &self.inner.ctx_state.model_registry
     }
 
@@ -2329,11 +2369,13 @@ impl ExtensionRunner {
         images: Option<Vec<ImageContent>>,
         system_prompt_options: BuildSystemPromptOptions,
     ) -> BeforeAgentStartCombinedResult {
-        let shared_options = Arc::new(Mutex::new(normalize_build_system_prompt_options(system_prompt_options)));
+        let shared_options = Arc::new(Mutex::new(normalize_build_system_prompt_options(
+            &system_prompt_options,
+        )));
         let opts_for_override = Arc::clone(&shared_options);
         let ctx = self.create_context().with_system_prompt_override(Arc::new(move || {
             let guard = opts_for_override.lock().unwrap_or_else(|e| e.into_inner());
-            build_system_prompt(&guard)
+            build_system_prompt_from_normalized(&guard).unwrap_or_default()
         }));
         let mut messages = Vec::new();
 
@@ -2341,7 +2383,7 @@ impl ExtensionRunner {
             for handler in handlers {
                 let current_prompt_str = {
                     let guard = shared_options.lock().unwrap_or_else(|e| e.into_inner());
-                    build_system_prompt(&guard)
+                    build_system_prompt_from_normalized(&guard).unwrap_or_default()
                 };
                 match handler {
                     RegisteredEventHandler::Boxed(f) => {
@@ -2784,7 +2826,7 @@ impl ExtensionContextBackend for RunnerContextBackend {
         self.state.session_manager.clone()
     }
 
-    fn model_registry(&self) -> super::types::mcp_wire::ModelRegistry {
+    fn model_registry(&self) -> ModelRegistry {
         self.state.model_registry.clone()
     }
 
@@ -3051,7 +3093,7 @@ impl ExtensionContextBackend for RunnerContextBackend {
         }
     }
 
-    fn send_message(&self, message: super::types::mcp_wire::CustomMessageDraft, options: Option<SendMessageOptions>) {
+    fn send_message(&self, message: CustomMessageDraft, options: Option<SendMessageOptions>) {
         let f = self
             .state
             .runtime
@@ -3064,11 +3106,7 @@ impl ExtensionContextBackend for RunnerContextBackend {
         f(message, options);
     }
 
-    fn send_user_message(
-        &self,
-        content: super::types::mcp_wire::CustomMessageContent,
-        options: Option<SendUserMessageOptions>,
-    ) {
+    fn send_user_message(&self, content: CustomMessageContent, options: Option<SendUserMessageOptions>) {
         let f = self
             .state
             .runtime

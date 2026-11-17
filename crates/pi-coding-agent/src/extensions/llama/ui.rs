@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use crate::core::extensions::types::{ExtensionCommandContext, NotifyType, Theme, mcp_wire::KeybindingsManager};
+use crate::core::extensions::types::{ExtensionCommandContext, KeybindingsManager, NotifyType, Theme};
 use crate::extensions::llama::client::{LlamaModelInfo, LlamaModelStatus, LlamaProgress};
 use crate::extensions::llama::huggingface::HuggingFaceModel;
 use crate::extensions::wire::{DynamicBorder, key_hint};

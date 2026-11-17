@@ -9,10 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use pi_ai::types::{Model, UserContentBlock};
 use pi_coding_agent::core::extensions::types::{
-    ExtensionContext, ExtensionContextBackend, ExtensionMode, ExtensionToolContext, ExtensionUIContext,
+    BuildSystemPromptOptions, CancelledResult, CompactOptions, ContextUsage, CustomMessageContent, CustomMessageDraft,
+    ExecuteToolOptions, ExtensionContext, ExtensionContextBackend, ExtensionMode, ExtensionToolContext,
+    ExtensionUIContext, ForkOptions, ModelRegistry, NavigateTreeOptions, NewSessionOptions, ReadonlySessionManager,
+    ScopedModel, SendMessageOptions, SendUserMessageOptions, SwitchSessionOptions,
 };
-use pi_coding_agent::core::tools::mcp_wire;
-use pi_coding_agent::core::tools::read::{create_read_tool, create_read_tool_definition};
+use pi_coding_agent::core::tools::read::{
+    ResizeImageOptions, create_read_tool, create_read_tool_definition, testing as read_testing,
+};
 use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
@@ -23,7 +27,7 @@ const TINY_PNG_BASE64: &str =
 #[tokio::test]
 #[serial]
 async fn read_tool_returns_text_only_when_auto_resize_returns_none() {
-    let _guard = mcp_wire::testing::override_resize_image(Arc::new(|_img, _opts| Box::pin(async { Ok(None) })));
+    let _guard = read_testing::override_resize_image(Arc::new(|_img, _opts| Box::pin(async { Ok(None) })));
 
     let dir = TempDir::new().unwrap();
     let image_path = dir.path().join("test.png");
@@ -175,16 +179,16 @@ impl ExtensionContextBackend for ModelOverrideBackend {
     fn cwd(&self) -> String {
         self.cwd.clone()
     }
-    fn session_manager(&self) -> pi_coding_agent::core::extensions::types::mcp_wire::ReadonlySessionManager {
+    fn session_manager(&self) -> ReadonlySessionManager {
         Default::default()
     }
-    fn model_registry(&self) -> pi_coding_agent::core::extensions::types::mcp_wire::ModelRegistry {
+    fn model_registry(&self) -> ModelRegistry {
         Default::default()
     }
     fn model(&self) -> Option<Model> {
         self.model.clone()
     }
-    fn scoped_models(&self) -> Vec<pi_coding_agent::core::extensions::types::mcp_wire::ScopedModel> {
+    fn scoped_models(&self) -> Vec<ScopedModel> {
         Vec::new()
     }
     fn thinking_level(&self) -> Option<pi_agent_core::types::ThinkingLevel> {
@@ -204,45 +208,38 @@ impl ExtensionContextBackend for ModelOverrideBackend {
         false
     }
     fn shutdown(&self) {}
-    fn get_context_usage(&self) -> Option<pi_coding_agent::core::extensions::types::ContextUsage> {
+    fn get_context_usage(&self) -> Option<ContextUsage> {
         None
     }
-    fn compact(&self, _: Option<pi_coding_agent::core::extensions::types::CompactOptions>) {}
+    fn compact(&self, _: Option<CompactOptions>) {}
     fn get_system_prompt(&self) -> String {
         String::new()
     }
-    fn get_system_prompt_options(&self) -> pi_coding_agent::core::extensions::types::BuildSystemPromptOptions {
+    fn get_system_prompt_options(&self) -> BuildSystemPromptOptions {
         Default::default()
     }
     fn wait_for_idle(&self) -> pi_js::BoxFuture<pi_js::Result<()>> {
         Box::pin(async { Ok(()) })
     }
-    fn new_session(
-        &self,
-        _: Option<pi_coding_agent::core::extensions::types::NewSessionOptions>,
-    ) -> pi_js::BoxFuture<pi_js::Result<pi_coding_agent::core::extensions::types::CancelledResult>> {
-        Box::pin(async { Ok(pi_coding_agent::core::extensions::types::CancelledResult { cancelled: false }) })
+    fn new_session(&self, _: Option<NewSessionOptions>) -> pi_js::BoxFuture<pi_js::Result<CancelledResult>> {
+        Box::pin(async { Ok(CancelledResult { cancelled: false }) })
     }
-    fn fork(
-        &self,
-        _: &str,
-        _: Option<pi_coding_agent::core::extensions::types::ForkOptions>,
-    ) -> pi_js::BoxFuture<pi_js::Result<pi_coding_agent::core::extensions::types::CancelledResult>> {
-        Box::pin(async { Ok(pi_coding_agent::core::extensions::types::CancelledResult { cancelled: false }) })
+    fn fork(&self, _: &str, _: Option<ForkOptions>) -> pi_js::BoxFuture<pi_js::Result<CancelledResult>> {
+        Box::pin(async { Ok(CancelledResult { cancelled: false }) })
     }
     fn navigate_tree(
         &self,
         _: &str,
-        _: Option<pi_coding_agent::core::extensions::types::NavigateTreeOptions>,
-    ) -> pi_js::BoxFuture<pi_js::Result<pi_coding_agent::core::extensions::types::CancelledResult>> {
-        Box::pin(async { Ok(pi_coding_agent::core::extensions::types::CancelledResult { cancelled: false }) })
+        _: Option<NavigateTreeOptions>,
+    ) -> pi_js::BoxFuture<pi_js::Result<CancelledResult>> {
+        Box::pin(async { Ok(CancelledResult { cancelled: false }) })
     }
     fn switch_session(
         &self,
         _: &str,
-        _: Option<pi_coding_agent::core::extensions::types::SwitchSessionOptions>,
-    ) -> pi_js::BoxFuture<pi_js::Result<pi_coding_agent::core::extensions::types::CancelledResult>> {
-        Box::pin(async { Ok(pi_coding_agent::core::extensions::types::CancelledResult { cancelled: false }) })
+        _: Option<SwitchSessionOptions>,
+    ) -> pi_js::BoxFuture<pi_js::Result<CancelledResult>> {
+        Box::pin(async { Ok(CancelledResult { cancelled: false }) })
     }
     fn reload(&self) -> pi_js::BoxFuture<pi_js::Result<()>> {
         Box::pin(async { Ok(()) })
@@ -255,7 +252,7 @@ impl ExtensionContextBackend for ModelOverrideBackend {
         _: &str,
         _: &str,
         _: serde_json::Value,
-        _: pi_coding_agent::core::extensions::types::ExecuteToolOptions,
+        _: ExecuteToolOptions,
     ) -> pi_js::BoxFuture<pi_agent_core::types::AgentToolCallOutcome> {
         Box::pin(async {
             pi_agent_core::types::AgentToolCallOutcome {
@@ -269,26 +266,16 @@ impl ExtensionContextBackend for ModelOverrideBackend {
             }
         })
     }
-    fn send_message(
-        &self,
-        _: pi_coding_agent::core::extensions::types::mcp_wire::CustomMessageDraft,
-        _: Option<pi_coding_agent::core::extensions::types::SendMessageOptions>,
-    ) {
-    }
-    fn send_user_message(
-        &self,
-        _: pi_coding_agent::core::extensions::types::mcp_wire::CustomMessageContent,
-        _: Option<pi_coding_agent::core::extensions::types::SendUserMessageOptions>,
-    ) {
-    }
+    fn send_message(&self, _: CustomMessageDraft, _: Option<SendMessageOptions>) {}
+    fn send_user_message(&self, _: CustomMessageContent, _: Option<SendUserMessageOptions>) {}
 }
 
 #[tokio::test]
 #[serial]
 async fn passes_current_model_resize_profile_to_read_tool() {
-    let seen = Arc::new(Mutex::new(None::<(String, mcp_wire::ResizeImageOptions)>));
+    let seen = Arc::new(Mutex::new(None::<(String, ResizeImageOptions)>));
     let seen_cb = Arc::clone(&seen);
-    let _guard = mcp_wire::testing::override_resize_image(Arc::new(move |img, opts| {
+    let _guard = read_testing::override_resize_image(Arc::new(move |img, opts| {
         *seen_cb.lock().unwrap() = Some((img.mime_type, opts));
         Box::pin(async { Ok(None) })
     }));
@@ -346,11 +333,11 @@ async fn passes_current_model_resize_profile_to_read_tool() {
     assert_eq!(captured.0, "image/png");
     assert_eq!(
         captured.1,
-        mcp_wire::ResizeImageOptions {
-            max_width: 1234,
-            max_height: 1000,
-            max_bytes: 500_000,
-            jpeg_quality: 70,
+        ResizeImageOptions {
+            max_width: Some(1234),
+            max_height: Some(1000),
+            max_bytes: Some(500_000),
+            jpeg_quality: Some(70),
         }
     );
 }

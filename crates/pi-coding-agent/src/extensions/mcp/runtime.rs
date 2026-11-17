@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::Value;
 
+use crate::config::VERSION;
+use crate::core::resolve_config_value::{resolve_config_value_or_throw, resolve_headers_or_throw};
 use crate::extensions::mcp::config::{McpServerConfig, McpServerEntry};
 use crate::extensions::mcp::log::McpServerLog;
 use crate::extensions::mcp::oauth::{
@@ -14,7 +16,6 @@ use crate::extensions::mcp::oauth::{
 };
 use crate::extensions::mcp::resources::{McpResourceServer, is_mcp_app_resource};
 use crate::extensions::mcp::tools::McpToolCaller;
-use crate::extensions::wire::{VERSION, resolve_config_value_or_throw, resolve_headers_or_throw};
 use pi_js::{BoxFuture, Error, Result};
 use pi_mcp::client::{ClientState, McpClientRoots};
 use pi_mcp::oauth::{McpOAuthAuthorizationRequiredError, OAuthChallenge};
@@ -89,7 +90,7 @@ pub fn is_transient_error(error: &Error) -> bool {
 }
 
 fn sign_in_required_message(entry: &McpServerEntry) -> String {
-    let target = match &entry.auth_provider {
+    let target = match entry.auth_provider() {
         Some(provider) => format!("/login {provider}"),
         None => "/mcp".to_string(),
     };
@@ -103,7 +104,7 @@ pub fn entry_uses_oauth(entry: &McpServerEntry) -> bool {
     let McpServerConfig::Http(ref http) = entry.config else {
         return false;
     };
-    if entry.auth_provider.is_some() {
+    if entry.auth_provider().is_some() {
         return false;
     }
     let has_auth_header = http
@@ -325,9 +326,9 @@ impl McpServerConnection {
                 }
                 Err(_) => None,
             }
-        } else if let Some(ref provider_id) = entry.auth_provider {
+        } else if let Some(provider_id) = entry.auth_provider() {
             Some(Arc::new(ProviderTokenAuthAdapter {
-                provider: provider_id.clone(),
+                provider: provider_id.to_string(),
                 lookup: options.provider_token,
             }))
         } else {
@@ -370,8 +371,8 @@ impl McpServerConnection {
             McpServerConfig::Stdio(s) => s.timeout,
             McpServerConfig::Http(h) => h.timeout,
         }
-        .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
-        secs * 1000
+        .unwrap_or(DEFAULT_TIMEOUT_SECONDS as f64);
+        (secs * 1000.0).round() as i64
     }
 
     pub fn oauth_url(&self) -> Option<&str> {

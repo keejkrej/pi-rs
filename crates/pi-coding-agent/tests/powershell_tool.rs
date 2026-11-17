@@ -1,8 +1,8 @@
 //! Port of packages/coding-agent/test/powershell-tool.test.ts
 
 use pi_ai::types::UserContentBlock;
-use pi_coding_agent::core::tools::mcp_wire::{POWERSHELL_ARGS, get_power_shell_config};
 use pi_coding_agent::core::tools::powershell::{create_local_power_shell_operations, create_power_shell_tool};
+use pi_coding_agent::utils::shell::{POWERSHELL_ARGS, get_power_shell_config};
 use serde_json::json;
 
 #[test]

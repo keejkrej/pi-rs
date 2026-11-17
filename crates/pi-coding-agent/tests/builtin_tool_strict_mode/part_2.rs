@@ -83,6 +83,6 @@ fn preserves_explicit_opt_outs_when_wrapping_definitions() {
     }
 }
 
-// WIRE(@mcp-w3 / @ca-cli): Full AgentSession + SettingsManager + DefaultResourceLoader strict opt-out integration tests enable once session/settings/resource-loader land.
+// WIRE(@ca-cli-w3): Full AgentSession + SettingsManager + DefaultResourceLoader strict opt-out integration tests enable once AgentSession lands.
 #[cfg(any())]
 mod pending_session_integration {}

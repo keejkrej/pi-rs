@@ -82,22 +82,19 @@ pub struct BashToolOptions {
 }
 
 use std::process::Stdio;
-use std::sync::Mutex as StdMutex;
-use std::time::{Duration, Instant};
+use std::sync::{LazyLock, Mutex as StdMutex};
+use std::time::Duration;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use pi_ai::types::{TextContent, UserContentBlock};
+use pi_js::seam::{Guard, Slot};
 use pi_js::text::Utf8StreamDecoder;
 use pi_js::vendor::typebox::{Schema, t};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::core::extensions::types::ToolDefinition;
-use crate::core::tools::mcp_wire::{
-    CommandTransport, ShellConfig, StreamActivity, get_shell_config, get_shell_env, kill_process_tree,
-    sanitize_binary_output, track_detached_child_pid, untrack_detached_child_pid, wait_for_child_process,
-};
 use crate::core::tools::output_accumulator::{OutputAccumulator, StructuredOutputBuffer};
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
@@ -105,6 +102,30 @@ use crate::core::tools::tool_definition_wrapper::{
     wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, format_size};
+use crate::utils::child_process::{ChildProcessExit, wait_for_child_process_status};
+use crate::utils::shell::{
+    CommandTransport, ShellConfig, get_shell_config as real_get_shell_config, get_shell_env, kill_process_tree,
+    sanitize_binary_output, track_detached_child_pid, untrack_detached_child_pid,
+};
+
+pub type ShellConfigOverrideFn = Arc<dyn Fn(Option<&str>) -> Result<ShellConfig, pi_js::Error> + Send + Sync>;
+static SHELL_CONFIG_SLOT: LazyLock<Slot<ShellConfigOverrideFn>> = LazyLock::new(Slot::new);
+
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    pub fn override_get_shell_config(func: ShellConfigOverrideFn) -> Guard {
+        SHELL_CONFIG_SLOT.set(Arc::new(func))
+    }
+}
+
+pub(crate) fn resolve_shell_config(custom_shell_path: Option<&str>) -> Result<ShellConfig, pi_js::Error> {
+    if let Some(func) = SHELL_CONFIG_SLOT.get() {
+        return func(custom_shell_path);
+    }
+    real_get_shell_config(custom_shell_path)
+}
 
 struct LocalBashOperations {
     custom_shell_path: Option<String>,
@@ -121,7 +142,7 @@ impl BashOperations for LocalBashOperations {
         let command = command.to_string();
         let cwd = cwd.to_string();
         Box::pin(async move {
-            let shell_cfg = get_shell_config(custom_shell_path.as_deref())?;
+            let shell_cfg = resolve_shell_config(custom_shell_path.as_deref())?;
             execute_shell_process(shell_cfg, &command, &cwd, options).await
         })
     }
@@ -174,6 +195,7 @@ pub(crate) async fn execute_shell_process(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             pi_js::Error::msg(format!("Failed to spawn shell {}: ENOENT ({e})", shell_cfg.shell))
@@ -195,39 +217,13 @@ pub(crate) async fn execute_shell_process(
         });
     }
 
-    let activity = StreamActivity::new();
-    let stdout_task = child.stdout.take().map(|mut stdout| {
-        let cb = options.on_data.clone();
-        let activity = Arc::clone(&activity);
-        tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
-            while let Ok(n) = stdout.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                activity.bump();
-                if let Some(cb) = &cb {
-                    cb(&buf[..n]);
-                }
-            }
-        })
+    let on_stdout = options.on_data.clone().map(|cb| {
+        let b: Box<dyn FnMut(&[u8]) + Send> = Box::new(move |chunk: &[u8]| cb(chunk));
+        b
     });
-
-    let stderr_task = child.stderr.take().map(|mut stderr| {
-        let cb = options.on_data.clone();
-        let activity = Arc::clone(&activity);
-        tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
-            while let Ok(n) = stderr.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                activity.bump();
-                if let Some(cb) = &cb {
-                    cb(&buf[..n]);
-                }
-            }
-        })
+    let on_stderr = options.on_data.clone().map(|cb| {
+        let b: Box<dyn FnMut(&[u8]) + Send> = Box::new(move |chunk: &[u8]| cb(chunk));
+        b
     });
 
     let timeout_secs = options.timeout;
@@ -253,13 +249,13 @@ pub(crate) async fn execute_shell_process(
     };
 
     enum RaceOutcome {
-        Exited(Result<Option<i32>, pi_js::Error>),
+        Exited(Result<ChildProcessExit, pi_js::Error>),
         Aborted,
         TimedOut,
     }
 
     let race = {
-        let wait_fut = wait_for_child_process(&mut child, stdout_task, stderr_task, activity);
+        let wait_fut = wait_for_child_process_status(child, on_stdout, on_stderr);
         tokio::pin!(wait_fut);
         tokio::pin!(abort_fut);
         tokio::pin!(timeout_fut);
@@ -272,21 +268,19 @@ pub(crate) async fn execute_shell_process(
     };
 
     let outcome = match race {
-        RaceOutcome::Exited(res) => res.map(|code| BashExecResult {
-            exit_code: code.map(i64::from),
+        RaceOutcome::Exited(res) => res.map(|exit| BashExecResult {
+            exit_code: exit.into_shell_code().map(i64::from),
         }),
         RaceOutcome::Aborted => {
             if let Some(pid) = child_pid {
                 kill_process_tree(pid);
             }
-            let _ = child.kill().await;
             Err(pi_js::Error::msg("aborted"))
         }
         RaceOutcome::TimedOut => {
             if let Some(pid) = child_pid {
                 kill_process_tree(pid);
             }
-            let _ = child.kill().await;
             let secs = timeout_secs.unwrap_or(0.0);
             let secs_str = if secs.fract() == 0.0 {
                 format!("{}", secs as u64)
@@ -419,7 +413,7 @@ where
     F: FnOnce(BashExecOptions) -> Fut,
     Fut: std::future::Future<Output = Result<BashExecResult, pi_js::Error>>,
 {
-    let started_at = Instant::now();
+    let started_at_ms = pi_js::time::performance_now();
 
     struct SharedState {
         decoder: Utf8StreamDecoder,
@@ -480,7 +474,7 @@ where
     };
 
     let exec_res = exec_fn(exec_opts).await;
-    let wall_time_seconds = started_at.elapsed().as_secs_f64();
+    let wall_time_seconds = ((pi_js::time::performance_now() - started_at_ms) / 1000.0).max(0.0);
 
     let mut guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.finished = true;
@@ -622,7 +616,7 @@ pub fn create_bash_tool_definition_with_shell(
 
                 let mut clean_params = params;
                 if let Value::Object(ref mut map) = clean_params {
-                    map.remove("timeout");
+                    map.shift_remove("timeout");
                 }
                 let input: BashToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid bash parameters: {e}")))?;

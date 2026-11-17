@@ -3,12 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_coding_agent::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend};
 use pi_coding_agent::extensions::mcp::oauth::{
     McpAuthProvider, McpOAuthCredentialStore, McpOAuthServerStore, McpOAuthSettings, McpSignInPrompt,
     SignInMcpServerOptions, create_mcp_auth_provider, sign_in_mcp_server,
 };
-// WIRE(@mcp-w3): switch to crate::core::auth_storage::{AuthStorageBackend, InMemoryAuthStorageBackend} once landed
-use pi_coding_agent::extensions::wire::{AuthStorageBackend, InMemoryAuthStorageBackend};
 use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Request, Response, fetch};
 use pi_mcp::auth_provider::{McpFetch, McpFetchInit, UnauthorizedContext};

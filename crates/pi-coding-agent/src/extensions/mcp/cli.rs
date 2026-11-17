@@ -10,6 +10,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+use crate::config::{APP_NAME, CONFIG_DIR_NAME};
+use crate::core::trust_manager::ProjectTrustStore;
 use crate::extensions::mcp::config::{
     LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry, add_mcp_server_config,
     get_mcp_tool_exposure, load_mcp_config, remove_mcp_server_config, validate_mcp_server_config,
@@ -21,20 +23,22 @@ use crate::extensions::mcp::oauth::{
 use crate::extensions::mcp::runtime::{
     McpServerConnection, McpServerConnectionOptions, ServerState, create_default_transport,
 };
-use crate::extensions::wire::{APP_NAME, CONFIG_DIR_NAME, ProjectTrustStore, open_browser};
+use crate::utils::open_browser::open_browser;
 use pi_js::Result;
 use pi_js::abort::AbortSignal;
 
 const DEFAULT_LOGIN_TIMEOUT_SECONDS: f64 = 300.0;
 
 fn help_text() -> String {
+    let app = *APP_NAME;
+    let cfg = *CONFIG_DIR_NAME;
     format!(
-        "\x1b[1mUsage:\x1b[22m\n  {APP_NAME} mcp add <server> [options] -- <command> [args...]\n  {APP_NAME} mcp add <server> [options] --url <url>\n  {APP_NAME} mcp remove <server> [-l]\n  {APP_NAME} mcp list [--json]\n  {APP_NAME} mcp login <server> [--timeout <seconds>]\n  {APP_NAME} mcp logout <server>\n\nConfigure and check MCP servers and sign in to OAuth servers without starting a session.\nReads ~/{CONFIG_DIR_NAME}/agent/mcp.json and, in trusted projects, {CONFIG_DIR_NAME}/mcp.json.\n\nCommands:\n  add <server>            Add or replace a server in mcp.json\n  remove <server>         Remove a server from mcp.json\n  list                    Show state, tools, and errors (exits 1 on failure)\n  login <server>          Sign in through the browser\n  logout <server>         Delete the stored OAuth credentials\n\nOptions for add and remove:\n  -l, --local             Use {CONFIG_DIR_NAME}/mcp.json in the current project instead of the global file\n\nOptions for add:\n  --url <url>             Streamable HTTP server URL (instead of a command)\n  --env <KEY=VALUE>       Environment variable for a stdio server (repeatable)\n  --cwd <dir>             Working directory for a stdio server\n  --header <KEY=VALUE>    HTTP header (repeatable)\n  --bearer-token-env-var <NAME>\n                          Send \"Authorization: Bearer ${{NAME}}\"\n  --oauth-client-id <id>  Pre-registered OAuth client id\n  --oauth-client-secret <secret>\n                          OAuth client secret (may be ${{NAME}} or !command)\n  --oauth-callback-port <port>\n                          Fixed OAuth callback port\n  --oauth-client-name <name>\n                          Client name sent when registering with the OAuth server\n  --exposure <mode>       codemode (default), deferred, direct, or hidden\n  --description <text>    What the server offers, shown in the system prompt\n\nOther options:\n  --json                  Print the list as JSON\n  --timeout <seconds>     How long login waits for the browser (default: 300)"
+        "\x1b[1mUsage:\x1b[22m\n  {app} mcp add <server> [options] -- <command> [args...]\n  {app} mcp add <server> [options] --url <url>\n  {app} mcp remove <server> [-l]\n  {app} mcp list [--json]\n  {app} mcp login <server> [--timeout <seconds>]\n  {app} mcp logout <server>\n\nConfigure and check MCP servers and sign in to OAuth servers without starting a session.\nReads ~/{cfg}/agent/mcp.json and, in trusted projects, {cfg}/mcp.json.\n\nCommands:\n  add <server>            Add or replace a server in mcp.json\n  remove <server>         Remove a server from mcp.json\n  list                    Show state, tools, and errors (exits 1 on failure)\n  login <server>          Sign in through the browser\n  logout <server>         Delete the stored OAuth credentials\n\nOptions for add and remove:\n  -l, --local             Use {cfg}/mcp.json in the current project instead of the global file\n\nOptions for add:\n  --url <url>             Streamable HTTP server URL (instead of a command)\n  --env <KEY=VALUE>       Environment variable for a stdio server (repeatable)\n  --cwd <dir>             Working directory for a stdio server\n  --header <KEY=VALUE>    HTTP header (repeatable)\n  --bearer-token-env-var <NAME>\n                          Send \"Authorization: Bearer ${{NAME}}\"\n  --oauth-client-id <id>  Pre-registered OAuth client id\n  --oauth-client-secret <secret>\n                          OAuth client secret (may be ${{NAME}} or !command)\n  --oauth-callback-port <port>\n                          Fixed OAuth callback port\n  --oauth-client-name <name>\n                          Client name sent when registering with the OAuth server\n  --exposure <mode>       codemode (default), deferred, direct, or hidden\n  --description <text>    What the server offers, shown in the system prompt\n\nOther options:\n  --json                  Print the list as JSON\n  --timeout <seconds>     How long login waits for the browser (default: 300)"
     )
 }
 
 fn help_hint() -> String {
-    format!("\x1b[2mUse \"{APP_NAME} mcp --help\" for usage.\x1b[22m")
+    format!("\x1b[2mUse \"{} mcp --help\" for usage.\x1b[22m", *APP_NAME)
 }
 
 pub type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
@@ -209,7 +213,8 @@ fn parse_pairs(option: &str, pairs: Option<&Vec<String>>, error: &LogFn) -> Opti
 
 fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: &LogFn, error: &LogFn) -> i32 {
     let usage = format!(
-        "Usage: {APP_NAME} mcp add <server> [options] (--url <url> | -- <command> [args...])\n{}",
+        "Usage: {} mcp add <server> [options] (--url <url> | -- <command> [args...])\n{}",
+        *APP_NAME,
         help_hint()
     );
     let mut known = IndexMap::new();
@@ -323,7 +328,7 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         cfg_obj.insert("description".to_string(), Value::String(desc.to_string()));
     }
 
-    let (validated, auth_provider) = match validate_mcp_server_config(&name, &Value::Object(cfg_obj)) {
+    let validated = match validate_mcp_server_config(&name, &Value::Object(cfg_obj)) {
         Ok(v) => v,
         Err(msg) => {
             error(&msg);
@@ -338,7 +343,7 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         pi_js::path::join(&[&options.agent_dir, "mcp.json"])
     };
     let scope = if project { "project" } else { "global" };
-    let replaced = match add_mcp_server_config(&path, &name, &validated, auth_provider.as_deref()) {
+    let replaced = match add_mcp_server_config(&path, &name, &validated) {
         Ok(r) => r,
         Err(err) => {
             error(&format!("Could not update {path}: {}", err.message()));
@@ -346,10 +351,17 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         }
     };
     let action_word = if replaced { "Replaced" } else { "Added" };
+    let app = *APP_NAME;
     log(&format!("{action_word} {scope} MCP server \"{name}\" in {path}."));
-    if project && ProjectTrustStore::new(&options.agent_dir).get(&options.cwd) != Some(true) {
+    if project
+        && ProjectTrustStore::new(&options.agent_dir)
+            .get(&options.cwd)
+            .ok()
+            .flatten()
+            != Some(true)
+    {
         log(&format!(
-            "The project is not trusted, so {path} is ignored until you start {APP_NAME} in the project and trust it."
+            "The project is not trusted, so {path} is ignored until you start {app} in the project and trust it."
         ));
     }
     let may_need_sign_in = matches!(
@@ -357,11 +369,11 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         McpServerConfig::Http(h) if !h.headers.as_ref().is_some_and(|hdrs| hdrs.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
     );
     let hint = if may_need_sign_in {
-        format!(". If it requires sign-in: {APP_NAME} mcp login {name}")
+        format!(". If it requires sign-in: {app} mcp login {name}")
     } else {
         String::new()
     };
-    log(&format!("Check it with: {APP_NAME} mcp list{hint}"));
+    log(&format!("Check it with: {app} mcp list{hint}"));
     0
 }
 
@@ -372,7 +384,11 @@ fn remove(args: &[String], project_config: &str, options: &McpCommandOptions, lo
         return 1;
     };
     if parsed.positional.len() != 1 {
-        error(&format!("Usage: {APP_NAME} mcp remove <server> [-l]\n{}", help_hint()));
+        error(&format!(
+            "Usage: {} mcp remove <server> [-l]\n{}",
+            *APP_NAME,
+            help_hint()
+        ));
         return 1;
     }
     let name = &parsed.positional[0];
@@ -528,7 +544,7 @@ async fn list(
         ));
         log(&format!("  {}", report.transport));
         if report.state == "needs-auth" {
-            log(&format!("  sign in with: {APP_NAME} mcp login {}", report.name));
+            log(&format!("  sign in with: {} mcp login {}", *APP_NAME, report.name));
         }
         if !report.tools.is_empty() {
             let tools: Vec<String> = report
@@ -643,7 +659,7 @@ async fn login(
 
     let open_url: Arc<dyn Fn(&str) + Send + Sync> = options.open_url.clone().unwrap_or_else(|| {
         Arc::new(|u| {
-            let _ = open_browser(u);
+            open_browser(u);
         })
     });
     let interactive = std::io::stdin().is_terminal() && options.open_url.is_none();
@@ -716,7 +732,7 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
         return Ok(0);
     }
     let rest = &args[1..];
-    let project_config = pi_js::path::join(&[&options.cwd, CONFIG_DIR_NAME, "mcp.json"]);
+    let project_config = pi_js::path::join(&[&options.cwd, *CONFIG_DIR_NAME, "mcp.json"]);
     if command == "add" {
         return Ok(add(rest, &project_config, &options, &log, &error));
     }
@@ -724,15 +740,20 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
         return Ok(remove(rest, &project_config, &options, &log, &error));
     }
 
-    let project_trusted = ProjectTrustStore::new(&options.agent_dir).get(&options.cwd) == Some(true);
+    let project_trusted = ProjectTrustStore::new(&options.agent_dir)
+        .get(&options.cwd)
+        .ok()
+        .flatten()
+        == Some(true);
     let loaded = load_mcp_config(&LoadMcpConfigOptions {
         agent_dir: options.agent_dir.clone(),
         cwd: options.cwd.clone(),
         project_trusted,
     });
+    let app = *APP_NAME;
     let untrusted_note = if !project_trusted && Path::new(&project_config).exists() {
         Some(format!(
-            "{project_config} is ignored because the project is not trusted. Start {APP_NAME} in the project to trust it."
+            "{project_config} is ignored because the project is not trusted. Start {app} in the project to trust it."
         ))
     } else {
         None
@@ -750,7 +771,7 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
                 return Ok(1);
             };
             if !parsed.positional.is_empty() {
-                error(&format!("Usage: {APP_NAME} mcp list [--json]\n{}", help_hint()));
+                error(&format!("Usage: {app} mcp list [--json]\n{}", help_hint()));
                 return Ok(1);
             }
             Ok(list(
@@ -772,7 +793,7 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
                 return Ok(1);
             };
             if parsed.positional.len() != 1 {
-                error(&format!("Usage: {APP_NAME} mcp {command} <server>\n{}", help_hint()));
+                error(&format!("Usage: {app} mcp {command} <server>\n{}", help_hint()));
                 return Ok(1);
             }
             let name = &parsed.positional[0];

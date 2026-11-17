@@ -6,11 +6,12 @@ use std::sync::LazyLock;
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
-pub use crate::core::extensions::types::mcp_wire::{
-    McpExposure, McpHttpServerConfig, McpOAuthConfig, McpServerConfig, McpStdioServerConfig, mcp_namespace,
+use crate::config::CONFIG_DIR_NAME;
+pub use crate::core::mcp_servers::{
+    McpExposure, McpHttpServerConfig, McpOAuthConfig, McpProviderAuthConfig, McpServerConfig, McpStdioServerConfig,
+    get_mcp_tool_exposure, mcp_namespace, validate_mcp_server_config,
 };
-use crate::extensions::wire::{CONFIG_DIR_NAME, strip_bom};
-pub use crate::extensions::wire::{get_mcp_tool_exposure, validate_mcp_server_config};
+use crate::utils::text::strip_bom;
 use pi_js::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,16 +31,23 @@ impl McpScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct McpServerEntry {
     pub name: String,
     pub config: McpServerConfig,
-    // WIRE(@mcp-w3): move into McpHttpServerConfig.auth once types.rs adds auth field
-    pub auth_provider: Option<String>,
     /// Config file that defined the entry, or the path of the extension that registered it.
     pub source: String,
     /// `Global`, `Project`, or `Extension` (`pi.registerMcpServer()`).
     pub scope: Option<McpScope>,
+}
+
+impl McpServerEntry {
+    pub fn auth_provider(&self) -> Option<&str> {
+        match &self.config {
+            McpServerConfig::Http(h) => h.auth.as_ref().map(|a| a.provider.as_str()),
+            McpServerConfig::Stdio(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -106,8 +114,8 @@ fn read_config_file(path: &str, scope: McpScope, state: &mut McpConfigState) {
         return;
     };
     for (name, value) in mcp_servers {
-        let (config, auth_provider) = match validate_mcp_server_config(name, value) {
-            Ok(pair) => pair,
+        let config = match validate_mcp_server_config(name, value) {
+            Ok(cfg) => cfg,
             Err(err) => {
                 state.errors.push(format!("{path}: {err}"));
                 continue;
@@ -125,7 +133,7 @@ fn read_config_file(path: &str, scope: McpScope, state: &mut McpConfigState) {
                 .push(format!("{path}: server \"{name}\" conflicts with \"{clash}\""));
             continue;
         }
-        if scope == McpScope::Project && matches!(config, McpServerConfig::Http(_)) && auth_provider.is_some() {
+        if scope == McpScope::Project && matches!(&config, McpServerConfig::Http(h) if h.auth.is_some()) {
             state.errors.push(format!(
                 "{path}: server \"{name}\": auth is only allowed in the global mcp.json"
             ));
@@ -136,7 +144,6 @@ fn read_config_file(path: &str, scope: McpScope, state: &mut McpConfigState) {
             McpServerEntry {
                 name: name.clone(),
                 config,
-                auth_provider,
                 source: path.to_string(),
                 scope: Some(scope),
             },
@@ -149,7 +156,7 @@ pub fn load_mcp_config(options: &LoadMcpConfigOptions) -> LoadedMcpConfig {
     let global_path = pi_js::path::join(&[&options.agent_dir, "mcp.json"]);
     read_config_file(&global_path, McpScope::Global, &mut state);
     if options.project_trusted {
-        let project_path = pi_js::path::join(&[&options.cwd, CONFIG_DIR_NAME, "mcp.json"]);
+        let project_path = pi_js::path::join(&[&options.cwd, *CONFIG_DIR_NAME, "mcp.json"]);
         read_config_file(&project_path, McpScope::Project, &mut state);
     }
     LoadedMcpConfig {
@@ -251,23 +258,13 @@ pub fn update_mcp_server_config(path: &str, name: &str, patch: McpServerConfigPa
     })
 }
 
-pub fn add_mcp_server_config(
-    path: &str,
-    name: &str,
-    config: &McpServerConfig,
-    auth_provider: Option<&str>,
-) -> Result<bool> {
+pub fn add_mcp_server_config(path: &str, name: &str, config: &McpServerConfig) -> Result<bool> {
     let mut replaced = false;
     let serialized_str = match config {
         McpServerConfig::Stdio(s) => pi_js::json::stringify(s),
         McpServerConfig::Http(h) => pi_js::json::stringify(h),
     };
-    let mut config_val = pi_js::json::parse(&serialized_str)?;
-    if let Some(provider) = auth_provider
-        && let Some(obj) = config_val.as_object_mut()
-    {
-        obj.insert("auth".to_string(), serde_json::json!({ "provider": provider }));
-    }
+    let config_val = pi_js::json::parse(&serialized_str)?;
     edit_mcp_servers(path, |servers, root| {
         let mut target = servers.cloned().unwrap_or_default();
         replaced = target.contains_key(name);

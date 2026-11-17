@@ -8,10 +8,20 @@ use pi_js::{BoxFuture, Unsubscribe};
 use serde_json::Value;
 
 pub type EventHandler = Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>;
+pub type SyncEventHandler = Arc<dyn Fn(Value) + Send + Sync>;
 
 pub trait EventBus: Send + Sync {
     fn emit(&self, channel: &str, data: Value);
     fn on(&self, channel: &str, handler: EventHandler) -> Unsubscribe;
+    fn on_sync(&self, channel: &str, handler: SyncEventHandler) -> Unsubscribe {
+        self.on(
+            channel,
+            Arc::new(move |val| {
+                let h = Arc::clone(&handler);
+                Box::pin(async move { h(val) })
+            }),
+        )
+    }
 }
 
 pub trait EventBusController: EventBus {
@@ -134,6 +144,10 @@ impl EventBus for LocalEventBus {
 
     fn on(&self, channel: &str, handler: EventHandler) -> Unsubscribe {
         LocalEventBus::on(self, channel, handler)
+    }
+
+    fn on_sync(&self, channel: &str, handler: SyncEventHandler) -> Unsubscribe {
+        self.insert_listener(channel, Listener::Sync(handler))
     }
 }
 

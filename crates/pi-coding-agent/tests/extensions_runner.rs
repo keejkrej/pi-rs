@@ -7,22 +7,25 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pi_agent_core::types::AgentMessage;
 use pi_ai::types::{Model, ProviderHeaders, TextContent};
-use pi_coding_agent::core::extensions::mcp_wire::{
-    BashResult, EventBus, ModelRegistry, ProjectedSessionEntry, ResourceDiagnosticType, ScopedModel, SessionEntry,
-    SessionManager, build_system_prompt, create_event_bus,
-};
+use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::bash_executor::BashResult;
+use pi_coding_agent::core::diagnostics::ResourceDiagnosticType;
+use pi_coding_agent::core::event_bus::{EventBus, create_event_bus};
 use pi_coding_agent::core::extensions::{
     AgentActivityOutcome, AgentEndEvent, AutocompleteProviderFactory, BoundaryBaseEvent, BoundaryContextPreview,
     BoundaryResult, BuildSystemPromptOptions, CustomToolResultEvent, CustomUiFactory, EditorFactory,
     EmitProjectTrustOutput, ExtensionActions, ExtensionApi, ExtensionCommandContextActions, ExtensionContextActions,
     ExtensionCustomOptions, ExtensionMode, ExtensionRunner, ExtensionUIContext, ExtensionUIDialogOptions,
-    ExtensionWidgetOptions, FooterFactory, ForkPosition, HeaderFactory, NotifyType, ProjectTrustContext,
-    ProjectTrustEvent, ProjectTrustEventDecision, ProjectTrustEventResult, ProviderActions, ProviderConfig,
-    SessionBoundaryDraft, SetThemeResult, TerminalInputHandler, Theme, ThemeInfo, ToolResultContentBlock,
-    ToolResultEvent, UserBashEvent, UserBashEventResult, WidgetFactory, WorkingIndicatorOptions,
-    create_extension_runtime, discover_and_load_extensions, emit_project_trust_event, load_extension_from_factory,
-    load_extensions,
+    ExtensionWidgetOptions, FooterFactory, ForkPosition, HeaderFactory, ModelRegistry, NotifyType, ProjectTrustContext,
+    ProjectTrustEvent, ProjectTrustEventDecision, ProjectTrustEventResult, ProjectedSessionEntry, ProviderActions,
+    ProviderConfig, ScopedModel, SessionBoundaryDraft, SessionEntry, SessionManager, SetThemeResult,
+    TerminalInputHandler, Theme, ThemeInfo, ToolResultContentBlock, ToolResultEvent, UserBashEvent,
+    UserBashEventResult, WidgetFactory, WorkingIndicatorOptions, create_extension_runtime,
+    discover_and_load_extensions, emit_project_trust_event, load_extension_from_factory, load_extensions,
 };
+use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
+use pi_coding_agent::core::session_manager::CustomEntry;
+use pi_coding_agent::core::system_prompt::build_system_prompt_from_normalized;
 use pi_js::Unsubscribe;
 use pi_js::abort::AbortController;
 use pi_tui::keybindings::{KeyIdOrList, KeybindingsConfig};
@@ -183,7 +186,7 @@ async fn scoped_models_returns_live_get_scoped_models_action() {
     .unwrap();
     let scoped = vec![ScopedModel {
         model: dummy_model,
-        thinking_level: Some(pi_agent_core::types::ThinkingLevel::High),
+        thinking_level: Some(pi_ai::types::ModelThinkingLevel::High),
     }];
     let mut ctx_act = default_ctx_actions();
     let scoped_ret = scoped.clone();
@@ -781,8 +784,8 @@ async fn before_agent_start_keeps_get_system_prompt_in_sync() {
         )
         .await;
     assert_eq!(combined.messages.len(), 0);
-    let rendered = build_system_prompt(&combined.system_prompt_options);
-    assert_eq!(rendered, "base\nfirst\nsecond");
+    let rendered = build_system_prompt_from_normalized(&combined.system_prompt_options).unwrap();
+    assert_eq!(rendered, format!("base\n\n<cwd>\n{root}\n</cwd>\nfirst\nsecond"));
 }
 
 #[tokio::test]
@@ -854,13 +857,13 @@ async fn boundary_chaining_repair_and_throw_preservation() {
                     .iter()
                     .enumerate()
                     .map(|(i, _)| ProjectedSessionEntry {
-                        source_entry: SessionEntry {
-                            r#type: "custom".to_string(),
+                        source_entry: SessionEntry::Custom(CustomEntry {
                             id: format!("draft-{i}"),
                             parent_id: None,
                             timestamp: String::new(),
-                            fields: Default::default(),
-                        },
+                            custom_type: "test".to_string(),
+                            data: None,
+                        }),
                         messages: Vec::new(),
                     })
                     .collect();
@@ -1156,4 +1159,42 @@ async fn provider_actions_flush_and_context_roundtrip() {
     assert_eq!(out[0].role(), Some("system"));
     assert_eq!(out[1].role(), Some("user"));
 }
-// WIRE(@mcp-w3): add queued invalid-provider error reporting and ModelRegistry::find checks once real ModelRegistry lands from @mcp.
+#[tokio::test]
+async fn queued_invalid_provider_reports_error_and_model_registry_find() {
+    let (_d, root, _) = setup_dirs();
+    let rt = create_extension_runtime();
+    let mut bad_cfg = ProviderConfig::default();
+    bad_cfg.stream_simple = Some(Arc::new(|_, _, _| {
+        pi_ai::utils::event_stream::AssistantMessageEventStream::new()
+    }));
+    // Missing `api` fails validation when flushed onto ModelRegistry::register_provider
+    (rt.inner.register_provider_fn.lock().unwrap().clone())("invalid-queued", bad_cfg, "/tmp/bad.ts");
+
+    let runtime = ModelRuntime::create(CreateModelRuntimeOptions {
+        credentials: Some(Arc::new(AuthStorage::in_memory(None))),
+        models_path: Some(None),
+        allow_model_network: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let registry = ModelRegistry::new(runtime);
+    assert!(registry.find("anthropic", "claude-sonnet-4-5").is_some());
+    assert!(registry.find("nonexistent-provider", "missing").is_none());
+
+    let runner = ExtensionRunner::new(Vec::new(), rt, &root, Default::default(), registry);
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let errors_cb = Arc::clone(&errors);
+    runner.on_error_typed(Arc::new(move |err| {
+        errors_cb.lock().unwrap().push(err.error);
+    }));
+    runner.bind_core(default_actions(), default_ctx_actions(), None);
+
+    let captured = errors.lock().unwrap();
+    assert!(
+        captured
+            .iter()
+            .any(|msg| msg.contains("invalid-queued") && msg.contains("api")),
+        "expected queued invalid-provider error, got: {captured:?}"
+    );
+}

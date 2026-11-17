@@ -52,7 +52,7 @@ async fn read_tool_reads_text_files_normally() {
     }
 }
 
-// WIRE(@mcp-w3 / @ca-cli): SettingsManager.blockImages and cli::file_processor::process_file_arguments
-// tests will be enabled here once SettingsManager and CLI file-processor land.
+// WIRE(@ca-cli-w3): cli::file_processor::process_file_arguments
+// tests with SettingsManager.blockImages will be enabled once CLI file-processor lands.
 #[cfg(any())]
 mod pending_wire_tests {}

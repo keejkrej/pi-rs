@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use pi_agent_core::types::{
     AgentMessage, AgentTool, AgentToolCallOutcome, AgentToolPrepareArgumentsFn, AgentToolResult,
     AgentToolUpdateCallback, ThinkingLevel, ToolExecutionMode,
@@ -38,1051 +38,66 @@ use crate::core::tools::powershell::{PowerShellToolDetails, PowerShellToolInput}
 use crate::core::tools::read::{ReadToolDetails, ReadToolInput};
 use crate::core::tools::write::WriteToolInput;
 
-// ---------------------------------------------------------------------------
-// Temporary WIRE(@mcp-w3) surface for Stage 3A-1 items owned by @mcp.
-// Removed/replaced with `crate::core::*` + `crate::utils::*` once `swarm/mcp-w3`
-// lands on `main`.
-// ---------------------------------------------------------------------------
-
-// WIRE(@mcp-w3): replace mcp_wire definitions with imports from crate::core::* / crate::utils::* once swarm/mcp-w3 merges to main.
-pub mod mcp_wire {
-    use super::*;
-
-    pub const BUILTIN_PATH_PREFIX: &str = "builtin:";
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum SourceScope {
-        User,
-        Project,
-        Temporary,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    pub enum SourceOrigin {
-        Package,
-        TopLevel,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SourceInfo {
-        pub path: String,
-        pub source: String,
-        pub scope: SourceScope,
-        pub origin: SourceOrigin,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub base_dir: Option<String>,
-    }
-
-    pub fn get_synthetic_path_source(path: &str) -> Option<String> {
-        if path.starts_with(BUILTIN_PATH_PREFIX) {
-            return Some("builtin".to_string());
-        }
-        if path.starts_with('<') && path.ends_with('>') {
-            let inner = &path[1..path.len() - 1];
-            let prefix = inner.split(':').next().unwrap_or("");
-            return Some(if prefix.is_empty() {
-                "temporary".to_string()
-            } else {
-                prefix.to_string()
-            });
-        }
-        None
-    }
-
-    pub fn is_synthetic_path(path: &str) -> bool {
-        path.starts_with(BUILTIN_PATH_PREFIX) || path.starts_with('<')
-    }
-
-    pub fn create_synthetic_source_info(
-        path: impl Into<String>,
-        source: impl Into<String>,
-        scope: Option<SourceScope>,
-        origin: Option<SourceOrigin>,
-        base_dir: Option<String>,
-    ) -> SourceInfo {
-        SourceInfo {
-            path: path.into(),
-            source: source.into(),
-            scope: scope.unwrap_or(SourceScope::Temporary),
-            origin: origin.unwrap_or(SourceOrigin::TopLevel),
-            base_dir,
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum SlashCommandSource {
-        Extension,
-        Prompt,
-        Skill,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SlashCommandInfo {
-        pub name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub description: Option<String>,
-        pub source: SlashCommandSource,
-        pub source_info: SourceInfo,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    pub struct ExecOptions {
-        pub signal: Option<AbortSignal>,
-        pub timeout: Option<u64>,
-        pub cwd: Option<String>,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ExecResult {
-        pub stdout: String,
-        pub stderr: String,
-        pub code: i64,
-        pub killed: bool,
-    }
-
-    pub async fn exec_command_wire(
-        command: &str,
-        args: &[String],
-        cwd: &str,
-        options: Option<ExecOptions>,
-    ) -> pi_js::Result<ExecResult> {
-        let opts = options.unwrap_or_default();
-        let effective_cwd = opts.cwd.as_deref().unwrap_or(cwd);
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .current_dir(effective_cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                return Ok(ExecResult {
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    code: 1,
-                    killed: false,
-                });
-            }
-        };
-
-        let fut = child.wait_with_output();
-        if let Some(sig) = &opts.signal {
-            if sig.aborted() {
-                return Ok(ExecResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    code: 1,
-                    killed: true,
-                });
-            }
-        }
-
-        let res = match opts.timeout {
-            Some(ms) if ms > 0 => tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
-                .await
-                .map_err(|_| ()),
-            _ => Ok(fut.await),
-        };
-
-        match res {
-            Ok(Ok(output)) => Ok(ExecResult {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                code: i64::from(output.status.code().unwrap_or(1)),
-                killed: false,
-            }),
-            Ok(Err(err)) => Ok(ExecResult {
-                stdout: String::new(),
-                stderr: err.to_string(),
-                code: 1,
-                killed: false,
-            }),
-            Err(()) => Ok(ExecResult {
-                stdout: String::new(),
-                stderr: String::new(),
-                code: 1,
-                killed: true,
-            }),
-        }
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct BashResult {
-        pub output: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub exit_code: Option<i64>,
-        pub cancelled: bool,
-        pub truncated: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub full_output_path: Option<String>,
-    }
-
-    pub type EventBusHandler = Arc<dyn Fn(Value) + Send + Sync>;
-
-    pub trait EventBus: Send + Sync {
-        fn emit(&self, channel: &str, data: Value);
-        fn on(&self, channel: &str, handler: EventBusHandler) -> Unsubscribe;
-    }
-
-    pub trait EventBusController: EventBus {
-        fn clear(&self);
-    }
-
-    #[derive(Default)]
-    struct DefaultEventBusInner {
-        next_id: u64,
-        listeners: IndexMap<String, Vec<(u64, EventBusHandler)>>,
-    }
-
-    #[derive(Clone, Default)]
-    pub struct DefaultEventBus {
-        inner: Arc<Mutex<DefaultEventBusInner>>,
-    }
-
-    impl EventBus for DefaultEventBus {
-        fn emit(&self, channel: &str, data: Value) {
-            let handlers: Vec<EventBusHandler> = {
-                let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard
-                    .listeners
-                    .get(channel)
-                    .map(|list| list.iter().map(|(_, h)| Arc::clone(h)).collect())
-                    .unwrap_or_default()
-            };
-            for handler in handlers {
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(data.clone())));
-                if res.is_err() {
-                    // Errors isolated per subscriber like EventEmitter in TS.
-                }
-            }
-        }
-
-        fn on(&self, channel: &str, handler: EventBusHandler) -> Unsubscribe {
-            let id = {
-                let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard.next_id += 1;
-                let id = guard.next_id;
-                guard
-                    .listeners
-                    .entry(channel.to_string())
-                    .or_default()
-                    .push((id, handler));
-                id
-            };
-            let inner = Arc::clone(&self.inner);
-            let channel_name = channel.to_string();
-            Unsubscribe::new(move || {
-                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(list) = guard.listeners.get_mut(&channel_name) {
-                    list.retain(|(entry_id, _)| *entry_id != id);
-                    if list.is_empty() {
-                        guard.listeners.shift_remove(&channel_name);
-                    }
-                }
-            })
-        }
-    }
-
-    impl EventBusController for DefaultEventBus {
-        fn clear(&self) {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.listeners.clear();
-        }
-    }
-
-    pub fn create_event_bus() -> Arc<dyn EventBusController> {
-        Arc::new(DefaultEventBus::default())
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum McpExposure {
-        Codemode,
-        Deferred,
-        Direct,
-        Hidden,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct McpOAuthConfig {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub client_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub client_secret: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub callback_port: Option<i64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub callback_url: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub scope: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub client_name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub auth_server_metadata_url: Option<String>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct McpStdioServerConfig {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub exposure: Option<McpExposure>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub description: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub tool_exposure: Option<IndexMap<String, McpExposure>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub timeout: Option<i64>,
-        #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-        pub r#type: Option<String>,
-        pub command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub args: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub env: Option<IndexMap<String, String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub cwd: Option<String>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct McpHttpServerConfig {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub exposure: Option<McpExposure>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub description: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub tool_exposure: Option<IndexMap<String, McpExposure>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub timeout: Option<i64>,
-        #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-        pub r#type: Option<String>,
-        pub url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub headers: Option<IndexMap<String, String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub oauth: Option<McpOAuthConfig>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(untagged)]
-    pub enum McpServerConfig {
-        Stdio(McpStdioServerConfig),
-        Http(McpHttpServerConfig),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RegisteredMcpServer {
-        pub name: String,
-        pub config: McpServerConfig,
-        pub extension_path: String,
-    }
-
-    pub fn mcp_namespace(server: &str) -> String {
-        let mut out = String::from("mcp__");
-        for ch in server.chars() {
-            if ch == '-' {
-                out.push('_');
-            } else {
-                out.push(ch);
-            }
-        }
-        out
-    }
-
-    pub fn validate_mcp_server_config(_name: &str, raw: &Value) -> std::result::Result<McpServerConfig, String> {
-        let mut val = raw.clone();
-        if let Some(obj) = val.as_object_mut() {
-            if let Some(exp) = obj.get("exposure").and_then(|v| v.as_str()) {
-                if exp == "codemode-deferred" {
-                    obj.insert("exposure".to_string(), Value::String("codemode".to_string()));
-                }
-            }
-        }
-        serde_json::from_value::<McpServerConfig>(val).map_err(|e| format!("Invalid MCP server config: {e}"))
-    }
-
-    #[derive(Default)]
-    struct McpServerRegistryInner {
-        servers: IndexMap<String, RegisteredMcpServer>,
-        listener: Option<Arc<dyn Fn() + Send + Sync>>,
-    }
-
-    #[derive(Clone, Default)]
-    pub struct McpServerRegistry {
-        inner: Arc<Mutex<McpServerRegistryInner>>,
-    }
-
-    impl McpServerRegistry {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        pub fn set_change_listener(&self, listener: Option<Arc<dyn Fn() + Send + Sync>>) {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.listener = listener;
-        }
-
-        pub fn get(&self, name: &str) -> Option<RegisteredMcpServer> {
-            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.servers.get(name).cloned()
-        }
-
-        pub fn list(&self) -> Vec<RegisteredMcpServer> {
-            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.servers.values().cloned().collect()
-        }
-
-        pub fn register(&self, server: RegisteredMcpServer) {
-            let listener = {
-                let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard.servers.insert(server.name.clone(), server);
-                guard.listener.clone()
-            };
-            if let Some(cb) = listener {
-                cb();
-            }
-        }
-
-        pub fn unregister(&self, name: &str, extension_path: &str) -> bool {
-            let (removed, listener) = {
-                let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                let matches = guard
-                    .servers
-                    .get(name)
-                    .is_some_and(|s| s.extension_path == extension_path);
-                let removed = if matches {
-                    guard.servers.shift_remove(name).is_some()
-                } else {
-                    false
-                };
-                (removed, if removed { guard.listener.clone() } else { None })
-            };
-            if removed {
-                if let Some(cb) = listener {
-                    cb();
-                }
-            }
-            removed
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(untagged)]
-    pub enum CustomMessageContent {
-        Text(String),
-        Blocks(Vec<ContentBlock>),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(tag = "type")]
-    pub enum ContentBlock {
-        #[serde(rename = "text")]
-        Text(TextContent),
-        #[serde(rename = "image")]
-        Image(ImageContent),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CustomMessage {
-        pub role: String,
-        pub custom_type: String,
-        pub content: CustomMessageContent,
-        pub display: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub details: Option<Value>,
-        pub timestamp: i64,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CustomMessageDraft {
-        pub custom_type: String,
-        pub content: CustomMessageContent,
-        pub display: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub details: Option<Value>,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum CodemodeMode {
-        On,
-        Only,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CodemodeSettings {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub mode: Option<CodemodeMode>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub inline_budget: Option<i64>,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CompactionSettings {
-        pub enabled: bool,
-        pub reserve_tokens: i64,
-        pub keep_recent_tokens: i64,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Settings {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub default_provider: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub default_model: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub default_thinking_level: Option<ThinkingLevel>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub theme: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub codemode: Option<CodemodeSettings>,
-        #[serde(flatten)]
-        pub extra: IndexMap<String, Value>,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct BuildSystemPromptOptions {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub custom_prompt: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub force_system_prompt: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub selected_tools: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub tool_snippets: Option<IndexMap<String, String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub tool_guidelines: Option<IndexMap<String, Vec<String>>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub prompt_guidelines: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub append_system_prompt: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub sections: Option<IndexMap<String, String>>,
-        pub cwd: String,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct NormalizedBuildSystemPromptOptions {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub custom_prompt: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub force_system_prompt: Option<String>,
-        pub selected_tools: Vec<String>,
-        pub tool_snippets: IndexMap<String, String>,
-        pub tool_guidelines: IndexMap<String, Vec<String>>,
-        pub prompt_guidelines: Vec<String>,
-        pub append_system_prompt: String,
-        pub sections: IndexMap<String, String>,
-        pub cwd: String,
-    }
-
-    pub fn normalize_build_system_prompt_options(
-        input: BuildSystemPromptOptions,
-    ) -> NormalizedBuildSystemPromptOptions {
-        NormalizedBuildSystemPromptOptions {
-            custom_prompt: input.custom_prompt,
-            force_system_prompt: input.force_system_prompt,
-            selected_tools: input.selected_tools.unwrap_or_else(|| {
-                vec![
-                    "read".to_string(),
-                    "bash".to_string(),
-                    "edit".to_string(),
-                    "write".to_string(),
-                ]
-            }),
-            tool_snippets: input.tool_snippets.unwrap_or_default(),
-            tool_guidelines: input.tool_guidelines.unwrap_or_default(),
-            prompt_guidelines: input.prompt_guidelines.unwrap_or_default(),
-            append_system_prompt: input.append_system_prompt.unwrap_or_default(),
-            sections: input.sections.unwrap_or_default(),
-            cwd: input.cwd,
-        }
-    }
-
-    pub fn build_system_prompt(options: &NormalizedBuildSystemPromptOptions) -> String {
-        if let Some(forced) = &options.force_system_prompt {
-            return forced.clone();
-        }
-        if let Some(custom) = &options.custom_prompt {
-            return custom.clone();
-        }
-        format!("Current working directory: {}", options.cwd)
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum CacheWarmingAction {
-        Warm,
-        Stop,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CacheWarmingDecisionEvent {
-        pub action: CacheWarmingAction,
-        #[serde(flatten)]
-        pub extra: IndexMap<String, Value>,
-    }
-
-    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CacheWarmingDecisionEventResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub action: Option<CacheWarmingAction>,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum ResourceCollisionType {
-        Extension,
-        Skill,
-        Prompt,
-        Theme,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ResourceCollision {
-        pub resource_type: ResourceCollisionType,
-        pub name: String,
-        pub winner_path: String,
-        pub loser_path: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub winner_source: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub loser_source: Option<String>,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum ResourceDiagnosticType {
-        Warning,
-        Error,
-        Collision,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ResourceDiagnostic {
-        #[serde(rename = "type")]
-        pub r#type: ResourceDiagnosticType,
-        pub message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub collision: Option<ResourceCollision>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CompactionEntry {
-        pub id: String,
-        pub parent_id: Option<String>,
-        pub timestamp: String,
-        pub summary: String,
-        pub first_kept_entry_id: String,
-        pub tokens_before: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub details: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub usage: Option<Usage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub from_hook: Option<bool>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct BranchSummaryEntry {
-        pub id: String,
-        pub parent_id: Option<String>,
-        pub timestamp: String,
-        pub from_id: String,
-        pub summary: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub details: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub usage: Option<Usage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub from_hook: Option<bool>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CustomEntry {
-        pub id: String,
-        pub parent_id: Option<String>,
-        pub timestamp: String,
-        pub custom_type: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub data: Option<Value>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ContextEditReplacement {
-        pub content: Value,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ContextEditEntry {
-        pub id: String,
-        pub parent_id: Option<String>,
-        pub timestamp: String,
-        pub target_id: String,
-        pub replacement: Option<ContextEditReplacement>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SessionEntry {
-        #[serde(rename = "type")]
-        pub r#type: String,
-        pub id: String,
-        pub parent_id: Option<String>,
-        pub timestamp: String,
-        #[serde(flatten)]
-        pub fields: IndexMap<String, Value>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ProjectedSessionEntry {
-        pub source_entry: SessionEntry,
-        pub messages: Vec<AgentMessage>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct FileOperations {
-        pub read: IndexSet<String>,
-        pub written: IndexSet<String>,
-        pub edited: IndexSet<String>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CompactionPreparation {
-        pub first_kept_entry_id: String,
-        pub messages_to_summarize: Vec<AgentMessage>,
-        pub turn_prefix_messages: Vec<AgentMessage>,
-        pub is_split_turn: bool,
-        pub tokens_before: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub previous_summary: Option<String>,
-        pub file_ops: FileOperations,
-        pub settings: CompactionSettings,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CompactionResult {
-        pub summary: String,
-        pub first_kept_entry_id: String,
-        pub tokens_before: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub estimated_tokens_after: Option<i64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub usage: Option<Usage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub details: Option<Value>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ScopedModel {
-        pub model: Model,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub thinking_level: Option<ThinkingLevel>,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum ModelRouteReason {
-        User,
-        Continuation,
-        Retry,
-        Direct,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ModelRouteRequest {
-        pub model: Model,
-        pub thinking_level: pi_ai::types::ModelThinkingLevel,
-        pub reason: ModelRouteReason,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub state: Option<Value>,
-        pub messages: Vec<Message>,
-        #[serde(skip)]
-        pub signal: Option<AbortSignal>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ModelRoute {
-        pub model: Model,
-        pub thinking_level: pi_ai::types::ModelThinkingLevel,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub state: Option<Value>,
-    }
-
-    #[derive(Clone)]
-    pub struct VirtualModelDefinition {
-        pub provider: String,
-        pub id: String,
-        pub name: String,
-        pub thinking_levels: Option<Vec<pi_ai::types::ModelThinkingLevel>>,
-        pub route: Arc<dyn Fn(ModelRouteRequest) -> BoxFuture<pi_js::Result<ModelRoute>> + Send + Sync>,
-    }
-
-    pub trait SessionManagerBackend: Send + Sync {
-        fn get_cwd(&self) -> String;
-        fn get_session_dir(&self) -> String;
-        fn get_session_id(&self) -> String;
-        fn get_session_file(&self) -> Option<String>;
-        fn get_leaf_id(&self) -> Option<String>;
-        fn get_entry(&self, id: &str) -> Option<SessionEntry>;
-        fn get_label(&self, id: &str) -> Option<String>;
-        fn get_branch(&self, from_id: Option<&str>) -> Vec<SessionEntry>;
-        fn get_entries(&self) -> Vec<SessionEntry>;
-        fn get_session_name(&self) -> Option<String>;
-    }
-
-    #[derive(Clone)]
-    pub struct SessionManager(pub Arc<dyn SessionManagerBackend>);
-
-    impl Default for SessionManager {
-        fn default() -> Self {
-            Self(Arc::new(NoopSessionManager))
-        }
-    }
-
-    impl SessionManager {
-        pub fn get_cwd(&self) -> String {
-            self.0.get_cwd()
-        }
-        pub fn get_session_dir(&self) -> String {
-            self.0.get_session_dir()
-        }
-        pub fn get_session_id(&self) -> String {
-            self.0.get_session_id()
-        }
-        pub fn get_session_file(&self) -> Option<String> {
-            self.0.get_session_file()
-        }
-        pub fn get_leaf_id(&self) -> Option<String> {
-            self.0.get_leaf_id()
-        }
-        pub fn get_entry(&self, id: &str) -> Option<SessionEntry> {
-            self.0.get_entry(id)
-        }
-        pub fn get_label(&self, id: &str) -> Option<String> {
-            self.0.get_label(id)
-        }
-        pub fn get_branch(&self, from_id: Option<&str>) -> Vec<SessionEntry> {
-            self.0.get_branch(from_id)
-        }
-        pub fn get_entries(&self) -> Vec<SessionEntry> {
-            self.0.get_entries()
-        }
-        pub fn get_session_name(&self) -> Option<String> {
-            self.0.get_session_name()
-        }
-    }
-
-    pub type ReadonlySessionManager = SessionManager;
-
-    struct NoopSessionManager;
-    impl SessionManagerBackend for NoopSessionManager {
-        fn get_cwd(&self) -> String {
-            String::new()
-        }
-        fn get_session_dir(&self) -> String {
-            String::new()
-        }
-        fn get_session_id(&self) -> String {
-            String::new()
-        }
-        fn get_session_file(&self) -> Option<String> {
-            None
-        }
-        fn get_leaf_id(&self) -> Option<String> {
-            None
-        }
-        fn get_entry(&self, _id: &str) -> Option<SessionEntry> {
-            None
-        }
-        fn get_label(&self, _id: &str) -> Option<String> {
-            None
-        }
-        fn get_branch(&self, _from_id: Option<&str>) -> Vec<SessionEntry> {
-            Vec::new()
-        }
-        fn get_entries(&self) -> Vec<SessionEntry> {
-            Vec::new()
-        }
-        fn get_session_name(&self) -> Option<String> {
-            None
-        }
-    }
-
-    pub trait ModelRegistryBackend: Send + Sync {
-        fn register_provider(&self, name: &str, config: ProviderConfig);
-        fn register_native_provider(&self, provider: Arc<dyn Provider>);
-        fn unregister_provider(&self, name: &str);
-        fn register_virtual_model(&self, definition: VirtualModelDefinition);
-        fn unregister_virtual_model(&self, provider: &str, id: &str);
-        fn get_available_models(&self) -> Vec<Model>;
-        fn get_api_key(&self, model: &Model) -> BoxFuture<pi_js::Result<Option<String>>>;
-    }
-
-    #[derive(Clone)]
-    pub struct ModelRegistry(pub Arc<dyn ModelRegistryBackend>);
-
-    impl Default for ModelRegistry {
-        fn default() -> Self {
-            Self(Arc::new(NoopModelRegistry))
-        }
-    }
-
-    struct NoopModelRegistry;
-    impl ModelRegistryBackend for NoopModelRegistry {
-        fn register_provider(&self, _name: &str, _config: ProviderConfig) {}
-        fn register_native_provider(&self, _provider: Arc<dyn Provider>) {}
-        fn unregister_provider(&self, _name: &str) {}
-        fn register_virtual_model(&self, _definition: VirtualModelDefinition) {}
-        fn unregister_virtual_model(&self, _provider: &str, _id: &str) {}
-        fn get_available_models(&self) -> Vec<Model> {
-            Vec::new()
-        }
-        fn get_api_key(&self, _model: &Model) -> BoxFuture<pi_js::Result<Option<String>>> {
-            Box::pin(async { Ok(None) })
-        }
-    }
-
-    pub trait ReadonlyFooterDataProvider: Send + Sync {
-        fn get_git_branch(&self) -> Option<String>;
-        fn get_extension_statuses(&self) -> IndexMap<String, String>;
-    }
-
-    pub type KeybindingsManager = pi_tui::keybindings::KeybindingsManager;
-    pub type AppKeybinding = String;
-
-    pub fn resolve_path_wire(input: &str, base_dir: &str) -> String {
-        let trimmed = input.strip_prefix('@').unwrap_or(input);
-        let expanded = if trimmed == "~" {
-            pi_js::env::home_dir()
-        } else if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
-            pi_js::path::join(&[&pi_js::env::home_dir(), rest])
-        } else {
-            trimmed.to_string()
-        };
-        if pi_js::path::is_absolute(&expanded) {
-            pi_js::path::normalize(&expanded)
-        } else {
-            pi_js::path::resolve(&[base_dir, &expanded])
-        }
-    }
-
-    pub fn strip_ansi_wire(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                match chars.peek().copied() {
-                    Some('[') => {
-                        chars.next();
-                        while let Some(n) = chars.next() {
-                            if ('\x40'..='\x7e').contains(&n) {
-                                break;
-                            }
-                        }
-                    }
-                    Some(']') => {
-                        chars.next();
-                        while let Some(n) = chars.next() {
-                            if n == '\x07' {
-                                break;
-                            }
-                            if n == '\x1b' && chars.peek() == Some(&'\\') {
-                                chars.next();
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
-    pub fn sanitize_binary_output_wire(s: &str) -> String {
-        s.chars()
-            .filter(|&c| {
-                if c == '\t' || c == '\n' || c == '\r' {
-                    return true;
-                }
-                let code = c as u32;
-                !(code <= 0x1f || (0x7f..=0x9f).contains(&code) || (0xfff9..=0xfffb).contains(&code))
-            })
-            .collect()
-    }
-
-    pub fn get_agent_dir_wire() -> String {
-        if let Some(dir) = pi_js::env::var("PI_CODING_AGENT_DIR") {
-            return resolve_path_wire(&dir, &pi_js::env::cwd());
-        }
-        pi_js::path::join(&[&pi_js::env::home_dir(), ".pi", "agent"])
-    }
-
-    pub const CONFIG_DIR_NAME_WIRE: &str = ".pi";
-
-    #[derive(Clone, Debug, Default, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PiManifest {
-        #[serde(default)]
-        pub extensions: Vec<String>,
-    }
-
-    pub fn read_pi_manifest_wire(package_json_path: &str) -> Option<PiManifest> {
-        let content = pi_js::fs::read_to_string(package_json_path).ok()?;
-        let val = pi_js::json::parse(content.strip_prefix('\u{feff}').unwrap_or(&content)).ok()?;
-        let pi_val = val.get("pi")?;
-        serde_json::from_value::<PiManifest>(pi_val.clone()).ok()
-    }
+pub use pi_tui::keybindings::KeybindingsManager;
+
+pub use crate::core::bash_executor::BashResult;
+pub use crate::core::cache_warmer::{CacheWarmingAction, CacheWarmingDecisionEvent};
+pub use crate::core::compaction::compaction::{CompactionPreparation, CompactionResult};
+pub use crate::core::diagnostics::{
+    ResourceCollision, ResourceDiagnostic, ResourceDiagnosticType, ResourceType, ResourceType as ResourceCollisionType,
+};
+pub use crate::core::event_bus::{EventBus, EventBusController, EventHandler, LocalEventBus, SyncEventHandler};
+pub use crate::core::exec::{ExecOptions, ExecResult, exec_command};
+pub use crate::core::footer_data_provider::ReadonlyFooterDataProvider;
+pub use crate::core::keybindings::AppKeybinding;
+pub use crate::core::mcp_servers::{
+    McpExposure, McpHttpServerConfig, McpOAuthConfig, McpProviderAuthConfig, McpServerConfig, McpServerRegistry,
+    McpStdioServerConfig, RegisteredMcpServer, mcp_namespace, validate_mcp_server_config,
+};
+pub use crate::core::messages::{CustomMessage, CustomMessageContent};
+pub use crate::core::model_registry::ModelRegistry;
+pub use crate::core::model_resolver::ScopedModel;
+pub use crate::core::provider_composer::{
+    ExtensionOAuthConfig, ProviderChatModelConfig as ComposerChatModelConfig,
+    ProviderClassifierModelConfig as ComposerClassifierModelConfig, ProviderConfigInput,
+    ProviderImageModelConfig as ComposerImageModelConfig, ProviderModelConfig as ComposerModelConfig,
+};
+pub use crate::core::session_manager::{
+    BranchSummaryEntry, CompactionEntry, ContextEditEntry, ContextEditReplacement, CustomEntry, ProjectedSessionEntry,
+    ReadonlySessionManager, SessionEntry, SessionManager,
+};
+pub use crate::core::settings_manager::{CodemodeMode, CodemodeSettings, CompactionSettings, RetrySettings, Settings};
+pub use crate::core::slash_commands::{SlashCommandInfo, SlashCommandSource};
+pub use crate::core::source_info::{
+    BUILTIN_PATH_PREFIX, SourceInfo, SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
+    get_synthetic_path_source, is_synthetic_path,
+};
+pub use crate::core::system_prompt::{
+    BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions, build_system_prompt,
+    build_system_prompt_from_normalized, normalize_build_system_prompt_options,
+};
+pub use crate::core::virtual_models::{
+    ModelRoute, ModelRouteReason, ModelRouteRequest, VirtualModelDefinition, VirtualModelRouter,
+};
+
+pub type EventBusHandler = SyncEventHandler;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessageDraft {
+    pub custom_type: String,
+    pub content: CustomMessageContent,
+    pub display: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
-pub use mcp_wire::{
-    AppKeybinding, BashResult, BuildSystemPromptOptions, CacheWarmingAction, CacheWarmingDecisionEvent,
-    CacheWarmingDecisionEventResult, ExecOptions, ExecResult, KeybindingsManager, NormalizedBuildSystemPromptOptions,
-    SlashCommandInfo, SlashCommandSource, SourceInfo,
-};
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheWarmingDecisionEventResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<CacheWarmingAction>,
+}
 
 // ---------------------------------------------------------------------------
 // Stage 3B Theme adapter (// WIRE(@w3-b))
@@ -1248,7 +263,7 @@ pub type EditorFactory =
 
 pub type WidgetFactory = Arc<dyn Fn(Arc<dyn TUI>, Theme) -> Arc<dyn Component> + Send + Sync>;
 pub type FooterFactory =
-    Arc<dyn Fn(Arc<dyn TUI>, Theme, Arc<dyn mcp_wire::ReadonlyFooterDataProvider>) -> Arc<dyn Component> + Send + Sync>;
+    Arc<dyn Fn(Arc<dyn TUI>, Theme, Arc<dyn ReadonlyFooterDataProvider>) -> Arc<dyn Component> + Send + Sync>;
 pub type HeaderFactory = Arc<dyn Fn(Arc<dyn TUI>, Theme) -> Arc<dyn Component> + Send + Sync>;
 
 pub type DoneFn = Arc<dyn Fn(Value) + Send + Sync>;
@@ -1387,7 +402,7 @@ pub struct ContextUsage {
 #[derive(Clone, Default)]
 pub struct CompactOptions {
     pub custom_instructions: Option<String>,
-    pub on_complete: Option<Arc<dyn Fn(mcp_wire::CompactionResult) + Send + Sync>>,
+    pub on_complete: Option<Arc<dyn Fn(CompactionResult) + Send + Sync>>,
     pub on_error: Option<Arc<dyn Fn(pi_js::Error) + Send + Sync>>,
 }
 
@@ -1414,7 +429,7 @@ pub struct CancelledResult {
 
 pub struct NewSessionOptions {
     pub parent_session: Option<String>,
-    pub setup: Option<Box<dyn FnOnce(mcp_wire::SessionManager) -> BoxFuture<pi_js::Result<()>> + Send>>,
+    pub setup: Option<Box<dyn FnOnce(SessionManager) -> BoxFuture<pi_js::Result<()>> + Send>>,
     pub with_session: Option<Box<dyn FnOnce(ReplacedSessionContext) -> BoxFuture<pi_js::Result<()>> + Send>>,
 }
 
@@ -1449,10 +464,10 @@ pub trait ExtensionContextBackend: Send + Sync {
     fn mode(&self) -> ExtensionMode;
     fn has_ui(&self) -> bool;
     fn cwd(&self) -> String;
-    fn session_manager(&self) -> mcp_wire::ReadonlySessionManager;
-    fn model_registry(&self) -> mcp_wire::ModelRegistry;
+    fn session_manager(&self) -> ReadonlySessionManager;
+    fn model_registry(&self) -> ModelRegistry;
     fn model(&self) -> Option<Model>;
-    fn scoped_models(&self) -> Vec<mcp_wire::ScopedModel>;
+    fn scoped_models(&self) -> Vec<ScopedModel>;
     fn thinking_level(&self) -> Option<ThinkingLevel>;
     fn is_idle(&self) -> bool;
     fn is_project_trusted(&self) -> bool;
@@ -1486,8 +501,8 @@ pub trait ExtensionContextBackend: Send + Sync {
         args: Value,
         options: ExecuteToolOptions,
     ) -> BoxFuture<AgentToolCallOutcome>;
-    fn send_message(&self, message: mcp_wire::CustomMessageDraft, options: Option<SendMessageOptions>);
-    fn send_user_message(&self, content: mcp_wire::CustomMessageContent, options: Option<SendUserMessageOptions>);
+    fn send_message(&self, message: CustomMessageDraft, options: Option<SendMessageOptions>);
+    fn send_user_message(&self, content: CustomMessageContent, options: Option<SendUserMessageOptions>);
 }
 
 #[derive(Clone)]
@@ -1529,12 +544,12 @@ impl ExtensionContext {
         Ok(self.backend.cwd())
     }
 
-    pub fn session_manager(&self) -> pi_js::Result<mcp_wire::ReadonlySessionManager> {
+    pub fn session_manager(&self) -> pi_js::Result<ReadonlySessionManager> {
         self.backend.assert_active()?;
         Ok(self.backend.session_manager())
     }
 
-    pub fn model_registry(&self) -> pi_js::Result<mcp_wire::ModelRegistry> {
+    pub fn model_registry(&self) -> pi_js::Result<ModelRegistry> {
         self.backend.assert_active()?;
         Ok(self.backend.model_registry())
     }
@@ -1544,7 +559,7 @@ impl ExtensionContext {
         Ok(self.backend.model())
     }
 
-    pub fn scoped_models(&self) -> pi_js::Result<Vec<mcp_wire::ScopedModel>> {
+    pub fn scoped_models(&self) -> pi_js::Result<Vec<ScopedModel>> {
         self.backend.assert_active()?;
         Ok(self.backend.scoped_models())
     }
@@ -1627,11 +642,11 @@ impl ExtensionToolContext {
         self.base.model()
     }
 
-    pub fn session_manager(&self) -> pi_js::Result<mcp_wire::ReadonlySessionManager> {
+    pub fn session_manager(&self) -> pi_js::Result<ReadonlySessionManager> {
         self.base.session_manager()
     }
 
-    pub fn model_registry(&self) -> pi_js::Result<mcp_wire::ModelRegistry> {
+    pub fn model_registry(&self) -> pi_js::Result<ModelRegistry> {
         self.base.model_registry()
     }
 
@@ -1733,7 +748,7 @@ impl ReplacedSessionContext {
 
     pub async fn send_message(
         &self,
-        message: mcp_wire::CustomMessageDraft,
+        message: CustomMessageDraft,
         options: Option<SendMessageOptions>,
     ) -> pi_js::Result<()> {
         self.base.base.backend.assert_active()?;
@@ -1743,7 +758,7 @@ impl ReplacedSessionContext {
 
     pub async fn send_user_message(
         &self,
-        content: mcp_wire::CustomMessageContent,
+        content: CustomMessageContent,
         options: Option<SendUserMessageOptions>,
     ) -> pi_js::Result<()> {
         self.base.base.backend.assert_active()?;
@@ -1982,10 +997,10 @@ impl ExtensionEvent for ResourcesDiscoverEvent {
     type Output = ResourcesDiscoverResult;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServersChangeEvent {
-    pub servers: Vec<mcp_wire::RegisteredMcpServer>,
+    pub servers: Vec<RegisteredMcpServer>,
 }
 
 impl ExtensionEvent for McpServersChangeEvent {
@@ -2086,8 +1101,8 @@ pub enum CompactionReason {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionBeforeCompactEvent {
-    pub preparation: mcp_wire::CompactionPreparation,
-    pub branch_entries: Vec<mcp_wire::SessionEntry>,
+    pub preparation: CompactionPreparation,
+    pub branch_entries: Vec<SessionEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_instructions: Option<String>,
     pub reason: CompactionReason,
@@ -2102,7 +1117,7 @@ pub struct SessionBeforeCompactResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancel: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<mcp_wire::CompactionResult>,
+    pub compaction: Option<CompactionResult>,
 }
 
 impl ExtensionEvent for SessionBeforeCompactEvent {
@@ -2113,7 +1128,7 @@ impl ExtensionEvent for SessionBeforeCompactEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCompactEvent {
-    pub compaction_entry: mcp_wire::CompactionEntry,
+    pub compaction_entry: CompactionEntry,
     pub from_extension: bool,
     pub reason: CompactionReason,
     pub will_retry: bool,
@@ -2169,7 +1184,7 @@ pub struct TreePreparation {
     pub target_id: String,
     pub old_leaf_id: Option<String>,
     pub common_ancestor_id: Option<String>,
-    pub entries_to_summarize: Vec<mcp_wire::SessionEntry>,
+    pub entries_to_summarize: Vec<SessionEntry>,
     pub user_wants_summary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_instructions: Option<String>,
@@ -2223,7 +1238,7 @@ pub struct SessionTreeEvent {
     pub new_leaf_id: Option<String>,
     pub old_leaf_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary_entry: Option<mcp_wire::BranchSummaryEntry>,
+    pub summary_entry: Option<BranchSummaryEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_extension: Option<bool>,
 }
@@ -2330,7 +1345,7 @@ pub struct BeforeAgentStartEvent {
 #[serde(rename_all = "camelCase")]
 pub struct BeforeAgentStartEventResult {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<mcp_wire::CustomMessageDraft>,
+    pub message: Option<CustomMessageDraft>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
@@ -2379,7 +1394,7 @@ pub enum SessionBoundaryDraft {
     #[serde(rename = "custom_message", rename_all = "camelCase")]
     CustomMessage {
         custom_type: String,
-        content: mcp_wire::CustomMessageContent,
+        content: CustomMessageContent,
         display: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
@@ -2387,7 +1402,7 @@ pub enum SessionBoundaryDraft {
     #[serde(rename = "context_edit", rename_all = "camelCase")]
     ContextEdit {
         target_id: String,
-        replacement: Option<mcp_wire::ContextEditReplacement>,
+        replacement: Option<ContextEditReplacement>,
     },
     #[serde(rename = "compaction", rename_all = "camelCase")]
     Compaction {
@@ -2403,7 +1418,7 @@ pub enum SessionBoundaryDraft {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoundaryContextPreview {
-    pub context_entries: Vec<mcp_wire::ProjectedSessionEntry>,
+    pub context_entries: Vec<ProjectedSessionEntry>,
     pub context_messages: Vec<AgentMessage>,
     pub llm_messages: Vec<Message>,
     pub pending_messages: Vec<AgentMessage>,
@@ -2646,7 +1661,7 @@ pub struct UserBashEvent {
 #[derive(Clone)]
 pub enum UserBashEventResult {
     Operations { operations: Arc<dyn BashOperations> },
-    Result { result: mcp_wire::BashResult },
+    Result { result: BashResult },
 }
 
 impl ExtensionEvent for UserBashEvent {
@@ -3256,10 +2271,10 @@ pub struct EntryRenderOptions {
 }
 
 pub type MessageRenderer =
-    Arc<dyn Fn(mcp_wire::CustomMessage, MessageRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
+    Arc<dyn Fn(CustomMessage, MessageRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
 
 pub type EntryRenderer =
-    Arc<dyn Fn(mcp_wire::CustomEntry, EntryRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
+    Arc<dyn Fn(CustomEntry, EntryRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
 
 // ============================================================================
 // Command, Shortcut, Flag Registration
@@ -3376,11 +2391,7 @@ pub struct ExtensionVirtualModel {
     pub id: String,
     pub name: String,
     pub thinking_levels: Option<Vec<pi_ai::types::ModelThinkingLevel>>,
-    pub route: Arc<
-        dyn Fn(mcp_wire::ModelRouteRequest, ExtensionContext) -> BoxFuture<pi_js::Result<mcp_wire::ModelRoute>>
-            + Send
-            + Sync,
-    >,
+    pub route: Arc<dyn Fn(ModelRouteRequest, ExtensionContext) -> BoxFuture<pi_js::Result<ModelRoute>> + Send + Sync>,
 }
 
 pub type CustomStreamSimpleFn =
@@ -3485,6 +2496,98 @@ pub enum ProviderModelConfig {
     Chat(ProviderChatModelConfig),
     Image(ProviderImageModelConfig),
     Classifier(ProviderClassifierModelConfig),
+}
+
+fn convert_provider_model_config(model: ProviderModelConfig) -> ComposerModelConfig {
+    match model {
+        ProviderModelConfig::Chat(m) => ComposerModelConfig::Chat(ComposerChatModelConfig {
+            id: m.id,
+            name: m.name,
+            api: m.api,
+            base_url: m.base_url,
+            input: m.input,
+            input_limits: m.input_limits,
+            cost: m.cost,
+            headers: m.headers,
+            reasoning: m.reasoning,
+            thinking_level_map: m.thinking_level_map,
+            prompt_cache: m.prompt_cache,
+            context_window: m.context_window,
+            max_tokens: m.max_tokens,
+            sampling_params: m.sampling_params,
+            compat: m.compat,
+        }),
+        ProviderModelConfig::Image(m) => ComposerModelConfig::Image(ComposerImageModelConfig {
+            id: m.id,
+            name: m.name,
+            api: m.api,
+            base_url: m.base_url,
+            input: m.input,
+            input_limits: m.input_limits,
+            cost: m.cost,
+            headers: m.headers,
+            output: m.output,
+        }),
+        ProviderModelConfig::Classifier(m) => ComposerModelConfig::Classifier(ComposerClassifierModelConfig {
+            id: m.id,
+            name: m.name,
+            api: m.api,
+            base_url: m.base_url,
+            input: m.input,
+            input_limits: m.input_limits,
+            cost: m.cost,
+            headers: m.headers,
+            context_window: m.context_window,
+        }),
+    }
+}
+
+impl From<ProviderConfig> for ProviderConfigInput {
+    fn from(cfg: ProviderConfig) -> Self {
+        let stream_simple: Option<pi_ai::types::SimpleStreamFunction> = cfg.stream_simple.map(|cb| {
+            Arc::new(
+                move |model: &Model, context: &TranscriptContext, options: Option<SimpleStreamOptions>| {
+                    cb(model.clone(), context.clone(), options)
+                },
+            ) as pi_ai::types::SimpleStreamFunction
+        });
+        let oauth = cfg.oauth.map(|o| ExtensionOAuthConfig {
+            name: o.name,
+            is_subscription: o.is_subscription,
+            uses_callback_server: o.uses_callback_server,
+            login: o.login,
+            refresh_token: o.refresh_token,
+            get_api_key: o.get_api_key,
+            modify_models: o.modify_models,
+        });
+        let models = cfg
+            .models
+            .map(|list| list.into_iter().map(convert_provider_model_config).collect());
+        let refresh_models: Option<crate::core::provider_composer::ExtensionRefreshModelsFn> =
+            cfg.refresh_models.map(|cb| {
+                Arc::new(move |ctx: RefreshModelsContext| {
+                    let cb = Arc::clone(&cb);
+                    Box::pin(async move {
+                        let list = cb(ctx).await?;
+                        Ok(list.into_iter().map(convert_provider_model_config).collect())
+                    }) as BoxFuture<pi_js::Result<Vec<ComposerModelConfig>>>
+                }) as crate::core::provider_composer::ExtensionRefreshModelsFn
+            });
+        ProviderConfigInput {
+            name: cfg.name,
+            base_url: cfg.base_url,
+            api_key: cfg.api_key,
+            api: cfg.api,
+            stream_simple,
+            images: cfg.images,
+            classifiers: cfg.classifiers,
+            headers: cfg.headers,
+            auth_header: cfg.auth_header,
+            oauth,
+            models,
+            refresh_models,
+        }
+    }
 }
 
 // ============================================================================
@@ -3628,20 +2731,19 @@ pub struct PendingNativeProviderRegistration {
 
 #[derive(Clone)]
 pub struct PendingVirtualModelRegistration {
-    pub definition: mcp_wire::VirtualModelDefinition,
+    pub definition: VirtualModelDefinition,
     pub extension_path: String,
 }
 
-pub type SendMessageHandler = Arc<dyn Fn(mcp_wire::CustomMessageDraft, Option<SendMessageOptions>) + Send + Sync>;
-pub type SendUserMessageHandler =
-    Arc<dyn Fn(mcp_wire::CustomMessageContent, Option<SendUserMessageOptions>) + Send + Sync>;
+pub type SendMessageHandler = Arc<dyn Fn(CustomMessageDraft, Option<SendMessageOptions>) + Send + Sync>;
+pub type SendUserMessageHandler = Arc<dyn Fn(CustomMessageContent, Option<SendUserMessageOptions>) + Send + Sync>;
 pub type AppendEntryHandler = Arc<dyn Fn(&str, Option<Value>) + Send + Sync>;
 pub type SetSessionNameHandler = Arc<dyn Fn(&str) + Send + Sync>;
 pub type GetSessionNameHandler = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 pub type SetLabelHandler = Arc<dyn Fn(&str, Option<&str>) + Send + Sync>;
 pub type GetActiveToolsHandler = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 pub type GetAllToolsHandler = Arc<dyn Fn() -> Vec<ToolInfo> + Send + Sync>;
-pub type GetSettingsHandler = Arc<dyn Fn() -> mcp_wire::Settings + Send + Sync>;
+pub type GetSettingsHandler = Arc<dyn Fn() -> Settings + Send + Sync>;
 pub type SetActiveToolsHandler = Arc<dyn Fn(Vec<String>) + Send + Sync>;
 pub type RefreshToolsHandler = Arc<dyn Fn() + Send + Sync>;
 pub type GetCommandsHandler = Arc<dyn Fn() -> Vec<SlashCommandInfo> + Send + Sync>;
@@ -3670,7 +2772,7 @@ pub struct ExtensionActions {
 
 pub struct ExtensionContextActions {
     pub get_model: Arc<dyn Fn() -> Option<Model> + Send + Sync>,
-    pub get_scoped_models: Arc<dyn Fn() -> Vec<mcp_wire::ScopedModel> + Send + Sync>,
+    pub get_scoped_models: Arc<dyn Fn() -> Vec<ScopedModel> + Send + Sync>,
     pub is_idle: Arc<dyn Fn() -> bool + Send + Sync>,
     pub is_project_trusted: Arc<dyn Fn() -> bool + Send + Sync>,
     pub get_signal: Arc<dyn Fn() -> Option<AbortSignal> + Send + Sync>,
@@ -3702,7 +2804,7 @@ pub struct ExtensionRuntimeInner {
     pub pending_provider_registrations: Mutex<Vec<PendingProviderRegistration>>,
     pub pending_native_provider_registrations: Mutex<Vec<PendingNativeProviderRegistration>>,
     pub pending_virtual_model_registrations: Mutex<Vec<PendingVirtualModelRegistration>>,
-    pub mcp_servers: mcp_wire::McpServerRegistry,
+    pub mcp_servers: McpServerRegistry,
     pub actions: Mutex<ExtensionActions>,
     pub stale_message: Mutex<Option<String>>,
     pub generation: std::sync::atomic::AtomicU64,
@@ -3711,7 +2813,7 @@ pub struct ExtensionRuntimeInner {
     pub register_provider_fn: Mutex<Arc<dyn Fn(&str, ProviderConfig, &str) + Send + Sync>>,
     pub register_native_provider_fn: Mutex<Arc<dyn Fn(Arc<dyn Provider>, &str) + Send + Sync>>,
     pub unregister_provider_fn: Mutex<Arc<dyn Fn(&str, &str) + Send + Sync>>,
-    pub register_virtual_model_fn: Mutex<Arc<dyn Fn(mcp_wire::VirtualModelDefinition, &str) + Send + Sync>>,
+    pub register_virtual_model_fn: Mutex<Arc<dyn Fn(VirtualModelDefinition, &str) + Send + Sync>>,
     pub unregister_virtual_model_fn: Mutex<Arc<dyn Fn(&str, &str) + Send + Sync>>,
 }
 
@@ -3801,7 +2903,7 @@ pub struct ExtensionApiInner {
     pub extension: LoadedExtension,
     pub runtime: ExtensionRuntime,
     pub cwd: String,
-    pub event_bus: Arc<dyn mcp_wire::EventBus>,
+    pub event_bus: Arc<dyn EventBus>,
     pub load_state: Mutex<ExtensionLoadState>,
     pub next_handler_id: std::sync::atomic::AtomicU64,
     pub pending_flag_values: Mutex<IndexMap<String, FlagValue>>,
@@ -4224,11 +3326,7 @@ impl ExtensionApi {
             .cloned())
     }
 
-    pub fn send_message(
-        &self,
-        message: mcp_wire::CustomMessageDraft,
-        options: Option<SendMessageOptions>,
-    ) -> pi_js::Result<()> {
+    pub fn send_message(&self, message: CustomMessageDraft, options: Option<SendMessageOptions>) -> pi_js::Result<()> {
         self.assert_active()?;
         let handler = self
             .inner
@@ -4245,7 +3343,7 @@ impl ExtensionApi {
 
     pub fn send_user_message(
         &self,
-        content: mcp_wire::CustomMessageContent,
+        content: CustomMessageContent,
         options: Option<SendUserMessageOptions>,
     ) -> pi_js::Result<()> {
         self.assert_active()?;
@@ -4333,7 +3431,7 @@ impl ExtensionApi {
             .and_then(|o| o.cwd.as_deref())
             .unwrap_or(&self.inner.cwd)
             .to_string();
-        mcp_wire::exec_command_wire(command, args, &target_cwd, options).await
+        Ok(exec_command(command, args, &target_cwd, options).await)
     }
 
     pub fn get_active_tools(&self) -> pi_js::Result<Vec<String>> {
@@ -4364,7 +3462,7 @@ impl ExtensionApi {
         Ok(handler())
     }
 
-    pub fn get_settings(&self) -> pi_js::Result<mcp_wire::Settings> {
+    pub fn get_settings(&self) -> pi_js::Result<Settings> {
         self.assert_active()?;
         let handler = self
             .inner
@@ -4502,7 +3600,7 @@ impl ExtensionApi {
 
     pub fn register_mcp_server(&self, name: &str, config_raw: Value) -> pi_js::Result<()> {
         self.assert_active()?;
-        let validated = mcp_wire::validate_mcp_server_config(name, &config_raw).map_err(|msg| {
+        let validated = validate_mcp_server_config(name, &config_raw).map_err(|msg| {
             pi_js::Error::msg(format!(
                 "Invalid MCP server registered by extension \"{}\": {msg}",
                 self.inner.extension.path
@@ -4516,9 +3614,9 @@ impl ExtensionApi {
                 )));
             }
         }
-        let target_ns = mcp_wire::mcp_namespace(name);
+        let target_ns = mcp_namespace(name);
         for existing in self.inner.runtime.inner.mcp_servers.list() {
-            if existing.name != name && mcp_wire::mcp_namespace(&existing.name) == target_ns {
+            if existing.name != name && mcp_namespace(&existing.name) == target_ns {
                 return Err(pi_js::Error::msg(format!(
                     "MCP server \"{name}\" conflicts with registered server \"{}\"",
                     existing.name
@@ -4526,7 +3624,7 @@ impl ExtensionApi {
             }
         }
         let registry = self.inner.runtime.inner.mcp_servers.clone();
-        let server = mcp_wire::RegisteredMcpServer {
+        let server = RegisteredMcpServer {
             name: name.to_string(),
             config: validated,
             extension_path: self.inner.extension.path.clone(),
@@ -4548,7 +3646,7 @@ impl ExtensionApi {
         Ok(())
     }
 
-    pub fn get_mcp_servers(&self) -> pi_js::Result<Vec<mcp_wire::RegisteredMcpServer>> {
+    pub fn get_mcp_servers(&self) -> pi_js::Result<Vec<RegisteredMcpServer>> {
         self.assert_active()?;
         Ok(self.inner.runtime.inner.mcp_servers.list())
     }
@@ -4557,25 +3655,39 @@ impl ExtensionApi {
         self.assert_active()?;
         let runtime = self.inner.runtime.clone();
         let ext_path = self.inner.extension.path.clone();
-        let route_cb = model.route;
-        let runtime_for_route = runtime.clone();
-        let def = mcp_wire::VirtualModelDefinition {
-            provider: model.provider,
-            id: model.id,
-            name: model.name,
-            thinking_levels: model.thinking_levels,
-            route: Arc::new(move |req| {
-                let route_cb = Arc::clone(&route_cb);
-                let create_ctx = runtime_for_route
+
+        struct ExtensionVirtualRouter {
+            route_cb:
+                Arc<dyn Fn(ModelRouteRequest, ExtensionContext) -> BoxFuture<pi_js::Result<ModelRoute>> + Send + Sync>,
+            runtime: ExtensionRuntime,
+        }
+
+        #[async_trait]
+        impl VirtualModelRouter for ExtensionVirtualRouter {
+            async fn route(&self, req: ModelRouteRequest) -> pi_js::Result<ModelRoute> {
+                let create_ctx = self
+                    .runtime
                     .inner
                     .create_context_fn
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
-                Box::pin(async move {
-                    let ctx = create_ctx()?;
-                    route_cb(req, ctx).await
-                })
+                let ctx = create_ctx()?;
+                (self.route_cb)(req, ctx).await
+            }
+        }
+
+        let def = VirtualModelDefinition {
+            provider: model.provider,
+            id: model.id,
+            name: model.name,
+            thinking_levels: model.thinking_levels,
+            context_window: None,
+            max_tokens: None,
+            input: None,
+            router: Arc::new(ExtensionVirtualRouter {
+                route_cb: model.route,
+                runtime: runtime.clone(),
             }),
         };
         self.apply_runtime_change(move || {
@@ -4607,7 +3719,7 @@ impl ExtensionApi {
         Ok(())
     }
 
-    pub fn events(&self) -> Arc<dyn mcp_wire::EventBus> {
+    pub fn events(&self) -> Arc<dyn EventBus> {
         let state = *self.inner.load_state.lock().unwrap_or_else(|e| e.into_inner());
         Arc::new(TrackedEventBus {
             api: self.clone(),
@@ -4621,48 +3733,61 @@ struct TrackedEventBus {
     loading_only: bool,
 }
 
-impl mcp_wire::EventBus for TrackedEventBus {
+impl TrackedEventBus {
+    fn track_subscription(&self, raw_unsub: Unsubscribe) -> Unsubscribe {
+        let tracked = self.api.inner.runtime.track_event_bus_subscription(raw_unsub);
+        if !self.loading_only {
+            return tracked;
+        }
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let active_a = Arc::clone(&active);
+        let slot = Arc::new(Mutex::new(Some(tracked)));
+        let slot_a = Arc::clone(&slot);
+        self.api
+            .inner
+            .loading_unsubscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Unsubscribe::new(move || {
+                if active_a.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    if let Some(u) = slot_a.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        u.call();
+                    }
+                }
+            }));
+        let active_b = Arc::clone(&active);
+        let slot_b = Arc::clone(&slot);
+        Unsubscribe::new(move || {
+            if active_b.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                if let Some(u) = slot_b.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    u.call();
+                }
+            }
+        })
+    }
+}
+
+impl EventBus for TrackedEventBus {
     fn emit(&self, channel: &str, data: Value) {
         if self.api.assert_active().is_ok() {
             self.api.inner.event_bus.emit(channel, data);
         }
     }
 
-    fn on(&self, channel: &str, handler: mcp_wire::EventBusHandler) -> Unsubscribe {
+    fn on(&self, channel: &str, handler: EventHandler) -> Unsubscribe {
         if self.api.assert_active().is_err() {
             return Unsubscribe::noop();
         }
         let raw_unsub = self.api.inner.event_bus.on(channel, handler);
-        let tracked = self.api.inner.runtime.track_event_bus_subscription(raw_unsub);
-        if self.loading_only {
-            let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let active_a = Arc::clone(&active);
-            let slot = Arc::new(Mutex::new(Some(tracked)));
-            let slot_a = Arc::clone(&slot);
-            self.api
-                .inner
-                .loading_unsubscribers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(Unsubscribe::new(move || {
-                    if active_a.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                        if let Some(u) = slot_a.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                            u.call();
-                        }
-                    }
-                }));
-            let active_b = Arc::clone(&active);
-            let slot_b = Arc::clone(&slot);
-            Unsubscribe::new(move || {
-                if active_b.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                    if let Some(u) = slot_b.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                        u.call();
-                    }
-                }
-            })
-        } else {
-            tracked
+        self.track_subscription(raw_unsub)
+    }
+
+    fn on_sync(&self, channel: &str, handler: SyncEventHandler) -> Unsubscribe {
+        if self.api.assert_active().is_err() {
+            return Unsubscribe::noop();
         }
+        let raw_unsub = self.api.inner.event_bus.on_sync(channel, handler);
+        self.track_subscription(raw_unsub)
     }
 }
 

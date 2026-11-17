@@ -27,13 +27,13 @@ use crate::core::tools::bash::{
     BashExecOptions, BashExecResult, ShellSystemPromptContribution, bash_tool_output_schema, execute_shell_process,
     run_shell_tool_execute,
 };
-use crate::core::tools::mcp_wire::{get_power_shell_config, get_shell_env};
 use crate::core::tools::renderers;
 use crate::core::tools::tool_definition_wrapper::{
     BuiltinToolDefSpec, build_builtin_tool_definition, resolve_effective_cwd, strict_prefer_sampling,
     wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use crate::utils::shell::{get_power_shell_config, get_shell_env};
 
 struct LocalPowerShellOperations;
 
@@ -134,7 +134,7 @@ pub fn create_power_shell_tool_definition(cwd: &str, options: Option<PowerShellT
 
                 let mut clean_params = params;
                 if let Value::Object(ref mut map) = clean_params {
-                    map.remove("timeout");
+                    map.shift_remove("timeout");
                 }
                 let input: PowerShellToolInput = serde_json::from_value(clean_params)
                     .map_err(|e| pi_js::Error::msg(format!("Invalid powershell parameters: {e}")))?;

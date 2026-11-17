@@ -14,10 +14,11 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::UserContentBlock;
+use pi_coding_agent::core::auth_storage::InMemoryAuthStorageBackend;
 use pi_coding_agent::core::tools::truncate::truncate_middle;
 use pi_coding_agent::extensions::mcp::config::{
-    LoadMcpConfigOptions, McpExposure, McpHttpServerConfig, McpOAuthConfig, McpServerConfig, McpServerEntry,
-    McpStdioServerConfig, add_mcp_server_config, get_mcp_tool_exposure, load_mcp_config,
+    LoadMcpConfigOptions, McpExposure, McpHttpServerConfig, McpOAuthConfig, McpProviderAuthConfig, McpServerConfig,
+    McpServerEntry, McpStdioServerConfig, add_mcp_server_config, get_mcp_tool_exposure, load_mcp_config,
 };
 use pi_coding_agent::extensions::mcp::log::McpServerLog;
 use pi_coding_agent::extensions::mcp::oauth::McpOAuthCredentialStore;
@@ -31,8 +32,6 @@ use pi_coding_agent::extensions::mcp::tools::{
 use pi_coding_agent::extensions::mcp::{
     MAX_SERVERS_SECTION_CHARS, McpServerListing, McpServerListingConnection, render_servers_section,
 };
-// WIRE(@mcp-w3): switch to crate::core::auth_storage::InMemoryAuthStorageBackend once landed
-use pi_coding_agent::extensions::wire::InMemoryAuthStorageBackend;
 use pi_js::fetch::{Headers, Response as JsResponse};
 use pi_js::{Error, Unsubscribe};
 use pi_mcp::protocol::content::{
@@ -82,6 +81,7 @@ fn http_cfg(url: &str) -> McpHttpServerConfig {
         url: url.to_string(),
         headers: None,
         oauth: None,
+        auth: None,
     }
 }
 
@@ -221,7 +221,6 @@ fn reads_and_edits_mcp_json_files_with_utf8_bom() {
         &global_path.to_string_lossy(),
         "other",
         &McpServerConfig::Stdio(stdio_cfg("other-cmd")),
-        None,
     )
     .expect("add_mcp_server_config");
     assert!(!replaced);
@@ -914,7 +913,6 @@ async fn starts_new_session_and_retries_once_when_session_expired() {
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -969,7 +967,6 @@ done
                 s.cwd = Some("~/work".to_string());
                 s
             }),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1002,7 +999,6 @@ async fn connects_to_servers_without_tools_capability_without_listing_tools() {
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1028,7 +1024,6 @@ async fn marks_dropped_connection_and_reconnects_on_next_call() {
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1078,7 +1073,6 @@ async fn retries_http_connections_that_fail_with_transient_error() {
                 h.headers = Some(IndexMap::from([("Authorization".to_string(), "x".to_string())]));
                 h
             }),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1111,7 +1105,6 @@ async fn retries_http_connections_that_fail_with_transient_error() {
                 h.headers = Some(IndexMap::from([("Authorization".to_string(), "x".to_string())]));
                 h
             }),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1157,7 +1150,6 @@ async fn retries_resource_reads_but_not_tool_calls_after_transient_http_error() 
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1198,7 +1190,6 @@ async fn asks_oauth_servers_that_keep_rejecting_requests_for_new_sign_in() {
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Http(http_cfg("http://unused.invalid")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1255,8 +1246,13 @@ async fn sends_provider_token_and_asks_for_provider_login_when_rejected() {
     let conn = McpServerConnection::new(McpServerConnectionOptions {
         entry: McpServerEntry {
             name: "radius".to_string(),
-            config: McpServerConfig::Http(http_cfg(&format!("http://127.0.0.1:{}/mcp", addr.port()))),
-            auth_provider: Some("radius".to_string()),
+            config: McpServerConfig::Http({
+                let mut h = http_cfg(&format!("http://127.0.0.1:{}/mcp", addr.port()));
+                h.auth = Some(McpProviderAuthConfig {
+                    provider: "radius".to_string(),
+                });
+                h
+            }),
             source: "test".to_string(),
             scope: None,
         },
@@ -1302,7 +1298,6 @@ async fn appends_server_log_messages_to_log_file() {
         McpServerEntry {
             name: "fake".to_string(),
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1368,7 +1363,6 @@ async fn resolves_oauth_client_secret_lazily() {
                 });
                 h
             }),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },
@@ -1390,7 +1384,6 @@ fn listing(name: &str, desc: Option<&str>, exposure: Option<McpExposure>) -> Mcp
         entry: McpServerEntry {
             name: name.to_string(),
             config: McpServerConfig::Stdio(cfg),
-            auth_provider: None,
             source: "test".to_string(),
             scope: None,
         },

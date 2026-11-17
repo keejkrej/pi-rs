@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use pi_coding_agent::core::extensions::{clear_extension_cache, load_extensions, load_extensions_cached};
+use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions};
 
 fn write_counting_extension(file_path: &std::path::Path, log_path: &std::path::Path) {
     let log_str = log_path.to_string_lossy().replace('\\', "\\\\");
@@ -106,4 +107,36 @@ async fn keeps_the_cache_scoped_to_one_cwd() {
     clear_extension_cache();
 }
 
-// WIRE(@mcp-w3): port DefaultResourceLoader::reload() cache clearing test once resource_loader.rs lands from @mcp.
+#[tokio::test]
+#[serial_test::serial]
+async fn clears_cached_extension_modules_across_default_resource_loader_reload() {
+    clear_extension_cache();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let agent_dir = root.join("agent");
+    let ext_dir = agent_dir.join("extensions");
+    let cwd = root.join("cwd");
+    let log = root.join("counts.log");
+    fs::create_dir_all(&ext_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+
+    let ext_path = ext_dir.join("counting.ts");
+    write_counting_extension(&ext_path, &log);
+
+    let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        cwd: cwd.to_string_lossy().into_owned(),
+        agent_dir: agent_dir.to_string_lossy().into_owned(),
+        no_skills: true,
+        no_prompt_templates: true,
+        no_themes: true,
+        no_context_files: true,
+        ..Default::default()
+    });
+
+    loader.reload(None).await.expect("initial reload");
+    loader.reload(None).await.expect("second reload");
+    let (loads, runs) = count_lines(&log);
+    assert_eq!(loads, 2);
+    assert_eq!(runs, 2);
+    clear_extension_cache();
+}
