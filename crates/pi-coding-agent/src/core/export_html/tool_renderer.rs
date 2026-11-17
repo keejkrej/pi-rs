@@ -15,11 +15,19 @@ use serde_json::Value;
 
 use super::ansi_to_html::{ansi_lines_to_html, strip_ansi_escapes};
 
-// WIRE(@tui-w3): replace local HtmlTheme adapter with `crate::modes::interactive::theme::Theme` once TUI theme merges.
-/// Lightweight theme handle passed to extension tool renderers during HTML export.
+/// Theme handle passed to extension tool renderers during HTML export, backed by interactive TUI `Theme`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HtmlTheme {
     pub name: Option<String>,
+}
+
+impl HtmlTheme {
+    fn resolve_tui_theme(&self) -> crate::modes::interactive::theme::theme::Theme {
+        self.name
+            .as_deref()
+            .and_then(crate::modes::interactive::theme::theme::get_theme_by_name)
+            .unwrap_or_else(crate::modes::interactive::theme::theme::theme)
+    }
 }
 
 /// Pre-rendered HTML variants of a custom tool result.
@@ -76,40 +84,40 @@ impl From<&ToolRenderContext> for crate::core::extensions::types::ToolRenderCont
 }
 
 impl crate::core::extensions::types::ExtensionTheme for HtmlTheme {
-    fn fg(&self, _color: &str, text: &str) -> String {
-        text.to_owned()
+    fn fg(&self, color: &str, text: &str) -> String {
+        crate::core::extensions::types::ExtensionTheme::fg(&self.resolve_tui_theme(), color, text)
     }
 
-    fn bg(&self, _bg: &str, text: &str) -> String {
-        text.to_owned()
+    fn bg(&self, bg: &str, text: &str) -> String {
+        crate::core::extensions::types::ExtensionTheme::bg(&self.resolve_tui_theme(), bg, text)
     }
 
     fn bold(&self, text: &str) -> String {
-        text.to_owned()
+        crate::core::extensions::types::ExtensionTheme::bold(&self.resolve_tui_theme(), text)
     }
 
     fn italic(&self, text: &str) -> String {
-        text.to_owned()
+        crate::core::extensions::types::ExtensionTheme::italic(&self.resolve_tui_theme(), text)
     }
 
     fn underline(&self, text: &str) -> String {
-        text.to_owned()
+        crate::core::extensions::types::ExtensionTheme::underline(&self.resolve_tui_theme(), text)
     }
 
     fn inverse(&self, text: &str) -> String {
-        text.to_owned()
+        crate::core::extensions::types::ExtensionTheme::inverse(&self.resolve_tui_theme(), text)
     }
 
     fn strikethrough(&self, text: &str) -> String {
-        text.to_owned()
+        crate::core::extensions::types::ExtensionTheme::strikethrough(&self.resolve_tui_theme(), text)
     }
 
-    fn get_fg_ansi(&self, _color: &str) -> String {
-        String::new()
+    fn get_fg_ansi(&self, color: &str) -> String {
+        crate::core::extensions::types::ExtensionTheme::get_fg_ansi(&self.resolve_tui_theme(), color)
     }
 
-    fn get_bg_ansi(&self, _bg: &str) -> String {
-        String::new()
+    fn get_bg_ansi(&self, bg: &str) -> String {
+        crate::core::extensions::types::ExtensionTheme::get_bg_ansi(&self.resolve_tui_theme(), bg)
     }
 }
 

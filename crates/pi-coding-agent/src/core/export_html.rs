@@ -56,8 +56,7 @@ pub struct ExportOptions {
     pub theme_name: Option<String>,
     /// Optional tool renderer for custom tools.
     pub tool_renderer: Option<Arc<dyn ToolHtmlRenderer>>,
-    /// Optional resolved theme colors injected by the caller/TUI.
-    // WIRE(@tui-w3): wire `get_resolved_theme_colors` and `get_theme_export_colors` from `crate::modes::interactive::theme`.
+    /// Optional resolved theme colors injected by the caller.
     pub theme_override: Option<ResolvedExportTheme>,
 }
 
@@ -176,78 +175,15 @@ fn derive_export_colors(base_color: &str) -> (String, String, String) {
     }
 }
 
-fn default_theme_colors(theme_name: Option<&str>) -> ResolvedExportTheme {
-    // Fallback dark/light palette mirrors default TUI themes until `@tui` theme module lands.
-    let is_light = theme_name.is_some_and(|name| name.eq_ignore_ascii_case("light"));
-    let mut colors = IndexMap::new();
-    if is_light {
-        colors.insert("accent".to_owned(), "#0066cc".to_owned());
-        colors.insert("border".to_owned(), "#d0d7de".to_owned());
-        colors.insert("borderAccent".to_owned(), "#0969da".to_owned());
-        colors.insert("borderMuted".to_owned(), "#e5e7eb".to_owned());
-        colors.insert("success".to_owned(), "#1a7f37".to_owned());
-        colors.insert("error".to_owned(), "#cf222e".to_owned());
-        colors.insert("warning".to_owned(), "#9a6700".to_owned());
-        colors.insert("muted".to_owned(), "#656d76".to_owned());
-        colors.insert("dim".to_owned(), "#8c959f".to_owned());
-        colors.insert("text".to_owned(), "#1f2328".to_owned());
-        colors.insert("thinkingText".to_owned(), "#6e7781".to_owned());
-        colors.insert("userMessageBg".to_owned(), "#f3f4f6".to_owned());
-        colors.insert("userMessageText".to_owned(), "#1f2328".to_owned());
-        colors.insert("toolPendingBg".to_owned(), "#f6f8fa".to_owned());
-        colors.insert("toolSuccessBg".to_owned(), "#eefaf1".to_owned());
-        colors.insert("toolErrorBg".to_owned(), "#fff1f2".to_owned());
-        colors.insert("toolTitle".to_owned(), "#0969da".to_owned());
-        colors.insert("toolOutput".to_owned(), "#24292f".to_owned());
-        colors.insert("mdHeading".to_owned(), "#0550ae".to_owned());
-        colors.insert("mdLink".to_owned(), "#0969da".to_owned());
-        colors.insert("mdCode".to_owned(), "#953800".to_owned());
-        colors.insert("mdCodeBlock".to_owned(), "#f6f8fa".to_owned());
-        colors.insert("mdCodeBlockBorder".to_owned(), "#d0d7de".to_owned());
-        colors.insert("mdQuote".to_owned(), "#57606a".to_owned());
-        colors.insert("mdQuoteBorder".to_owned(), "#d0d7de".to_owned());
-        colors.insert("customMessageBg".to_owned(), "#eef2ff".to_owned());
-        colors.insert("customMessageText".to_owned(), "#1e293b".to_owned());
-        colors.insert("customMessageLabel".to_owned(), "#4338ca".to_owned());
-        colors.insert("toolDiffAdded".to_owned(), "#1a7f37".to_owned());
-        colors.insert("toolDiffRemoved".to_owned(), "#cf222e".to_owned());
-        colors.insert("toolDiffContext".to_owned(), "#57606a".to_owned());
-    } else {
-        colors.insert("accent".to_owned(), "#8abeb7".to_owned());
-        colors.insert("border".to_owned(), "#5f87af".to_owned());
-        colors.insert("borderAccent".to_owned(), "#00d7ff".to_owned());
-        colors.insert("borderMuted".to_owned(), "#505050".to_owned());
-        colors.insert("success".to_owned(), "#b5bd68".to_owned());
-        colors.insert("error".to_owned(), "#cc6666".to_owned());
-        colors.insert("warning".to_owned(), "#ffff00".to_owned());
-        colors.insert("muted".to_owned(), "#808080".to_owned());
-        colors.insert("dim".to_owned(), "#666666".to_owned());
-        colors.insert("text".to_owned(), "".to_owned());
-        colors.insert("thinkingText".to_owned(), "#808080".to_owned());
-        colors.insert("userMessageBg".to_owned(), "#343541".to_owned());
-        colors.insert("userMessageText".to_owned(), "".to_owned());
-        colors.insert("toolPendingBg".to_owned(), "#282832".to_owned());
-        colors.insert("toolSuccessBg".to_owned(), "#283228".to_owned());
-        colors.insert("toolErrorBg".to_owned(), "#3c2828".to_owned());
-        colors.insert("toolTitle".to_owned(), "".to_owned());
-        colors.insert("toolOutput".to_owned(), "#808080".to_owned());
-        colors.insert("mdHeading".to_owned(), "#f0c674".to_owned());
-        colors.insert("mdLink".to_owned(), "#81a2be".to_owned());
-        colors.insert("mdCode".to_owned(), "#8abeb7".to_owned());
-        colors.insert("mdCodeBlock".to_owned(), "#b5bd68".to_owned());
-        colors.insert("mdCodeBlockBorder".to_owned(), "#808080".to_owned());
-        colors.insert("mdQuote".to_owned(), "#808080".to_owned());
-        colors.insert("mdQuoteBorder".to_owned(), "#808080".to_owned());
-        colors.insert("customMessageBg".to_owned(), "#2d2838".to_owned());
-        colors.insert("customMessageText".to_owned(), "".to_owned());
-        colors.insert("customMessageLabel".to_owned(), "#9575cd".to_owned());
-        colors.insert("toolDiffAdded".to_owned(), "#b5bd68".to_owned());
-        colors.insert("toolDiffRemoved".to_owned(), "#cc6666".to_owned());
-        colors.insert("toolDiffContext".to_owned(), "#808080".to_owned());
-    }
+fn resolve_export_theme(theme_name: Option<&str>) -> ResolvedExportTheme {
+    let export = crate::modes::interactive::theme::theme::get_theme_export_colors(theme_name);
     ResolvedExportTheme {
-        colors,
-        export_colors: ThemeExportColors::default(),
+        colors: crate::modes::interactive::theme::theme::get_resolved_theme_colors(theme_name),
+        export_colors: ThemeExportColors {
+            page_bg: export.page_bg,
+            card_bg: export.card_bg,
+            info_bg: export.info_bg,
+        },
     }
 }
 
@@ -255,7 +191,7 @@ fn generate_html(session_data: &SessionData, options: &ExportOptions) -> Result<
     let resolved = options
         .theme_override
         .clone()
-        .unwrap_or_else(|| default_theme_colors(options.theme_name.as_deref()));
+        .unwrap_or_else(|| resolve_export_theme(options.theme_name.as_deref()));
 
     let user_message_bg = resolved
         .colors
