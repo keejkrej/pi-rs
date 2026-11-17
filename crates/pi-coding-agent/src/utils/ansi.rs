@@ -13,7 +13,7 @@ fn build_ansi_regex(only_first: bool) -> Regex {
     // OSC sequences only: ESC ] ... ST (non-greedy until the first ST)
     let osc = format!(r"(?:\x1b\][\s\S]*?{st})");
     // CSI and related: ESC/C1, optional intermediates, optional params (supports ; and :) then final byte
-    let csi = r"[\x1b\u{009b}][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]";
+    let csi = r"[\x1b\u{009b}][\[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]";
     let pattern = format!("{osc}|{csi}");
     Regex::new(&pattern).expect("valid ansi regex")
 }

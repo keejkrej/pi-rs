@@ -1161,7 +1161,7 @@ impl SettingsManager {
         }
     }
 
-    fn save_locked(&self, st: &mut SettingsManagerState) {
+    fn save_locked(&self, mut st: std::sync::MutexGuard<'_, SettingsManagerState>) {
         st.settings = deep_merge_settings(&st.global_settings, &st.project_settings);
         if st.global_settings_load_error.is_some() {
             return;
@@ -1169,10 +1169,15 @@ impl SettingsManager {
         let snapshot = st.global_settings.clone();
         let modified = st.modified_fields.clone();
         let nested = st.modified_nested_fields.clone();
+        drop(st);
         self.enqueue_write(SettingsScope::Global, snapshot, modified, nested);
     }
 
-    fn save_project_locked(&self, st: &mut SettingsManagerState, settings: Settings) -> Result<()> {
+    fn save_project_locked(
+        &self,
+        mut st: std::sync::MutexGuard<'_, SettingsManagerState>,
+        settings: Settings,
+    ) -> Result<()> {
         if !st.project_trusted {
             return Err(Error::msg("Project is not trusted; refusing to write project settings"));
         }
@@ -1184,6 +1189,7 @@ impl SettingsManager {
         let snapshot = st.project_settings.clone();
         let modified = st.modified_project_fields.clone();
         let nested = st.modified_project_nested_fields.clone();
+        drop(st);
         self.enqueue_write(SettingsScope::Project, snapshot, modified, nested);
         Ok(())
     }
@@ -1196,7 +1202,7 @@ impl SettingsManager {
         let mut project_settings = st.project_settings.clone();
         update(&mut project_settings);
         Self::mark_project_modified_locked(&mut st, field, None);
-        self.save_project_locked(&mut st, project_settings)
+        self.save_project_locked(st, project_settings)
     }
 
     pub async fn flush(&self) {
@@ -1227,7 +1233,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.last_changelog_version = Some(version.to_owned());
         Self::mark_modified_locked(&mut st, "lastChangelogVersion", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_session_dir(&self) -> Option<String> {
@@ -1248,14 +1254,14 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.default_provider = Some(provider.to_owned());
         Self::mark_modified_locked(&mut st, "defaultProvider", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_default_model(&self, model_id: &str) {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.default_model = Some(model_id.to_owned());
         Self::mark_modified_locked(&mut st, "defaultModel", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_default_model_and_provider(&self, provider: &str, model_id: &str) {
@@ -1264,7 +1270,7 @@ impl SettingsManager {
         st.global_settings.default_model = Some(model_id.to_owned());
         Self::mark_modified_locked(&mut st, "defaultProvider", None);
         Self::mark_modified_locked(&mut st, "defaultModel", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_steering_mode(&self) -> QueueModeSetting {
@@ -1277,7 +1283,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.steering_mode = Some(mode);
         Self::mark_modified_locked(&mut st, "steeringMode", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_follow_up_mode(&self) -> QueueModeSetting {
@@ -1290,7 +1296,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.follow_up_mode = Some(mode);
         Self::mark_modified_locked(&mut st, "followUpMode", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_theme_setting(&self) -> Option<String> {
@@ -1306,7 +1312,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.theme = Some(theme.to_owned());
         Self::mark_modified_locked(&mut st, "theme", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_default_thinking_level(&self) -> Option<ModelThinkingLevel> {
@@ -1317,7 +1323,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.default_thinking_level = Some(level);
         Self::mark_modified_locked(&mut st, "defaultThinkingLevel", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_model_thinking_level(&self, provider: &str, model_id: &str) -> Option<ModelThinkingLevel> {
@@ -1339,7 +1345,7 @@ impl SettingsManager {
             .get_or_insert_with(IndexMap::new);
         levels.insert(format!("{provider}/{model_id}"), level);
         Self::mark_modified_locked(&mut st, "modelThinkingLevels", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn remove_model_thinking_level(&self, provider: &str, model_id: &str) {
@@ -1352,7 +1358,7 @@ impl SettingsManager {
             st.global_settings.model_thinking_levels = None;
         }
         Self::mark_modified_locked(&mut st, "modelThinkingLevels", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_transport(&self) -> TransportSetting {
@@ -1363,7 +1369,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.transport = Some(transport);
         Self::mark_modified_locked(&mut st, "transport", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_compaction_enabled(&self) -> bool {
@@ -1378,7 +1384,7 @@ impl SettingsManager {
             .get_or_insert_with(CompactionSettings::default);
         comp.enabled = Some(enabled);
         Self::mark_modified_locked(&mut st, "compaction", Some("enabled"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     fn get_compaction_token_setting(&self, field: &str, model: Option<&ModelRef>) -> Result<i64> {
@@ -1474,7 +1480,7 @@ impl SettingsManager {
         let retry = st.global_settings.retry.get_or_insert_with(RetrySettings::default);
         retry.enabled = Some(enabled);
         Self::mark_modified_locked(&mut st, "retry", Some("enabled"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_retry_settings(&self) -> ResolvedRetrySettings {
@@ -1505,7 +1511,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.http_idle_timeout_ms = Some(Value::Number(serde_json::Number::from(val)));
         Self::mark_modified_locked(&mut st, "httpIdleTimeoutMs", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
         Ok(())
     }
 
@@ -1519,7 +1525,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.cache_warming = Some(mode);
         Self::mark_modified_locked(&mut st, "cacheWarming", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_provider_retry_settings(&self) -> ResolvedProviderRetrySettings {
@@ -1569,14 +1575,14 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.hide_thinking_block = Some(hide);
         Self::mark_modified_locked(&mut st, "hideThinkingBlock", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_show_cache_miss_notices(&self, show: bool) {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.show_cache_miss_notices = Some(show);
         Self::mark_modified_locked(&mut st, "showCacheMissNotices", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_shell_path(&self) -> Option<String> {
@@ -1589,7 +1595,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.shell_path = path;
         Self::mark_modified_locked(&mut st, "shellPath", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_quiet_startup(&self) -> QuietStartup {
@@ -1600,7 +1606,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.quiet_startup = Some(quiet);
         Self::mark_modified_locked(&mut st, "quietStartup", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_default_project_trust(&self) -> DefaultProjectTrust {
@@ -1613,7 +1619,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.default_project_trust = Some(default_project_trust);
         Self::mark_modified_locked(&mut st, "defaultProjectTrust", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_shell_command_prefix(&self) -> Option<String> {
@@ -1624,7 +1630,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.shell_command_prefix = prefix;
         Self::mark_modified_locked(&mut st, "shellCommandPrefix", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_npm_command(&self) -> Option<Vec<String>> {
@@ -1635,7 +1641,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.npm_command = command;
         Self::mark_modified_locked(&mut st, "npmCommand", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_collapse_changelog(&self) -> bool {
@@ -1646,7 +1652,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.collapse_changelog = Some(collapse);
         Self::mark_modified_locked(&mut st, "collapseChangelog", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_enable_install_telemetry(&self) -> bool {
@@ -1657,7 +1663,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.enable_install_telemetry = Some(enabled);
         Self::mark_modified_locked(&mut st, "enableInstallTelemetry", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_enable_analytics(&self) -> bool {
@@ -1676,7 +1682,7 @@ impl SettingsManager {
             st.global_settings.tracking_id = Some(pi_js::crypto::random_uuid());
             Self::mark_modified_locked(&mut st, "trackingId", None);
         }
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_or_create_device_id(&self) -> String {
@@ -1687,7 +1693,7 @@ impl SettingsManager {
         let id = pi_js::crypto::random_uuid();
         st.global_settings.device_id = Some(id.clone());
         Self::mark_modified_locked(&mut st, "deviceId", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
         id
     }
 
@@ -1699,7 +1705,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.packages = Some(packages);
         Self::mark_modified_locked(&mut st, "packages", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_project_packages(&self, packages: Vec<PackageSource>) -> Result<()> {
@@ -1714,7 +1720,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.extensions = Some(paths);
         Self::mark_modified_locked(&mut st, "extensions", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_project_extension_paths(&self, paths: Vec<String>) -> Result<()> {
@@ -1729,7 +1735,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.skills = Some(paths);
         Self::mark_modified_locked(&mut st, "skills", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_project_skill_paths(&self, paths: Vec<String>) -> Result<()> {
@@ -1744,7 +1750,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.prompts = Some(paths);
         Self::mark_modified_locked(&mut st, "prompts", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_project_prompt_template_paths(&self, paths: Vec<String>) -> Result<()> {
@@ -1759,7 +1765,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.themes = Some(paths);
         Self::mark_modified_locked(&mut st, "themes", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn set_project_theme_paths(&self, paths: Vec<String>) -> Result<()> {
@@ -1774,7 +1780,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.enable_skill_commands = Some(enabled);
         Self::mark_modified_locked(&mut st, "enableSkillCommands", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_thinking_budgets(&self) -> Option<ThinkingBudgetsSettings> {
@@ -1815,7 +1821,7 @@ impl SettingsManager {
             .get_or_insert_with(TerminalSettings::default);
         term.show_images = Some(show);
         Self::mark_modified_locked(&mut st, "terminal", Some("showImages"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_image_width_cells(&self) -> i64 {
@@ -1840,7 +1846,7 @@ impl SettingsManager {
             .get_or_insert_with(TerminalSettings::default);
         term.image_width_cells = Some(Value::Number(serde_json::Number::from(clamped)));
         Self::mark_modified_locked(&mut st, "terminal", Some("imageWidthCells"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_clear_on_shrink(&self) -> bool {
@@ -1858,7 +1864,7 @@ impl SettingsManager {
             .get_or_insert_with(TerminalSettings::default);
         term.clear_on_shrink = Some(enabled);
         Self::mark_modified_locked(&mut st, "terminal", Some("clearOnShrink"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_show_terminal_progress(&self) -> bool {
@@ -1876,7 +1882,7 @@ impl SettingsManager {
             .get_or_insert_with(TerminalSettings::default);
         term.show_terminal_progress = Some(enabled);
         Self::mark_modified_locked(&mut st, "terminal", Some("showTerminalProgress"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_tui_mode(&self) -> TuiMode {
@@ -1887,7 +1893,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.tui_mode = Some(mode);
         Self::mark_modified_locked(&mut st, "tuiMode", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_fullscreen_exit_output(&self) -> FullscreenExitOutput {
@@ -1900,7 +1906,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.fullscreen_exit_output = Some(output);
         Self::mark_modified_locked(&mut st, "fullscreenExitOutput", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_fullscreen_scrollbar(&self) -> ScrollViewScrollbar {
@@ -1913,7 +1919,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.fullscreen_scrollbar = Some(mode);
         Self::mark_modified_locked(&mut st, "fullscreenScrollbar", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_fullscreen_copy_on_select(&self) -> bool {
@@ -1924,7 +1930,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.fullscreen_copy_on_select = Some(enabled);
         Self::mark_modified_locked(&mut st, "fullscreenCopyOnSelect", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_fullscreen_wheel_scroll_lines(&self) -> WheelScrollLines {
@@ -1942,7 +1948,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.fullscreen_wheel_scroll_lines = Some(normalized);
         Self::mark_modified_locked(&mut st, "fullscreenWheelScrollLines", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_image_auto_resize(&self) -> bool {
@@ -1954,7 +1960,7 @@ impl SettingsManager {
         let img = st.global_settings.images.get_or_insert_with(ImageSettings::default);
         img.auto_resize = Some(enabled);
         Self::mark_modified_locked(&mut st, "images", Some("autoResize"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_block_images(&self) -> bool {
@@ -1966,7 +1972,7 @@ impl SettingsManager {
         let img = st.global_settings.images.get_or_insert_with(ImageSettings::default);
         img.block_images = Some(blocked);
         Self::mark_modified_locked(&mut st, "images", Some("blockImages"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_enabled_models(&self) -> Option<Vec<String>> {
@@ -1983,7 +1989,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.enabled_models = patterns;
         Self::mark_modified_locked(&mut st, "enabledModels", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_double_escape_action(&self) -> DoubleEscapeAction {
@@ -1996,7 +2002,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.double_escape_action = Some(action);
         Self::mark_modified_locked(&mut st, "doubleEscapeAction", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_tree_filter_mode(&self) -> TreeFilterMode {
@@ -2007,7 +2013,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.tree_filter_mode = Some(mode);
         Self::mark_modified_locked(&mut st, "treeFilterMode", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_show_hardware_cursor(&self) -> bool {
@@ -2021,7 +2027,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.show_hardware_cursor = Some(enabled);
         Self::mark_modified_locked(&mut st, "showHardwareCursor", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_editor_padding_x(&self) -> i64 {
@@ -2032,7 +2038,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.editor_padding_x = Some(padding.clamp(0, 3));
         Self::mark_modified_locked(&mut st, "editorPaddingX", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_output_pad(&self) -> u8 {
@@ -2048,7 +2054,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.output_pad = Some(pad);
         Self::mark_modified_locked(&mut st, "outputPad", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_autocomplete_max_visible(&self) -> i64 {
@@ -2062,7 +2068,7 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.autocomplete_max_visible = Some(max_visible.clamp(3, 20));
         Self::mark_modified_locked(&mut st, "autocompleteMaxVisible", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_code_block_indent(&self) -> String {
@@ -2087,7 +2093,7 @@ impl SettingsManager {
             .get_or_insert_with(MarkdownSettings::default);
         md.mermaid = Some(mode);
         Self::mark_modified_locked(&mut st, "markdown", Some("mermaid"));
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 
     pub fn get_warnings(&self) -> WarningSettings {
@@ -2098,6 +2104,6 @@ impl SettingsManager {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.global_settings.warnings = Some(warnings);
         Self::mark_modified_locked(&mut st, "warnings", None);
-        self.save_locked(&mut st);
+        self.save_locked(st);
     }
 }

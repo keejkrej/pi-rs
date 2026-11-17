@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::config::CONFIG_DIR_NAME;
-use crate::utils::paths::{canonicalize_path, resolve_path};
+use crate::utils::paths::{canonicalize_path, paths_equal, resolve_path};
 use crate::utils::text::strip_bom;
 use crate::vendor::proper_lockfile::{LockOptions, LockRelease, lock_sync};
 
@@ -53,14 +53,17 @@ fn normalize_cwd(cwd: &str) -> String {
     canonicalize_path(&resolve_path(cwd, None, Default::default()))
 }
 
+fn find_trust_file_keys(data: &TrustFile, path: &str) -> Vec<String> {
+    data.keys().filter(|key| paths_equal(key, path)).cloned().collect()
+}
+
 fn find_nearest_trust_entry(data: &TrustFile, cwd: &str) -> Option<ProjectTrustStoreEntry> {
     let mut current_dir = normalize_cwd(cwd);
     loop {
-        if let Some(Some(decision)) = data.get(&current_dir).copied() {
-            return Some(ProjectTrustStoreEntry {
-                path: current_dir,
-                decision,
-            });
+        for key in find_trust_file_keys(data, &current_dir) {
+            if let Some(Some(decision)) = data.get(&key).copied() {
+                return Some(ProjectTrustStoreEntry { path: key, decision });
+            }
         }
         let parent_dir = pi_js::path::dirname(&current_dir);
         if parent_dir == current_dir {
@@ -250,7 +253,7 @@ pub fn has_trust_requiring_project_resources(cwd: &str) -> bool {
 
     loop {
         let agents_skills_dir = pi_js::path::join(&[&current_dir, ".agents", "skills"]);
-        if agents_skills_dir != user_agents_skills_dir && pi_js::fs::exists(&agents_skills_dir) {
+        if !paths_equal(&agents_skills_dir, &user_agents_skills_dir) && pi_js::fs::exists(&agents_skills_dir) {
             return true;
         }
         let parent_dir = pi_js::path::dirname(&current_dir);
@@ -297,13 +300,11 @@ impl ProjectTrustStore {
             let mut data = read_trust_file(&self.trust_path)?;
             for item in decisions {
                 let key = normalize_cwd(&item.path);
-                match item.decision {
-                    None => {
-                        data.shift_remove(&key);
-                    }
-                    Some(b) => {
-                        data.insert(key, Some(b));
-                    }
+                for existing_key in find_trust_file_keys(&data, &key) {
+                    data.shift_remove(&existing_key);
+                }
+                if let Some(b) = item.decision {
+                    data.insert(key, Some(b));
                 }
             }
             write_trust_file(&self.trust_path, &data)

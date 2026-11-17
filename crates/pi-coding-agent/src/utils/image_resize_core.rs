@@ -105,16 +105,33 @@ pub async fn resize_image_in_process(
 
     loop {
         let resized = resize(&image, current_width, current_height, SamplingFilter::Lanczos3);
-        let mut candidates = Vec::new();
-        if let Ok(png) = resized.get_bytes() {
-            candidates.push(encode_candidate(&png, "image/png"));
-        }
+        let png = resized.get_bytes().ok().map(|b| encode_candidate(&b, "image/png"));
+        let mut jpegs = Vec::new();
         for &q in &quality_steps {
             if let Ok(jpg) = resized.get_bytes_jpeg(q) {
-                candidates.push(encode_candidate(&jpg, "image/jpeg"));
+                jpegs.push(encode_candidate(&jpg, "image/jpeg"));
             }
         }
-        for candidate in candidates {
+        let mut ordered = Vec::with_capacity(1 + jpegs.len());
+        let mut jpeg_iter = jpegs.into_iter();
+        let first_jpeg = jpeg_iter.next();
+        match (png, first_jpeg) {
+            (Some(p), Some(j)) => {
+                // Prefer the smaller of PNG and JPEG at the configured quality; lower JPEG quality only if neither fits.
+                if j.encoded_size < p.encoded_size {
+                    ordered.push(j);
+                    ordered.push(p);
+                } else {
+                    ordered.push(p);
+                    ordered.push(j);
+                }
+            }
+            (Some(p), None) => ordered.push(p),
+            (None, Some(j)) => ordered.push(j),
+            (None, None) => {}
+        }
+        ordered.extend(jpeg_iter);
+        for candidate in ordered {
             if candidate.encoded_size < max_bytes {
                 return Some(ResizedImage {
                     data: candidate.data,
