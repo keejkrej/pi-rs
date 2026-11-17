@@ -22,6 +22,12 @@ use crate::modes::interactive::theme::theme::{
 };
 use crate::modes::interactive::theme::theme_controller::ThemeResult;
 
+use crate::utils::changelog::{
+    get_changelog_path, get_new_entries, normalize_changelog_links_for_entry, parse_changelog,
+};
+use crate::utils::paths::shorten_home_path;
+use crate::utils::pi_user_agent::get_pi_user_agent;
+
 use super::*;
 
 pub const MAX_WIDGET_LINES: usize = 10;
@@ -38,22 +44,6 @@ pub fn get_cwd_relative_path_local(file_path: &str, cwd: &str) -> Option<String>
     } else {
         None
     }
-}
-
-pub fn shorten_home_path_local(path: &str) -> String {
-    let home = pi_js::env::home_dir();
-    if path.is_empty() || home.is_empty() {
-        return path.to_string();
-    }
-    if path == home {
-        return "~".to_string();
-    }
-    if let Some(rest) = path.strip_prefix(&home)
-        && (rest.starts_with('/') || rest.starts_with('\\'))
-    {
-        return format!("~{rest}");
-    }
-    path.to_string()
 }
 
 pub struct ScopeGroup {
@@ -466,12 +456,26 @@ impl InteractiveMode {
             return None;
         }
         let settings = self.settings_manager();
-        if settings.get_last_changelog_version().is_none() {
-            settings.set_last_changelog_version(VERSION_LOCAL);
-            self.report_install_telemetry(VERSION_LOCAL);
+        let last_version = settings.get_last_changelog_version();
+        let changelog_path = get_changelog_path();
+        let entries = parse_changelog(&changelog_path);
+        let Some(last_version) = last_version else {
+            settings.set_last_changelog_version(*VERSION);
+            self.report_install_telemetry(*VERSION);
             return None;
+        };
+        let new_entries = get_new_entries(&entries, &last_version);
+        if !new_entries.is_empty() {
+            settings.set_last_changelog_version(*VERSION);
+            self.report_install_telemetry(*VERSION);
+            return Some(
+                new_entries
+                    .iter()
+                    .map(|e| normalize_changelog_links_for_entry(&e.content, e))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            );
         }
-        // WIRE(@tui-w3): wire crate::utils::changelog::{get_changelog_path, parse_changelog, get_new_entries, normalize_changelog_links} once @mcp lands.
         None
     }
 
@@ -492,22 +496,43 @@ impl InteractiveMode {
             let Some(ref base_dir) = info.base_dir else {
                 continue;
             };
-            if info.changelog_path.is_none() {
+            let Some(ref changelog_path) = info.changelog_path else {
                 continue;
-            }
+            };
             let key = format!("{}:{}", info.scope, info.source);
             if !seen_keys.insert(key.clone()) {
                 continue;
             }
-            let Some((_pkg_name, Some(version))) = self.read_package_json(base_dir) else {
+            let Some((pkg_name, Some(version))) = self.read_package_json(base_dir) else {
                 continue;
             };
-            if settings.get_extension_changelog_version(&key).is_none() {
+            let Some(last_version) = settings.get_extension_changelog_version(&key) else {
                 settings.set_extension_changelog_version(&key, &version);
                 continue;
+            };
+            let new_entries = get_new_entries(&parse_changelog(changelog_path), &last_version);
+            if !new_entries.is_empty() {
+                settings.set_extension_changelog_version(&key, &version);
+                let name = pkg_name.unwrap_or_else(|| info.source.clone());
+                let markdown = new_entries
+                    .iter()
+                    .map(|entry| {
+                        if let Some(rest) = entry.content.strip_prefix("## ") {
+                            format!("## {name} {rest}")
+                        } else {
+                            entry.content.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+                    .trim()
+                    .to_string();
+                updates.push(ExtensionChangelogUpdate {
+                    name,
+                    version,
+                    markdown,
+                });
             }
-            // WIRE(@tui-w3): wire get_new_entries(parse_changelog(changelog_path), last_version) once @mcp lands.
-            let _ = &mut updates;
         }
         updates
     }
@@ -526,11 +551,32 @@ impl InteractiveMode {
         if pi_js::env::var("PI_OFFLINE").as_deref() == Some("1") {
             return;
         }
-        if !self.settings_manager().get_enable_install_telemetry() {
+        let enabled = match pi_js::env::var("PI_TELEMETRY") {
+            Some(ref val) => {
+                !val.is_empty() && (val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes"))
+            }
+            None => self.settings_manager().get_enable_install_telemetry(),
+        };
+        if !enabled {
             return;
         }
-        // WIRE(@tui-w3): wire install telemetry HTTP ping if enabled once @mcp lands.
-        let _ = version;
+        let encoded_ver = pi_js::uri::encode_uri_component(version);
+        let url = format!("https://pi.dev/api/report-install?version={encoded_ver}");
+        let user_agent = get_pi_user_agent(version);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let controller = Arc::new(pi_js::abort::AbortController::new());
+                let ctrl_for_timeout = Arc::clone(&controller);
+                let timeout = pi_js::time::set_timeout(5_000, move || {
+                    ctrl_for_timeout.abort(None);
+                });
+                let req = pi_js::fetch::Request::get(&url)
+                    .header("User-Agent", &user_agent)
+                    .signal(controller.signal());
+                let _ = pi_js::fetch::fetch(req).await;
+                timeout.clear();
+            });
+        }
     }
 
     pub(crate) fn get_markdown_theme_with_settings(&self) -> MarkdownTheme {
@@ -540,7 +586,7 @@ impl InteractiveMode {
     }
 
     fn format_display_path(&self, p: &str) -> String {
-        shorten_home_path_local(p)
+        shorten_home_path(p, None)
     }
 
     fn format_extension_display_path(&self, p: &str) -> String {
@@ -1400,7 +1446,17 @@ impl InteractiveMode {
     }
 
     pub(crate) fn ensure_png_transcoder(&self) {
-        // WIRE(@tui-w3): wire crate::utils::image_convert::ensure_png_transcoder once @mcp lands on main.
+        let this = self.clone();
+        crate::modes::interactive::components::tool_execution::ensure_png_transcoder_with(move || {
+            let tools: Vec<ToolExecutionComponent> = {
+                let st = this.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.chat_trackers.iter().filter_map(|t| t.tool_exec.clone()).collect()
+            };
+            for tool in tools {
+                tool.invalidate();
+            }
+            this.ui().request_render(None);
+        });
     }
 
     pub(crate) fn apply_runtime_settings(&self) {
@@ -1531,7 +1587,10 @@ impl InteractiveMode {
                 Arc::new(|| {
                     theme().fg(
                         ThemeColor::Muted,
-                        &format!("If this looks like a {APP_NAME_LOCAL} bug, /bug sends a report to the developers."),
+                        &format!(
+                            "If this looks like a {} bug, /bug sends a report to the developers.",
+                            *APP_NAME
+                        ),
                     )
                 }),
                 Some(pad),

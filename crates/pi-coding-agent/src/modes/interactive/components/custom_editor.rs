@@ -2,12 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::core::keybindings::KeybindingsManager;
 use indexmap::IndexMap;
 use pi_tui::autocomplete::AutocompleteProvider;
 use pi_tui::components::editor::EditorCursor;
 use pi_tui::{
-    Component, Editor, EditorOptions, EditorTheme, Focusable, KeybindingsManager, TUI, TuiMouseEvent,
-    TuiMouseEventResult, strip_terminal_sequences, visible_width,
+    Component, Editor, EditorOptions, EditorTheme, Focusable, TUI, TuiMouseEvent, TuiMouseEventResult,
+    strip_terminal_sequences, visible_width,
 };
 
 use super::status_indicator::StatusIndicator;
@@ -34,7 +35,6 @@ struct CustomEditorState {
 
 struct CustomEditorInner {
     editor: Editor,
-    // WIRE(@tui-w3): Use `crate::core::keybindings::KeybindingsManager` once @mcp merges onto main.
     keybindings: KeybindingsManager,
     embed_working_status: bool,
     state: Mutex<CustomEditorState>,

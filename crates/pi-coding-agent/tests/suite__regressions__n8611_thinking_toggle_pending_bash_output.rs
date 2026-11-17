@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use pi_agent_core::AgentMessage;
 use pi_ai::auth::types::{AuthInteraction, AuthType};
 use pi_ai::{AssistantMessage, Model, ModelThinkingLevel, Transport};
+use pi_coding_agent::core::keybindings::KeybindingsManager as AppKeybindingsManager;
 use pi_coding_agent::modes::interactive::bug_report::BugReportSession;
 use pi_coding_agent::modes::interactive::components::custom_entry::EntryRenderer;
 use pi_coding_agent::modes::interactive::components::custom_message::MessageRenderer;
@@ -46,12 +47,11 @@ use pi_coding_agent::modes::interactive::theme::theme_controller::ThemeSettingsS
 use pi_coding_agent::modes::json_event::AgentSessionEvent;
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result, Unsubscribe};
-use pi_tui::keybindings::KeyIdOrList;
 use pi_tui::terminal::{TerminalInputHandler, TerminalResizeHandler};
 use pi_tui::terminal_image::TerminalCapabilityOverrides;
 use pi_tui::{
-    Container, KeybindingDefinition, KeybindingsManager, ScrollViewScrollbar, TUI_KEYBINDINGS, Terminal,
-    WheelScrollLines, set_keybindings, strip_terminal_sequences,
+    Container, KeybindingsManager, ScrollViewScrollbar, TUI_KEYBINDINGS, Terminal, WheelScrollLines, set_keybindings,
+    strip_terminal_sequences,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -815,15 +815,7 @@ mod thinking_visibility_while_bash_tool_is_running_8611 {
         let _guard = TestGuard;
         init_theme(Some("dark"), None);
 
-        let mut defs = TUI_KEYBINDINGS.clone();
-        defs.insert(
-            "app.thinking.toggle".to_string(),
-            KeybindingDefinition {
-                default_keys: KeyIdOrList::One("ctrl+t".to_string()),
-                description: Some("Toggle thinking block visibility".to_string()),
-            },
-        );
-        let keybindings = Arc::new(KeybindingsManager::new(defs, None));
+        let keybindings = Arc::new(AppKeybindingsManager::new(None, None));
 
         let session = FakeSession::new();
         let host: Arc<dyn InteractiveRuntimeHost> = Arc::new(FakeRuntimeHost {

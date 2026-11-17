@@ -34,21 +34,9 @@ use crate::modes::interactive::components::user_message_selector::UserMessageSel
 use crate::modes::interactive::session_share::{SessionShareContext, share_session};
 use crate::modes::interactive::theme::theme::{ThemeColor, set_registered_themes, theme};
 
+use crate::utils::changelog::{get_changelog_path, normalize_changelog_links_for_entry, parse_changelog};
+
 use super::*;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChangelogEntryLocal {
-    pub major: u64,
-    pub minor: u64,
-    pub patch: u64,
-    pub content: String,
-}
-
-impl ChangelogEntryLocal {
-    pub fn version_string(&self) -> String {
-        format!("{}.{}.{}", self.major, self.minor, self.patch)
-    }
-}
 
 fn to_tree_filter_mode(mode: TreeFilterMode) -> FilterMode {
     match mode {
@@ -90,183 +78,6 @@ pub fn find_matching_providers_local(
         .filter(|p| p.id.to_ascii_lowercase() == normalized || p.name.to_ascii_lowercase() == normalized)
         .cloned()
         .collect()
-}
-
-// WIRE(@tui-w3): Replace local changelog helpers with `crate::utils::changelog::{parse_changelog, normalize_changelog_links}` once @mcp merges onto main.
-pub fn parse_changelog_local(changelog_path: &str) -> Vec<ChangelogEntryLocal> {
-    if !pi_js::fs::exists(changelog_path) {
-        return Vec::new();
-    }
-    let Ok(content) = pi_js::fs::read_to_string(changelog_path) else {
-        return Vec::new();
-    };
-    let mut entries = Vec::new();
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut current_version: Option<(u64, u64, u64)> = None;
-
-    for line in content.split('\n') {
-        if line.starts_with("## ") {
-            if let Some((major, minor, patch)) = current_version
-                && !current_lines.is_empty()
-            {
-                entries.push(ChangelogEntryLocal {
-                    major,
-                    minor,
-                    patch,
-                    content: current_lines.join("\n").trim().to_string(),
-                });
-            }
-            if let Some(ver) = parse_changelog_header_version(line) {
-                current_version = Some(ver);
-                current_lines = vec![line.to_string()];
-            } else {
-                current_version = None;
-                current_lines.clear();
-            }
-        } else if current_version.is_some() {
-            current_lines.push(line.to_string());
-        }
-    }
-
-    if let Some((major, minor, patch)) = current_version
-        && !current_lines.is_empty()
-    {
-        entries.push(ChangelogEntryLocal {
-            major,
-            minor,
-            patch,
-            content: current_lines.join("\n").trim().to_string(),
-        });
-    }
-    entries
-}
-
-fn parse_changelog_header_version(line: &str) -> Option<(u64, u64, u64)> {
-    let after = line.strip_prefix("## ")?.trim_start();
-    let inner = after.strip_prefix('[').unwrap_or(after);
-    let mut parts = inner.split(|c: char| !c.is_ascii_digit());
-    let major = parts.next().filter(|s| !s.is_empty())?.parse::<u64>().ok()?;
-    let minor = parts.next().filter(|s| !s.is_empty())?.parse::<u64>().ok()?;
-    let patch = parts.next().filter(|s| !s.is_empty())?.parse::<u64>().ok()?;
-    Some((major, minor, patch))
-}
-
-pub fn normalize_changelog_links_local(markdown: &str, version: &str) -> String {
-    const GITHUB_REPO: &str = "earendil-works/pi";
-    const BASE_PATH: &str = "packages/coding-agent";
-    let tag = if version.starts_with('v') {
-        version.to_string()
-    } else {
-        format!("v{version}")
-    };
-    let repo_url = format!("https://github.com/{GITHUB_REPO}");
-    let mut out = String::with_capacity(markdown.len());
-    let bytes = markdown.as_bytes();
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        if bytes[i] == b'['
-            && let Some(close_bracket_rel) = markdown[i + 1..].find(']')
-            && !markdown[i + 1..i + 1 + close_bracket_rel].contains('\n')
-        {
-            let close_bracket = i + 1 + close_bracket_rel;
-            if markdown[close_bracket + 1..].starts_with('(')
-                && let Some(close_paren_rel) = markdown[close_bracket + 2..].find(')')
-            {
-                let close_paren = close_bracket + 2 + close_paren_rel;
-                let inner = &markdown[close_bracket + 2..close_paren];
-                let split_ws = inner.find(char::is_whitespace).unwrap_or(inner.len());
-                let raw_target = &inner[..split_ws];
-                let rest = &inner[split_ws..];
-                if !raw_target.is_empty() {
-                    let mut target = normalize_legacy_repo_url(raw_target, &repo_url);
-                    for route in ["blob", "tree"] {
-                        for branch in ["main", "master"] {
-                            let prefix = format!("{repo_url}/{route}/{branch}/");
-                            if let Some(tail) = target.strip_prefix(&prefix) {
-                                target = format!("{repo_url}/{route}/{tag}/{tail}");
-                            }
-                        }
-                    }
-                    if !target.starts_with('#') && !target.starts_with("//") && !has_url_scheme(&target) {
-                        target = normalize_local_changelog_target(&target, &repo_url, &tag, BASE_PATH);
-                    }
-                    out.push_str(&markdown[i..close_bracket + 2]);
-                    out.push_str(&target);
-                    out.push_str(rest);
-                    out.push(')');
-                    i = close_paren + 1;
-                    continue;
-                }
-            }
-        }
-        let Some(ch) = markdown[i..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-fn normalize_legacy_repo_url(target: &str, repo_url: &str) -> String {
-    for legacy in [
-        "https://github.com/badlogic/pi-mono",
-        "https://github.com/earendil-works/pi-mono",
-    ] {
-        if let Some(after) = target.strip_prefix(legacy)
-            && (after.is_empty() || after.starts_with('/'))
-        {
-            return format!("{repo_url}{after}");
-        }
-    }
-    target.to_string()
-}
-
-fn has_url_scheme(target: &str) -> bool {
-    let Some(colon) = target.find(':') else {
-        return false;
-    };
-    let scheme = &target[..colon];
-    !scheme.is_empty()
-        && scheme.bytes().enumerate().all(|(i, b)| {
-            if i == 0 {
-                b.is_ascii_alphabetic()
-            } else {
-                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')
-            }
-        })
-}
-
-fn normalize_local_changelog_target(target: &str, repo_url: &str, tag: &str, base_path: &str) -> String {
-    let (before_hash, fragment) = match target.find('#') {
-        Some(idx) => (&target[..idx], &target[idx..]),
-        None => (target, ""),
-    };
-    let (path_part, query) = match before_hash.find('?') {
-        Some(idx) => (&before_hash[..idx], &before_hash[idx..]),
-        None => (before_hash, ""),
-    };
-    if path_part.is_empty() {
-        return target.to_string();
-    }
-    let norm = path_part.replace('\\', "/");
-    let joined = if norm.starts_with('/') {
-        pi_js::path::posix::normalize(norm.trim_start_matches('/'))
-    } else {
-        pi_js::path::posix::normalize(&pi_js::path::posix::join(&[base_path, &norm]))
-    };
-    if joined == "." || joined == ".." || joined.starts_with("../") {
-        return target.to_string();
-    }
-    let basename = pi_js::path::posix::basename(&joined, None);
-    let route = if path_part.ends_with('/') || !basename.contains('.') {
-        "tree"
-    } else {
-        "blob"
-    };
-    let encoded = percent_encoding::utf8_percent_encode(&joined, percent_encoding::CONTROLS).to_string();
-    format!("{repo_url}/{route}/{tag}/{encoded}{query}{fragment}")
 }
 
 fn has_default_model_provider(provider_id: &str) -> bool {
@@ -1088,7 +899,7 @@ impl InteractiveMode {
                     m.update_available_provider_count();
                     m.inner.footer.invalidate();
                     m.update_editor_border_color();
-                    let auth_path = get_auth_path_local();
+                    let auth_path = get_auth_path();
                     if let Some(ref sel_m) = selected_model {
                         m.show_status(&format!(
                             "{act}. Selected {}. Credentials saved to {auth_path}",
@@ -1110,7 +921,7 @@ impl InteractiveMode {
         if defer_selection {
             self.show_status(&format!(
                 "{action_label}. Credentials saved to {}. Refreshing model catalog…",
-                get_auth_path_local()
+                get_auth_path()
             ));
         } else {
             finish_authentication().await;
@@ -1178,7 +989,7 @@ impl InteractiveMode {
         );
         let method_name = entry.method_name.as_deref().unwrap_or("Authentication");
         dialog.show_info(
-            &format!("{method_name} is configured outside {APP_NAME_LOCAL}."),
+            &format!("{method_name} is configured outside {}.", *APP_NAME),
             None,
             Some(true),
         );
@@ -1207,7 +1018,7 @@ impl InteractiveMode {
                 t.fg(ThemeColor::Muted, "See:"),
                 t.fg(
                     ThemeColor::Accent,
-                    &format!("  {}", pi_js::path::join(&[&get_docs_path_local(), "providers.md"])),
+                    &format!("  {}", pi_js::path::join(&[&get_docs_path(), "providers.md"])),
                 ),
             ]);
         }
@@ -1676,7 +1487,6 @@ impl InteractiveMode {
     }
 
     async fn copy_text_to_clipboard(&self, text: &str) -> Result<()> {
-        // WIRE(@tui-w3): Also invoke `crate::utils::clipboard::copy_to_clipboard(text)` once @mcp merges onto main.
         (self.inner.hooks.clipboard_copy)(text).await
     }
 
@@ -1936,15 +1746,15 @@ impl InteractiveMode {
     }
 
     pub(crate) fn handle_changelog_command(&self) {
-        let changelog_path = get_changelog_path_local();
-        let all_entries = parse_changelog_local(&changelog_path);
+        let changelog_path = get_changelog_path();
+        let all_entries = parse_changelog(&changelog_path);
         let changelog_md = if all_entries.is_empty() {
             "No changelog entries found.".to_string()
         } else {
             all_entries
-                .into_iter()
+                .iter()
                 .rev()
-                .map(|e| normalize_changelog_links_local(&e.content, &e.version_string()))
+                .map(|e| normalize_changelog_links_for_entry(&e.content, e))
                 .collect::<Vec<_>>()
                 .join("\n\n")
         };
@@ -2149,7 +1959,7 @@ impl InteractiveMode {
         let width = term.columns() as usize;
         let height = term.rows() as usize;
         let all_lines = self.ui().render(width);
-        let debug_log_path = get_debug_log_path_local();
+        let debug_log_path = get_debug_log_path();
 
         let mut parts: Vec<String> = vec![
             format!("Debug output at {}", chrono::Utc::now().to_rfc3339()),

@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_ai::{ImageContent, TextContent, UserContentBlock};
+use pi_coding_agent::core::keybindings::KEYBINDINGS;
 use pi_coding_agent::modes::interactive::components::tool_execution::{
     RenderShell, ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult, ToolRenderers, testing,
 };
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
-use pi_tui::keybindings::{KeyIdOrList, KeybindingDefinition};
 use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
 use pi_tui::tui::{
     OverlayHandle, OverlayOptions, QueryTerminalColorsOptions, TUI, TuiInputListener, TuiMode, TuiStopOptions,
@@ -191,15 +191,7 @@ impl Drop for TestGuard {
 
 fn setup() -> (TestGuard, FakeTui, Arc<dyn TUI + Send + Sync>) {
     init_theme(Some("dark"), None);
-    let mut defs = TUI_KEYBINDINGS.clone();
-    defs.insert(
-        "app.tools.expand".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+o".to_string()),
-            description: Some("Toggle tool output".to_string()),
-        },
-    );
-    set_keybindings(KeybindingsManager::new(defs, None));
+    set_keybindings(KeybindingsManager::new(KEYBINDINGS.clone(), None));
     let fake = FakeTui::new();
     let ui: Arc<dyn TUI + Send + Sync> = Arc::new(fake.clone());
     (TestGuard, fake, ui)

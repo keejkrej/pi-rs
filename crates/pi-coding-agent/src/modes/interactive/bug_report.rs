@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use crate::core::keybindings::KeybindingsManager;
 use pi_ai::providers::radius_config::DEFAULT_RADIUS_GATEWAY;
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result};
-use pi_tui::{Component, Container, KeybindingsManager, TUI};
+use pi_tui::{Component, Container, TUI};
 use serde_json::Value;
 use tokio::sync::oneshot;
 use url::Url;
@@ -64,7 +65,6 @@ pub struct BugReportContext {
     pub ui: Arc<dyn TUI + Send + Sync>,
     pub editor_container: Container,
     pub editor: Arc<dyn Component>,
-    // WIRE(@tui-w3): Use crate::core::keybindings::KeybindingsManager once @mcp merges onto main.
     pub keybindings: KeybindingsManager,
     pub show_status: Arc<dyn Fn(&str) + Send + Sync>,
     pub show_error: Arc<dyn Fn(&str) + Send + Sync>,

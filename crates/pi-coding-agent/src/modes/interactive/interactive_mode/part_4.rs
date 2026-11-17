@@ -15,8 +15,11 @@ use pi_tui::tui::OverlayHandle;
 use pi_tui::{Component, Spacer};
 use serde_json::Value;
 
+use crate::core::cache_stats::{CACHE_TTL_MS, ModelPriceSource, collect_cache_misses};
+use crate::core::cache_warmer::format_cache_warming_usage;
 use crate::core::messages::{create_compaction_summary_message, create_custom_message};
 use crate::core::session_manager::{CustomEntry, SessionEntry, UsageEntry, session_entry_to_context_messages};
+use crate::core::trust_manager::has_trust_requiring_project_resources;
 use crate::modes::interactive::components::assistant_message::AssistantMessageComponent;
 use crate::modes::interactive::components::bash_execution::{BashExecutionComponent, TruncationResult};
 use crate::modes::interactive::components::branch_summary_message::{
@@ -54,22 +57,7 @@ fn json_object_to_value(obj: &pi_ai::JsonObject) -> Value {
     Value::Object(map)
 }
 
-pub const CACHE_TTL_MS_LOCAL: f64 = 5.0 * 60.0 * 1000.0;
-const NOISE_FLOOR_TOKENS_LOCAL: i64 = 1024;
-const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES: &[&str] = &[
-    "settings.json",
-    "mcp.json",
-    "extensions",
-    "skills",
-    "prompts",
-    "themes",
-    "SYSTEM.md",
-    "APPEND_SYSTEM.md",
-];
-
-// WIRE(@tui-w3): Replace local mirrors with `crate::core::agent_session::parse_skill_block`,
-// `crate::core::cache_warmer::format_cache_warming_usage`, `crate::core::cache_stats::{CACHE_TTL_MS, collect_cache_misses}`, and
-// `crate::core::trust_manager::has_trust_requiring_project_resources` once Stage 3A merges onto main.
+// WIRE(@tui-w3): Replace local `parse_skill_block_local` with `crate::core::agent_session::parse_skill_block` once Stage 3B-1 merges onto main.
 pub fn parse_skill_block_local(text: &str) -> Option<ParsedSkillBlock> {
     let rest = text.strip_prefix("<skill name=\"")?;
     let name_end = rest.find('"')?;
@@ -99,70 +87,6 @@ pub fn parse_skill_block_local(text: &str) -> Option<ParsedSkillBlock> {
         content: content.to_string(),
         user_message,
     })
-}
-
-pub fn format_cache_warming_usage_local(total_cost: f64, note: Option<&str>) -> String {
-    let note_text = match note {
-        Some(n) if !n.is_empty() => format!(" ({n})"),
-        _ => String::new(),
-    };
-    let formatted = format!("{total_cost:.6}");
-    let cost = trim_decimal_trailing_zeros_keeping_min(&formatted, 3);
-    format!("Cache warmed{note_text}: ${cost}")
-}
-
-fn trim_decimal_trailing_zeros_keeping_min(s: &str, min_decimals: usize) -> String {
-    let Some(dot) = s.find('.') else {
-        return s.to_string();
-    };
-    let min_len = (dot + 1 + min_decimals).min(s.len());
-    let mut end = s.len();
-    while end > min_len && s.as_bytes()[end - 1] == b'0' {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
-pub fn has_trust_requiring_project_resources_local(cwd: &str) -> bool {
-    let home_raw = pi_js::env::var("HOME")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(pi_js::env::home_dir);
-    let home_dir = canonicalize_or_resolve(&home_raw);
-    let user_agents_skills_dir = pi_js::path::join(&[&home_dir, ".agents", "skills"]);
-    let mut current_dir = canonicalize_or_resolve(cwd);
-
-    let config_dir = pi_js::path::join(&[&current_dir, CONFIG_DIR_NAME_LOCAL]);
-    if TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES
-        .iter()
-        .any(|entry| pi_js::fs::exists(&pi_js::path::join(&[&config_dir, entry])))
-    {
-        return true;
-    }
-
-    loop {
-        let agents_skills_dir = pi_js::path::join(&[&current_dir, ".agents", "skills"]);
-        if agents_skills_dir != user_agents_skills_dir && pi_js::fs::exists(&agents_skills_dir) {
-            return true;
-        }
-        let parent_dir = pi_js::path::dirname(&current_dir);
-        if parent_dir == current_dir {
-            return false;
-        }
-        current_dir = parent_dir;
-    }
-}
-
-fn canonicalize_or_resolve(path: &str) -> String {
-    let resolved = pi_js::path::resolve(&[path]);
-    std::fs::canonicalize(&resolved)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(resolved)
-}
-
-fn parse_rfc3339_ms(timestamp: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|dt| dt.timestamp_millis())
-        .unwrap_or(0)
 }
 
 fn thinking_level_name(level: ModelThinkingLevel) -> &'static str {
@@ -201,97 +125,27 @@ fn create_compaction_summary_agent_message(summary: &str, tokens_before: i64, ti
     AgentMessage::Custom(serde_json::to_value(msg).unwrap_or(Value::Null))
 }
 
-#[derive(Clone)]
-struct PreviousCacheRequest {
-    prompt_tokens: i64,
-    model_key: String,
-    timestamp: i64,
-    reported_cache: bool,
+struct RuntimeModelPriceSource(Arc<dyn InteractiveModelRuntime>);
+
+impl ModelPriceSource for RuntimeModelPriceSource {
+    fn get_cache_read_cost(&self, provider: &str, model_id: &str) -> Option<f64> {
+        self.0.get_model(provider, model_id).map(|m| m.cost.cache_read)
+    }
 }
 
-fn collect_cache_misses_local(
+fn collect_cache_misses_by_id(
     entries: &[SessionEntry],
-    runtime: &dyn InteractiveModelRuntime,
+    runtime: Arc<dyn InteractiveModelRuntime>,
 ) -> IndexMap<String, CacheMissNotice> {
-    let mut prev: Option<PreviousCacheRequest> = None;
-    let mut misses: IndexMap<String, CacheMissNotice> = IndexMap::new();
-
-    for entry in entries {
-        match entry {
-            SessionEntry::Compaction(_) | SessionEntry::BranchSummary(_) => {
-                prev = None;
-            }
-            SessionEntry::Usage(u) if u.kind == "cache_warm" => {
-                let prompt_tokens = u.usage.input + u.usage.cache_read + u.usage.cache_write;
-                if prompt_tokens > 0 {
-                    prev = Some(PreviousCacheRequest {
-                        prompt_tokens,
-                        model_key: format!("{}/{}", u.provider, u.model),
-                        timestamp: parse_rfc3339_ms(&u.timestamp),
-                        reported_cache: true,
-                    });
-                }
-            }
-            SessionEntry::Message(me) => {
-                if let AgentMessage::Message(Message::Assistant(assistant)) = &me.message {
-                    if let Some(miss) = detect_miss_local(prev.as_ref(), assistant, runtime) {
-                        misses.insert(me.id.clone(), miss);
-                    }
-                    let usage = &assistant.usage;
-                    let prompt_tokens = usage.input + usage.cache_read + usage.cache_write;
-                    if prompt_tokens > 0 {
-                        let prev_reported = prev.as_ref().is_some_and(|p| p.reported_cache);
-                        prev = Some(PreviousCacheRequest {
-                            prompt_tokens,
-                            model_key: format!("{}/{}", assistant.provider, assistant.model),
-                            timestamp: assistant.timestamp,
-                            reported_cache: prev_reported || (usage.cache_read + usage.cache_write > 0),
-                        });
-                    }
-                }
-            }
-            _ => {}
+    let price_source = RuntimeModelPriceSource(runtime);
+    let indexed = collect_cache_misses(entries, &price_source);
+    let mut by_id = IndexMap::with_capacity(indexed.len());
+    for (idx, miss) in indexed {
+        if let Some(entry) = entries.get(idx) {
+            by_id.insert(entry.id().to_string(), miss);
         }
     }
-
-    misses
-}
-
-fn detect_miss_local(
-    prev: Option<&PreviousCacheRequest>,
-    message: &AssistantMessage,
-    runtime: &dyn InteractiveModelRuntime,
-) -> Option<CacheMissNotice> {
-    let prev = prev?;
-    let usage = &message.usage;
-    let prompt_tokens = usage.input + usage.cache_read + usage.cache_write;
-    if prompt_tokens <= 0 || (usage.cache_read + usage.cache_write == 0 && !prev.reported_cache) {
-        return None;
-    }
-    let missed_tokens = prev.prompt_tokens.min(prompt_tokens) - usage.cache_read;
-    if missed_tokens <= NOISE_FLOOR_TOKENS_LOCAL {
-        return None;
-    }
-    let paid_tokens = usage.input + usage.cache_write;
-    let paid_per_token = if paid_tokens > 0 {
-        (usage.cost.input + usage.cost.cache_write) / paid_tokens as f64
-    } else {
-        0.0
-    };
-    let read_per_token = if usage.cache_read > 0 {
-        usage.cost.cache_read / usage.cache_read as f64
-    } else {
-        runtime
-            .get_model(&message.provider, &message.model)
-            .map(|m| m.cost.cache_read / 1_000_000.0)
-            .unwrap_or(0.0)
-    };
-    Some(CacheMissNotice {
-        missed_tokens,
-        missed_cost: missed_tokens as f64 * (paid_per_token - read_per_token).max(0.0),
-        idle_ms: (message.timestamp - prev.timestamp).max(0),
-        model_changed: format!("{}/{}", message.provider, message.model) != prev.model_key,
-    })
+    by_id
 }
 
 enum RenderSessionItemLocal {
@@ -841,8 +695,84 @@ impl InteractiveMode {
     }
 
     pub(crate) async fn handle_clipboard_paste(&self) {
-        // WIRE(@tui-w3): Wire crate::utils::clipboard::{read_clipboard_file_paths, read_clipboard_image, read_clipboard_text}
-        // once @mcp merges onto main (before falling back to hooks.clipboard_read_text).
+        match (self.inner.hooks.clipboard_read_file_paths)().await {
+            Ok(Some(file_paths)) if !file_paths.is_empty() => {
+                if file_paths
+                    .iter()
+                    .any(|file_path| file_path.chars().any(char::is_control))
+                {
+                    self.show_error("Failed to paste from clipboard: Clipboard file path contains control characters");
+                    return;
+                }
+                let is_bash = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).is_bash_mode;
+                let paths = if is_bash {
+                    file_paths
+                        .iter()
+                        .map(|p| quote_if_needed(p))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    file_paths.join("\n")
+                };
+                let editor = self.active_editor();
+                let (leading_space, trailing_space) = if let Some(cursor) = editor.get_cursor()
+                    && let Ok(line_idx) = usize::try_from(cursor.line)
+                    && let Ok(col_idx) = usize::try_from(cursor.col)
+                {
+                    let text = editor.get_text();
+                    let current_line = text.split('\n').nth(line_idx).unwrap_or("");
+                    let units: Vec<u16> = current_line.encode_utf16().collect();
+                    let char_before = col_idx
+                        .checked_sub(1)
+                        .and_then(|idx| units.get(idx))
+                        .and_then(|&u| char::from_u32(u as u32));
+                    let char_after = units.get(col_idx).and_then(|&u| char::from_u32(u as u32));
+                    let lead = if char_before.is_some_and(|c| !c.is_whitespace()) {
+                        " "
+                    } else {
+                        ""
+                    };
+                    let trail = if char_after.is_some_and(|c| !c.is_whitespace()) {
+                        " "
+                    } else {
+                        ""
+                    };
+                    (lead, trail)
+                } else {
+                    ("", "")
+                };
+                editor.insert_text_at_cursor(&format!("{leading_space}{paths}{trailing_space}"));
+                self.ui().request_render(None);
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.show_error(&format!("Failed to paste from clipboard: {err}"));
+                return;
+            }
+        }
+
+        match (self.inner.hooks.clipboard_read_image)().await {
+            Ok(Some(image)) => {
+                let ext =
+                    crate::utils::clipboard_image::extension_for_image_mime_type(&image.mime_type).unwrap_or("png");
+                let file_name = format!("pi-clipboard-{}.{ext}", pi_js::crypto::random_uuid());
+                let file_path = pi_js::path::join(&[&pi_js::env::tmp_dir(), &file_name]);
+                if let Err(err) = pi_js::fs::write_file(&file_path, &image.bytes, None) {
+                    self.show_error(&format!("Failed to paste from clipboard: {err}"));
+                    return;
+                }
+                self.active_editor().insert_text_at_cursor(&file_path);
+                self.ui().request_render(None);
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.show_error(&format!("Failed to paste from clipboard: {err}"));
+                return;
+            }
+        }
+
         match (self.inner.hooks.clipboard_read_text)().await {
             Ok(Some(text)) if !text.is_empty() => {
                 self.active_editor().insert_text_at_cursor(&text);
@@ -2104,7 +2034,7 @@ impl InteractiveMode {
         let mut rendered_pending_tools: IndexMap<String, ToolExecutionComponent> = IndexMap::new();
         let cache_misses = if self.settings_manager().get_show_cache_miss_notices() {
             let entries = self.session_manager().get_entries();
-            collect_cache_misses_local(&entries, self.session().model_runtime().as_ref())
+            collect_cache_misses_by_id(&entries, self.session().model_runtime())
         } else {
             IndexMap::new()
         };
@@ -2295,14 +2225,13 @@ impl InteractiveMode {
         }
         let total_cost = Arc::new(std::sync::Mutex::new(entry.usage.cost.total));
         let cost_ref = Arc::clone(&total_cost);
-        let note_clone = entry.note.clone();
+        let template_entry = entry.clone();
         let comp = ThemedText::new(
             Arc::new(move || {
                 let c = *cost_ref.lock().unwrap_or_else(|e| e.into_inner());
-                theme().fg(
-                    ThemeColor::Dim,
-                    &format_cache_warming_usage_local(c, note_clone.as_deref()),
-                )
+                let mut e = template_entry.clone();
+                e.usage.cost.total = c;
+                theme().fg(ThemeColor::Dim, &format_cache_warming_usage(&e))
             }),
             Some(1),
             Some(0),
@@ -2436,7 +2365,7 @@ impl InteractiveMode {
         );
         let label = if miss.model_changed {
             "Cache miss after model switch".to_string()
-        } else if miss.idle_ms as f64 >= CACHE_TTL_MS_LOCAL {
+        } else if miss.idle_ms >= CACHE_TTL_MS {
             format!(
                 "Cache miss after {}m idle",
                 ((miss.idle_ms as f64) / 60_000.0).round() as i64
@@ -2480,7 +2409,7 @@ impl InteractiveMode {
 
     pub(crate) fn render_project_trust_warning_if_needed(&self) {
         if self.settings_manager().is_project_trusted()
-            || !has_trust_requiring_project_resources_local(&self.session_manager().get_cwd())
+            || !has_trust_requiring_project_resources(&self.session_manager().get_cwd())
         {
             return;
         }
@@ -2488,7 +2417,8 @@ impl InteractiveMode {
             self.add_chat_component(Arc::new(Spacer::new(Some(1))), None, None, None);
         }
         let msg = format!(
-            "This project is not trusted. Project {CONFIG_DIR_NAME_LOCAL} resources and packages are ignored. Use /trust to save a trust decision, then restart pi."
+            "This project is not trusted. Project {} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.",
+            *CONFIG_DIR_NAME
         );
         self.add_chat_component(
             Arc::new(ThemedText::new(

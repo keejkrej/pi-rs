@@ -411,26 +411,23 @@ pub struct StdioRpcIo;
 #[async_trait]
 impl RpcIo for StdioRpcIo {
     fn take_over_stdout(&self) {
-        // WIRE(@tui-w3): call crate::core::output_guard::take_over_stdout() once @mcp merges.
+        crate::core::output_guard::take_over_stdout();
     }
 
     fn write_line(&self, line: &str) {
-        // WIRE(@tui-w3): call crate::core::output_guard::write_raw_stdout(line) once @mcp merges.
-        pi_js::console::stdout_write(line);
+        crate::core::output_guard::write_raw_stdout(line);
     }
 
     fn wait_for_stdout_backpressure(&self) -> BoxFuture<()> {
-        // WIRE(@tui-w3): call crate::core::output_guard::wait_for_raw_stdout_backpressure().await once @mcp merges.
-        Box::pin(async {})
+        Box::pin(crate::core::output_guard::wait_for_raw_stdout_backpressure())
     }
 
     fn flush_stdout(&self) -> BoxFuture<pi_js::Result<()>> {
-        // WIRE(@tui-w3): call crate::core::output_guard::flush_raw_stdout().await once @mcp merges.
-        Box::pin(async { Ok(()) })
+        Box::pin(crate::core::output_guard::flush_raw_stdout())
     }
 
     fn kill_tracked_detached_children(&self) {
-        // WIRE(@tui-w3): call crate::utils::shell::kill_tracked_detached_children() once @mcp merges.
+        crate::utils::shell::kill_tracked_detached_children();
     }
 
     fn attach_input(&self, on_line: RpcLineCallback, on_end: RpcEndCallback) -> Unsubscribe {

@@ -16,6 +16,7 @@ pub use part_6::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::core::keybindings::{KEYBINDINGS, KeybindingsManager};
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::AgentMessage;
@@ -28,8 +29,8 @@ use pi_tui::components::editor::EditorCursor;
 use pi_tui::editor_component::{EditorBorderColor, EditorTextCallback};
 use pi_tui::tui::{OverlayHandle, OverlayOptions, TUI};
 use pi_tui::{
-    AutocompleteItem, Component, Container, EditorComponent, KeybindingsManager, ScrollViewScrollbar, Terminal,
-    TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType, WheelScrollLines, fuzzy_filter,
+    AutocompleteItem, Component, Container, EditorComponent, ScrollViewScrollbar, Terminal, TuiMouseEvent,
+    TuiMouseEventResult, TuiMouseEventType, WheelScrollLines, fuzzy_filter,
 };
 use serde_json::Value;
 
@@ -63,35 +64,11 @@ use crate::modes::interactive::tui_renderer::{InteractiveTui, InteractiveTuiRefe
 use crate::modes::json_event::{AgentSessionEvent, CompactionReason};
 
 // WIRE(@tui-w3): Replace local runtime/session/config/settings/extension mirror traits with concrete
-// crate::{config, core::*, utils::*, extensions::mcp::config} imports once Stage 3A merges onto main.
+// crate::{core::*, utils::*, extensions::mcp::config} imports once Stage 3 merges onto main.
 
-pub const APP_NAME_LOCAL: &str = "pi";
-pub const APP_TITLE_LOCAL: &str = "π";
-pub const CONFIG_DIR_NAME_LOCAL: &str = ".pi";
-pub const VERSION_LOCAL: &str = env!("CARGO_PKG_VERSION");
-
-pub fn get_agent_dir_local() -> String {
-    if let Some(dir) = pi_js::env::var("PI_CODING_AGENT_DIR").filter(|s| !s.is_empty()) {
-        return dir;
-    }
-    pi_js::path::join(&[&pi_js::env::home_dir(), CONFIG_DIR_NAME_LOCAL, "agent"])
-}
-
-pub fn get_auth_path_local() -> String {
-    pi_js::path::join(&[&get_agent_dir_local(), "auth.json"])
-}
-
-pub fn get_debug_log_path_local() -> String {
-    pi_js::path::join(&[&get_agent_dir_local(), "debug.log"])
-}
-
-pub fn get_docs_path_local() -> String {
-    pi_js::path::join(&[&get_agent_dir_local(), "docs"])
-}
-
-pub fn get_changelog_path_local() -> String {
-    pi_js::path::join(&[&get_agent_dir_local(), "CHANGELOG.md"])
-}
+pub(crate) use crate::config::{
+    APP_NAME, APP_TITLE, CONFIG_DIR_NAME, VERSION, get_agent_dir, get_auth_path, get_debug_log_path, get_docs_path,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticLevel {
@@ -210,6 +187,15 @@ pub struct RegisteredExtensionShortcut {
 pub struct ToolStatus {
     pub is_warning: bool,
     pub message: String,
+}
+
+impl From<crate::utils::tools_manager::ToolStatus> for ToolStatus {
+    fn from(status: crate::utils::tools_manager::ToolStatus) -> Self {
+        Self {
+            is_warning: status.r#type == crate::utils::tools_manager::ToolStatusKind::Warning,
+            message: status.message,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -542,34 +528,34 @@ impl ProgramStatusReporter {
             let mut status = if let Some(blocked) = st.blocked.values().last() {
                 ProgramStatus {
                     state: ProgramStatusState::Blocked,
-                    app: Some(APP_NAME_LOCAL.to_string()),
+                    app: Some((*APP_NAME).to_string()),
                     kind: Some(blocked.kind),
                     message: Some(blocked.message.clone()),
                 }
             } else if st.compacting {
                 ProgramStatus {
                     state: ProgramStatusState::Working,
-                    app: Some(APP_NAME_LOCAL.to_string()),
+                    app: Some((*APP_NAME).to_string()),
                     kind: None,
                     message: Some("Compacting context".to_string()),
                 }
             } else if st.run_active {
                 ProgramStatus {
                     state: ProgramStatusState::Working,
-                    app: Some(APP_NAME_LOCAL.to_string()),
+                    app: Some((*APP_NAME).to_string()),
                     kind: None,
                     message: session_name,
                 }
             } else {
                 let mut resting = st.resting_status.clone();
-                resting.app = Some(APP_NAME_LOCAL.to_string());
+                resting.app = Some((*APP_NAME).to_string());
                 if resting.state == ProgramStatusState::Done {
                     resting.message = session_name;
                 }
                 resting
             };
             if status.app.is_none() {
-                status.app = Some(APP_NAME_LOCAL.to_string());
+                status.app = Some((*APP_NAME).to_string());
             }
             let key = format!(
                 "{}:{}:{}:{}",
@@ -811,13 +797,7 @@ pub struct CacheWarmingStatusSummary {
     pub warm_cost: f64,
 }
 
-#[derive(Clone, Debug)]
-pub struct CacheMissNotice {
-    pub missed_tokens: i64,
-    pub missed_cost: f64,
-    pub model_changed: bool,
-    pub idle_ms: i64,
-}
+pub type CacheMissNotice = crate::core::cache_stats::CacheMiss;
 
 #[derive(Clone, Debug, Default)]
 pub struct CompactionSummaryResult {
@@ -1176,7 +1156,6 @@ pub trait InteractiveFooterDataProvider: ReadonlyFooterDataProvider + Send + Syn
     fn set_extension_status(&self, key: &str, text: Option<&str>);
     fn clear_extension_statuses(&self);
     fn set_available_provider_count(&self, count: usize);
-    fn on_branch_change(&self, cb: Arc<dyn Fn() + Send + Sync>) -> Unsubscribe;
     fn dispose(&self);
 }
 
@@ -1273,6 +1252,13 @@ pub trait InteractiveRuntimeHost: Send + Sync {
     async fn dispose(&self);
 }
 
+pub(crate) fn sync_tui_keybindings(kb: &KeybindingsManager) {
+    pi_tui::set_keybindings(pi_tui::KeybindingsManager::new(
+        KEYBINDINGS.clone(),
+        Some(kb.get_user_bindings()),
+    ));
+}
+
 /// Optional hooks allowing offline unit tests to override exit/signal behavior cleanly.
 #[derive(Clone)]
 pub struct InteractiveModeHooks {
@@ -1282,6 +1268,9 @@ pub struct InteractiveModeHooks {
     pub keybindings_reload: Arc<dyn Fn(&KeybindingsManager) + Send + Sync>,
     pub clipboard_copy: Arc<dyn Fn(&str) -> BoxFuture<Result<()>> + Send + Sync>,
     pub clipboard_read_text: Arc<dyn Fn() -> BoxFuture<Result<Option<String>>> + Send + Sync>,
+    pub clipboard_read_file_paths: Arc<dyn Fn() -> BoxFuture<Result<Option<Vec<String>>>> + Send + Sync>,
+    pub clipboard_read_image:
+        Arc<dyn Fn() -> BoxFuture<Result<Option<crate::utils::clipboard_image::ClipboardImage>>> + Send + Sync>,
     pub platform_is_windows: Option<bool>,
     pub suspend_process:
         Option<Arc<dyn Fn(Arc<dyn Fn() + Send + Sync>) -> std::result::Result<(), String> + Send + Sync>>,
@@ -1294,9 +1283,23 @@ impl Default for InteractiveModeHooks {
             exit_process: Arc::new(|code| std::process::exit(code)),
             create_footer_data_provider: Arc::new(|cwd| Arc::new(DefaultFooterDataProvider::new(cwd))),
             keybindings: None,
-            keybindings_reload: Arc::new(|_| {}),
-            clipboard_copy: Arc::new(|_| Box::pin(async { Ok(()) })),
-            clipboard_read_text: Arc::new(|| Box::pin(async { Ok(None) })),
+            keybindings_reload: Arc::new(|kb| {
+                kb.reload();
+                sync_tui_keybindings(kb);
+            }),
+            clipboard_copy: Arc::new(|text| {
+                let text = text.to_string();
+                Box::pin(async move { crate::utils::clipboard::copy_to_clipboard(&text).await })
+            }),
+            clipboard_read_text: Arc::new(|| {
+                Box::pin(async { Ok(crate::utils::clipboard::read_clipboard_text().await) })
+            }),
+            clipboard_read_file_paths: Arc::new(|| {
+                Box::pin(async { Ok(crate::utils::clipboard::read_clipboard_file_paths().await) })
+            }),
+            clipboard_read_image: Arc::new(|| {
+                Box::pin(async { Ok(crate::utils::clipboard_image::read_clipboard_image(None).await) })
+            }),
             platform_is_windows: None,
             suspend_process: None,
             install_change_warning: None,
@@ -1338,6 +1341,11 @@ impl ReadonlyFooterDataProvider for DefaultFooterDataProvider {
     fn get_available_provider_count(&self) -> usize {
         *self.available_provider_count.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn on_branch_change(&self, cb: Arc<dyn Fn() + Send + Sync>) -> Unsubscribe {
+        self.branch_listeners.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
+        Unsubscribe::noop()
+    }
 }
 
 impl InteractiveFooterDataProvider for DefaultFooterDataProvider {
@@ -1366,11 +1374,6 @@ impl InteractiveFooterDataProvider for DefaultFooterDataProvider {
 
     fn set_available_provider_count(&self, count: usize) {
         *self.available_provider_count.lock().unwrap_or_else(|e| e.into_inner()) = count;
-    }
-
-    fn on_branch_change(&self, cb: Arc<dyn Fn() + Send + Sync>) -> Unsubscribe {
-        self.branch_listeners.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
-        Unsubscribe::noop()
     }
 
     fn dispose(&self) {
@@ -1609,7 +1612,8 @@ pub fn format_crash_extension_hint(extension_matches: Option<&[String]>) -> Opti
     let noun = if matches.len() == 1 { "extension" } else { "extensions" };
     let pronoun = if matches.len() == 1 { "it" } else { "them" };
     Some(format!(
-        "A stack frame came from loaded {noun} {labels}, which may be involved. Try disabling {pronoun} with `{APP_NAME_LOCAL} config`, or run `{APP_NAME_LOCAL} -ne` to confirm."
+        "A stack frame came from loaded {noun} {labels}, which may be involved. Try disabling {pronoun} with `{0} config`, or run `{0} -ne` to confirm.",
+        *APP_NAME
     ))
 }
 
@@ -1643,7 +1647,7 @@ pub fn format_resume_command(session_manager: &dyn InteractiveSessionManager) ->
     if !pi_js::fs::exists(&session_file) {
         return None;
     }
-    let mut args = vec![APP_NAME_LOCAL.to_string()];
+    let mut args = vec![(*APP_NAME).to_string()];
     if !session_manager.uses_default_session_dir() {
         args.push("--session-dir".to_string());
         args.push(quote_if_needed(&session_manager.get_session_dir()));
@@ -1832,7 +1836,6 @@ pub(crate) struct InteractiveModeState {
     pub(crate) last_status_text: Option<ThemedText>,
     pub(crate) last_status_text_component: Option<Arc<dyn Component>>,
     pub(crate) last_status_message: Arc<Mutex<String>>,
-    #[allow(dead_code)] // WIRE(@tui-w3): used by show_managed_tool_status once ensure_tool lands on main.
     pub(crate) managed_tool_status_started: bool,
     pub(crate) streaming_component: Option<AssistantMessageComponent>,
     pub(crate) streaming_component_arc: Option<Arc<dyn Component>>,

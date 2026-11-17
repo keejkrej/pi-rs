@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexSet;
 use pi_agent_core::ThinkingLevel;
 use pi_ai::{Model, ModelThinkingLevel, ProviderId};
 use pi_js::abort::{AbortController, AbortSignal};
@@ -12,6 +12,11 @@ use pi_tui::components::settings_list::SettingsList;
 use pi_tui::terminal_image::{get_capabilities, hyperlink};
 use pi_tui::{Component, DefaultTextStyle, Spacer, TruncatedText};
 
+use crate::core::http_dispatcher::{configure_http_dispatcher, format_http_idle_timeout_ms};
+use crate::core::model_resolver::{
+    ModelScopeDiagnosticCode, find_exact_model_reference_match, resolve_model_scope_from_models,
+};
+use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
 use crate::modes::interactive::components::dynamic_border::DynamicBorder;
 use crate::modes::interactive::components::model_selector::{
     DefaultModelReference, ModelSelectorComponent, ScopedModelItem,
@@ -25,7 +30,7 @@ use crate::modes::interactive::components::settings_selector::{
 use crate::modes::interactive::components::themed_text::ThemedText;
 use crate::modes::interactive::components::thinking_selector::ThinkingSelectorComponent;
 use crate::modes::interactive::components::trust_selector::{
-    ProjectTrustStoreEntry, ProjectTrustUpdate, TrustSelection, TrustSelectorComponent, TrustSelectorOptions,
+    TrustSelection, TrustSelectorComponent, TrustSelectorOptions,
 };
 use crate::modes::interactive::external_editor::{
     ExternalEditorOptions, ExternalEditorResult, edit_in_external_editor,
@@ -47,24 +52,7 @@ pub const THINKING_LEVEL_OPTIONS_LOCAL: &[ModelThinkingLevel] = &[
     ModelThinkingLevel::XHigh,
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LatestPiRelease {
-    pub version: String,
-    pub note: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModelScopeDiagnostic {
-    pub code: &'static str,
-    pub message: String,
-    pub pattern: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ResolveModelScopeResult {
-    pub scoped_models: Vec<ScopedModelItem>,
-    pub diagnostics: Vec<ModelScopeDiagnostic>,
-}
+pub use crate::utils::version_check::LatestPiRelease;
 
 fn model_thinking_to_str(level: ModelThinkingLevel) -> &'static str {
     match level {
@@ -75,19 +63,6 @@ fn model_thinking_to_str(level: ModelThinkingLevel) -> &'static str {
         ModelThinkingLevel::High => "high",
         ModelThinkingLevel::XHigh => "xhigh",
         ModelThinkingLevel::Max => "max",
-    }
-}
-
-fn parse_thinking_level_str(s: &str) -> Option<ModelThinkingLevel> {
-    match s.to_ascii_lowercase().as_str() {
-        "off" => Some(ModelThinkingLevel::Off),
-        "minimal" => Some(ModelThinkingLevel::Minimal),
-        "low" => Some(ModelThinkingLevel::Low),
-        "medium" => Some(ModelThinkingLevel::Medium),
-        "high" => Some(ModelThinkingLevel::High),
-        "xhigh" => Some(ModelThinkingLevel::XHigh),
-        "max" => Some(ModelThinkingLevel::Max),
-        _ => None,
     }
 }
 
@@ -113,112 +88,6 @@ fn from_agent_thinking_level(level: ThinkingLevel) -> ModelThinkingLevel {
     }
 }
 
-fn format_http_idle_timeout_ms_display(timeout_ms: u64) -> String {
-    if timeout_ms == 0 {
-        return "disabled".to_string();
-    }
-    if timeout_ms % 60_000 == 0 {
-        format!("{} min", timeout_ms / 60_000)
-    } else if timeout_ms % 1000 == 0 {
-        format!("{} sec", timeout_ms / 1000)
-    } else {
-        format!("{timeout_ms} ms")
-    }
-}
-
-// WIRE(@tui-w3): Replace local trust store mirror with `crate::core::trust_manager::ProjectTrustStore` once @mcp merges onto main.
-struct ProjectTrustStoreLocal {
-    trust_path: String,
-}
-
-impl ProjectTrustStoreLocal {
-    fn new(agent_dir: &str) -> Self {
-        let resolved_dir = pi_js::path::resolve(&[agent_dir]);
-        Self {
-            trust_path: pi_js::path::join(&[&resolved_dir, "trust.json"]),
-        }
-    }
-
-    fn normalize_cwd(cwd: &str) -> String {
-        let resolved = pi_js::path::resolve(&[cwd]);
-        std::fs::canonicalize(&resolved)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or(resolved)
-    }
-
-    fn read_trust_file(&self) -> IndexMap<String, bool> {
-        let Ok(raw) = pi_js::fs::read_to_string(&self.trust_path) else {
-            return IndexMap::new();
-        };
-        let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
-        let Ok(serde_json::Value::Object(map)) = pi_js::json::parse(trimmed) else {
-            return IndexMap::new();
-        };
-        let mut out = IndexMap::new();
-        for (k, v) in map {
-            if let Some(b) = v.as_bool() {
-                out.insert(k, b);
-            }
-        }
-        out
-    }
-
-    fn write_trust_file(&self, map: &IndexMap<String, bool>) -> Result<()> {
-        let parent = pi_js::path::dirname(&self.trust_path);
-        if !parent.is_empty() {
-            pi_js::fs::mkdir(&parent, true, None)?;
-        }
-        let mut obj = serde_json::Map::new();
-        for (k, v) in map {
-            obj.insert(k.clone(), serde_json::Value::Bool(*v));
-        }
-        let json_text = pi_js::json::stringify_pretty(&serde_json::Value::Object(obj), "  ");
-        pi_js::fs::write_file(&self.trust_path, &format!("{json_text}\n"), None)?;
-        Ok(())
-    }
-
-    fn get(&self, cwd: &str) -> Option<bool> {
-        self.get_entry(cwd).map(|e| e.decision)
-    }
-
-    fn get_entry(&self, cwd: &str) -> Option<ProjectTrustStoreEntry> {
-        let data = self.read_trust_file();
-        let mut current = Self::normalize_cwd(cwd);
-        loop {
-            if let Some(&decision) = data.get(&current) {
-                return Some(ProjectTrustStoreEntry {
-                    path: current,
-                    decision,
-                });
-            }
-            let parent = pi_js::path::dirname(&current);
-            if parent == current {
-                return None;
-            }
-            current = parent;
-        }
-    }
-
-    fn set(&self, cwd: &str, decision: Option<bool>) -> Result<()> {
-        self.set_many(&[ProjectTrustUpdate {
-            path: cwd.to_string(),
-            decision,
-        }])
-    }
-
-    fn set_many(&self, updates: &[ProjectTrustUpdate]) -> Result<()> {
-        let mut data = self.read_trust_file();
-        for upd in updates {
-            let key = Self::normalize_cwd(&upd.path);
-            data.shift_remove(&key);
-            if let Some(decision) = upd.decision {
-                data.insert(key, decision);
-            }
-        }
-        self.write_trust_file(&data)
-    }
-}
-
 struct ModelCatalogBridge(pub(crate) Arc<dyn InteractiveModelRuntime>);
 
 impl ModelCatalogRuntime for ModelCatalogBridge {
@@ -241,181 +110,6 @@ impl ModelCatalogRuntime for ModelCatalogBridge {
     fn get_error(&self) -> Option<String> {
         self.0.get_error()
     }
-}
-
-fn split_provider_prefix<'a>(text: &'a str, models: &'a [Model]) -> Option<(String, String)> {
-    let lower_text = text.to_ascii_lowercase();
-    let mut best: Option<(String, String)> = None;
-    for model in models {
-        let prefix = model.provider.trim().to_ascii_lowercase();
-        if prefix.is_empty() {
-            continue;
-        }
-        if let Some((ref best_p, _)) = best
-            && best_p.len() >= model.provider.len()
-        {
-            continue;
-        }
-        if lower_text.len() <= prefix.len() {
-            continue;
-        }
-        if let Some(rel_slash) = lower_text[prefix.len()..].find('/') {
-            let slash_idx = prefix.len() + rel_slash;
-            if lower_text[..slash_idx].trim() != prefix {
-                continue;
-            }
-            let model_text = text[slash_idx + 1..].trim();
-            if !model_text.is_empty() {
-                best = Some((model.provider.clone(), model_text.to_string()));
-            }
-        }
-    }
-    best
-}
-
-// WIRE(@tui-w3): Replace local matchers with `crate::core::model_resolver::{find_exact_model_reference_match, resolve_model_scope_from_models}` once @ca-cli merges onto main.
-pub fn find_exact_model_reference_match_local(model_reference: &str, models: &[Model]) -> Option<Model> {
-    let text = model_reference.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let lower_text = text.to_ascii_lowercase();
-    let raw: Vec<&Model> = models
-        .iter()
-        .filter(|m| m.id.to_ascii_lowercase() == lower_text)
-        .collect();
-    let named: Option<&Model> = split_provider_prefix(text, models).and_then(|(provider, model_text)| {
-        let lower_model = model_text.to_ascii_lowercase();
-        models
-            .iter()
-            .find(|m| m.provider == provider && m.id.to_ascii_lowercase() == lower_model)
-            .or_else(|| raw.iter().copied().find(|m| m.provider == provider))
-    });
-    if let Some(m) = named {
-        return Some(m.clone());
-    }
-    if raw.is_empty() {
-        return None;
-    }
-    let first_provider = &raw[0].provider;
-    if raw.iter().all(|m| &m.provider == first_provider) {
-        return Some(raw[0].clone());
-    }
-    Some(raw[0].clone())
-}
-
-fn split_thinking_suffix(text: &str) -> Option<(&str, ModelThinkingLevel)> {
-    let idx = text.rfind(':')?;
-    let level = parse_thinking_level_str(&text[idx + 1..])?;
-    Some((&text[..idx], level))
-}
-
-fn glob_match_ci(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
-    let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
-    glob_match_chars(&p, &t)
-}
-
-fn glob_match_chars(p: &[char], t: &[char]) -> bool {
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let mut star_pi: Option<usize> = None;
-    let mut star_ti = 0usize;
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star_pi = Some(pi);
-            pi += 1;
-            star_ti = ti;
-        } else if let Some(sp) = star_pi {
-            pi = sp + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
-}
-
-pub fn resolve_model_scope_from_models_local(patterns: &[String], models: &[Model]) -> ResolveModelScopeResult {
-    let mut out = ResolveModelScopeResult::default();
-    let add = |out: &mut ResolveModelScopeResult, model: &Model, thinking_level: Option<ModelThinkingLevel>| {
-        if !out
-            .scoped_models
-            .iter()
-            .any(|s| s.model.provider == model.provider && s.model.id == model.id)
-        {
-            out.scoped_models.push(ScopedModelItem {
-                model: model.clone(),
-                thinking_level: thinking_level.map(|lvl| model_thinking_to_str(lvl).to_string()),
-            });
-        }
-    };
-
-    for pattern in patterns {
-        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-            let (glob_pattern, thinking_level) = match split_thinking_suffix(pattern) {
-                Some((base, lvl)) => (base, Some(lvl)),
-                None => (pattern.as_str(), None),
-            };
-            let matches: Vec<&Model> = if let Some(exact) = find_exact_model_reference_match_local(glob_pattern, models)
-            {
-                models
-                    .iter()
-                    .filter(|m| m.provider == exact.provider && m.id == exact.id)
-                    .collect()
-            } else {
-                models
-                    .iter()
-                    .filter(|m| {
-                        glob_match_ci(glob_pattern, &format!("{}/{}", m.provider, m.id))
-                            || glob_match_ci(glob_pattern, &m.id)
-                    })
-                    .collect()
-            };
-            if matches.is_empty() {
-                out.diagnostics.push(ModelScopeDiagnostic {
-                    code: "no-match",
-                    message: format!("No models match pattern \"{pattern}\""),
-                    pattern: pattern.clone(),
-                });
-            }
-            for m in matches {
-                add(&mut out, m, thinking_level);
-            }
-            continue;
-        }
-
-        let (lookup_text, thinking_level) = match split_thinking_suffix(pattern) {
-            Some((base, lvl)) => (base, Some(lvl)),
-            None => (pattern.as_str(), None),
-        };
-        if let Some(exact) = find_exact_model_reference_match_local(lookup_text, models) {
-            add(&mut out, &exact, thinking_level);
-            continue;
-        }
-        let lower = lookup_text.to_ascii_lowercase();
-        let fuzzy: Vec<&Model> = models
-            .iter()
-            .filter(|m| m.id.to_ascii_lowercase().contains(&lower) || m.name.to_ascii_lowercase().contains(&lower))
-            .collect();
-        if let Some(best) = fuzzy.first() {
-            add(&mut out, best, thinking_level);
-        } else {
-            out.diagnostics.push(ModelScopeDiagnostic {
-                code: "no-match",
-                message: format!("No models match pattern \"{pattern}\""),
-                pattern: pattern.clone(),
-            });
-        }
-    }
-
-    out
 }
 
 pub type SelectorFactory = Box<
@@ -538,7 +232,7 @@ impl InteractiveMode {
             format!(
                 "{}{}",
                 theme().fg(ThemeColor::Muted, &format!("New version {version} is available. Run ")),
-                theme().fg(ThemeColor::Accent, &format!("{APP_NAME_LOCAL} update")),
+                theme().fg(ThemeColor::Accent, &format!("{} update", *APP_NAME)),
             )
         };
         let changelog_url = "https://pi.dev/changelog";
@@ -623,7 +317,7 @@ impl InteractiveMode {
                     let update_instruction = format!(
                         "{}{}",
                         theme().fg(ThemeColor::Muted, "Package updates are available. Run "),
-                        theme().fg(ThemeColor::Accent, &format!("{APP_NAME_LOCAL} update --extensions")),
+                        theme().fg(ThemeColor::Accent, &format!("{} update --extensions", *APP_NAME)),
                     );
                     format!(
                         "{}\n{update_instruction}\n{}\n{package_lines}",
@@ -1105,10 +799,10 @@ impl InteractiveMode {
                 })),
                 on_http_idle_timeout_ms_change: Some(Arc::new(move |timeout_ms| {
                     m_ht.settings_manager().set_http_idle_timeout_ms(timeout_ms);
-                    // WIRE(@tui-w3): Call crate::core::http_dispatcher::configure_http_dispatcher(timeout_ms) once @mcp merges onto main.
+                    let _ = configure_http_dispatcher(Some(timeout_ms));
                     m_ht.show_status(&format!(
                         "HTTP idle timeout: {}",
-                        format_http_idle_timeout_ms_display(timeout_ms)
+                        format_http_idle_timeout_ms(timeout_ms)
                     ));
                 })),
                 on_cache_warming_mode_change: Some(Arc::new(move |mode| {
@@ -1435,7 +1129,7 @@ impl InteractiveMode {
         } else {
             self.session().model_runtime().get_available_snapshot()
         };
-        if let Some(found) = find_exact_model_reference_match_local(search_term, &cached) {
+        if let Some(found) = find_exact_model_reference_match(search_term, &cached) {
             return Some(found);
         }
         if !self.session().scoped_models().is_empty() {
@@ -1476,7 +1170,7 @@ impl InteractiveMode {
             }
         }
         let refreshed = self.session().model_runtime().get_available_snapshot();
-        find_exact_model_reference_match_local(search_term, &refreshed)
+        find_exact_model_reference_match(search_term, &refreshed)
     }
 
     pub(crate) fn update_available_provider_count(&self) {
@@ -1544,11 +1238,11 @@ impl InteractiveMode {
         if !matches_auto_trust {
             return false;
         }
-        if !self.settings_manager().is_project_trusted() || !has_trust_requiring_project_resources_local(&cwd) {
+        if !self.settings_manager().is_project_trusted() || !has_trust_requiring_project_resources(&cwd) {
             return false;
         }
-        let trust_store = ProjectTrustStoreLocal::new(&self.inner.runtime_host.agent_dir());
-        if trust_store.get(&cwd).is_some() {
+        let trust_store = ProjectTrustStore::new(&self.inner.runtime_host.agent_dir());
+        if trust_store.get(&cwd).ok().flatten().is_some() {
             self.inner
                 .state
                 .lock()
@@ -1575,8 +1269,8 @@ impl InteractiveMode {
     pub(crate) fn show_trust_selector(&self) {
         let cwd = self.session_manager().get_cwd();
         let agent_dir = self.inner.runtime_host.agent_dir();
-        let trust_store = ProjectTrustStoreLocal::new(&agent_dir);
-        let saved_decision = trust_store.get_entry(&cwd);
+        let trust_store = ProjectTrustStore::new(&agent_dir);
+        let saved_decision = trust_store.get_entry(&cwd).ok().flatten();
         let project_trusted = self.settings_manager().is_project_trusted();
         let m = self.clone();
         self.show_selector(Box::new(move |done| {
@@ -1589,14 +1283,15 @@ impl InteractiveMode {
                 saved_decision,
                 project_trusted,
                 on_select: Arc::new(move |selection: TrustSelection| {
-                    let store = ProjectTrustStoreLocal::new(&agent_dir_sel);
+                    let store = ProjectTrustStore::new(&agent_dir_sel);
                     if let Err(err) = store.set_many(&selection.updates) {
                         m_sel.show_error(&format!("Failed to save trust decision: {err}"));
                     }
                     done_sel();
                     let label = if selection.trusted { "trusted" } else { "untrusted" };
                     m_sel.show_status(&format!(
-                        "Saved trust decision: {label}. Restart {APP_NAME_LOCAL} for this to take effect."
+                        "Saved trust decision: {label}. Restart {} for this to take effect.",
+                        *APP_NAME
                     ));
                 }),
                 on_cancel: Arc::new(move || {
@@ -1693,14 +1388,14 @@ impl InteractiveMode {
                 if patterns.is_empty() {
                     return None;
                 }
-                let resolved = resolve_model_scope_from_models_local(patterns, models);
+                let resolved = resolve_model_scope_from_models(patterns, models);
                 let mut ids: Vec<String> = resolved
                     .scoped_models
                     .iter()
                     .map(|s| format!("{}/{}", s.model.provider, s.model.id))
                     .collect();
                 for diag in resolved.diagnostics {
-                    if diag.code == "no-match" && !ids.contains(&diag.pattern) {
+                    if diag.code == ModelScopeDiagnosticCode::NoMatch && !ids.contains(&diag.pattern) {
                         ids.push(diag.pattern);
                     }
                 }
@@ -1742,8 +1437,17 @@ impl InteractiveMode {
                 && has_enabled
                 && !all_enabled
             {
-                let resolved = resolve_model_scope_from_models_local(ids, &models_snap);
-                m_upd.session().set_scoped_models(resolved.scoped_models);
+                let resolved = resolve_model_scope_from_models(ids, &models_snap);
+                m_upd.session().set_scoped_models(
+                    resolved
+                        .scoped_models
+                        .into_iter()
+                        .map(|sm| ScopedModelItem {
+                            model: sm.model,
+                            thinking_level: sm.thinking_level.map(|lvl| model_thinking_to_str(lvl).to_string()),
+                        })
+                        .collect(),
+                );
             } else {
                 m_upd.session().set_scoped_models(Vec::new());
             }

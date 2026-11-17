@@ -3,13 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use pi_agent_core::ThinkingLevel;
+use pi_coding_agent::core::keybindings::KEYBINDINGS;
 use pi_coding_agent::modes::interactive::components::thinking_selector::ThinkingSelectorComponent;
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
 use pi_tui::keybindings::KeyIdOrList;
-use pi_tui::{
-    KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings,
-    strip_terminal_sequences,
-};
+use pi_tui::{KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings, strip_terminal_sequences};
 use serial_test::serial;
 
 struct TestGuard;
@@ -22,16 +20,7 @@ impl Drop for TestGuard {
 }
 
 fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> KeybindingsManager {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Replace local app.thinking.save definition with crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.thinking.save".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+s".to_string()),
-            description: Some("Save thinking level as default".to_string()),
-        },
-    );
-    KeybindingsManager::new(defs, user_bindings)
+    KeybindingsManager::new(KEYBINDINGS.clone(), user_bindings)
 }
 
 fn setup(user_bindings: Option<KeybindingsConfig>) -> TestGuard {

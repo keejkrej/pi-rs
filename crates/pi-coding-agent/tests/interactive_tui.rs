@@ -1212,7 +1212,15 @@ async fn keeps_the_status_line_confirmation_for_the_copy_shortcut_in_regular_mod
     let _g = TestGuard;
     init_theme(Some("dark"), None);
     let terminal = RecordingTerminal::new(80, 24);
-    let (mode, _) = build_mode_with(TuiMode::Regular, true, terminal, InteractiveModeHooks::default());
+    let (mode, _) = build_mode_with(
+        TuiMode::Regular,
+        true,
+        terminal,
+        InteractiveModeHooks {
+            clipboard_copy: Arc::new(|_| Box::pin(async { Ok(()) })),
+            ..Default::default()
+        },
+    );
 
     mode.handle_copy_command(true, true).await;
 

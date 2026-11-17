@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_coding_agent::core::keybindings::{KEYBINDINGS, KeybindingsManager as AppKeybindingsManager};
 use pi_coding_agent::modes::interactive::bug_report::{
     BugReportBundleData, BugReportContext, BugReportDelivery, BugReportOptions, BugReportSession, report_bug,
 };
@@ -105,8 +106,8 @@ impl BugReportSession for FakeBugReportSession {
 async fn preserves_line_breaks_in_pasted_descriptions() {
     let _g = TestGuard;
     init_theme(Some("dark"), None);
-    let keybindings = KeybindingsManager::new(TUI_KEYBINDINGS.clone(), None);
-    set_keybindings(keybindings.clone());
+    let keybindings = AppKeybindingsManager::new(None, None);
+    set_keybindings(KeybindingsManager::new(KEYBINDINGS.clone(), None));
 
     let ui: Arc<dyn TUI + Send + Sync> = Arc::new(TuiMainScreen::new(Arc::new(VirtualTerminal), None, None));
     let editor_container = Container::new();

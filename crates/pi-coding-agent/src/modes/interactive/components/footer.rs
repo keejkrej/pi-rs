@@ -2,26 +2,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use indexmap::IndexMap;
 use pi_ai::{Model, Usage};
 use pi_js::intl::locale_compare;
 use pi_js::path::{is_absolute, relative, resolve, sep};
 use pi_tui::{Component, TuiMouseEvent, TuiMouseEventResult, truncate_to_width, visible_width};
-use serde::{Deserialize, Serialize};
+
+pub use crate::core::footer_data_provider::ReadonlyFooterDataProvider;
+pub use crate::core::usage_totals::UsageTotals;
 
 use super::super::theme::theme::{ThemeColor, theme};
 
-// WIRE(@tui-w3): Replace local UsageTotals / traits with `crate::core::usage_totals`, `crate::core::experimental`, `crate::core::agent_session::AgentSession`, and `crate::core::footer_data_provider::ReadonlyFooterDataProvider` once @mcp and @ca-cli merge onto main.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageTotals {
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub cost: f64,
-}
-
+// WIRE(@tui-w3): Replace local FooterSession / traits with `crate::core::agent_session::AgentSession`
+// once @ca-cli merges onto main.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FooterContextUsage {
     pub context_window: i64,
@@ -57,12 +49,6 @@ pub trait FooterSession: Send + Sync {
     fn get_context_usage(&self) -> Option<FooterContextUsage>;
     fn is_using_subscription(&self, provider: &str) -> bool;
     fn usage_records(&self) -> Vec<FooterUsageRecord>;
-}
-
-pub trait ReadonlyFooterDataProvider: Send + Sync {
-    fn get_git_branch(&self) -> Option<String>;
-    fn get_extension_statuses(&self) -> IndexMap<String, String>;
-    fn get_available_provider_count(&self) -> usize;
 }
 
 fn sanitize_status_text(text: &str) -> String {

@@ -7,8 +7,7 @@ use indexmap::IndexSet;
 use pi_tui::autocomplete::CombinedCommand;
 use pi_tui::tui::{TUI, TuiMode, TuiStopOptions};
 use pi_tui::{
-    CombinedAutocompleteProvider, Component, Container, KeybindingsManager, SlashCommand, Spacer, TUI_KEYBINDINGS,
-    Text, set_capability_overrides, set_keybindings,
+    CombinedAutocompleteProvider, Component, Container, SlashCommand, Spacer, Text, set_capability_overrides,
 };
 
 use crate::modes::interactive::components::armin_3d_lazy::play_pi_logo_3d;
@@ -189,6 +188,10 @@ impl ReadonlyFooterDataProvider for FooterDataBridge {
     fn get_available_provider_count(&self) -> usize {
         self.0.get_available_provider_count()
     }
+
+    fn on_branch_change(&self, cb: Arc<dyn Fn() + Send + Sync>) -> pi_js::Unsubscribe {
+        self.0.on_branch_change(cb)
+    }
 }
 
 pub fn to_interactive_tui_mode(mode: SettingsTuiMode) -> InteractiveTuiMode {
@@ -293,7 +296,7 @@ impl InteractiveMode {
         let renderer = create_interactive_tui(InteractiveTuiOptions {
             tui_mode: Some(to_interactive_tui_mode(tui_mode)),
             show_hardware_cursor: settings_manager.get_show_hardware_cursor(),
-            log_directory: get_agent_dir_local(),
+            log_directory: get_agent_dir(),
             terminal: options.terminal.clone(),
             on_right_click_paste: Some(Arc::clone(&on_right_click_paste)),
             fullscreen_copy_on_select: Some(settings_manager.get_fullscreen_copy_on_select()),
@@ -331,8 +334,8 @@ impl InteractiveMode {
         let keybindings = hooks
             .keybindings
             .clone()
-            .unwrap_or_else(|| Arc::new(KeybindingsManager::new(TUI_KEYBINDINGS.clone(), None)));
-        set_keybindings((*keybindings).clone());
+            .unwrap_or_else(|| Arc::new(KeybindingsManager::create(Some(&runtime_host.agent_dir()))));
+        sync_tui_keybindings(&keybindings);
 
         let editor_padding_x = settings_manager.get_editor_padding_x();
         let autocomplete_max_visible = settings_manager.get_autocomplete_max_visible();
@@ -453,7 +456,7 @@ impl InteractiveMode {
             footer,
             footer_data_provider,
             keybindings,
-            version: VERSION_LOCAL.to_string(),
+            version: (*VERSION).to_string(),
             idle_status: IdleStatus::new(),
             program_status,
             theme_controller,
@@ -1020,7 +1023,7 @@ impl InteractiveMode {
         let next_ui = create_interactive_tui(InteractiveTuiOptions {
             tui_mode: Some(to_interactive_tui_mode(mode)),
             show_hardware_cursor,
-            log_directory: get_agent_dir_local(),
+            log_directory: get_agent_dir(),
             terminal: Some(Arc::clone(&terminal)),
             on_right_click_paste: Some(on_right_click_paste),
             fullscreen_copy_on_select: Some(settings.get_fullscreen_copy_on_select()),
@@ -1291,8 +1294,23 @@ impl InteractiveMode {
         }
         self.ui().request_render(None);
 
-        // WIRE(@tui-w3): call crate::utils::tools_manager::ensure_tool("fd" / "rg") once @mcp lands on main.
-        self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).fd_path = find_on_path("fd");
+        let this_fd = self.clone();
+        let this_rg = self.clone();
+        let (fd_path, _) = tokio::join!(
+            crate::utils::tools_manager::ensure_tool(
+                crate::utils::tools_manager::ManagedTool::Fd,
+                Some(move |status: crate::utils::tools_manager::ToolStatus| {
+                    this_fd.show_managed_tool_status(&status.into());
+                }),
+            ),
+            crate::utils::tools_manager::ensure_tool(
+                crate::utils::tools_manager::ManagedTool::Rg,
+                Some(move |status: crate::utils::tools_manager::ToolStatus| {
+                    this_rg.show_managed_tool_status(&status.into());
+                }),
+            ),
+        );
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).fd_path = fd_path;
 
         self.setup_key_handlers();
         self.setup_editor_submit_handler();
@@ -1326,9 +1344,9 @@ impl InteractiveMode {
             .unwrap_or(&cwd);
         let session_name = self.session_manager().get_session_name();
         let title = if let Some(name) = session_name {
-            format!("{APP_TITLE_LOCAL} - {name} - {cwd_basename}")
+            format!("{} - {name} - {cwd_basename}", *APP_TITLE)
         } else {
-            format!("{APP_TITLE_LOCAL} - {cwd_basename}")
+            format!("{} - {cwd_basename}", *APP_TITLE)
         };
         self.ui().terminal().set_title(&title);
     }
@@ -1352,7 +1370,14 @@ impl InteractiveMode {
             });
         }
 
-        // WIRE(@tui-w3): spawn check_for_new_pi_version + check_for_package_updates once @mcp lands.
+        let this_ver = self.clone();
+        let version_for_check = self.inner.version.clone();
+        tokio::spawn(async move {
+            if let Some(new_release) = crate::utils::version_check::check_for_new_pi_version(&version_for_check).await {
+                this_ver.show_new_version_notification(&new_release);
+            }
+        });
+        // WIRE(@tui-w3): spawn check_for_package_updates once SettingsManager is concrete on @ca-cli.
         let this_tmux = self.clone();
         tokio::spawn(async move {
             if let Some(warning) = this_tmux.check_tmux_keyboard_setup().await {
@@ -1480,10 +1505,6 @@ impl InteractiveMode {
         }
         None
     }
-}
-
-fn find_on_path(binary: &str) -> Option<String> {
-    which::which(binary).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
 fn extract_changelog_version(markdown: &str) -> Option<String> {

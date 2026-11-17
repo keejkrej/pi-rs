@@ -6,19 +6,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::ThinkingLevel;
+use pi_coding_agent::core::keybindings::KeybindingsManager as AppKeybindingsManager;
 use pi_coding_agent::modes::interactive::components::custom_editor::{CustomEditor, CustomEditorOptions};
 use pi_coding_agent::modes::interactive::components::status_indicator::{
     CompactionStatusReason, IdleStatus, StatusIndicator,
 };
 use pi_coding_agent::modes::interactive::theme::theme::{ThemeColor, get_editor_theme, init_theme, theme};
-use pi_tui::keybindings::KeyIdOrList;
 use pi_tui::terminal::{TerminalInputHandler, TerminalResizeHandler};
 use pi_tui::tui::{
     OverlayHandle, OverlayOptions, QueryTerminalColorsOptions, TUI, TuiInputListener, TuiMode, TuiStopOptions,
 };
 use pi_tui::{
-    Component, KeybindingDefinition, KeybindingsManager, TUI_KEYBINDINGS, Terminal, TerminalColorScheme,
-    TerminalColors, TuiMouseEvent, TuiMouseEventResult, set_keybindings, strip_terminal_sequences, visible_width,
+    Component, KeybindingsManager, TUI_KEYBINDINGS, Terminal, TerminalColorScheme, TerminalColors, TuiMouseEvent,
+    TuiMouseEventResult, set_keybindings, strip_terminal_sequences, visible_width,
 };
 use serial_test::serial;
 
@@ -31,29 +31,16 @@ impl Drop for TestGuard {
     }
 }
 
-fn app_keybindings() -> KeybindingsManager {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Use crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.interrupt".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("escape".to_string()),
-            description: Some("Interrupt".to_string()),
-        },
-    );
-    defs.insert(
-        "app.tools.expand".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+o".to_string()),
-            description: Some("Expand tools".to_string()),
-        },
-    );
-    KeybindingsManager::new(defs, None)
+fn app_keybindings() -> AppKeybindingsManager {
+    AppKeybindingsManager::new(None, None)
 }
 
 fn setup() -> TestGuard {
     init_theme(Some("dark"), None);
-    set_keybindings(app_keybindings());
+    set_keybindings(KeybindingsManager::new(
+        pi_coding_agent::core::keybindings::KEYBINDINGS.clone(),
+        None,
+    ));
     TestGuard
 }
 

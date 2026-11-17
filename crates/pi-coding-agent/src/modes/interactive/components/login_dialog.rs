@@ -853,7 +853,6 @@ impl Component for LoginDialogComponent {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use pi_tui::keybindings::{KeyIdOrList, KeybindingDefinition};
     use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
     use pi_tui::{KeybindingsManager, TUI_KEYBINDINGS, TuiMainScreen, set_keybindings, strip_terminal_sequences};
     use serial_test::serial;
@@ -901,15 +900,10 @@ mod tests {
     }
 
     fn setup_keybindings() {
-        let mut defs = TUI_KEYBINDINGS.clone();
-        defs.insert(
-            "app.message.copy".to_string(),
-            KeybindingDefinition {
-                default_keys: KeyIdOrList::One("ctrl+x".to_string()),
-                description: Some("Copy".to_string()),
-            },
-        );
-        set_keybindings(KeybindingsManager::new(defs, None));
+        set_keybindings(KeybindingsManager::new(
+            crate::core::keybindings::KEYBINDINGS.clone(),
+            None,
+        ));
     }
 
     fn create_dialog(

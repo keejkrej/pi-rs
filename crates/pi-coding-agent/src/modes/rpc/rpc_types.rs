@@ -2,7 +2,7 @@
 
 use indexmap::IndexMap;
 use pi_agent_core::{AgentMessage, QueueMode};
-use pi_ai::{ImageContent, Model, ModelThinkingLevel, Usage};
+use pi_ai::{ImageContent, Model, ModelThinkingLevel};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
@@ -46,40 +46,8 @@ pub enum RpcStreamingBehavior {
     FollowUp,
 }
 
-/// Scope of a loaded resource.
-// WIRE(@tui-w3): replace with crate::core::source_info::SourceScope once @mcp merges.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SourceScope {
-    User,
-    Project,
-    Temporary,
-}
-
-/// Origin of a loaded resource.
-// WIRE(@tui-w3): replace with crate::core::source_info::SourceOrigin once @mcp merges.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SourceOrigin {
-    #[serde(rename = "package")]
-    Package,
-    #[serde(rename = "top-level")]
-    TopLevel,
-}
-
-/// Source metadata for an owning resource.
-// WIRE(@tui-w3): replace with crate::core::source_info::SourceInfo once @mcp merges.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceInfo {
-    pub path: String,
-    pub source: String,
-    pub scope: SourceScope,
-    pub origin: SourceOrigin,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changelog_path: Option<String>,
-}
+/// Scope, origin, and metadata for a loaded resource.
+pub use crate::core::source_info::{SourceInfo, SourceOrigin, SourceScope};
 
 /// Result returned by `bash` RPC command.
 // WIRE(@tui-w3): replace with crate::core::bash_executor::BashResult once @mcp merges.
@@ -96,20 +64,7 @@ pub struct BashResult {
 }
 
 /// Result returned by `compact` RPC command.
-// WIRE(@tui-w3): replace with crate::core::compaction::compaction::CompactionResult once @mcp merges.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactionResult {
-    pub summary: String,
-    pub first_kept_entry_id: String,
-    pub tokens_before: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_tokens_after: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-}
+pub type CompactionResult = crate::core::compaction::compaction::CompactionResult<Value>;
 
 /// Context window utilization reported inside [`SessionStats`].
 // WIRE(@tui-w3): replace with crate::core::extensions::types::ContextUsage once @codemode merges.

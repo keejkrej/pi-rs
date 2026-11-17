@@ -140,6 +140,9 @@ impl ReadonlyFooterDataProvider for FakeFooterData {
     fn get_available_provider_count(&self) -> usize {
         self.provider_count
     }
+    fn on_branch_change(&self, _callback: Arc<dyn Fn() + Send + Sync>) -> pi_js::Unsubscribe {
+        pi_js::Unsubscribe::noop()
+    }
 }
 
 #[test]

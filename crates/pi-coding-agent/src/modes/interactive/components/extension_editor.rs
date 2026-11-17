@@ -2,9 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::core::keybindings::KeybindingsManager;
 use pi_tui::{
-    Component, Container, Editor, EditorOptions, Focusable, KeybindingsManager, Spacer, TUI, Text, TuiMouseEvent,
-    TuiMouseEventResult, get_keybindings,
+    Component, Container, Editor, EditorOptions, Focusable, Spacer, TUI, Text, TuiMouseEvent, TuiMouseEventResult,
+    get_keybindings,
 };
 
 use super::super::external_editor::{ExternalEditorOptions, ExternalEditorResult, edit_in_external_editor};
@@ -28,7 +29,6 @@ struct ExtensionEditorInner {
     on_submit: Arc<dyn Fn(&str) + Send + Sync>,
     on_cancel: Arc<dyn Fn() + Send + Sync>,
     tui: Arc<dyn TUI + Send + Sync>,
-    // WIRE(@tui-w3): Use `crate::core::keybindings::KeybindingsManager` once @mcp merges onto main.
     keybindings: KeybindingsManager,
     external_editor_command: String,
     external_editor_status: Text,

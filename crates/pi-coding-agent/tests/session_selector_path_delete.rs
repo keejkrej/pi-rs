@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use pi_coding_agent::core::keybindings::{KEYBINDINGS, KeybindingsManager as AppKeybindingsManager};
 use pi_coding_agent::modes::interactive::components::session_selector::{
     SessionListProgress, SessionSelectorComponent, SessionSelectorOptions, SessionsLoader,
 };
@@ -11,10 +12,8 @@ use pi_coding_agent::modes::interactive::components::session_selector_search::Se
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result};
-use pi_tui::keybindings::KeyIdOrList;
 use pi_tui::{
-    Component, KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings,
-    strip_terminal_sequences,
+    Component, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings, strip_terminal_sequences,
 };
 use serial_test::serial;
 use tempfile::TempDir;
@@ -29,58 +28,17 @@ impl Drop for TestGuard {
     }
 }
 
-fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> Arc<KeybindingsManager> {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Replace local app.session.* definitions with crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.session.togglePath".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+p".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.session.toggleSort".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+s".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.session.toggleNamedFilter".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+n".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.session.rename".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+r".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.session.delete".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+d".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.session.deleteNoninvasive".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+backspace".to_string()),
-            description: None,
-        },
-    );
-    Arc::new(KeybindingsManager::new(defs, user_bindings))
+fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> Arc<AppKeybindingsManager> {
+    Arc::new(AppKeybindingsManager::new(user_bindings, None))
 }
 
-fn setup() -> (TestGuard, Arc<KeybindingsManager>) {
+fn setup() -> (TestGuard, Arc<AppKeybindingsManager>) {
     init_theme(Some("dark"), None);
     let kb = app_keybindings(None);
-    set_keybindings((*kb).clone());
+    set_keybindings(KeybindingsManager::new(
+        KEYBINDINGS.clone(),
+        Some(kb.get_user_bindings()),
+    ));
     (TestGuard, kb)
 }
 

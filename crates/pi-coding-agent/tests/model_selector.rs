@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use pi_ai::Model;
+use pi_coding_agent::core::keybindings::KEYBINDINGS;
 use pi_coding_agent::modes::interactive::components::model_selector::ModelSelectorComponent;
 use pi_coding_agent::modes::interactive::model_catalog_refresh::{ModelCatalogRefreshResult, ModelCatalogRuntime};
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
@@ -16,8 +17,8 @@ use pi_tui::tui::{
     OverlayHandle, OverlayOptions, QueryTerminalColorsOptions, TUI, TuiInputListener, TuiMode, TuiStopOptions,
 };
 use pi_tui::{
-    Component, KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, Terminal,
-    TerminalColorScheme, TerminalColors, TuiMouseEvent, TuiMouseEventResult, set_keybindings, strip_terminal_sequences,
+    Component, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, Terminal, TerminalColorScheme, TerminalColors,
+    TuiMouseEvent, TuiMouseEventResult, set_keybindings, strip_terminal_sequences,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -33,16 +34,7 @@ impl Drop for TestGuard {
 }
 
 fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> KeybindingsManager {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Use crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.models.save".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+s".to_string()),
-            description: Some("Save default model".to_string()),
-        },
-    );
-    KeybindingsManager::new(defs, user_bindings)
+    KeybindingsManager::new(KEYBINDINGS.clone(), user_bindings)
 }
 
 fn setup(user_bindings: Option<KeybindingsConfig>) -> TestGuard {

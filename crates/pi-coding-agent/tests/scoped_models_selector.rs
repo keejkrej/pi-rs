@@ -3,15 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use pi_ai::Model;
+use pi_coding_agent::core::keybindings::KEYBINDINGS;
 use pi_coding_agent::modes::interactive::components::scoped_models_selector::{
     ModelsCallbacks, ModelsConfig, ScopedModelsSelectorComponent,
 };
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
-use pi_tui::keybindings::KeyIdOrList;
-use pi_tui::{
-    KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings,
-    strip_terminal_sequences,
-};
+use pi_tui::{KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings, strip_terminal_sequences};
 use serde_json::json;
 use serial_test::serial;
 
@@ -25,51 +22,7 @@ impl Drop for TestGuard {
 }
 
 fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> KeybindingsManager {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Replace local app.models.* definitions with crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.models.save".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+s".to_string()),
-            description: Some("Save model selection".to_string()),
-        },
-    );
-    defs.insert(
-        "app.models.enableAll".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+a".to_string()),
-            description: Some("Enable all models".to_string()),
-        },
-    );
-    defs.insert(
-        "app.models.clearAll".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+x".to_string()),
-            description: Some("Clear all models".to_string()),
-        },
-    );
-    defs.insert(
-        "app.models.toggleProvider".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+p".to_string()),
-            description: Some("Toggle all models for provider".to_string()),
-        },
-    );
-    defs.insert(
-        "app.models.reorderUp".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("alt+up".to_string()),
-            description: Some("Move model up in order".to_string()),
-        },
-    );
-    defs.insert(
-        "app.models.reorderDown".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("alt+down".to_string()),
-            description: Some("Move model down in order".to_string()),
-        },
-    );
-    KeybindingsManager::new(defs, user_bindings)
+    KeybindingsManager::new(KEYBINDINGS.clone(), user_bindings)
 }
 
 fn setup() -> TestGuard {

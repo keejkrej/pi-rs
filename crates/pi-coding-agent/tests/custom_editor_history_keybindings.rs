@@ -4,14 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use pi_coding_agent::core::keybindings::{KEYBINDINGS, KeybindingsManager as AppKeybindingsManager};
 use pi_coding_agent::modes::interactive::components::custom_editor::CustomEditor;
 use pi_coding_agent::modes::interactive::theme::theme::{get_editor_theme, init_theme};
 use pi_tui::keybindings::KeyIdOrList;
 use pi_tui::terminal::{TerminalInputHandler, TerminalResizeHandler};
-use pi_tui::{
-    KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, Terminal, TuiMainScreen,
-    set_keybindings,
-};
+use pi_tui::{KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, Terminal, TuiMainScreen, set_keybindings};
 use serial_test::serial;
 
 struct TestGuard;
@@ -56,37 +54,6 @@ fn gives_an_explicit_history_binding_precedence_over_model_cycling() {
     let _g = TestGuard;
     init_theme(Some("dark"), None);
 
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Use crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.model.cycleForward".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+p".to_string()),
-            description: Some("Cycle model forward".to_string()),
-        },
-    );
-    defs.insert(
-        "app.interrupt".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("escape".to_string()),
-            description: Some("Interrupt".to_string()),
-        },
-    );
-    defs.insert(
-        "app.exit".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+d".to_string()),
-            description: Some("Exit".to_string()),
-        },
-    );
-    defs.insert(
-        "app.clipboard.pasteImage".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+v".to_string()),
-            description: Some("Paste image".to_string()),
-        },
-    );
-
     let mut user = KeybindingsConfig::new();
     user.insert(
         "tui.editor.historyPrevious".to_string(),
@@ -96,8 +63,8 @@ fn gives_an_explicit_history_binding_precedence_over_model_cycling() {
         "tui.editor.historyNext".to_string(),
         Some(KeyIdOrList::One("ctrl+n".to_string())),
     );
-    let keybindings = KeybindingsManager::new(defs, Some(user));
-    set_keybindings(keybindings.clone());
+    let keybindings = AppKeybindingsManager::new(Some(user.clone()), None);
+    set_keybindings(KeybindingsManager::new(KEYBINDINGS.clone(), Some(user)));
 
     let tui = Arc::new(TuiMainScreen::new(Arc::new(NoopTerminal), None, None));
     let editor = CustomEditor::new(tui, get_editor_theme(), keybindings, None);

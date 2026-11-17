@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 use chrono::{Datelike, Local, TimeZone};
 use pi_agent_core::AgentMessage;
 use pi_ai::{Message, StopReason};
+use pi_coding_agent::core::keybindings::KEYBINDINGS;
 use pi_coding_agent::modes::interactive::components::tree_selector::{
     ContextEditEntry, FilterMode, ModelChangeEntry, SessionEntry, SessionMessageEntry, SessionTreeNode,
     ThinkingLevelChangeEntry, TreeSelectorComponent,
 };
 use pi_coding_agent::modes::interactive::theme::theme::init_theme;
-use pi_tui::keybindings::KeyIdOrList;
 use pi_tui::{
-    CURSOR_MARKER, Component, Focusable, KeybindingDefinition, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS,
-    set_keybindings, strip_terminal_sequences, visible_width,
+    CURSOR_MARKER, Component, Focusable, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings,
+    strip_terminal_sequences, visible_width,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -28,93 +28,7 @@ impl Drop for TestGuard {
 }
 
 fn app_keybindings(user_bindings: Option<KeybindingsConfig>) -> KeybindingsManager {
-    let mut defs = TUI_KEYBINDINGS.clone();
-    // WIRE(@tui-w3): Replace local app.* definitions with crate::core::keybindings::KeybindingsManager once @mcp lands.
-    defs.insert(
-        "app.message.copy".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+x".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.foldOrUp".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::Many(vec!["alt+left".to_string(), "ctrl+left".to_string()]),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.unfoldOrDown".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::Many(vec!["alt+right".to_string(), "ctrl+right".to_string()]),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.editLabel".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("shift+l".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.toggleLabelTimestamp".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("shift+t".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.default".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+d".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.noTools".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+t".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.userOnly".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+u".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.labeledOnly".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+l".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.all".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+a".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.cycleForward".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("ctrl+o".to_string()),
-            description: None,
-        },
-    );
-    defs.insert(
-        "app.tree.filter.cycleBackward".to_string(),
-        KeybindingDefinition {
-            default_keys: KeyIdOrList::One("shift+ctrl+o".to_string()),
-            description: None,
-        },
-    );
-    KeybindingsManager::new(defs, user_bindings)
+    KeybindingsManager::new(KEYBINDINGS.clone(), user_bindings)
 }
 
 fn setup() -> TestGuard {

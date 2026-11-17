@@ -3,22 +3,21 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::core::keybindings::KeybindingsManager;
 use crate::utils::paths::{canonicalize_path, get_path_comparison_key, shorten_home_path};
 use indexmap::IndexMap;
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::time::Timeout;
 use pi_js::{BoxFuture, Result};
 use pi_tui::{
-    Component, Container, Focusable, Input, KeybindingsManager, Spacer, Text, TuiMouseEvent, TuiMouseEventResult,
-    get_keybindings, truncate_to_width, visible_width,
+    Component, Container, Focusable, Input, Spacer, Text, TuiMouseEvent, TuiMouseEventResult, get_keybindings,
+    truncate_to_width, visible_width,
 };
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_hint, key_text};
 use super::session_selector_search::{NameFilter, SessionInfo, SortMode, filter_and_sort_sessions, has_session_name};
-
-// WIRE(@tui-w3): Replace keybindings with crate::core::keybindings::KeybindingsManager once wired across interactive_mode.
 
 pub type SessionListProgress = Arc<dyn Fn(usize, usize, Option<&[SessionInfo]>) + Send + Sync>;
 
@@ -1231,7 +1230,12 @@ impl SessionSelectorComponent {
         options: SessionSelectorOptions,
         current_session_file_path: Option<&str>,
     ) -> Self {
-        let keybindings = options.keybindings.unwrap_or_else(|| Arc::new(get_keybindings()));
+        let keybindings = options.keybindings.unwrap_or_else(|| {
+            Arc::new(KeybindingsManager::new(
+                Some(get_keybindings().get_user_bindings()),
+                None,
+            ))
+        });
         let scope = SessionScope::Current;
         let sort_mode = SortMode::Threaded;
         let name_filter = NameFilter::All;
