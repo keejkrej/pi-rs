@@ -1624,9 +1624,13 @@ impl InteractiveMode {
                 }
             }
             Err(err) => {
+                let msg = err.to_string();
                 // WIRE(@tui-w3): Special-case typed MissingSessionCwdError / SessionImportFileNotFoundError once @mcp merges onto main.
-                self.handle_fatal_runtime_error("Failed to import session", &err.to_string())
-                    .await;
+                if msg.starts_with("File not found:") {
+                    self.show_error(&format!("Failed to import session: {msg}"));
+                    return;
+                }
+                self.handle_fatal_runtime_error("Failed to import session", &msg).await;
             }
         }
     }
