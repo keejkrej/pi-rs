@@ -58,82 +58,35 @@ pub(crate) fn format_preview_lines(
     format!("{}\n... ({remaining} more lines, {expand_hint})", shown.join("\n"))
 }
 
-/// WIRE(@w3-b): Temporary local adapter mirroring interactive TUI helpers
-/// (`keybinding-hints`, `diff`, `visual-truncate`, `theme`) until Stage 3B lands.
+/// Interactive TUI helper bridge for built-in tool renderers.
 pub(crate) mod w3b_wire {
     use crate::core::extensions::types::Theme;
-    use crate::core::tools::render_utils::replace_tabs;
 
     /// Format a tool action keybinding hint.
     pub fn key_hint(action: &str, description: &str) -> String {
-        let key = default_action_key(action);
-        format!("{key} {description}")
-    }
-
-    fn default_action_key(action: &str) -> &'static str {
-        match action {
-            "expandTools" => "ctrl+o",
-            _ => "ctrl+o",
+        let binding = match action {
+            "expandTools" => "app.tools.expand",
+            other => other,
+        };
+        if pi_tui::get_keybindings().get_keys(binding).is_empty() {
+            crate::modes::interactive::components::keybinding_hints::raw_key_hint("ctrl+o", description)
+        } else {
+            crate::modes::interactive::components::keybinding_hints::key_hint(&binding.to_string(), description)
         }
     }
 
     /// Language detection from a file path for code highlighting.
     pub fn get_language_from_path(file_path: &str) -> Option<&'static str> {
-        let ext = file_path.rsplit('.').next()?.to_ascii_lowercase();
-        let lang = match ext.as_str() {
-            "ts" | "mts" | "cts" => "typescript",
-            "tsx" => "tsx",
-            "js" | "mjs" | "cjs" => "javascript",
-            "jsx" => "jsx",
-            "rs" => "rust",
-            "py" => "python",
-            "rb" => "ruby",
-            "go" => "go",
-            "java" => "java",
-            "c" | "h" => "c",
-            "cpp" | "cc" | "cxx" | "hpp" => "cpp",
-            "cs" => "csharp",
-            "sh" | "bash" | "zsh" => "bash",
-            "ps1" | "psm1" => "powershell",
-            "json" => "json",
-            "yaml" | "yml" => "yaml",
-            "toml" => "toml",
-            "md" | "markdown" => "markdown",
-            "html" | "htm" => "html",
-            "css" => "css",
-            "scss" => "scss",
-            "sql" => "sql",
-            "xml" | "svg" => "xml",
-            _ => return None,
-        };
-        Some(lang)
+        crate::modes::interactive::theme::theme::get_language_from_path(file_path)
     }
 
     /// Highlight source code text line by line.
-    pub fn highlight_code(code: &str, _lang: Option<&str>) -> Vec<String> {
-        code.split('\n').map(replace_tabs).collect()
+    pub fn highlight_code(code: &str, lang: Option<&str>) -> Vec<String> {
+        crate::modes::interactive::theme::theme::highlight_code(code, lang)
     }
 
     /// Render a unified diff string with theme colors.
-    pub fn render_diff(diff_text: &str, theme: Option<&Theme>) -> String {
-        let lines: Vec<&str> = diff_text.split('\n').collect();
-        let mut rendered = Vec::with_capacity(lines.len());
-        for line in lines {
-            let formatted = if line.starts_with('+') {
-                theme
-                    .map(|t| t.fg("toolDiffAdded", line))
-                    .unwrap_or_else(|| line.to_string())
-            } else if line.starts_with('-') {
-                theme
-                    .map(|t| t.fg("toolDiffRemoved", line))
-                    .unwrap_or_else(|| line.to_string())
-            } else {
-                theme
-                    .map(|t| t.fg("toolDiffContext", line))
-                    .unwrap_or_else(|| line.to_string())
-            };
-            rendered.push(formatted);
-        }
-        rendered.join("\n")
+    pub fn render_diff(diff_text: &str, _theme: Option<&Theme>) -> String {
+        crate::modes::interactive::components::diff::render_diff(diff_text, None)
     }
 }
