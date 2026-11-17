@@ -2,8 +2,10 @@
 //!
 //! Tests router state persistence via `VIRTUAL_MODEL_STATE_ENTRY` and `get_virtual_model_state`,
 //! virtual-model multi-step route selection (`User`, `Retry`, `Continuation`, `Direct`),
-//! and `ModelRuntime` stream/retry dispatching over `faux_provider`.
-//! // WIRE(@core-session-w3): extend with full `AgentSession` / compaction harness once `core::agent_session` and `core::sdk` land.
+//! `ModelRuntime` stream/retry dispatching over `faux_provider`, and `AgentSession` compaction.
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::sync::{Arc, Mutex};
 
@@ -379,4 +381,87 @@ async fn complete_simple_respects_routed_model_limits_and_thinking() {
 
     assert_eq!(msg.stop_reason, StopReason::Stop);
     assert_eq!(*seen_calls.lock().unwrap(), vec!["large:low:4000"]);
+}
+
+#[tokio::test]
+async fn agent_session_routes_prompt_and_direct_compaction_through_virtual_model() {
+    use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message};
+    use pi_coding_agent::core::extensions::types::{ExtensionApi, ExtensionVirtualModel, InlineExtension};
+    use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
+    use support::suite::harness::{HarnessOptions, create_harness};
+
+    let reasons: Arc<Mutex<Vec<ModelRouteReason>>> = Arc::new(Mutex::new(Vec::new()));
+    let reasons_c = Arc::clone(&reasons);
+    let ext = InlineExtension::Factory(Arc::new(move |pi: ExtensionApi| {
+        let reasons_c = Arc::clone(&reasons_c);
+        async move {
+            pi.register_virtual_model(ExtensionVirtualModel {
+                provider: "router".to_owned(),
+                id: "auto".to_owned(),
+                name: "Auto".to_owned(),
+                thinking_levels: Some(vec![ModelThinkingLevel::Low, ModelThinkingLevel::High]),
+                route: Arc::new(move |req, ctx| {
+                    let reasons_c = Arc::clone(&reasons_c);
+                    Box::pin(async move {
+                        reasons_c.lock().unwrap().push(req.reason);
+                        let target = ctx
+                            .model_registry()?
+                            .get_available()
+                            .into_iter()
+                            .find(|m| m.provider.starts_with("faux"))
+                            .ok_or_else(|| pi_js::Error::msg("no backing faux model"))?;
+                        Ok(ModelRoute {
+                            model: target,
+                            thinking_level: req.thinking_level,
+                            state: None,
+                        })
+                    })
+                }),
+            })?;
+            Ok(())
+        }
+    }));
+
+    let harness = create_harness(HarnessOptions {
+        settings: Some(Settings {
+            compaction: Some(CompactionSettings {
+                keep_recent_tokens: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        extension_factories: Some(vec![ext]),
+        ..Default::default()
+    })
+    .await;
+    harness.session.bind_extensions(Default::default()).await.unwrap();
+    let vmodel = harness.session.model_runtime().get_model("router", "auto").unwrap();
+    harness.session.set_model(vmodel, None).await.unwrap();
+    harness.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("first reply to summarize".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("second reply".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("compact summary".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("turn prefix summary".to_owned()),
+            None,
+        )),
+    ]);
+
+    harness.session.prompt("hello", None).await.unwrap();
+    harness.session.prompt("second turn", None).await.unwrap();
+    let compact = harness.session.compact(None).await.unwrap();
+    assert!(!compact.summary.is_empty());
+    let recorded_reasons = reasons.lock().unwrap().clone();
+    assert!(recorded_reasons.contains(&ModelRouteReason::User));
+    assert!(recorded_reasons.contains(&ModelRouteReason::Direct));
+    harness.cleanup();
 }

@@ -1,15 +1,23 @@
 //! Port of `packages/coding-agent/test/suite/regressions/5217-compaction-reason.test.ts`.
-// WIRE(@ca-cli-w3): full `session_before_compact` / `session_compact` (`reason`, `willRetry`) hook testing belongs in AgentSession once `core::agent_session` lands.
 
-use std::sync::Arc;
+#[path = "support/mod.rs"]
+mod support;
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_agent_core::{AgentMessage, StreamFn};
+use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxResponseStep, faux_assistant_message};
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Message, Model,
     ModelCost, ModelInput, StopReason, Usage, UserMessage, UserMessageContent, faux_text,
 };
 use pi_coding_agent::core::compaction::{CompactOptions, CompactionSettings, compact, prepare_compaction};
+use pi_coding_agent::core::extensions::types::{
+    CompactionReason, ExtensionApi, InlineExtension, SessionBeforeCompactEvent, SessionCompactEvent,
+};
 use pi_coding_agent::core::session_manager::{SessionEntry, SessionManager};
+use pi_coding_agent::core::settings_manager::{CompactionSettings as ManagerCompactionSettings, Settings};
+use support::suite::harness::{HarnessOptions, create_harness};
 use tempfile::TempDir;
 
 fn test_model() -> Model {
@@ -176,4 +184,76 @@ async fn compaction_preparation_and_persistence_support_manual_threshold_and_ove
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn agent_session_hooks_receive_compaction_reason_and_will_retry() {
+    let recorded: Arc<Mutex<Vec<(&'static str, CompactionReason, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec_a = Arc::clone(&recorded);
+    let rec_b = Arc::clone(&recorded);
+    let ext = InlineExtension::Factory(Arc::new(move |pi: ExtensionApi| {
+        let rec_a = Arc::clone(&rec_a);
+        let rec_b = Arc::clone(&rec_b);
+        async move {
+            pi.on::<SessionBeforeCompactEvent>(move |ev, _ctx| {
+                let rec = Arc::clone(&rec_a);
+                Box::pin(async move {
+                    rec.lock().unwrap_or_else(PoisonError::into_inner).push((
+                        "session_before_compact",
+                        ev.reason,
+                        ev.will_retry,
+                    ));
+                    Ok(None)
+                })
+            });
+            pi.on::<SessionCompactEvent>(move |ev, _ctx| {
+                let rec = Arc::clone(&rec_b);
+                Box::pin(async move {
+                    rec.lock().unwrap_or_else(PoisonError::into_inner).push((
+                        "session_compact",
+                        ev.reason,
+                        ev.will_retry,
+                    ));
+                    Ok(None)
+                })
+            });
+            Ok(())
+        }
+    }));
+
+    let harness = create_harness(HarnessOptions {
+        settings: Some(Settings {
+            compaction: Some(ManagerCompactionSettings {
+                keep_recent_tokens: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        extension_factories: Some(vec![ext]),
+        ..Default::default()
+    })
+    .await;
+    harness.session.bind_extensions(Default::default()).await.unwrap();
+    harness.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("reply to compact".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("summary from hook test".to_owned()),
+            None,
+        )),
+    ]);
+
+    harness.session.prompt("message to compact", None).await.unwrap();
+    let res = harness.session.compact(None).await.unwrap();
+    assert!(res.summary.contains("summary from hook test"));
+    assert_eq!(
+        *recorded.lock().unwrap_or_else(PoisonError::into_inner),
+        vec![
+            ("session_before_compact", CompactionReason::Manual, false),
+            ("session_compact", CompactionReason::Manual, false),
+        ]
+    );
+    harness.cleanup();
 }

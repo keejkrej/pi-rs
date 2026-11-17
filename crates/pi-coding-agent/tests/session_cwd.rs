@@ -1,8 +1,12 @@
 //! Port of `packages/coding-agent/test/session-cwd.test.ts`.
-// WIRE(@ca-cli-w3): `create_agent_session_runtime` rejection before factory invocation awaits `core::agent_session_runtime`.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use pi_coding_agent::core::agent_session_runtime::{
+    CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeOptions, create_agent_session_runtime,
+};
 use pi_coding_agent::core::session_cwd::{
     MissingSessionCwdError, SessionCwdIssue, SessionCwdSource, assert_session_cwd_exists,
     format_missing_session_cwd_error, format_missing_session_cwd_prompt, get_missing_session_cwd_issue,
@@ -96,4 +100,45 @@ fn assert_session_cwd_exists_returns_controlled_error_when_stored_cwd_is_missing
     let err = assert_session_cwd_exists(&SmCwd(&sm), &fallback_str).unwrap_err();
     let missing_err = MissingSessionCwdError::new(get_missing_session_cwd_issue(&SmCwd(&sm), &fallback_str).unwrap());
     assert!(err.to_string().contains(&missing_err.to_string()));
+}
+
+#[tokio::test]
+async fn throws_a_controlled_error_before_runtime_creation_when_the_stored_cwd_is_missing() {
+    let tmp = TempDir::new().unwrap();
+    let fallback_dir = tmp.path().join("fallback");
+    std::fs::create_dir_all(&fallback_dir).unwrap();
+    let missing_cwd = fallback_dir.join("does-not-exist");
+    let session_dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let session_file = session_dir.join("session.jsonl");
+    write_session_file(&session_file, &missing_cwd);
+
+    let fallback_str = fallback_dir.to_string_lossy().into_owned();
+    let sm = SessionManager::open(session_file.to_str().unwrap(), None, None).unwrap();
+    let factory_called = Arc::new(AtomicBool::new(false));
+    let called_c = Arc::clone(&factory_called);
+    let factory: CreateAgentSessionRuntimeFactory = Arc::new(move |_| {
+        let called = Arc::clone(&called_c);
+        Box::pin(async move {
+            called.store(true, Ordering::SeqCst);
+            Err(pi_js::Error::msg("should not be called"))
+        })
+    });
+
+    let err = match create_agent_session_runtime(
+        factory,
+        CreateAgentSessionRuntimeOptions {
+            cwd: fallback_str.clone(),
+            agent_dir: fallback_str,
+            session_manager: sm,
+            session_start_event: None,
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("expected MissingSessionCwdError before factory invocation"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains(&missing_cwd.to_string_lossy().into_owned()));
+    assert!(!factory_called.load(Ordering::SeqCst));
 }

@@ -607,7 +607,24 @@ impl McpClient {
             .await?;
         items
             .into_iter()
-            .map(|map| serde_json::from_value::<Tool>(Value::Object(map)).map_err(|e| Error::msg(e.to_string())))
+            .map(|mut map| {
+                // Keep only spec-typed annotation fields; non-conformant servers may emit e.g. string booleans.
+                if let Some(Value::Object(annotations)) = map.get_mut("annotations") {
+                    for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+                        if let Some(val) = annotations.get(hint)
+                            && !val.is_boolean()
+                        {
+                            annotations.shift_remove(hint);
+                        }
+                    }
+                    if let Some(title) = annotations.get("title")
+                        && !title.is_string()
+                    {
+                        annotations.shift_remove("title");
+                    }
+                }
+                serde_json::from_value::<Tool>(Value::Object(map)).map_err(|e| Error::msg(e.to_string()))
+            })
             .collect()
     }
 

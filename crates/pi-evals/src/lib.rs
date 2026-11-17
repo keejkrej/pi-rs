@@ -6,3 +6,5 @@ pub mod harness;
 pub mod plan;
 pub mod report;
 // @generated-mods end
+
+pub use pi_js::{Error, Result};
