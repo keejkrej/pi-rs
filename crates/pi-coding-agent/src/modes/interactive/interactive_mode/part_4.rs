@@ -638,13 +638,15 @@ impl InteractiveMode {
             if is_overlay {
                 rm_close();
             } else {
-                if let Some(comp) = comp_close.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let comp = comp_close.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(comp) = comp {
                     m_close.remove_extension_dialog(&comp);
                 }
                 m_close.active_editor().set_text(&saved_text_done);
                 m_close.ui().request_render(None);
             }
-            if let Some(sender) = tx_close.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let sender = tx_close.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(sender) = sender {
                 let _ = sender.send(value);
             }
         });
@@ -682,7 +684,8 @@ impl InteractiveMode {
             }
             Err(err) => {
                 if !is_overlay && !closed.load(Ordering::SeqCst) {
-                    if let Some(comp) = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let comp = comp_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(comp) = comp {
                         self.remove_extension_dialog(&comp);
                     }
                     self.active_editor().set_text(&saved_text);

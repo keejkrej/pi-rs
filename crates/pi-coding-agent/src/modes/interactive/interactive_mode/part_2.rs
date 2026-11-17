@@ -247,6 +247,13 @@ pub(crate) fn parse_git_url_local(source: &str) -> Option<(String, String, Optio
     }
 }
 
+fn upgrade_weak_slot(slot: &Mutex<Option<Weak<InteractiveModeInner>>>) -> Option<Arc<InteractiveModeInner>> {
+    slot.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(Weak::upgrade)
+}
+
 impl InteractiveMode {
     pub fn new(runtime_host: Arc<dyn InteractiveRuntimeHost>, options: InteractiveModeOptions) -> Self {
         let session = runtime_host.session();
@@ -263,9 +270,7 @@ impl InteractiveMode {
         let weak_slot: Arc<Mutex<Option<Weak<InteractiveModeInner>>>> = Arc::new(Mutex::new(None));
         let weak_for_paste = Arc::clone(&weak_slot);
         let on_right_click_paste: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(weak) = weak_for_paste.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                && let Some(inner) = weak.upgrade()
-            {
+            if let Some(inner) = upgrade_weak_slot(&weak_for_paste) {
                 let mode = InteractiveMode { inner };
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
@@ -298,9 +303,7 @@ impl InteractiveMode {
 
         let renderer_slot: Arc<Mutex<Option<Weak<InteractiveModeInner>>>> = Arc::clone(&weak_slot);
         let ui = Arc::new(create_interactive_tui_reference(Arc::new(move || {
-            if let Some(weak) = renderer_slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                && let Some(inner) = weak.upgrade()
-            {
+            if let Some(inner) = upgrade_weak_slot(&renderer_slot) {
                 return inner
                     .state
                     .lock()
@@ -371,9 +374,7 @@ impl InteractiveMode {
             Arc::new(renderer.clone()) as Arc<dyn TUI + Send + Sync>,
             InteractiveThemeControllerOptions {
                 get_settings_manager: Arc::new(move || {
-                    let mgr = if let Some(weak) = weak_for_theme_mgr.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                        && let Some(inner) = weak.upgrade()
-                    {
+                    let mgr = if let Some(inner) = upgrade_weak_slot(&weak_for_theme_mgr) {
                         inner.runtime_host.session().settings_manager()
                     } else {
                         host_for_theme_mgr.session().settings_manager()
@@ -381,16 +382,12 @@ impl InteractiveMode {
                     Arc::new(SettingsThemeBridge(mgr))
                 }),
                 show_error: Arc::new(move |msg| {
-                    if let Some(weak) = weak_for_theme_err.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                        && let Some(inner) = weak.upgrade()
-                    {
+                    if let Some(inner) = upgrade_weak_slot(&weak_for_theme_err) {
                         InteractiveMode { inner }.show_error(msg);
                     }
                 }),
                 on_changed: Arc::new(move || {
-                    if let Some(weak) = weak_for_theme_chg.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                        && let Some(inner) = weak.upgrade()
-                    {
+                    if let Some(inner) = upgrade_weak_slot(&weak_for_theme_chg) {
                         InteractiveMode { inner }.update_editor_border_color();
                     }
                 }),
@@ -403,9 +400,7 @@ impl InteractiveMode {
         let fallback_terminal = renderer.terminal();
         let program_status = ProgramStatusReporter::new(
             Arc::new(move || {
-                if let Some(weak) = weak_for_prog_term.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                    && let Some(inner) = weak.upgrade()
-                {
+                if let Some(inner) = upgrade_weak_slot(&weak_for_prog_term) {
                     return inner
                         .state
                         .lock()
@@ -416,11 +411,7 @@ impl InteractiveMode {
                 Arc::clone(&fallback_terminal)
             }),
             Arc::new(move || {
-                weak_for_prog_name
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .and_then(|w| w.upgrade())
+                upgrade_weak_slot(&weak_for_prog_name)
                     .and_then(|inner| inner.runtime_host.session().session_manager().get_session_name())
             }),
         );
@@ -429,9 +420,7 @@ impl InteractiveMode {
         let host_for_mermaid = Arc::clone(&runtime_host);
         let mermaid_markdown_transformer = create_mermaid_markdown_transformer(MermaidTransformerOptions {
             get_mode: Arc::new(move || {
-                if let Some(weak) = weak_for_mermaid.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                    && let Some(inner) = weak.upgrade()
-                {
+                if let Some(inner) = upgrade_weak_slot(&weak_for_mermaid) {
                     return inner
                         .runtime_host
                         .session()
