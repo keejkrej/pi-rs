@@ -38,7 +38,6 @@ crates/
     package/                        Runtime-loaded package docs, examples, README, CHANGELOG, and package.json
   pi-gui/                           Rune GPU desktop application (`pi-gui` binary), Waku theme, diff/file/terminal inspector
   pi-evals/                         Documentation audit and Docker evaluation harness (`pi-evals` binary)
-legacy/                             Excluded pre-v1 workspace kept for historical reference only
 ```
 
 ## Invariants
@@ -56,7 +55,6 @@ legacy/                             Excluded pre-v1 workspace kept for historica
 - **Runtime package assets**: Do not move, rename, or delete `crates/pi-coding-agent/package/` (`docs/`, `examples/`, `README.md`, `CHANGELOG.md`, `package.json`). `pi_coding_agent::config::{get_docs_path, get_readme_path, get_changelog_path, get_examples_path}` resolve those paths at runtime, and `pi-evals` audits them.
 - **Rune dependencies**: Root `Cargo.toml` pins `https://github.com/anomalyco/rune.git` at one exact `dev` commit across all `rune*` `[workspace.dependencies]` and all 5 `[patch.crates-io]` crates (`wgpu-hal`, `winit`, `parley_engine`, `accesskit_windows`, `accesskit_macos`). Never commit machine-local paths (`/Users/`, `/Volumes/`, `C:/Users/`).
 - **UI thread boundary in `pi-gui`**: Keep all `pi-coding-agent` session work, file scanning, git diffs, and shell commands in the background `GuiBridge` worker (`crates/pi-gui/src/bridge/`), never on the Rune render/UI thread.
-- **`legacy/`**: Excluded from `[workspace]` in `Cargo.toml`. Do not modify or delete `legacy/` unless the user explicitly asks.
 
 ## Commands
 
