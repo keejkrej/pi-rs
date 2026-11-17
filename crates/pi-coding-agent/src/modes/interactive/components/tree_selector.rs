@@ -83,7 +83,7 @@ pub struct UsageEntry {
     pub note: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {
     #[serde(default)]
@@ -97,9 +97,13 @@ pub struct CompactionEntry {
     pub tokens_before: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_message: Option<AgentMessage>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchSummaryEntry {
     #[serde(default)]
@@ -111,6 +115,8 @@ pub struct BranchSummaryEntry {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

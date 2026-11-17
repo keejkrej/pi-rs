@@ -130,8 +130,16 @@ impl CustomEditor {
         self.inner.editor.set_border_color(border_color);
     }
 
+    pub fn on_submit(&self) -> Option<TextCallback> {
+        self.inner.editor.on_submit()
+    }
+
     pub fn set_on_submit(&self, on_submit: Option<TextCallback>) {
         self.inner.editor.set_on_submit(on_submit);
+    }
+
+    pub fn on_change(&self) -> Option<TextCallback> {
+        self.inner.editor.on_change()
     }
 
     pub fn set_on_change(&self, on_change: Option<TextCallback>) {
@@ -152,6 +160,10 @@ impl CustomEditor {
 
     pub fn set_padding_x(&self, padding: f64) {
         self.inner.editor.set_padding_x(padding);
+    }
+
+    pub fn get_autocomplete_max_visible(&self) -> i64 {
+        self.inner.editor.get_autocomplete_max_visible()
     }
 
     pub fn set_autocomplete_max_visible(&self, max_visible: f64) {
@@ -408,5 +420,65 @@ impl Component for CustomEditor {
 
     fn as_focusable(&self) -> Option<&dyn Focusable> {
         Some(self)
+    }
+}
+
+impl pi_tui::EditorComponent for CustomEditor {
+    fn get_text(&self) -> String {
+        CustomEditor::get_text(self)
+    }
+
+    fn set_text(&self, text: &str) {
+        CustomEditor::set_text(self, text);
+    }
+
+    fn on_submit(&self) -> Option<pi_tui::editor_component::EditorTextCallback> {
+        CustomEditor::on_submit(self)
+    }
+
+    fn set_on_submit(&self, on_submit: Option<pi_tui::editor_component::EditorTextCallback>) {
+        CustomEditor::set_on_submit(self, on_submit);
+    }
+
+    fn on_change(&self) -> Option<pi_tui::editor_component::EditorTextCallback> {
+        CustomEditor::on_change(self)
+    }
+
+    fn set_on_change(&self, on_change: Option<pi_tui::editor_component::EditorTextCallback>) {
+        CustomEditor::set_on_change(self, on_change);
+    }
+
+    fn add_to_history(&self, text: &str) {
+        CustomEditor::add_to_history(self, text);
+    }
+
+    fn insert_text_at_cursor(&self, text: &str) {
+        CustomEditor::insert_text_at_cursor(self, text);
+    }
+
+    fn get_expanded_text(&self) -> String {
+        CustomEditor::get_expanded_text(self)
+    }
+
+    fn set_autocomplete_provider(&self, provider: Arc<dyn AutocompleteProvider>) {
+        CustomEditor::set_autocomplete_provider(self, provider);
+    }
+
+    fn border_color(&self) -> Option<pi_tui::editor_component::EditorBorderColor> {
+        Some(CustomEditor::border_color(self))
+    }
+
+    fn set_border_color(&self, border_color: Option<pi_tui::editor_component::EditorBorderColor>) {
+        if let Some(bc) = border_color {
+            CustomEditor::set_border_color(self, bc);
+        }
+    }
+
+    fn set_padding_x(&self, padding: f64) {
+        CustomEditor::set_padding_x(self, padding);
+    }
+
+    fn set_autocomplete_max_visible(&self, max_visible: f64) {
+        CustomEditor::set_autocomplete_max_visible(self, max_visible);
     }
 }

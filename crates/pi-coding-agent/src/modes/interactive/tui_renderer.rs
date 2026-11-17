@@ -64,6 +64,13 @@ impl InteractiveTui {
         }
     }
 
+    pub fn get_focused_component(&self) -> Option<Arc<dyn Component>> {
+        match self {
+            Self::Main(main) => main.get_focused_component(),
+            Self::Alt(alt) => alt.get_focused_component(),
+        }
+    }
+
     fn as_tui(&self) -> &(dyn TUI + Send + Sync) {
         match self {
             Self::Main(main) => main.as_ref(),
