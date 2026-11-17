@@ -1,13 +1,13 @@
 //! Port of packages/coding-agent/src/cli/credential-print.ts
 
 use indexmap::IndexMap;
-use pi_ai::{CredentialType, Model};
+use pi_ai::{AnyModel, AuthOperationOptions, AuthType, Model};
 use pi_js::abort::AbortSignal;
 
 use crate::cli::args::Args;
 use crate::cli::auth_command::{AuthCommandError, AuthCommandKind, get_auth_credential, validate_auth_command_args};
 use crate::core::model_resolver::{ResolveCliModelOptions, resolve_cli_model};
-use crate::core::model_runtime::{ModelRuntime, ModelRuntimeGetAuthOptions};
+use crate::core::model_runtime::{ModelRuntime, ModelRuntimeAuthOverrides};
 
 const DEFAULT_BEARER_TOKEN_MIN_EXPIRY_MS: i64 = 30 * 60_000;
 
@@ -33,10 +33,12 @@ pub async fn resolve_credential_for_print(
     signal: Option<AbortSignal>,
 ) -> pi_js::Result<String> {
     let (cli_provider, cli_model) = validate_auth_command_args(args, kind)?;
-    let listed = model_runtime.list_credentials(signal.clone()).await?;
-    let mut credential_types: IndexMap<String, CredentialType> = IndexMap::new();
+    let listed = model_runtime
+        .list_credentials(signal.clone().map(|s| AuthOperationOptions { signal: Some(s) }))
+        .await?;
+    let mut credential_types: IndexMap<String, AuthType> = IndexMap::new();
     for cred in listed {
-        credential_types.insert(cred.provider_id, cred.r#type);
+        credential_types.insert(cred.provider_id, cred.credential_type);
     }
 
     let mut providers: Vec<CandidateProvider> = Vec::new();
@@ -47,10 +49,11 @@ pub async fn resolve_credential_for_print(
             ))
             .into_error());
         };
+        let pid = provider.id().to_string();
         if let Some(cli_model) = cli_model.as_deref() {
             let resolved = resolve_cli_model(ResolveCliModelOptions {
-                cli_provider: Some(&provider.id),
-                cli_model,
+                cli_provider: Some(&pid),
+                cli_model: Some(cli_model),
                 cli_thinking: None,
                 model_runtime,
             });
@@ -61,24 +64,22 @@ pub async fn resolve_credential_for_print(
                 return Err(AuthCommandError::new(msg).into_error());
             }
             providers.push(CandidateProvider {
-                id: provider.id,
+                id: pid,
                 model: resolved.model,
             });
         } else {
-            providers.push(CandidateProvider {
-                id: provider.id,
-                model: None,
-            });
+            providers.push(CandidateProvider { id: pid, model: None });
         }
     } else {
         let model_query = cli_model.as_deref().unwrap_or("");
         for provider in model_runtime.get_providers() {
-            if !credential_types.contains_key(&provider.id) {
+            let pid = provider.id().to_string();
+            if !credential_types.contains_key(&pid) {
                 continue;
             }
             let resolved = resolve_cli_model(ResolveCliModelOptions {
-                cli_provider: Some(&provider.id),
-                cli_model: model_query,
+                cli_provider: Some(&pid),
+                cli_model: Some(model_query),
                 cli_thinking: None,
                 model_runtime,
             });
@@ -90,7 +91,7 @@ pub async fn resolve_credential_for_print(
                     .is_some_and(|w| w.contains("Using custom model id"))
             {
                 providers.push(CandidateProvider {
-                    id: provider.id,
+                    id: pid,
                     model: Some(model),
                 });
             }
@@ -106,25 +107,30 @@ pub async fn resolve_credential_for_print(
     let mut credentials: Vec<ResolvedCredential> = Vec::new();
     for provider in &providers {
         let cred_type = credential_types.get(&provider.id).copied();
-        if kind == AuthCommandKind::ApiKey && cred_type == Some(CredentialType::OAuth) {
+        if kind == AuthCommandKind::ApiKey && cred_type == Some(AuthType::OAuth) {
             continue;
         }
-        if kind == AuthCommandKind::BearerToken && cred_type != Some(CredentialType::OAuth) {
+        if kind == AuthCommandKind::BearerToken && cred_type != Some(AuthType::OAuth) {
             continue;
         }
-        let auth_options = ModelRuntimeGetAuthOptions {
+        let auth_options = ModelRuntimeAuthOverrides {
             min_oauth_validity_ms: if kind == AuthCommandKind::BearerToken {
                 Some(min_expiry_ms.unwrap_or(DEFAULT_BEARER_TOKEN_MIN_EXPIRY_MS))
             } else {
                 None
             },
             signal: signal.clone(),
+            ..Default::default()
         };
         let auth = match &provider.model {
-            Some(model) => model_runtime.get_auth_for_model(model, Some(auth_options)).await?,
+            Some(model) => {
+                model_runtime
+                    .get_auth_model(&AnyModel::Chat(model.clone()), Some(auth_options))
+                    .await?
+            }
             None => {
                 model_runtime
-                    .get_auth_for_provider(&provider.id, Some(auth_options))
+                    .get_auth_provider_id(&provider.id, Some(auth_options))
                     .await?
             }
         };
@@ -142,14 +148,14 @@ pub async fn resolve_credential_for_print(
     if credentials.is_empty() {
         let provider_id = providers.first().map(|p| p.id.as_str());
         let cred_type = provider_id.and_then(|id| credential_types.get(id).copied());
-        if cli_provider.is_some() && kind == AuthCommandKind::ApiKey && cred_type == Some(CredentialType::OAuth) {
+        if cli_provider.is_some() && kind == AuthCommandKind::ApiKey && cred_type == Some(AuthType::OAuth) {
             let pid = provider_id.unwrap_or("");
             return Err(
                 AuthCommandError::new(format!("Provider \"{pid}\" is configured with OAuth, not an API key"))
                     .into_error(),
             );
         }
-        if cli_provider.is_some() && kind == AuthCommandKind::BearerToken && cred_type != Some(CredentialType::OAuth) {
+        if cli_provider.is_some() && kind == AuthCommandKind::BearerToken && cred_type != Some(AuthType::OAuth) {
             let pid = provider_id.unwrap_or("");
             return Err(AuthCommandError::new(format!(
                 "Provider \"{pid}\" is not configured with an OAuth bearer token"

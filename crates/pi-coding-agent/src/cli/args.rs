@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 
 use indexmap::IndexMap;
 use pi_ai::ModelThinkingLevel;

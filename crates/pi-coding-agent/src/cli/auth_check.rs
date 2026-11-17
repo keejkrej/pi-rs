@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use pi_ai::{Credential, CredentialStore, CredentialsStore};
+use pi_ai::{AuthType, Credential, CredentialStore};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::args::Args;
 use crate::cli::auth_command::{AuthCommandError, AuthCommandKind, get_auth_credential, validate_auth_command_args};
 use crate::core::model_resolver::{ResolveCliModelOptions, resolve_cli_model};
-use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
+use crate::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use crate::core::models_store::InMemoryCodingAgentModelsStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,10 +91,10 @@ pub async fn check_provider_auth(
         });
     }
 
-    match model_runtime.check_auth(&provider).await {
+    match model_runtime.check_auth(&provider, None).await {
         Ok(Some(auth)) => {
             if refresh {
-                match model_runtime.get_auth_for_provider(&provider, None).await {
+                match model_runtime.get_auth_provider_id(&provider, None).await {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         return Ok(AuthCheckResult {
@@ -114,9 +114,9 @@ pub async fn check_provider_auth(
                     }
                 }
             }
-            let auth_type = match auth.r#type {
-                pi_ai::CredentialType::ApiKey => "api_key".to_string(),
-                pi_ai::CredentialType::OAuth => "oauth".to_string(),
+            let auth_type = match auth.auth_type {
+                AuthType::ApiKey => "api_key".to_string(),
+                AuthType::OAuth => "oauth".to_string(),
             };
             Ok(AuthCheckResult {
                 status: AuthCheckStatus::Ready,
@@ -152,12 +152,12 @@ pub async fn get_provider_credential(
     {
         return Ok(Some(oauth.access));
     }
-    let auth = model_runtime.get_auth_for_provider(provider_id, None).await?;
+    let auth = model_runtime.get_auth_provider_id(provider_id, None).await?;
     Ok(get_auth_credential(auth.as_ref()))
 }
 
-pub async fn create_auth_check_model_runtime(credentials: CredentialsStore) -> pi_js::Result<ModelRuntime> {
-    ModelRuntime::create(ModelRuntimeCreateOptions {
+pub async fn create_auth_check_model_runtime(credentials: Arc<dyn CredentialStore>) -> pi_js::Result<ModelRuntime> {
+    ModelRuntime::create(CreateModelRuntimeOptions {
         credentials: Some(credentials),
         models_store: Some(Arc::new(InMemoryCodingAgentModelsStore::default())),
         allow_model_network: Some(false),

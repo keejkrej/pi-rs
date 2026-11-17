@@ -6,11 +6,12 @@ use indexmap::IndexSet;
 use pi_agent_core::agent::{Agent, AgentInitialState, AgentOptions};
 use pi_agent_core::stream_fn::set_default_stream_fn;
 use pi_agent_core::types::{AgentMessage, OnPayloadFn, StreamFn, TransformContextFn};
+use pi_ai::compat::stream_simple;
 use pi_ai::types::{
     Message, Model, ModelThinkingLevel, OnProviderStreamEventFn, OnResponseFn, ProviderHeaders, SimpleStreamOptions,
     TextContent, UserContentBlock, UserMessageContent,
 };
-use pi_ai::{ModelsSimpleStreamOptions, clamp_thinking_level, stream_simple};
+use pi_ai::{ModelsSimpleStreamOptions, clamp_thinking_level};
 use pi_js::BoxFuture;
 
 use crate::config::get_agent_dir;
@@ -34,6 +35,7 @@ use crate::core::virtual_models::get_branch_selection;
 use crate::utils::paths::{PathInputOptions, resolve_path};
 
 pub use crate::core::agent_session_runtime::*;
+pub use crate::core::agent_session_services::{AgentSessionRuntimeDiagnostic, AgentSessionServices};
 pub use crate::core::extensions::types::{
     ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionFactory, InlineExtension,
     ToolDefinition as SdkToolDefinition,
@@ -227,7 +229,7 @@ pub async fn create_agent_session(
 
     let settings_manager = match options.settings_manager {
         Some(sm) => sm,
-        None => SettingsManager::create(&cwd, Some(&agent_dir), None)?,
+        None => SettingsManager::create(&cwd, Some(&agent_dir), None),
     };
     let session_manager = match options.session_manager {
         Some(sm) => sm,
@@ -585,13 +587,13 @@ pub async fn create_agent_session(
     // Restore missing settings metadata for older sessions.
     if has_existing_session {
         if !has_thinking_entry {
-            session_manager.append_thinking_level_change(clamped_thinking);
+            let _ = session_manager.append_thinking_level_change(clamped_thinking.as_str());
         }
     } else {
         if let Some(ref m) = model {
-            session_manager.append_model_change(&m.provider, &m.id);
+            let _ = session_manager.append_model_change(&m.provider, &m.id);
         }
-        session_manager.append_thinking_level_change(clamped_thinking);
+        let _ = session_manager.append_thinking_level_change(clamped_thinking.as_str());
     }
 
     let session = AgentSession::new(AgentSessionConfig {

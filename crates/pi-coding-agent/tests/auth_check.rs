@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
-use pi_ai::{
-    ApiKeyCredential, AuthStorageData as _, Credential, CredentialsStore, InMemoryModelsStore, OAuthCredential,
-};
+use pi_ai::{ApiKeyCredential, Credential, CredentialStore, InMemoryModelsStore, OAuthCredential};
 use pi_coding_agent::cli::args::parse_args;
 use pi_coding_agent::cli::auth_check::{
     AuthCheckOptions, AuthCheckReason, AuthCheckResult, AuthCheckStatus, check_provider_auth,
@@ -29,7 +27,7 @@ fn make_jwt(account_id: &str) -> String {
     format!("{header}.{payload}.sig")
 }
 
-async fn create_runtime(credentials: CredentialsStore) -> ModelRuntime {
+async fn create_runtime(credentials: Arc<dyn CredentialStore>) -> ModelRuntime {
     ModelRuntime::create(ModelRuntimeCreateOptions {
         credentials: Some(credentials),
         models_path: None,

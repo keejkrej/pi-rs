@@ -6,12 +6,13 @@ mod support;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use pi_ai::{ApiKeyCredential, AuthOperationOptions, Credential, CredentialInfo, CredentialStore, ModifyCredentialFn};
+use pi_ai::{
+    ApiKeyCredential, AuthOperationOptions, Credential, CredentialInfo, CredentialStore, ModelsRefreshOptions,
+    ModifyCredentialFn,
+};
 use pi_coding_agent::core::agent_session_services::CreateAgentSessionServicesOptions;
 use pi_coding_agent::core::auth_storage::AuthStorage;
-use pi_coding_agent::core::model_runtime::{
-    ModelRuntime, ModelRuntimeCreateOptions, ModelRuntimeRefreshOptions, ProviderAuthStatus,
-};
+use pi_coding_agent::core::model_runtime::{AuthStatus, ModelRuntime, ModelRuntimeCreateOptions};
 use pi_coding_agent::core::models_store::InMemoryCodingAgentModelsStore;
 use pretty_assertions::assert_eq;
 use support::suite::harness::{Harness, HarnessOptions, create_harness};
@@ -155,7 +156,7 @@ async fn recovers_without_letting_the_stalled_refresh_overwrite_the_newer_snapsh
 
     set_api_key(auth_storage.as_ref(), "stale-provider", "stale-key").await;
     runtime
-        .refresh(Some(ModelRuntimeRefreshOptions {
+        .refresh(Some(ModelsRefreshOptions {
             allow_network: Some(false),
             ..Default::default()
         }))
@@ -163,19 +164,19 @@ async fn recovers_without_letting_the_stalled_refresh_overwrite_the_newer_snapsh
         .unwrap();
     assert!(matches!(
         runtime.get_provider_auth_status("stale-provider"),
-        ProviderAuthStatus { configured: true, .. }
+        AuthStatus { configured: true, .. }
     ));
 
     stalled.arm_list_stall();
     let started_wait = stalled.started.notified();
     let rt_stale = runtime.clone();
-    let stale_task = tokio::spawn(async move { rt_stale.get_available(None).await });
+    let stale_task = tokio::spawn(async move { rt_stale.get_available(None, None).await });
     started_wait.await;
 
     auth_storage.delete("stale-provider", None).await.unwrap();
     set_api_key(auth_storage.as_ref(), "current-provider", "current-key").await;
     runtime
-        .refresh(Some(ModelRuntimeRefreshOptions {
+        .refresh(Some(ModelsRefreshOptions {
             allow_network: Some(false),
             ..Default::default()
         }))
@@ -209,11 +210,11 @@ async fn does_not_let_a_stale_failure_overwrite_newer_availability_error_state()
     stalled.arm_list_stall();
     let started_wait = stalled.started.notified();
     let rt_stale = runtime.clone();
-    let stale_task = tokio::spawn(async move { rt_stale.get_available(None).await });
+    let stale_task = tokio::spawn(async move { rt_stale.get_available(None, None).await });
     started_wait.await;
 
     runtime
-        .refresh(Some(ModelRuntimeRefreshOptions {
+        .refresh(Some(ModelsRefreshOptions {
             allow_network: Some(false),
             ..Default::default()
         }))
@@ -252,10 +253,10 @@ async fn does_not_let_a_stale_provider_scoped_failure_overwrite_a_newer_availabi
     let started_wait = stalled.started.notified();
     let rt_stale = runtime.clone();
     let prov_c = provider.clone();
-    let stale_task = tokio::spawn(async move { rt_stale.get_available(Some(&prov_c)).await });
+    let stale_task = tokio::spawn(async move { rt_stale.get_available(Some(&prov_c), None).await });
     tokio::select! {
         _ = started_wait => {
-            runtime.get_available(None).await.unwrap();
+            runtime.get_available(None, None).await.unwrap();
             assert_eq!(runtime.get_error(), None);
             stalled.release();
             let res = stale_task.await.unwrap();
@@ -266,7 +267,7 @@ async fn does_not_let_a_stale_provider_scoped_failure_overwrite_a_newer_availabi
         }
         res = stale_task => {
             let _ = res;
-            runtime.get_available(None).await.unwrap();
+            runtime.get_available(None, None).await.unwrap();
             assert_eq!(runtime.get_error(), None);
         }
     }

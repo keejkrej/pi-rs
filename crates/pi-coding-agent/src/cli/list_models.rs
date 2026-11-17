@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use pi_ai::{Model, ModelInputType};
+use pi_ai::{AuthOperationOptions, Model, ModelInput};
 use pi_js::abort::AbortSignal;
 use pi_tui::fuzzy::fuzzy_filter;
 
@@ -54,7 +54,9 @@ pub async fn list_models(
         )));
     }
 
-    let models = model_runtime.get_available(None, signal).await?;
+    let models = model_runtime
+        .get_available(None, signal.map(|s| AuthOperationOptions { signal: Some(s) }))
+        .await?;
     if models.is_empty() {
         pi_js::console::log(&format_no_models_available_message());
         return Ok(());
@@ -87,7 +89,7 @@ pub async fn list_models(
             context: format_token_count(m.context_window),
             max_out: format_token_count(m.max_tokens),
             thinking: if m.reasoning { "yes" } else { "no" },
-            images: if m.input.contains(&ModelInputType::Image) {
+            images: if m.input.contains(&ModelInput::Image) {
                 "yes"
             } else {
                 "no"

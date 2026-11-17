@@ -18,9 +18,9 @@ use crate::core::session_manager::{NewSessionOptions as ManagerNewSessionOptions
 use crate::utils::paths::{PathInputOptions, resolve_path};
 
 pub use crate::core::agent_session_services::{
-    AgentSessionRuntimeDiagnostic as RuntimeDiagnostic, AgentSessionRuntimeDiagnosticType,
-    CreateAgentSessionFromServicesOptions, CreateAgentSessionServicesOptions, create_agent_session_from_services,
-    create_agent_session_services,
+    AgentSessionRuntimeDiagnostic, AgentSessionRuntimeDiagnostic as RuntimeDiagnostic,
+    AgentSessionRuntimeDiagnosticType, AgentSessionServices, CreateAgentSessionFromServicesOptions,
+    CreateAgentSessionServicesOptions, create_agent_session_from_services, create_agent_session_services,
 };
 
 /// Result returned by runtime creation.
@@ -374,7 +374,7 @@ impl AgentSessionRuntime {
         let session_manager = if current_session.session_manager().is_persisted() {
             SessionManager::create(&current_cwd, Some(&session_dir), None)?
         } else {
-            SessionManager::in_memory(Some(&current_cwd), None)
+            SessionManager::in_memory(Some(&current_cwd), None, None)?
         };
         if let Some(parent_session) = options.parent_session {
             session_manager.new_session(Some(ManagerNewSessionOptions {

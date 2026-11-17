@@ -5,12 +5,10 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::types::{AgentMessage, AgentTool};
+use pi_ai::compat::clear_api_providers;
 use pi_ai::types::{AssistantMessage, Model, StopReason, Usage};
 use pi_ai::utils::retry::{RetryCallbacks, RetryPolicy};
-use pi_ai::{
-    calculate_context_tokens, content_text, estimate_context_tokens, is_context_overflow, is_recoverable_length,
-    is_retryable_assistant_error, reset_api_providers, retry_delay_ms,
-};
+use pi_ai::{content_text, is_context_overflow, is_recoverable_length, is_retryable_assistant_error, retry_delay_ms};
 use pi_js::abort::{AbortController, AbortSignal};
 use serde_json::Value;
 
@@ -18,11 +16,10 @@ use crate::core::auth_guidance::format_no_model_selected_message;
 use crate::core::bash_executor::{BashOperations, BashResult, execute_bash_with_operations};
 use crate::core::bug_report::{GenerateBugReportSummaryOptions, generate_bug_report_summary};
 use crate::core::compaction::branch_summarization::{
-    BranchSummaryDetails, GenerateBranchSummaryOptions, TreePreparation, collect_entries_for_branch_summary,
-    generate_branch_summary,
+    BranchSummaryDetails, GenerateBranchSummaryOptions, collect_entries_for_branch_summary, generate_branch_summary,
 };
 use crate::core::compaction::compaction::{
-    CompactionPreparation, CompactionResult, compact as run_compact, estimate_messages_tokens,
+    CompactionPreparation, CompactionResult, calculate_context_tokens, compact as run_compact, estimate_context_tokens,
     estimate_projected_context_tokens, prepare_compaction, should_compact,
 };
 use crate::core::defaults::{from_agent_thinking_level, to_agent_thinking_level};
@@ -33,14 +30,15 @@ use crate::core::extensions::types::{
     ExtensionProviderActions, FlagValue, ReplacedSessionContext, ResourcesDiscoverReason, SessionBeforeCompactEvent,
     SessionBeforeTreeEvent, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent,
-    SlashCommandInfo, SlashCommandSource, ToolDefinition,
+    SlashCommandInfo, SlashCommandSource, ToolDefinition, TreePreparation,
 };
 use crate::core::extensions::wrapper::wrap_registered_tools;
 use crate::core::messages::BashExecutionMessage;
 use crate::core::model_registry::ModelRegistry;
-use crate::core::resource_loader::{ResourceExtensionPathEntry, ResourceExtensionPaths, ResourcePathMetadata};
+use crate::core::package_manager::PathMetadata;
+use crate::core::resource_loader::{ExtensionResourcePath, ResourceExtensionPaths};
 use crate::core::session_export::export_session_to_jsonl;
-use crate::core::session_manager::{BranchSummaryEntry, CompactionEntry, SessionEntry, get_latest_compaction_entry};
+use crate::core::session_manager::{BranchSummaryEntry, SessionEntry, get_latest_compaction_entry};
 use crate::core::settings_manager::DEFAULT_TOOL_NAMES;
 use crate::core::source_info::{
     BUILTIN_PATH_PREFIX, SourceInfo, SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
@@ -63,7 +61,7 @@ fn to_ext_compaction_reason(reason: CompactionReason) -> ExtCompactionReason {
 }
 
 fn entry_timestamp_ms(timestamp_iso: &str) -> Option<i64> {
-    pi_js::time::parse_iso_ms(timestamp_iso).ok()
+    pi_js::time::parse_date(timestamp_iso)
 }
 
 struct SessionSummarizationRetryCallbacks {
@@ -258,15 +256,15 @@ impl AgentSession {
 
             let entry_id = self.inner.session_manager.append_compaction(
                 &compact_res.summary,
-                &compact_res.first_kept_entry_id,
+                Some(&compact_res.first_kept_entry_id),
                 compact_res.tokens_before,
                 compact_res.details.clone(),
                 Some(from_extension),
                 compact_res.usage.clone(),
-            );
+            )?;
             self._refresh_finalized_context();
             let estimated_tokens_after =
-                estimate_messages_tokens(&self.inner.session_manager.build_session_projection().messages);
+                estimate_context_tokens(&self.inner.session_manager.build_session_projection().messages).tokens;
 
             let saved_entry = self
                 .inner
@@ -608,15 +606,15 @@ impl AgentSession {
 
             let entry_id = self.inner.session_manager.append_compaction(
                 &compact_res.summary,
-                &compact_res.first_kept_entry_id,
+                Some(&compact_res.first_kept_entry_id),
                 compact_res.tokens_before,
                 compact_res.details.clone(),
                 Some(from_extension),
                 compact_res.usage.clone(),
-            );
+            )?;
             self._refresh_finalized_context();
             let estimated_tokens_after =
-                estimate_messages_tokens(&self.inner.session_manager.build_session_projection().messages);
+                estimate_context_tokens(&self.inner.session_manager.build_session_projection().messages).tokens;
 
             let saved_entry = self
                 .inner
@@ -774,9 +772,12 @@ impl AgentSession {
         }
 
         let extension_paths = ResourceExtensionPaths {
-            skill_paths: self.build_extension_resource_paths(&discovered.skill_paths),
-            prompt_paths: self.build_extension_resource_paths(&discovered.prompt_paths),
-            theme_paths: self.build_extension_resource_paths(&discovered.theme_paths),
+            skill_paths: (!discovered.skill_paths.is_empty())
+                .then(|| self.build_extension_resource_paths(&discovered.skill_paths)),
+            prompt_paths: (!discovered.prompt_paths.is_empty())
+                .then(|| self.build_extension_resource_paths(&discovered.prompt_paths)),
+            theme_paths: (!discovered.theme_paths.is_empty())
+                .then(|| self.build_extension_resource_paths(&discovered.theme_paths)),
         };
         self.inner.resource_loader.extend_resources(extension_paths);
         let active = self.get_active_tool_names();
@@ -786,7 +787,7 @@ impl AgentSession {
     fn build_extension_resource_paths(
         &self,
         entries: &[crate::core::extensions::runner::DiscoveredResourcePath],
-    ) -> Vec<ResourceExtensionPathEntry> {
+    ) -> Vec<ExtensionResourcePath> {
         entries
             .iter()
             .map(|entry| {
@@ -796,13 +797,15 @@ impl AgentSession {
                 } else {
                     Some(pi_js::path::dirname(&entry.extension_path))
                 };
-                ResourceExtensionPathEntry {
+                ExtensionResourcePath {
                     path: entry.path.clone(),
-                    metadata: ResourcePathMetadata {
+                    metadata: PathMetadata {
                         source,
                         scope: SourceScope::Temporary,
                         origin: SourceOrigin::TopLevel,
                         base_dir,
+                        package_root: None,
+                        changelog_path: None,
                     },
                 }
             })
@@ -916,7 +919,7 @@ impl AgentSession {
                 Arc::new(move |msg, options| {
                     let weak = weak.clone();
                     let runner = runner.clone();
-                    pi_js::task::spawn(async move {
+                    tokio::spawn(async move {
                         if let Some(inner) = weak.upgrade() {
                             let session = AgentSession { inner };
                             let draft = SendCustomMessageDraft {
@@ -952,7 +955,7 @@ impl AgentSession {
                 Arc::new(move |content, options| {
                     let weak = weak.clone();
                     let runner = runner.clone();
-                    pi_js::task::spawn(async move {
+                    tokio::spawn(async move {
                         if let Some(inner) = weak.upgrade() {
                             let session = AgentSession { inner };
                             let input = match content {
@@ -984,11 +987,11 @@ impl AgentSession {
             append_entry: {
                 let weak = weak.clone();
                 Arc::new(move |custom_type, data| {
-                    if let Some(inner) = weak.upgrade() {
-                        let entry_id = inner.session_manager.append_custom_entry(custom_type, data);
-                        if let Some(entry) = inner.session_manager.get_entry(&entry_id) {
-                            AgentSession { inner }._emit(AgentSessionEvent::EntryAppended { entry });
-                        }
+                    if let Some(inner) = weak.upgrade()
+                        && let Ok(entry_id) = inner.session_manager.append_custom_entry(custom_type, data)
+                        && let Some(entry) = inner.session_manager.get_entry(&entry_id)
+                    {
+                        AgentSession { inner }._emit(AgentSessionEvent::EntryAppended { entry });
                     }
                 })
             },
@@ -1011,7 +1014,7 @@ impl AgentSession {
                 let weak = weak.clone();
                 Arc::new(move |entry_id, label| {
                     if let Some(inner) = weak.upgrade() {
-                        inner.session_manager.append_label_change(entry_id, label);
+                        let _ = inner.session_manager.append_label_change(entry_id, label);
                     }
                 })
             },
@@ -1136,7 +1139,7 @@ impl AgentSession {
                         if let Some(handler) = handler {
                             handler();
                         } else {
-                            pi_js::task::spawn(async move {
+                            tokio::spawn(async move {
                                 AgentSession { inner }.abort().await;
                             });
                         }
@@ -1178,7 +1181,7 @@ impl AgentSession {
                 let weak = weak.clone();
                 Arc::new(move |options| {
                     if let Some(inner) = weak.upgrade() {
-                        pi_js::task::spawn(async move {
+                        tokio::spawn(async move {
                             let session = AgentSession { inner };
                             let instr = options.as_ref().and_then(|o| o.custom_instructions.as_deref());
                             match session.compact(instr).await {
@@ -1602,10 +1605,10 @@ impl AgentSession {
             IndexSet::new()
         };
 
-        self.inner.settings_manager.reload().await?;
+        self.inner.settings_manager.reload().await;
         self.sync_queue_modes_from_settings();
-        reset_api_providers();
-        self.inner.resource_loader.reload().await?;
+        clear_api_providers();
+        self.inner.resource_loader.reload(None).await?;
 
         let added_default_tools: Vec<String> = if uses_default_tools {
             self.inner
@@ -1896,7 +1899,8 @@ impl AgentSession {
                 .pending_bash_messages
                 .push(bash_message);
         } else {
-            self.inner
+            let _ = self
+                .inner
                 .session_manager
                 .append_message(AgentMessage::from(bash_message));
             self._refresh_finalized_context();
@@ -1942,7 +1946,8 @@ impl AgentSession {
             std::mem::take(&mut guard.pending_bash_messages)
         };
         for bash_message in pending {
-            self.inner
+            let _ = self
+                .inner
                 .session_manager
                 .append_message(AgentMessage::from(bash_message));
         }
@@ -1954,7 +1959,7 @@ impl AgentSession {
     // =========================================================================
 
     pub fn set_session_name(&self, name: &str) {
-        self.inner.session_manager.append_session_info(name);
+        let _ = self.inner.session_manager.append_session_info(name);
         let session_name = self.inner.session_manager.get_session_name();
         self._emit(AgentSessionEvent::SessionInfoChanged {
             name: session_name.clone(),
@@ -2169,7 +2174,7 @@ impl AgentSession {
                 _ => None,
             });
             if let Some(ref lbl) = label {
-                self.inner.session_manager.append_label_change(&summary_id, Some(lbl));
+                let _ = self.inner.session_manager.append_label_change(&summary_id, Some(lbl));
             }
         } else if let Some(ref leaf) = new_leaf_id {
             self.inner.session_manager.branch(leaf)?;
@@ -2180,7 +2185,7 @@ impl AgentSession {
         if let Some(ref lbl) = label
             && summary_text.is_none()
         {
-            self.inner.session_manager.append_label_change(target_id, Some(lbl));
+            let _ = self.inner.session_manager.append_label_change(target_id, Some(lbl));
         }
 
         self._refresh_finalized_context();

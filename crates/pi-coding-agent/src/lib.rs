@@ -74,9 +74,10 @@ pub use crate::core::resource_loader::{
     DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceDiagnostic, ResourceLoader,
 };
 pub use crate::core::sdk::{
-    AgentSessionRuntime, AgentSessionRuntimeDiagnostic, AgentSessionRuntimeResult, AgentSessionServices,
-    CreateAgentSessionFromServicesOptions, CreateAgentSessionOptions, CreateAgentSessionResult,
-    CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeOptions, CreateAgentSessionServicesOptions, NoToolsMode,
+    AgentSessionRuntime, AgentSessionRuntimeDiagnostic, AgentSessionServices, CreateAgentSessionFromServicesOptions,
+    CreateAgentSessionOptions, CreateAgentSessionResult, CreateAgentSessionRuntimeFactory,
+    CreateAgentSessionRuntimeOptions, CreateAgentSessionRuntimeResult,
+    CreateAgentSessionRuntimeResult as AgentSessionRuntimeResult, CreateAgentSessionServicesOptions, NoToolsMode,
     PromptTemplate, ScopedModelEntry, Skill, create_agent_session, create_agent_session_from_services,
     create_agent_session_runtime, create_agent_session_services, ensure_default_stream_fn,
 };

@@ -1,8 +1,9 @@
 //! Port of packages/coding-agent/src/core/agent-session.ts#L1386-L2666
 
+use base64::Engine as _;
 use indexmap::{IndexMap, IndexSet};
-use pi_agent_core::agent::{Agent, AgentState, PromptInput};
-use pi_agent_core::types::{AgentContext, AgentMessage, AgentTool, QueueMode};
+use pi_agent_core::agent::{Agent, PromptInput};
+use pi_agent_core::types::{AgentContext, AgentMessage, AgentState, AgentTool, QueueMode};
 use pi_ai::types::{
     AssistantMessage, ImageContent, Model, ModelThinkingLevel, SystemMessage, TextContent, UserContentBlock,
     UserMessage, UserMessageContent,
@@ -12,7 +13,7 @@ use pi_js::BoxFuture;
 use serde_json::Value;
 
 use crate::core::auth_guidance::{format_no_api_key_found_message, format_no_model_selected_message};
-use crate::core::cache_warmer::{CacheWarmingMode, CacheWarmingStatus};
+use crate::core::cache_warmer::CacheWarmingStatus;
 use crate::core::defaults::DEFAULT_THINKING_LEVEL;
 use crate::core::extensions::types::{
     AgentBeforeSettleEvent, BeforeAgentStartEvent, BoundaryEntryBuilder, CustomMessageContent, InputDeliveryBehavior,
@@ -24,7 +25,7 @@ use crate::core::prompt_templates::{PromptTemplate, expand_prompt_template};
 use crate::core::resource_loader::ResourceLoader;
 use crate::core::sdk::ScopedModelEntry;
 use crate::core::session_manager::SessionManager;
-use crate::core::settings_manager::SettingsManager;
+use crate::core::settings_manager::{CacheWarmingMode, SettingsManager};
 use crate::core::system_prompt::{
     NormalizedBuildSystemPromptOptions, build_system_prompt, build_system_prompt_sections, diff_system_prompt_sections,
     normalize_build_system_prompt_options,
@@ -1009,7 +1010,7 @@ impl AgentSession {
         let mut normalized_images = Vec::new();
         let mut hints = Vec::new();
         for image in images {
-            let Ok(bytes) = pi_js::base64::decode(&image.data) else {
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&image.data) else {
                 hints.push("[Image omitted: invalid base64 payload.]".to_string());
                 continue;
             };
@@ -1495,7 +1496,7 @@ impl AgentSession {
     }
 
     fn _append_custom_message(&self, app_message: CustomMessage) {
-        self.inner.session_manager.append_custom_message_entry(
+        let _ = self.inner.session_manager.append_custom_message_entry(
             &app_message.custom_type,
             app_message.content.clone(),
             app_message.display,
@@ -1682,7 +1683,8 @@ impl AgentSession {
             self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).has_model = true;
         }
         self.inner.agent.set_model(model.clone());
-        self.inner
+        let _ = self
+            .inner
             .session_manager
             .append_model_change(&model.provider, &model.id);
 
@@ -1795,7 +1797,8 @@ impl AgentSession {
             self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).has_model = true;
         }
         self.inner.agent.set_model(next.model.clone());
-        self.inner
+        let _ = self
+            .inner
             .session_manager
             .append_model_change(&next.model.provider, &next.model.id);
         if options.persist == Some(true) {
@@ -1843,7 +1846,8 @@ impl AgentSession {
             self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).has_model = true;
         }
         self.inner.agent.set_model(next_model.clone());
-        self.inner
+        let _ = self
+            .inner
             .session_manager
             .append_model_change(&next_model.provider, &next_model.id);
         if options.persist == Some(true) {
@@ -1893,7 +1897,10 @@ impl AgentSession {
         }
 
         if is_changing {
-            self.inner.session_manager.append_thinking_level_change(effective_level);
+            let _ = self
+                .inner
+                .session_manager
+                .append_thinking_level_change(effective_level.as_str());
             self._emit(AgentSessionEvent::ThinkingLevelChanged { level: effective_level });
             if let Some(runner) = runner {
                 let ev = ThinkingLevelSelectEvent {

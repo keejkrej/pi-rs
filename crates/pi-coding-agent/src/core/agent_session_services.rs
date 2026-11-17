@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::get_agent_dir;
 use crate::core::extensions::types::{FlagType, FlagValue, SessionStartEvent, ToolDefinition};
-use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions, ModelRuntimeRefreshOptions};
+use pi_ai::ModelsRefreshOptions;
+
+use crate::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime, ModelRuntimeCreateOptions};
 use crate::core::resource_loader::{
     DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader, ResourceLoaderReloadOptions,
 };
@@ -20,25 +22,9 @@ use crate::core::session_manager::SessionManager;
 use crate::core::settings_manager::SettingsManager;
 use crate::utils::paths::{PathInputOptions, resolve_path};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentSessionRuntimeDiagnosticType {
-    Info,
-    Warning,
-    Error,
-}
-
-/// Non-fatal issues collected while creating services or sessions.
-///
-/// Runtime creation returns diagnostics to the caller instead of printing or
-/// exiting. The app layer decides whether warnings should be shown and whether
-/// errors should abort startup.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSessionRuntimeDiagnostic {
-    pub r#type: AgentSessionRuntimeDiagnosticType,
-    pub message: String,
-}
+pub use crate::core::diagnostics::{
+    AgentSessionRuntimeDiagnostic, AgentSessionRuntimeDiagnosticLevel as AgentSessionRuntimeDiagnosticType,
+};
 
 /// Inputs for creating cwd-bound runtime services.
 ///
@@ -179,7 +165,7 @@ pub async fn create_agent_session_services(
 
     let settings_manager = match options.settings_manager {
         Some(sm) => sm,
-        None => SettingsManager::create(&cwd, Some(&agent_dir), None)?,
+        None => SettingsManager::create(&cwd, Some(&agent_dir), None),
     };
 
     let mut loader_opts = options.resource_loader_options.unwrap_or_default();
@@ -247,7 +233,7 @@ pub async fn create_agent_session_services(
     }
 
     let _ = model_runtime
-        .refresh(Some(ModelRuntimeRefreshOptions {
+        .refresh(Some(ModelsRefreshOptions {
             allow_network: Some(false),
             ..Default::default()
         }))

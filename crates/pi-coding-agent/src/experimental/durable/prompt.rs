@@ -8,7 +8,7 @@ use pi_durable::harness::types::{Extension, PromptInput, PromptSection};
 use pi_durable::{define_extension, section_with_options};
 
 use crate::config::get_agent_dir;
-use crate::core::resource_loader::{LoadProjectContextFilesOptions, ProjectContextFile, load_project_context_files};
+use crate::core::resource_loader::{ContextFile, LoadProjectContextFilesOptions, load_project_context_files};
 use crate::core::settings_manager::SettingsManager;
 use crate::core::skills::{LoadSkillsOptions, Skill, load_skills};
 use crate::core::system_prompt::{BuildSystemPromptOptions, build_system_prompt_sections};
@@ -25,7 +25,7 @@ const KEYS: [&str; 7] = ["preamble", "tools", "rules", "docs", "project_context"
 
 #[derive(Clone)]
 struct CachedResources {
-    context_files: Vec<ProjectContextFile>,
+    context_files: Vec<ContextFile>,
     skills: Vec<Skill>,
 }
 

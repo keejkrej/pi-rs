@@ -4,8 +4,8 @@ use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use pi_ai::models_are_equal;
-use pi_ai::types::{ImageContent, ModelThinkingLevel};
+use pi_ai::types::ImageContent;
+use pi_ai::{AuthOperationOptions, CredentialStore, ModelsRefreshOptions, models_are_equal};
 use pi_js::abort::AbortController;
 use pi_tui::set_capability_overrides;
 
@@ -21,6 +21,7 @@ use crate::cli::auth_command::{
     AuthCommandKind, get_auth_command_name, get_auth_command_usage, is_auth_command_help, parse_auth_command,
     print_auth_command_help, validate_auth_command_args,
 };
+use crate::cli::config_selector::{ConfigSelectorOptions, select_config};
 use crate::cli::credential_print::resolve_credential_for_print;
 use crate::cli::file_processor::{ProcessFileOptions, process_file_arguments};
 use crate::cli::initial_message::{InitialMessageInput, build_initial_message};
@@ -30,14 +31,14 @@ use crate::cli::startup_ui::{should_run_first_time_setup, show_first_time_setup,
 use crate::config::{APP_NAME, ENV_SESSION_DIR, VERSION, expand_tilde_path, get_agent_dir, get_package_dir};
 use crate::core::agent_session_runtime::{
     AgentSessionRuntimeDiagnostic, AgentSessionRuntimeDiagnosticType, CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeOptions, create_agent_session_runtime,
+    CreateAgentSessionRuntimeOptions, CreateAgentSessionRuntimeResult, create_agent_session_runtime,
 };
 use crate::core::agent_session_services::{
     CreateAgentSessionFromServicesOptions, CreateAgentSessionServicesOptions, create_agent_session_from_services,
     create_agent_session_services,
 };
 use crate::core::auth_guidance::format_no_models_available_message;
-use crate::core::auth_storage::{AuthStorage, CredentialsStore, ReadOnlyAuthStorage};
+use crate::core::auth_storage::{AuthStorage, ReadOnlyAuthStorage};
 use crate::core::export_html::export_from_file;
 use crate::core::extensions::types::{FlagValue, InlineExtension};
 use crate::core::http_dispatcher::{apply_http_proxy_settings, configure_http_dispatcher};
@@ -52,7 +53,7 @@ use crate::core::session_cwd::{
 };
 use crate::core::session_manager::{NewSessionOptions, SessionManager, assert_valid_session_id};
 use crate::core::settings_diagnostics::{collect_settings_diagnostics, deduplicate_diagnostics};
-use crate::core::settings_manager::SettingsManager;
+use crate::core::settings_manager::{SettingsManager, SettingsManagerCreateOptions};
 use crate::core::timings::{TimingNamespaceKind, print_timings, reset_timings, time};
 use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
 use crate::experimental::coordinator::run_coordinator_process;
@@ -63,7 +64,8 @@ use crate::extensions::built_in_extensions;
 use crate::extensions::mcp::cli::{McpCommandOptions, run_mcp_command};
 use crate::migrations::{run_migrations, show_deprecation_warnings};
 use crate::package_manager_cli::{
-    PackageCommandRuntimeOptions, cleanup_managed_install, handle_config_command, handle_package_command,
+    ConfigSelectorInput, PackageCommandRuntimeOptions, cleanup_managed_install, handle_config_command,
+    handle_package_command,
 };
 use crate::utils::paths::{PathInputOptions, is_local_path, normalize_path, resolve_path};
 use crate::utils::windows_self_update::cleanup_windows_self_update_quarantine;
@@ -192,7 +194,7 @@ async fn run_auth_command(args: &[String]) -> pi_js::Result<bool> {
             &model_runtime,
             command.kind,
             command.min_expiry_ms,
-            Some(&signal),
+            Some(signal),
         )
         .await
         {
@@ -217,30 +219,19 @@ async fn run_auth_command(args: &[String]) -> pi_js::Result<bool> {
 
     let mut credential: Option<String> = None;
     let result = match async {
-        let credentials: CredentialsStore = if command.no_refresh {
-            CredentialsStore::ReadOnly(ReadOnlyAuthStorage::new(None))
+        let credentials: Arc<dyn CredentialStore> = if command.no_refresh {
+            Arc::new(ReadOnlyAuthStorage::new(None))
         } else {
-            CredentialsStore::File(AuthStorage::create(None))
+            Arc::new(AuthStorage::create(None))
         };
-        let model_runtime = create_auth_check_model_runtime(credentials.clone()).await?;
-        let mut res = check_provider_auth(
-            &parsed,
-            &model_runtime,
-            AuthCheckOptions {
-                refresh: Some(!command.no_refresh),
-            },
-        )
-        .await?;
+        let model_runtime = create_auth_check_model_runtime(Arc::clone(&credentials)).await?;
+        let auth_opts = AuthCheckOptions {
+            refresh: !command.no_refresh,
+        };
+        let mut res = check_provider_auth(&parsed, &model_runtime, Some(auth_opts)).await?;
         if command.credentials && res.status == AuthCheckStatus::Ready {
-            credential = get_provider_credential(
-                &res.provider,
-                &model_runtime,
-                &credentials,
-                AuthCheckOptions {
-                    refresh: Some(!command.no_refresh),
-                },
-            )
-            .await;
+            credential =
+                get_provider_credential(&res.provider, &model_runtime, credentials.as_ref(), auth_opts).await?;
             if credential.is_none() {
                 res = AuthCheckResult {
                     status: AuthCheckStatus::NotReady,
@@ -259,11 +250,7 @@ async fn run_auth_command(args: &[String]) -> pi_js::Result<bool> {
             status: AuthCheckStatus::Invalid,
             provider: requested_provider.or(requested_model).unwrap_or_default(),
             reason: Some(crate::cli::auth_check::AuthCheckReason::InvalidState),
-            auth_kind: None,
-            source: None,
-            expires_at: None,
-            missing_env_var: None,
-            error: None,
+            auth_type: None,
         },
     };
 
@@ -603,10 +590,10 @@ fn build_session_options(
     }
     if let Some(ref cli_model) = parsed.model {
         let resolved = resolve_cli_model(ResolveCliModelOptions {
-            cli_provider: parsed.provider.clone(),
-            cli_model: Some(cli_model.clone()),
+            cli_provider: parsed.provider.as_deref(),
+            cli_model: Some(cli_model.as_str()),
             cli_thinking: parsed.thinking,
-            model_runtime: model_runtime.clone(),
+            model_runtime,
         });
         if let Some(warning) = resolved.warning {
             diagnostics.push(AgentSessionRuntimeDiagnostic {
@@ -743,7 +730,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
         extension_factories.extend(extra);
     }
 
-    let env_offline = pi_js::env::get("PI_OFFLINE");
+    let env_offline = pi_js::env::var("PI_OFFLINE");
     let offline_mode = args.iter().any(|a| a == "--offline") || is_truthy_env_flag(env_offline.as_deref());
     if offline_mode {
         pi_js::env::set_var("PI_OFFLINE", "1");
@@ -770,12 +757,30 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
 
     let cwd = pi_js::env::cwd();
     let agent_dir = get_agent_dir();
-    let bootstrap_settings = SettingsManager::create(&cwd, &agent_dir, Some(false));
+    let bootstrap_settings = SettingsManager::create(
+        &cwd,
+        Some(&agent_dir),
+        Some(SettingsManagerCreateOptions {
+            project_trusted: Some(false),
+        }),
+    );
     apply_http_proxy_settings(bootstrap_settings.get_global_settings().http_proxy.as_deref());
     let _ = configure_http_dispatcher(None);
 
     let pkg_opts = PackageCommandRuntimeOptions {
-        extension_factories: Some(extension_factories.clone()),
+        extension_factories: extension_factories.clone(),
+        select_config: Some(Arc::new(|input: ConfigSelectorInput| {
+            Box::pin(select_config(ConfigSelectorOptions {
+                resolved_paths_global: input.resolved_paths_global,
+                resolved_paths_project: input.resolved_paths_project,
+                settings_manager: input.settings_manager,
+                cwd: input.cwd,
+                agent_dir: input.agent_dir,
+                write_scope: input.write_scope,
+                project_mode_available: input.project_mode_available,
+            }))
+        })),
+        ..Default::default()
     };
     if let Some(exit_code) = handle_package_command(args, Some(&pkg_opts)).await? {
         if exit_code != 0 {
@@ -865,7 +870,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     let migration_res = run_migrations(&cwd);
     time("runMigrations", TimingNamespaceKind::Main);
 
-    let startup_settings = SettingsManager::create(&cwd, &agent_dir, None);
+    let startup_settings = SettingsManager::create(&cwd, Some(&agent_dir), None);
     let startup_settings_diagnostics = collect_settings_diagnostics(&startup_settings);
 
     if app_mode == AppMode::Interactive
@@ -883,7 +888,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
         startup_settings.apply_theme_override(theme);
     }
 
-    let env_session_dir = pi_js::env::get(&ENV_SESSION_DIR);
+    let env_session_dir = pi_js::env::var(&ENV_SESSION_DIR);
     let session_dir = parsed
         .session_dir
         .as_deref()
@@ -913,7 +918,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
             pi_js::console::error(&chalk().red().apply("Error: --name requires a non-empty value"));
             return Err(pi_js::Error::Exit(1));
         };
-        session_manager.append_session_info(&name);
+        session_manager.append_session_info(&name)?;
     }
     time("createSessionManager", TimingNamespaceKind::Main);
 
@@ -992,7 +997,13 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                     .unwrap_or(false)
             };
 
-            let runtime_settings = SettingsManager::create(&cwd, &agent_dir, Some(project_trusted));
+            let runtime_settings = SettingsManager::create(
+                &cwd,
+                Some(&agent_dir),
+                Some(SettingsManagerCreateOptions {
+                    project_trusted: Some(project_trusted),
+                }),
+            );
             let trust_diagnostics_slot: Arc<std::sync::Mutex<Vec<AgentSessionRuntimeDiagnostic>>> =
                 Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -1114,7 +1125,12 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                 && !patterns.is_empty()
             {
                 let sig = AbortController::new().signal();
-                resolve_model_scope(patterns, &services.model_runtime, Some(&sig)).await?
+                resolve_model_scope(
+                    patterns,
+                    &services.model_runtime,
+                    Some(AuthOperationOptions { signal: Some(sig) }),
+                )
+                .await?
             } else {
                 Vec::new()
             };
@@ -1162,12 +1178,11 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                     .set_thinking_level(created.session.thinking_level(), None);
             }
 
-            Ok(crate::core::agent_session_runtime::CreateAgentSessionRuntimeResult {
-                session: created.session,
+            Ok(CreateAgentSessionRuntimeResult::from_session_result(
+                created,
                 services,
-                model_fallback_message: created.model_fallback_message,
                 diagnostics,
-            })
+            ))
         })
     });
 
@@ -1210,7 +1225,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
             ListModelsOption::Pattern(p) => Some(p.as_str()),
         };
         let sig = AbortController::new().signal();
-        list_models(&services.model_runtime, search_pattern, Some(&sig)).await?;
+        list_models(&services.model_runtime, search_pattern, Some(sig)).await?;
         return Ok(());
     }
 
@@ -1268,7 +1283,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
         return Err(pi_js::Error::Exit(1));
     }
 
-    let startup_benchmark = is_truthy_env_flag(pi_js::env::get("PI_STARTUP_BENCHMARK").as_deref());
+    let startup_benchmark = is_truthy_env_flag(pi_js::env::var("PI_STARTUP_BENCHMARK").as_deref());
     if startup_benchmark && app_mode != AppMode::Interactive {
         pi_js::console::error(
             &chalk()
@@ -1280,10 +1295,15 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
 
     if !offline_mode && app_mode == AppMode::Rpc {
         let mr = services.model_runtime.clone();
-        pi_js::task::spawn(async move {
+        tokio::spawn(async move {
             let controller = AbortController::new();
             let sig = controller.signal();
-            let _ = mr.refresh(Some(sig)).await;
+            let _ = mr
+                .refresh(Some(ModelsRefreshOptions {
+                    signal: Some(sig),
+                    ..Default::default()
+                }))
+                .await;
         });
     }
 

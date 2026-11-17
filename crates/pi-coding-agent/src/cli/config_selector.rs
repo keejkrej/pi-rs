@@ -2,12 +2,13 @@
 
 //! TUI config selector for `pi config` command
 
-use crate::core::package_manager::ScopedResolvedPaths;
+use crate::core::package_manager::ResolvedPaths;
 use crate::core::settings_manager::SettingsManager;
 
 #[derive(Clone)]
 pub struct ConfigSelectorOptions {
-    pub resolved_paths: ScopedResolvedPaths,
+    pub resolved_paths_global: ResolvedPaths,
+    pub resolved_paths_project: ResolvedPaths,
     pub settings_manager: SettingsManager,
     pub cwd: String,
     pub agent_dir: String,

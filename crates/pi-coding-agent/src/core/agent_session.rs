@@ -9,19 +9,20 @@ pub use part_3::*;
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::agent::Agent;
+use pi_agent_core::agent_loop::run_tool_call;
 use pi_agent_core::types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool,
     AgentToolCall, AgentToolCallOutcome, BeforeToolCallContext, BeforeToolCallResult, FinishTurnAction,
     FinishTurnContext, FinishTurnDecision, PrepareNextTurnContext, PrepareRequestContext, PrepareRequestResult,
-    run_tool_call,
 };
 use pi_ai::types::{
     AssistantMessage, AssistantMessageEvent, ImageContent, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders,
     SystemMessage, ToolResultMessage, Usage,
 };
-use pi_ai::{clamp_thinking_level, content_text, get_current_system_message, retry_delay_ms};
+use pi_ai::{AnyModel, clamp_thinking_level, content_text, get_current_system_message, retry_delay_ms};
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::{BoxFuture, Unsubscribe};
 use regex::Regex;
@@ -45,19 +46,23 @@ use crate::core::extensions::types::{
     TurnStartEvent,
 };
 use crate::core::messages::{BashExecutionMessage, convert_to_llm};
-use crate::core::model_runtime::{ModelRuntime, ModelRuntimeGetAuthOptions, ModelRuntimeResolveOptions};
-use crate::core::nested_tool_calls::{NestedToolCallRunner, NestedToolCallRunnerOptions};
+use crate::core::model_runtime::{ModelRuntime, ModelRuntimeAuthOverrides, ResolveModelOptions};
+use crate::core::nested_tool_calls::{
+    NestedToolCallHost, NestedToolCallRunner, NestedToolExecutionEvent, NestedToolUpdateAsyncCallback,
+};
 use crate::core::resource_loader::ResourceLoader;
 use crate::core::sdk::ScopedModelEntry;
 use crate::core::session_manager::{
-    BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager, SessionProjection, get_latest_compaction_entry,
+    BranchSummaryEntry, CompactionEntry, FileEntry, SessionEntry, SessionManager, SessionProjection,
+    get_latest_compaction_entry,
 };
 use crate::core::settings_manager::SettingsManager;
 use crate::core::source_info::SourceInfo;
 use crate::core::system_prompt::{NormalizedBuildSystemPromptOptions, build_system_prompt_sections};
 use crate::core::usage_totals::combine_usage;
 use crate::core::virtual_models::{
-    VIRTUAL_MODEL_STATE_ENTRY, VirtualModelStateData, get_branch_selection, get_virtual_model_state, is_virtual_model,
+    ModelRouteReason, VIRTUAL_MODEL_STATE_ENTRY, VirtualModelStateData, get_branch_selection, get_virtual_model_state,
+    is_virtual_model,
 };
 use crate::utils::tool_result_images::{NormalizeToolResultImagesOptions, normalize_tool_result_images};
 
@@ -686,9 +691,9 @@ impl AgentSession {
         let result = match self
             .inner
             .model_runtime
-            .get_auth_for_model(
-                model,
-                Some(ModelRuntimeGetAuthOptions {
+            .get_auth_model(
+                &AnyModel::Chat(model.clone()),
+                Some(ModelRuntimeAuthOverrides {
                     signal,
                     ..Default::default()
                 }),
@@ -742,9 +747,9 @@ impl AgentSession {
                 .resolve_model(
                     selected_model,
                     &messages,
-                    ModelRuntimeResolveOptions {
-                        reason: Some("direct".to_string()),
-                        thinking_level: Some(current_thinking),
+                    ResolveModelOptions {
+                        reason: ModelRouteReason::Direct,
+                        thinking_level: current_thinking,
                         signal: signal.clone(),
                         ..Default::default()
                     },
@@ -769,9 +774,9 @@ impl AgentSession {
         match self
             .inner
             .model_runtime
-            .get_auth_for_model(
-                &model,
-                Some(ModelRuntimeGetAuthOptions {
+            .get_auth_model(
+                &AnyModel::Chat(model.clone()),
+                Some(ModelRuntimeAuthOverrides {
                     signal: signal.clone(),
                     ..Default::default()
                 }),
@@ -849,7 +854,8 @@ impl AgentSession {
         if !is_virtual_model(&model) && !recorded_model.as_ref().is_some_and(is_virtual_model) {
             return;
         }
-        self.inner
+        let _ = self
+            .inner
             .session_manager
             .append_model_change(&model.provider, &model.id);
     }
@@ -1001,106 +1007,153 @@ impl AgentSession {
             if let Some(existing) = guard.nested_tool_calls.clone() {
                 existing
             } else {
-                let weak_tools = Arc::downgrade(&self.inner);
-                let weak_seq = Arc::downgrade(&self.inner);
-                let weak_run = Arc::downgrade(&self.inner);
-                let weak_emit = Arc::downgrade(&self.inner);
-                let created = Arc::new(NestedToolCallRunner::new(NestedToolCallRunnerOptions {
-                    get_tools: Arc::new(move || {
-                        weak_tools
+                struct SessionNestedToolHost {
+                    weak: std::sync::Weak<AgentSessionInner>,
+                }
+
+                #[async_trait]
+                impl NestedToolCallHost for SessionNestedToolHost {
+                    fn get_tools(&self) -> Vec<AgentTool> {
+                        self.weak
                             .upgrade()
                             .map(|inner| AgentSession { inner }._get_callable_tools(None))
                             .unwrap_or_default()
-                    }),
-                    is_sequential: Arc::new(move || {
-                        weak_seq.upgrade().is_some_and(|inner| {
+                    }
+
+                    fn is_sequential(&self) -> bool {
+                        self.weak.upgrade().is_some_and(|inner| {
                             inner.agent.tool_execution() == pi_agent_core::ToolExecutionMode::Sequential
                         })
-                    }),
-                    run_tool_call: Arc::new(move |tool_call: AgentToolCall, parent_id, signal, on_update| {
-                        let weak = weak_run.clone();
-                        Box::pin(async move {
-                            let Some(inner) = weak.upgrade() else {
-                                return Ok(AgentToolCallOutcome {
-                                    tool_call,
-                                    result: crate::core::extensions::types::AgentToolResult::text(
-                                        "No assistant message issued this call",
-                                    ),
-                                    is_error: true,
-                                });
-                            };
-                            let session = AgentSession { inner };
-                            let Some(assistant_message) = session._find_last_assistant_message() else {
-                                return Ok(AgentToolCallOutcome {
-                                    tool_call,
-                                    result: crate::core::extensions::types::AgentToolResult::text(
-                                        "No assistant message issued this call",
-                                    ),
-                                    is_error: true,
-                                });
-                            };
-                            let tools = session._get_callable_tools(None);
-                            let st = session.inner.agent.state();
-                            let weak_b = Arc::downgrade(&session.inner);
-                            let weak_a = Arc::downgrade(&session.inner);
-                            let parent_b = parent_id.clone();
-                            let parent_a = parent_id.clone();
-                            run_tool_call(
+                    }
+
+                    async fn run_tool_call(
+                        &self,
+                        tool_call: AgentToolCall,
+                        parent_tool_call_id: &str,
+                        signal: Option<AbortSignal>,
+                        on_update: NestedToolUpdateAsyncCallback,
+                    ) -> AgentToolCallOutcome {
+                        let Some(inner) = self.weak.upgrade() else {
+                            return AgentToolCallOutcome {
                                 tool_call,
-                                pi_agent_core::agent_loop::RunToolCallOptions {
-                                    tools,
-                                    assistant_message,
-                                    context: AgentContext {
-                                        messages: st.messages,
-                                        tools: Some(st.tools),
-                                    },
-                                    before_tool_call: Some(Arc::new(move |ctx, _sig| {
-                                        let weak = weak_b.clone();
-                                        let pid = parent_b.clone();
-                                        Box::pin(async move {
-                                            let Some(inner) = weak.upgrade() else {
-                                                return Ok(None);
-                                            };
-                                            AgentSession { inner }._before_tool_call(ctx, Some(&pid)).await
-                                        })
-                                    })),
-                                    after_tool_call: Some(Arc::new(move |ctx, _sig| {
-                                        let weak = weak_a.clone();
-                                        let pid = parent_a.clone();
-                                        Box::pin(async move {
-                                            let Some(inner) = weak.upgrade() else {
-                                                return Ok(None);
-                                            };
-                                            AgentSession { inner }._after_tool_call(ctx, Some(&pid)).await
-                                        })
-                                    })),
-                                    signal,
-                                    on_update,
+                                result: crate::core::extensions::types::AgentToolResult::text(
+                                    "No assistant message issued this call",
+                                ),
+                                is_error: true,
+                            };
+                        };
+                        let session = AgentSession { inner };
+                        let Some(assistant_message) = session._find_last_assistant_message() else {
+                            return AgentToolCallOutcome {
+                                tool_call,
+                                result: crate::core::extensions::types::AgentToolResult::text(
+                                    "No assistant message issued this call",
+                                ),
+                                is_error: true,
+                            };
+                        };
+                        let tools = session._get_callable_tools(None);
+                        let st = session.inner.agent.state();
+                        let weak_b = Arc::downgrade(&session.inner);
+                        let weak_a = Arc::downgrade(&session.inner);
+                        let parent_b = parent_tool_call_id.to_string();
+                        let parent_a = parent_tool_call_id.to_string();
+                        run_tool_call(
+                            tool_call,
+                            pi_agent_core::agent_loop::RunToolCallOptions {
+                                tools,
+                                assistant_message,
+                                context: AgentContext {
+                                    messages: st.messages,
+                                    tools: Some(st.tools),
                                 },
-                            )
-                            .await
-                        })
-                    }),
-                    emit: Arc::new(move |event| {
-                        let weak = weak_emit.clone();
-                        Box::pin(async move {
-                            if let Some(inner) = weak.upgrade() {
-                                let session = AgentSession { inner };
-                                let runner = session
-                                    .inner
-                                    .state
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .extension_runner
-                                    .clone();
-                                if let Some(runner) = runner {
-                                    runner.emit_nested_tool_event(&event).await;
-                                }
-                                session._emit(event);
+                                before_tool_call: Some(Arc::new(move |ctx, _sig| {
+                                    let weak = weak_b.clone();
+                                    let pid = parent_b.clone();
+                                    Box::pin(async move {
+                                        let Some(inner) = weak.upgrade() else {
+                                            return Ok(None);
+                                        };
+                                        AgentSession { inner }._before_tool_call(ctx, Some(&pid)).await
+                                    })
+                                })),
+                                after_tool_call: Some(Arc::new(move |ctx, _sig| {
+                                    let weak = weak_a.clone();
+                                    let pid = parent_a.clone();
+                                    Box::pin(async move {
+                                        let Some(inner) = weak.upgrade() else {
+                                            return Ok(None);
+                                        };
+                                        AgentSession { inner }._after_tool_call(ctx, Some(&pid)).await
+                                    })
+                                })),
+                                signal,
+                                on_update,
+                            },
+                        )
+                        .await
+                    }
+
+                    async fn emit(&self, event: NestedToolExecutionEvent) {
+                        if let Some(inner) = self.weak.upgrade() {
+                            let session = AgentSession { inner };
+                            let session_event = match event {
+                                NestedToolExecutionEvent::ToolExecutionStart {
+                                    tool_call_id,
+                                    tool_name,
+                                    args,
+                                    parent_tool_call_id,
+                                } => AgentSessionEvent::ToolExecutionStart {
+                                    tool_call_id,
+                                    tool_name,
+                                    args,
+                                    parent_tool_call_id: Some(parent_tool_call_id),
+                                },
+                                NestedToolExecutionEvent::ToolExecutionUpdate {
+                                    tool_call_id,
+                                    tool_name,
+                                    args,
+                                    partial_result,
+                                    parent_tool_call_id,
+                                } => AgentSessionEvent::ToolExecutionUpdate {
+                                    tool_call_id,
+                                    tool_name,
+                                    args,
+                                    partial_result,
+                                    parent_tool_call_id: Some(parent_tool_call_id),
+                                },
+                                NestedToolExecutionEvent::ToolExecutionEnd {
+                                    tool_call_id,
+                                    tool_name,
+                                    result,
+                                    is_error,
+                                    parent_tool_call_id,
+                                } => AgentSessionEvent::ToolExecutionEnd {
+                                    tool_call_id,
+                                    tool_name,
+                                    result,
+                                    is_error,
+                                    parent_tool_call_id: Some(parent_tool_call_id),
+                                },
+                            };
+                            let runner = session
+                                .inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extension_runner
+                                .clone();
+                            if let Some(runner) = runner {
+                                runner.emit_session_event(&session_event).await;
                             }
-                        })
-                    }),
-                }));
+                            session._emit(session_event);
+                        }
+                    }
+                }
+
+                let created = Arc::new(NestedToolCallRunner::new(Arc::new(SessionNestedToolHost {
+                    weak: Arc::downgrade(&self.inner),
+                })));
                 guard.nested_tool_calls = Some(Arc::clone(&created));
                 created
             }
@@ -1225,18 +1278,15 @@ impl AgentSession {
                         .resolve_model(
                             &model,
                             &llm_msgs,
-                            ModelRuntimeResolveOptions {
-                                reason: Some(
-                                    if failed.is_some() {
-                                        "retry"
-                                    } else if user_turn {
-                                        "user"
-                                    } else {
-                                        "continuation"
-                                    }
-                                    .to_string(),
-                                ),
-                                thinking_level: Some(thinking_level),
+                            ResolveModelOptions {
+                                reason: if failed.is_some() {
+                                    ModelRouteReason::Retry
+                                } else if user_turn {
+                                    ModelRouteReason::User
+                                } else {
+                                    ModelRouteReason::Continuation
+                                },
+                                thinking_level,
                                 signal: signal.clone(),
                                 failed,
                                 state: state.clone(),
@@ -1251,11 +1301,12 @@ impl AgentSession {
                             state: route.state,
                         };
                         let val = pi_js::json::parse(&pi_js::json::stringify(&data))?;
-                        let entry_id = session
+                        if let Ok(entry_id) = session
                             .inner
                             .session_manager
-                            .append_custom_entry(VIRTUAL_MODEL_STATE_ENTRY, Some(val));
-                        if let Some(entry) = session.inner.session_manager.get_entry(&entry_id) {
+                            .append_custom_entry(VIRTUAL_MODEL_STATE_ENTRY, Some(val))
+                            && let Some(entry) = session.inner.session_manager.get_entry(&entry_id)
+                        {
                             session._emit(AgentSessionEvent::EntryAppended { entry });
                         }
                     }
@@ -1495,16 +1546,18 @@ impl AgentSession {
         for draft in drafts {
             let entry_id = match draft {
                 SessionBoundaryDraft::Custom { custom_type, data } => {
-                    manager.append_custom_entry(custom_type, data.clone())
+                    manager.append_custom_entry(custom_type, data.clone()).ok()
                 }
                 SessionBoundaryDraft::CustomMessage {
                     custom_type,
                     content,
                     display,
                     details,
-                } => manager.append_custom_message_entry(custom_type, content.clone(), *display, details.clone()),
+                } => manager
+                    .append_custom_message_entry(custom_type, content.clone(), *display, details.clone())
+                    .ok(),
                 SessionBoundaryDraft::ContextEdit { target_id, replacement } => {
-                    manager.append_context_edit(target_id, replacement.clone())
+                    manager.append_context_edit(target_id, replacement.clone()).ok()
                 }
                 SessionBoundaryDraft::Compaction {
                     summary,
@@ -1515,17 +1568,21 @@ impl AgentSession {
                     let projection = manager.build_session_projection();
                     let branch = manager.get_branch(None);
                     let tokens_before = estimate_projected_context_tokens(&projection, &branch).tokens;
-                    manager.append_compaction(
-                        summary,
-                        first_kept_entry_id,
-                        tokens_before,
-                        details.clone(),
-                        Some(true),
-                        usage.clone(),
-                    )
+                    manager
+                        .append_compaction(
+                            summary,
+                            first_kept_entry_id.as_deref(),
+                            tokens_before,
+                            details.clone(),
+                            Some(true),
+                            usage.clone(),
+                        )
+                        .ok()
                 }
             };
-            if let Some(entry) = manager.get_entry(&entry_id) {
+            if let Some(id) = entry_id
+                && let Some(entry) = manager.get_entry(&id)
+            {
                 appended.push(entry);
             }
         }
@@ -1538,9 +1595,15 @@ impl AgentSession {
             .session_manager
             .get_header()
             .ok_or_else(|| pi_js::Error::msg("Session header is missing"))?;
-        let mut initial = vec![SessionEntry::Header(header)];
-        initial.extend(self.inner.session_manager.get_branch(None));
-        let manager = SessionManager::in_memory_with_entries(&self.cwd(), initial);
+        let mut initial = vec![FileEntry::Session(header)];
+        initial.extend(
+            self.inner
+                .session_manager
+                .get_branch(None)
+                .into_iter()
+                .map(FileEntry::from_session_entry),
+        );
+        let manager = SessionManager::in_memory(Some(&self.cwd()), None, Some(initial))?;
         self._apply_boundary_drafts(&manager, drafts);
         Ok(manager)
     }
@@ -1827,14 +1890,12 @@ impl AgentSession {
                 && let Ok(cm) =
                     pi_js::json::parse_as::<crate::core::messages::CustomMessage>(&pi_js::json::stringify(val))
             {
-                Some(self.inner.session_manager.append_custom_message_entry(
-                    &cm.custom_type,
-                    cm.content,
-                    cm.display,
-                    cm.details,
-                ))
+                self.inner
+                    .session_manager
+                    .append_custom_message_entry(&cm.custom_type, cm.content, cm.display, cm.details)
+                    .ok()
             } else if matches!(message.role(), Some("system" | "user" | "assistant" | "toolResult")) {
-                Some(self.inner.session_manager.append_message(message.clone()))
+                self.inner.session_manager.append_message(message.clone()).ok()
             } else {
                 None
             };
@@ -1965,7 +2026,7 @@ impl AgentSession {
             ));
         }
         for target_id in target_ids.into_iter().flatten() {
-            let edit_id = self.inner.session_manager.append_context_edit(&target_id, None);
+            let edit_id = self.inner.session_manager.append_context_edit(&target_id, None)?;
             if let Some(entry) = self.inner.session_manager.get_entry(&edit_id) {
                 self._emit(AgentSessionEvent::EntryAppended { entry });
             }
