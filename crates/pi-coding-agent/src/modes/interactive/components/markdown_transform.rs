@@ -28,10 +28,18 @@ pub fn create_markdown_transform(
     is_streaming: bool,
     transformers: Vec<MarkdownTransformer>,
 ) -> Arc<dyn Fn(&str, i64) -> String + Send + Sync> {
+    create_markdown_transform_dynamic(message_type, Arc::new(move || is_streaming), transformers)
+}
+
+pub fn create_markdown_transform_dynamic(
+    message_type: MarkdownMessageType,
+    is_streaming: Arc<dyn Fn() -> bool + Send + Sync>,
+    transformers: Vec<MarkdownTransformer>,
+) -> Arc<dyn Fn(&str, i64) -> String + Send + Sync> {
     Arc::new(move |markdown: &str, available_width: i64| {
         let context = MarkdownTransformContext {
             message_type,
-            is_streaming,
+            is_streaming: is_streaming(),
             available_width,
         };
         apply_markdown_transformers(markdown, &context, &transformers)
