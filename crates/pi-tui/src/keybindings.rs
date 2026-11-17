@@ -1,13 +1,11 @@
 //! Port of packages/tui/src/keybindings.ts
 
-#![allow(dead_code, unused_variables)]
-
 use std::sync::{Arc, LazyLock, Mutex};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
-use crate::keys::KeyId;
+use crate::keys::{KeyId, matches_key};
 
 /// Global keybinding registry.
 ///
@@ -257,7 +255,21 @@ fn tui_keybindings() -> KeybindingDefinitions {
 pub static TUI_KEYBINDINGS: LazyLock<KeybindingDefinitions> = LazyLock::new(tui_keybindings);
 
 fn normalize_keys(keys: Option<&KeyIdOrList>) -> Vec<KeyId> {
-    todo!("port: normalize_keys")
+    let Some(keys) = keys else {
+        return Vec::new();
+    };
+    let key_list: &[KeyId] = match keys {
+        KeyIdOrList::One(single) => std::slice::from_ref(single),
+        KeyIdOrList::Many(many) => many.as_slice(),
+    };
+    let mut seen: IndexSet<&str> = IndexSet::new();
+    let mut result = Vec::new();
+    for key in key_list {
+        if seen.insert(key.as_str()) {
+            result.push(key.clone());
+        }
+    }
+    result
 }
 
 struct KeybindingsManagerState {
@@ -281,49 +293,130 @@ pub struct KeybindingsManager {
 impl KeybindingsManager {
     /// `user_bindings` `None` is the TS default `{}`.
     pub fn new(definitions: KeybindingDefinitions, user_bindings: Option<KeybindingsConfig>) -> Self {
-        todo!("port: KeybindingsManager::new")
+        let mgr = Self {
+            inner: Arc::new(KeybindingsManagerInner {
+                definitions,
+                state: Mutex::new(KeybindingsManagerState {
+                    user_bindings: user_bindings.unwrap_or_default(),
+                    keys_by_id: IndexMap::new(),
+                    conflicts: Vec::new(),
+                }),
+            }),
+        };
+        mgr.rebuild();
+        mgr
     }
 
     fn rebuild(&self) {
-        todo!("port: KeybindingsManager::rebuild")
+        let mut state = self.inner.state.lock().unwrap();
+        state.keys_by_id.clear();
+        state.conflicts.clear();
+
+        let mut user_claims: IndexMap<KeyId, IndexSet<Keybinding>> = IndexMap::new();
+        for (keybinding, keys) in &state.user_bindings {
+            if !self.inner.definitions.contains_key(keybinding) {
+                continue;
+            }
+            for key in normalize_keys(keys.as_ref()) {
+                user_claims.entry(key).or_default().insert(keybinding.clone());
+            }
+        }
+
+        for (key, keybindings) in user_claims {
+            if keybindings.len() > 1 {
+                state.conflicts.push(KeybindingConflict {
+                    key,
+                    keybindings: keybindings.into_iter().collect(),
+                });
+            }
+        }
+
+        for (id, definition) in &self.inner.definitions {
+            let user_keys = state.user_bindings.get(id).and_then(|v| v.as_ref());
+            let keys = match user_keys {
+                None => normalize_keys(Some(&definition.default_keys)),
+                Some(uk) => normalize_keys(Some(uk)),
+            };
+            state.keys_by_id.insert(id.clone(), keys);
+        }
     }
 
     pub fn matches(&self, data: &str, keybinding: &str) -> bool {
-        todo!("port: KeybindingsManager::matches")
+        let keys = {
+            let state = self.inner.state.lock().unwrap();
+            state.keys_by_id.get(keybinding).cloned()
+        };
+        let Some(keys) = keys else {
+            return false;
+        };
+        for key in keys {
+            if matches_key(data, &key) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn get_keys(&self, keybinding: &str) -> Vec<KeyId> {
-        todo!("port: KeybindingsManager::get_keys")
+        let state = self.inner.state.lock().unwrap();
+        state.keys_by_id.get(keybinding).cloned().unwrap_or_default()
     }
 
     /// TS returns the stored definition (typed as always present). Owned clone, not a live borrow.
     pub fn get_definition(&self, keybinding: &str) -> KeybindingDefinition {
-        todo!("port: KeybindingsManager::get_definition")
+        self.inner
+            .definitions
+            .get(keybinding)
+            .cloned()
+            .unwrap_or_else(|| panic!("Unknown keybinding definition: {keybinding}"))
     }
 
     pub fn get_conflicts(&self) -> Vec<KeybindingConflict> {
-        todo!("port: KeybindingsManager::get_conflicts")
+        let state = self.inner.state.lock().unwrap();
+        state.conflicts.clone()
     }
 
     pub fn set_user_bindings(&self, user_bindings: KeybindingsConfig) {
-        todo!("port: KeybindingsManager::set_user_bindings")
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            state.user_bindings = user_bindings;
+        }
+        self.rebuild();
     }
 
     pub fn get_user_bindings(&self) -> KeybindingsConfig {
-        todo!("port: KeybindingsManager::get_user_bindings")
+        let state = self.inner.state.lock().unwrap();
+        state.user_bindings.clone()
     }
 
     pub fn get_resolved_bindings(&self) -> KeybindingsConfig {
-        todo!("port: KeybindingsManager::get_resolved_bindings")
+        let state = self.inner.state.lock().unwrap();
+        let mut resolved = IndexMap::new();
+        for id in self.inner.definitions.keys() {
+            let keys = state.keys_by_id.get(id).map(Vec::as_slice).unwrap_or(&[]);
+            let value = if keys.len() == 1 {
+                KeyIdOrList::One(keys[0].clone())
+            } else {
+                KeyIdOrList::Many(keys.to_vec())
+            };
+            resolved.insert(id.clone(), Some(value));
+        }
+        resolved
     }
 }
 
 static GLOBAL_KEYBINDINGS: LazyLock<Mutex<Option<KeybindingsManager>>> = LazyLock::new(|| Mutex::new(None));
 
 pub fn set_keybindings(keybindings: KeybindingsManager) {
-    todo!("port: set_keybindings")
+    *GLOBAL_KEYBINDINGS.lock().unwrap() = Some(keybindings);
 }
 
 pub fn get_keybindings() -> KeybindingsManager {
-    todo!("port: get_keybindings")
+    let mut global = GLOBAL_KEYBINDINGS.lock().unwrap();
+    if let Some(existing) = global.as_ref() {
+        return existing.clone();
+    }
+    let created = KeybindingsManager::new((&*TUI_KEYBINDINGS).clone(), None);
+    *global = Some(created.clone());
+    created
 }

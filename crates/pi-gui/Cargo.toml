@@ -1,0 +1,43 @@
+[package]
+name = "pi-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "pi-gui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+rune-motion.workspace = true
+rune-highlights.workspace = true
+rune-mermaid.workspace = true
+rune-theme-opencode.workspace = true
+pi-coding-agent.workspace = true
+pi-agent-core.workspace = true
+pi-ai.workspace = true
+pi-js.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+pretty_assertions.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true

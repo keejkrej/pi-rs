@@ -1,62 +1,45 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installCodingAgentConsumer, packReleasePackages } from "../../../scripts/coding-agent-consumer.mjs";
-import { getPublicWorkspacePackages } from "../../../scripts/release-packages.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const outputDirectory = process.argv[2];
 if (!outputDirectory || process.argv.length !== 3) {
-	throw new Error("Usage: node packages/evals/docker/install-runtime.mjs <output-directory>");
+	throw new Error("Usage: node crates/pi-evals/docker/install-runtime.mjs <output-directory>");
 }
 
-const evalPackage = JSON.parse(readFileSync(join(repositoryRoot, "packages/evals/package.json"), "utf8"));
-const tarballs = packReleasePackages(getPublicWorkspacePackages(), join(outputDirectory, "tarballs"));
-const evaluatorDependencies = Object.entries(evalPackage.devDependencies).filter(([name]) => !tarballs.has(name));
-const installDirectory = join(outputDirectory, "install");
-installCodingAgentConsumer(installDirectory, tarballs);
+const targetDir = process.env.CARGO_TARGET_DIR
+	? resolve(process.env.CARGO_TARGET_DIR)
+	: join(repositoryRoot, "target");
+
 execFileSync(
-	"npm",
-	[
-		"install",
-		"--ignore-scripts",
-		"--omit=dev",
-		"--no-audit",
-		"--no-fund",
-		"--no-save",
-		...evaluatorDependencies.map(([name, version]) => `${name}@${version}`),
-	],
-	{ cwd: installDirectory, stdio: "inherit" },
+	"cargo",
+	["build", "--locked", "--release", "-p", "pi-evals", "--bin", "pi-evals"],
+	{
+		cwd: repositoryRoot,
+		stdio: "inherit",
+		env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+	},
 );
 
-for (const packageName of tarballs.keys()) {
-	if (packageName === "@earendil-works/pi-coding-agent") continue;
-	const packageDirectory = join(installDirectory, "node_modules", ...packageName.split("/"));
-	if (!existsSync(packageDirectory)) continue;
-	for (const entry of readdirSync(packageDirectory, { withFileTypes: true })) {
-		if (
-			(entry.isDirectory() && ["docs", "examples", "src", "test", "tests"].includes(entry.name)) ||
-			(entry.isFile() && /^(?:readme|changelog)(?:\..+)?$/i.test(entry.name))
-		) {
-			rmSync(join(packageDirectory, entry.name), { force: true, recursive: true });
-		}
-	}
+const runnerBinary = join(targetDir, "release", "pi-evals");
+if (!existsSync(runnerBinary)) {
+	throw new Error(`Compiled pi-evals runner binary not found: ${runnerBinary}`);
 }
 
-const runtimeRoot = join(outputDirectory, "root");
-const runtimeEvalRoot = join(runtimeRoot, "packages/evals");
-mkdirSync(join(runtimeEvalRoot, "docker"), { recursive: true });
-for (const file of ["package.json", "vitest.base.ts"]) {
-	cpSync(join(repositoryRoot, file), join(runtimeRoot, file));
+const packageSource = join(repositoryRoot, "crates/pi-coding-agent/package");
+if (!existsSync(packageSource)) {
+	throw new Error(`Coding-agent package assets not found: ${packageSource}`);
 }
-for (const file of ["package.json", "vitest.evals.config.ts"]) {
-	cpSync(join(repositoryRoot, "packages/evals", file), join(runtimeEvalRoot, file));
+
+const rootBin = join(outputDirectory, "root/bin");
+mkdirSync(rootBin, { recursive: true });
+cpSync(runnerBinary, join(rootBin, "pi-evals"));
+chmodSync(join(rootBin, "pi-evals"), 0o700);
+
+const installPackage = join(outputDirectory, "install/package");
+if (existsSync(installPackage)) {
+	rmSync(installPackage, { force: true, recursive: true });
 }
-for (const directory of ["src", "evals"]) {
-	cpSync(join(repositoryRoot, "packages/evals", directory), join(runtimeEvalRoot, directory), { recursive: true });
-}
-cpSync(
-	join(repositoryRoot, "packages/evals/docker/entrypoint.ts"),
-	join(runtimeEvalRoot, "docker/entrypoint.ts"),
-);
+cpSync(packageSource, installPackage, { recursive: true });

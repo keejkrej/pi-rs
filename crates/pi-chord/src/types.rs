@@ -130,22 +130,72 @@ impl Context {
         }
     }
 
+    pub(crate) fn with_value<T>(key: ContextKey<T>, value: T, parent: Context) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::new(ContextInner::Value {
+                parent,
+                key_id: key.token.id,
+                type_id: TypeId::of::<T>(),
+                value: Arc::new(value),
+                description: key.token.description,
+            }),
+        }
+    }
+
     /// PORT: stored values are `Clone + Send + Sync + 'static` so they can live in `Any` and be returned by clone.
     pub fn value<T>(&self, key: &ContextKey<T>) -> Option<T>
     where
         T: Clone + Send + Sync + 'static,
     {
-        todo!("port: Context::value")
+        let mut current = &self.inner;
+        let expected_type = TypeId::of::<T>();
+        loop {
+            match current.as_ref() {
+                ContextInner::Empty { .. } => return None,
+                ContextInner::Value {
+                    parent,
+                    key_id,
+                    type_id,
+                    value,
+                    ..
+                } => {
+                    if *key_id == key.token.id && *type_id == expected_type {
+                        return value.downcast_ref::<T>().cloned();
+                    }
+                    current = &parent.inner;
+                }
+            }
+        }
     }
 
     pub fn abort_signal(&self) -> Option<pi_js::abort::AbortSignal> {
-        todo!("port: Context::abort_signal")
+        self.value(crate::context::abort_signal_context_key()).flatten()
     }
 }
 
 impl std::fmt::Display for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("port: Context::fmt")
+        let mut segments: Vec<&str> = Vec::new();
+        let mut current = &self.inner;
+        let root = loop {
+            match current.as_ref() {
+                ContextInner::Empty { name } => break *name,
+                ContextInner::Value {
+                    parent, description, ..
+                } => {
+                    segments.push(description.as_str());
+                    current = &parent.inner;
+                }
+            }
+        };
+        f.write_str(root)?;
+        for desc in segments.into_iter().rev() {
+            write!(f, ".WithValue({desc})")?;
+        }
+        Ok(())
     }
 }
 
@@ -174,28 +224,121 @@ pub struct ReplicatedStateDelivery {
 ///
 /// PORT: sync and promise listeners are one callback returning [`pi_js::BoxFuture`]. This handle does not
 /// inherit into [`MutableReplicatedState`] or [`AttachedReplicatedState`]; those narrow `value` to `T`.
-#[derive(Clone)]
-pub struct ReplicatedState<T = JsonValue> {
-    inner: Arc<ReplicatedStateInner<T>>,
+type StateListenerFn<T> =
+    Arc<dyn Fn(T, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>;
+
+trait ReplicatedStateOps<T>: Send + Sync {
+    fn value(&self) -> Option<T>;
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe;
+    fn internals(&self) -> Option<Arc<dyn crate::services::state_internals::ReplicatedStateInternals>>;
 }
 
-struct ReplicatedStateInner<T> {
-    _value: PhantomData<T>,
+impl<T: Clone + Send + Sync + 'static> ReplicatedStateOps<T> for crate::services::state::ReplicatedStateReplica<T> {
+    fn value(&self) -> Option<T> {
+        self.value()
+    }
+
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe {
+        self.subscribe(move |v, ctx, del| listener(v, ctx, del))
+    }
+
+    fn internals(&self) -> Option<Arc<dyn crate::services::state_internals::ReplicatedStateInternals>> {
+        None
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> ReplicatedStateOps<T> for crate::services::state::MutableReplicatedStateImpl<T> {
+    fn value(&self) -> Option<T> {
+        Some(self.value())
+    }
+
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe {
+        self.subscribe(move |v, ctx, del| listener(v, ctx, del))
+    }
+
+    fn internals(&self) -> Option<Arc<dyn crate::services::state_internals::ReplicatedStateInternals>> {
+        Some(self.internals())
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> ReplicatedStateOps<T>
+    for crate::services::state::AttachedReplicatedStateImpl<T>
+{
+    fn value(&self) -> Option<T> {
+        Some(self.value())
+    }
+
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe {
+        self.subscribe(move |v, ctx, del| listener(v, ctx, del))
+    }
+
+    fn internals(&self) -> Option<Arc<dyn crate::services::state_internals::ReplicatedStateInternals>> {
+        Some(self.internals())
+    }
+}
+
+/// Contract-immutable value, or undefined until hydration.
+///
+/// Each subscription serializes callbacks, awaiting hydration before updates. Values are immutable and may
+/// share unchanged revision data. At most 100 deliveries wait behind the running callback; overflow keeps
+/// only the newest pending value/context/delivery, so update sequences may skip. Failures are reported in
+/// isolation and delivery continues. Unsubscribe discards pending work without aborting or joining a callback.
+///
+/// PORT: sync and promise listeners are one callback returning [`pi_js::BoxFuture`]. This handle does not
+/// inherit into [`MutableReplicatedState`] or [`AttachedReplicatedState`]; those narrow `value` to `T`.
+pub struct ReplicatedState<T = JsonValue> {
+    inner: Arc<dyn ReplicatedStateOps<T>>,
+}
+
+impl<T> Clone for ReplicatedState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> ReplicatedState<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    pub(crate) fn from_replica(replica: crate::services::state::ReplicatedStateReplica<T>) -> Self {
+        Self {
+            inner: Arc::new(replica),
+        }
+    }
+
+    pub(crate) fn internals(&self) -> Option<Arc<dyn crate::services::state_internals::ReplicatedStateInternals>> {
+        self.inner.internals()
+    }
+
     pub fn value(&self) -> Option<T> {
-        todo!("port: ReplicatedState::value")
+        self.inner.value()
     }
 
     pub fn subscribe(
         &self,
         listener: Arc<dyn Fn(T, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
     ) -> pi_js::Unsubscribe {
-        todo!("port: ReplicatedState::subscribe")
+        self.inner.subscribe(listener)
+    }
+}
+
+impl<T> From<MutableReplicatedState<T>> for ReplicatedState<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn from(state: MutableReplicatedState<T>) -> Self {
+        state.as_replicated()
+    }
+}
+
+impl<T> From<AttachedReplicatedState<T>> for ReplicatedState<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn from(state: AttachedReplicatedState<T>) -> Self {
+        state.as_replicated()
     }
 }
 
@@ -266,36 +409,120 @@ impl Clone for ReplicatedStateSourceOptions {
     }
 }
 
+trait AttachedStateOps<T>: Send + Sync {
+    fn value(&self) -> T;
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe;
+    fn dispose(&self) -> pi_js::Result<()>;
+    fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals>;
+    fn as_replicated(&self) -> ReplicatedState<T>;
+}
+
+impl<T: Clone + Send + Sync + 'static> AttachedStateOps<T> for crate::services::state::AttachedReplicatedStateImpl<T> {
+    fn value(&self) -> T {
+        self.value()
+    }
+
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe {
+        self.subscribe(move |v, ctx, del| listener(v, ctx, del))
+    }
+
+    fn dispose(&self) -> pi_js::Result<()> {
+        self.dispose()
+    }
+
+    fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals> {
+        self.internals()
+    }
+
+    fn as_replicated(&self) -> ReplicatedState<T> {
+        ReplicatedState {
+            inner: Arc::new(self.clone()),
+        }
+    }
+}
+
 /// A synchronously hydrated publication-only state backed by one source attachment.
 ///
 /// PORT: separate from [`ReplicatedState`] so `value` is `T`, not `T | undefined`.
-#[derive(Clone)]
 pub struct AttachedReplicatedState<T = JsonValue> {
-    inner: Arc<AttachedReplicatedStateInner<T>>,
+    inner: Arc<dyn AttachedStateOps<T>>,
 }
 
-struct AttachedReplicatedStateInner<T> {
-    _value: PhantomData<T>,
+impl<T> Clone for AttachedReplicatedState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> AttachedReplicatedState<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    pub(crate) fn from_impl(impl_: crate::services::state::AttachedReplicatedStateImpl<T>) -> Self {
+        Self { inner: Arc::new(impl_) }
+    }
+
+    pub(crate) fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals> {
+        self.inner.internals()
+    }
+
+    pub fn as_replicated(&self) -> ReplicatedState<T> {
+        self.inner.as_replicated()
+    }
+
     pub fn value(&self) -> T {
-        todo!("port: AttachedReplicatedState::value")
+        self.inner.value()
     }
 
     pub fn subscribe(
         &self,
         listener: Arc<dyn Fn(T, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
     ) -> pi_js::Unsubscribe {
-        todo!("port: AttachedReplicatedState::subscribe")
+        self.inner.subscribe(listener)
     }
 
     /// Idempotently release the source attachment. The last published value remains readable.
     pub fn dispose(&self) -> pi_js::Result<()> {
-        todo!("port: AttachedReplicatedState::dispose")
+        self.inner.dispose()
+    }
+}
+
+trait MutableStateOps<T>: Send + Sync {
+    fn value(&self) -> T;
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe;
+    fn change_with(&self, context: Context, mutate: &mut dyn FnMut(&mut Draft<T>)) -> pi_js::Result<()>;
+    fn replace(&self, context: Context, value: T) -> pi_js::Result<()>;
+    fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals>;
+    fn as_replicated(&self) -> ReplicatedState<T>;
+}
+
+impl<T: Clone + Send + Sync + 'static> MutableStateOps<T> for crate::services::state::MutableReplicatedStateImpl<T> {
+    fn value(&self) -> T {
+        self.value()
+    }
+
+    fn subscribe(&self, listener: StateListenerFn<T>) -> pi_js::Unsubscribe {
+        self.subscribe(move |v, ctx, del| listener(v, ctx, del))
+    }
+
+    fn change_with(&self, context: Context, mutate: &mut dyn FnMut(&mut Draft<T>)) -> pi_js::Result<()> {
+        self.change(context, mutate)
+    }
+
+    fn replace(&self, context: Context, value: T) -> pi_js::Result<()> {
+        self.replace(context, value)
+    }
+
+    fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals> {
+        self.internals()
+    }
+
+    fn as_replicated(&self) -> ReplicatedState<T> {
+        ReplicatedState {
+            inner: Arc::new(self.clone()),
+        }
     }
 }
 
@@ -306,39 +533,59 @@ where
 /// `replace` atomically takes immutable ownership of an alias-free strict-JSON replacement.
 ///
 /// PORT: separate from [`ReplicatedState`] so `value` returns `T`. `change` takes `FnOnce` because the callback runs once.
-#[derive(Clone)]
 pub struct MutableReplicatedState<T = JsonValue> {
-    inner: Arc<MutableReplicatedStateInner<T>>,
+    inner: Arc<dyn MutableStateOps<T>>,
 }
 
-struct MutableReplicatedStateInner<T> {
-    _value: PhantomData<T>,
+impl<T> Clone for MutableReplicatedState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> MutableReplicatedState<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    pub(crate) fn from_impl(impl_: crate::services::state::MutableReplicatedStateImpl<T>) -> Self {
+        Self { inner: Arc::new(impl_) }
+    }
+
+    pub(crate) fn internals(&self) -> Arc<dyn crate::services::state_internals::ReplicatedStateInternals> {
+        self.inner.internals()
+    }
+
+    pub fn as_replicated(&self) -> ReplicatedState<T> {
+        self.inner.as_replicated()
+    }
+
     pub fn value(&self) -> T {
-        todo!("port: MutableReplicatedState::value")
+        self.inner.value()
     }
 
     pub fn subscribe(
         &self,
         listener: Arc<dyn Fn(T, Context, ReplicatedStateDelivery) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
     ) -> pi_js::Unsubscribe {
-        todo!("port: MutableReplicatedState::subscribe")
+        self.inner.subscribe(listener)
     }
 
     pub fn change<F>(&self, context: Context, mutate: F) -> pi_js::Result<()>
     where
-        F: FnOnce(&mut Draft<T>) + Send,
+        F: FnOnce(&mut Draft<T>),
     {
-        todo!("port: MutableReplicatedState::change")
+        let mut f = Some(mutate);
+        self.inner.change_with(context, &mut |draft| {
+            if let Some(cb) = f.take() {
+                cb(draft);
+            }
+        })
     }
 
     pub fn replace(&self, context: Context, value: T) -> pi_js::Result<()> {
-        todo!("port: MutableReplicatedState::replace")
+        self.inner.replace(context, value)
     }
 }
 
@@ -368,21 +615,198 @@ impl Service {
 }
 
 /// PORT: TS `ServiceSpawner<T>.spawn` returns an unsubscribe function.
+pub(crate) type ServiceObjectObserveHandler =
+    Arc<dyn Fn(crate::services::handle::ServiceObject, Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>;
+
+pub(crate) type ServiceSpawnerFn =
+    Arc<dyn Fn(&str, crate::services::handle::ServiceObject) -> pi_js::Result<pi_js::Unsubscribe> + Send + Sync>;
+
+fn is_plain_service_object(obj: &crate::services::handle::ServiceObject) -> bool {
+    !obj.is_callable() && obj.as_context().is_none() && obj.to_json().is_none_or(|json| json.is_object())
+}
+
+struct OpaqueLocalTarget(Arc<dyn std::any::Any + Send + Sync>);
+
+impl crate::services::handle::ServiceTarget for OpaqueLocalTarget {
+    fn get(
+        &self,
+        _property: &crate::services::handle::PropertyKey,
+    ) -> pi_js::Result<crate::services::handle::ServiceValue> {
+        Ok(crate::services::handle::ServiceValue::Undefined)
+    }
+
+    fn apply(
+        &self,
+        _this_arg: Option<&crate::services::handle::ServiceObject>,
+        _args: &[crate::services::handle::ServiceValue],
+    ) -> pi_js::Result<crate::services::handle::ServiceValue> {
+        Err(pi_js::Error::js("TypeError", "Service implementation is not callable"))
+    }
+
+    fn as_any(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub(crate) fn into_service_object<T: Send + Sync + 'static>(
+    value: T,
+    local: bool,
+    error_prefix: &str,
+    service_id: &str,
+) -> pi_js::Result<crate::services::handle::ServiceObject> {
+    use crate::services::handle::{ServiceObject, ServiceTarget, ServiceValue};
+
+    let err = || {
+        pi_js::Error::js(
+            "TypeError",
+            format!("{error_prefix} {service_id} implementation must be an object"),
+        )
+    };
+
+    let boxed: Box<dyn std::any::Any + Send + Sync> = Box::new(value);
+    let boxed = match boxed.downcast::<ServiceObject>() {
+        Ok(obj) => {
+            if !is_plain_service_object(&obj) {
+                return Err(err());
+            }
+            return Ok(*obj);
+        }
+        Err(b) => b,
+    };
+    let boxed = match boxed.downcast::<Arc<ServiceObject>>() {
+        Ok(obj) => {
+            if !is_plain_service_object(&obj) {
+                return Err(err());
+            }
+            return Ok((**obj).clone());
+        }
+        Err(b) => b,
+    };
+    let boxed = match boxed.downcast::<ServiceValue>() {
+        Ok(val) => match *val {
+            ServiceValue::Object(obj) => {
+                if !is_plain_service_object(&obj) {
+                    return Err(err());
+                }
+                return Ok(obj);
+            }
+            _ => return Err(err()),
+        },
+        Err(b) => b,
+    };
+    let boxed = match boxed.downcast::<JsonValue>() {
+        Ok(json) => {
+            if !json.is_object() {
+                return Err(err());
+            }
+            return Ok(ServiceObject::from_json(*json));
+        }
+        Err(b) => b,
+    };
+
+    let tid = (*boxed).type_id();
+    let is_primitive = tid == TypeId::of::<()>()
+        || tid == TypeId::of::<bool>()
+        || tid == TypeId::of::<i8>()
+        || tid == TypeId::of::<i16>()
+        || tid == TypeId::of::<i32>()
+        || tid == TypeId::of::<i64>()
+        || tid == TypeId::of::<i128>()
+        || tid == TypeId::of::<isize>()
+        || tid == TypeId::of::<u8>()
+        || tid == TypeId::of::<u16>()
+        || tid == TypeId::of::<u32>()
+        || tid == TypeId::of::<u64>()
+        || tid == TypeId::of::<u128>()
+        || tid == TypeId::of::<usize>()
+        || tid == TypeId::of::<f32>()
+        || tid == TypeId::of::<f64>()
+        || tid == TypeId::of::<String>()
+        || tid == TypeId::of::<&'static str>()
+        || tid == TypeId::of::<Vec<JsonValue>>()
+        || tid == TypeId::of::<Vec<ServiceValue>>();
+    if is_primitive {
+        return Err(err());
+    }
+
+    if local {
+        let arc: Arc<dyn std::any::Any + Send + Sync> = Arc::from(boxed);
+        return Ok(ServiceObject::new(
+            Arc::new(OpaqueLocalTarget(arc)) as Arc<dyn ServiceTarget>
+        ));
+    }
+
+    Err(err())
+}
+
+pub(crate) fn from_service_object<T: Send + Sync + 'static>(
+    obj: crate::services::handle::ServiceObject,
+) -> pi_js::Result<T> {
+    use crate::services::handle::{ServiceObject, ServiceValue};
+
+    if TypeId::of::<T>() == TypeId::of::<ServiceObject>() {
+        let boxed: Box<dyn std::any::Any> = Box::new(obj);
+        return Ok(*boxed.downcast::<T>().expect("ServiceObject TypeId verified"));
+    }
+    if TypeId::of::<T>() == TypeId::of::<ServiceValue>() {
+        let boxed: Box<dyn std::any::Any> = Box::new(ServiceValue::Object(obj));
+        return Ok(*boxed.downcast::<T>().expect("ServiceValue TypeId verified"));
+    }
+    if TypeId::of::<T>() == TypeId::of::<JsonValue>() {
+        let json = obj
+            .to_json()
+            .ok_or_else(|| pi_js::Error::js("TypeError", "Service handle is not a JSON value"))?;
+        let boxed: Box<dyn std::any::Any> = Box::new(json);
+        return Ok(*boxed.downcast::<T>().expect("JsonValue TypeId verified"));
+    }
+    Err(pi_js::Error::js(
+        "TypeError",
+        "Requested service handle type must be ServiceObject",
+    ))
+}
+
 #[derive(Clone)]
 pub struct ServiceSpawner<T = JsonValue> {
     inner: Arc<ServiceSpawnerInner<T>>,
 }
 
 struct ServiceSpawnerInner<T> {
-    _implementation: PhantomData<T>,
+    service_id: String,
+    local: bool,
+    spawn_fn: ServiceSpawnerFn,
+    _implementation: PhantomData<fn(T)>,
 }
 
 impl<T> ServiceSpawner<T>
 where
     T: Send + Sync + 'static,
 {
+    pub(crate) fn new(service_id: impl Into<String>, local: bool, spawn_fn: ServiceSpawnerFn) -> Self {
+        Self {
+            inner: Arc::new(ServiceSpawnerInner {
+                service_id: service_id.into(),
+                local,
+                spawn_fn,
+                _implementation: PhantomData,
+            }),
+        }
+    }
+
+    pub fn try_spawn(&self, key: &str, implementation: T) -> pi_js::Result<pi_js::Unsubscribe> {
+        let obj = into_service_object(
+            implementation,
+            self.inner.local,
+            "Facet service",
+            &self.inner.service_id,
+        )?;
+        (self.inner.spawn_fn)(key, obj)
+    }
+
     pub fn spawn(&self, key: &str, implementation: T) -> pi_js::Unsubscribe {
-        todo!("port: ServiceSpawner::spawn")
+        match self.try_spawn(key, implementation) {
+            Ok(unsub) => unsub,
+            Err(error) => panic!("ServiceSpawner::spawn failed: {error}"),
+        }
     }
 }
 
@@ -396,15 +820,37 @@ pub struct RemoteServices {
 }
 
 struct RemoteServicesInner {
-    _private: (),
+    use_fn: Arc<dyn Fn(&Service) -> pi_js::Result<crate::services::handle::ServiceObject> + Send + Sync>,
+    observe_fn: Arc<dyn Fn(&Service, ServiceObjectObserveHandler) -> pi_js::Result<pi_js::Unsubscribe> + Send + Sync>,
+    ready_fn: Arc<dyn Fn(Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
+    dispose_fn: Arc<dyn Fn(Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
 }
 
 impl RemoteServices {
+    pub fn new(
+        use_fn: Arc<dyn Fn(&Service) -> pi_js::Result<crate::services::handle::ServiceObject> + Send + Sync>,
+        observe_fn: Arc<
+            dyn Fn(&Service, ServiceObjectObserveHandler) -> pi_js::Result<pi_js::Unsubscribe> + Send + Sync,
+        >,
+        ready_fn: Arc<dyn Fn(Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
+        dispose_fn: Arc<dyn Fn(Context) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RemoteServicesInner {
+                use_fn,
+                observe_fn,
+                ready_fn,
+                dispose_fn,
+            }),
+        }
+    }
+
     pub fn r#use<T>(&self, service: &Service) -> pi_js::Result<T>
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: RemoteServices::use")
+        let obj = (self.inner.use_fn)(service)?;
+        from_service_object(obj)
     }
 
     pub fn observe<T>(
@@ -415,16 +861,28 @@ impl RemoteServices {
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: RemoteServices::observe")
+        (self.inner.observe_fn)(
+            service,
+            Arc::new(move |obj, context| match from_service_object::<T>(obj) {
+                Ok(typed) => handler(typed, context),
+                Err(error) => Box::pin(futures::future::ready(Err(error))),
+            }),
+        )
     }
 
     /// Wait until every currently acquired service has installed its initial snapshot.
     pub async fn ready(&self, context: Context) -> pi_js::Result<()> {
-        todo!("port: RemoteServices::ready")
+        (self.inner.ready_fn)(context).await
     }
 
     pub async fn dispose(&self, context: Context) -> pi_js::Result<()> {
-        todo!("port: RemoteServices::dispose")
+        (self.inner.dispose_fn)(context).await
+    }
+}
+
+impl From<RemoteServiceBinding> for RemoteServices {
+    fn from(binding: RemoteServiceBinding) -> Self {
+        binding.as_remote_services()
     }
 }
 
@@ -572,11 +1030,11 @@ impl ServiceSubscription {
     }
 
     pub fn activate(&self) -> pi_js::Result<()> {
-        todo!("port: ServiceSubscription::activate")
+        (self.inner.activate)()
     }
 
     pub async fn close(&self, context: Option<Context>) -> pi_js::Result<()> {
-        todo!("port: ServiceSubscription::close")
+        (self.inner.close)(context).await
     }
 }
 
@@ -625,7 +1083,7 @@ impl RemoteServiceTransport {
     }
 
     pub async fn invoke(&self, call: &ServiceCall, context: &Context) -> pi_js::Result<Option<JsonValue>> {
-        todo!("port: RemoteServiceTransport::invoke")
+        (self.inner.invoke)(call, context).await
     }
 
     pub async fn subscribe(
@@ -635,7 +1093,7 @@ impl RemoteServiceTransport {
         listener: Arc<dyn Fn(ServiceProviderUpdate, Context) + Send + Sync>,
         context: &Context,
     ) -> pi_js::Result<ServiceSubscription> {
-        todo!("port: RemoteServiceTransport::subscribe")
+        (self.inner.subscribe)(service_id, mode, listener, context).await
     }
 }
 
@@ -667,15 +1125,46 @@ pub struct RemoteServiceBinding {
 }
 
 struct RemoteServiceBindingInner {
-    _private: (),
+    impl_: crate::services::consumer::RemoteServiceBindingImpl,
 }
 
 impl RemoteServiceBinding {
+    pub fn new(options: RemoteServiceBindingOptions) -> pi_js::Result<Self> {
+        let impl_ = crate::services::consumer::RemoteServiceBindingImpl::new(options)?;
+        Ok(Self::from_impl(impl_))
+    }
+
+    pub(crate) fn from_impl(impl_: crate::services::consumer::RemoteServiceBindingImpl) -> Self {
+        Self {
+            inner: Arc::new(RemoteServiceBindingInner { impl_ }),
+        }
+    }
+
+    pub fn as_remote_services(&self) -> RemoteServices {
+        let use_binding = self.clone();
+        let observe_binding = self.clone();
+        let ready_binding = self.clone();
+        let dispose_binding = self.clone();
+        RemoteServices::new(
+            Arc::new(move |service| use_binding.inner.impl_.r#use(service)),
+            Arc::new(move |service, handler| observe_binding.inner.impl_.observe(service, handler)),
+            Arc::new(move |context| {
+                let b = ready_binding.clone();
+                Box::pin(async move { b.ready(context).await })
+            }),
+            Arc::new(move |context| {
+                let b = dispose_binding.clone();
+                Box::pin(async move { b.dispose(context).await })
+            }),
+        )
+    }
+
     pub fn r#use<T>(&self, service: &Service) -> pi_js::Result<T>
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: RemoteServiceBinding::use")
+        let obj = self.inner.impl_.r#use(service)?;
+        from_service_object(obj)
     }
 
     pub fn observe<T>(
@@ -686,19 +1175,25 @@ impl RemoteServiceBinding {
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: RemoteServiceBinding::observe")
+        self.inner.impl_.observe(
+            service,
+            Arc::new(move |obj, context| match from_service_object::<T>(obj) {
+                Ok(typed) => handler(typed, context),
+                Err(error) => Box::pin(futures::future::ready(Err(error))),
+            }),
+        )
     }
 
     pub async fn ready(&self, context: Context) -> pi_js::Result<()> {
-        todo!("port: RemoteServiceBinding::ready")
+        self.inner.impl_.ready(context).await
     }
 
     pub async fn dispose(&self, context: Context) -> pi_js::Result<()> {
-        todo!("port: RemoteServiceBinding::dispose")
+        self.inner.impl_.dispose(context).await
     }
 
     pub async fn rebind(&self, bound: bool, context: Context) -> pi_js::Result<()> {
-        todo!("port: RemoteServiceBinding::rebind")
+        self.inner.impl_.rebind(bound, context).await
     }
 }
 
@@ -752,11 +1247,11 @@ impl RemoteServiceSource {
     }
 
     pub fn catalogue(&self, context: Context) -> pi_js::BoxFuture<pi_js::Result<Vec<ServiceCatalogueEntry>>> {
-        todo!("port: RemoteServiceSource::catalogue")
+        (self.inner.catalogue)(context)
     }
 
     pub fn open(&self, options: RemoteServiceSourceOpenOptions) -> RemoteServices {
-        todo!("port: RemoteServiceSource::open")
+        (self.inner.open)(options)
     }
 }
 
@@ -768,17 +1263,35 @@ pub struct FacetEnvironment {
     inner: Arc<FacetEnvironmentInner>,
 }
 
+pub(crate) struct FacetEnvironmentHandlers {
+    pub use_fn: Arc<dyn Fn(&Service) -> pi_js::Result<crate::services::handle::ServiceObject> + Send + Sync>,
+    pub observe_fn: Arc<dyn Fn(&Service, ServiceObjectObserveHandler) -> pi_js::Result<()> + Send + Sync>,
+    pub provide_fn: Arc<dyn Fn(&Service, crate::services::handle::ServiceObject) -> pi_js::Result<()> + Send + Sync>,
+    pub provide_many_fn: Arc<dyn Fn(&Service) -> pi_js::Result<ServiceSpawnerFn> + Send + Sync>,
+    pub assert_replicated_state_fn: Arc<dyn Fn() -> pi_js::Result<()> + Send + Sync>,
+    pub own_fn: Arc<dyn Fn(Disposal) -> pi_js::Result<()> + Send + Sync>,
+    pub on_activate_fn: Arc<dyn Fn(Disposal) -> pi_js::Result<()> + Send + Sync>,
+    pub on_deactivate_fn: Arc<dyn Fn(Disposal) -> pi_js::Result<()> + Send + Sync>,
+}
+
 struct FacetEnvironmentInner {
-    _private: (),
+    handlers: FacetEnvironmentHandlers,
 }
 
 impl FacetEnvironment {
+    pub(crate) fn from_handlers(handlers: FacetEnvironmentHandlers) -> Self {
+        Self {
+            inner: Arc::new(FacetEnvironmentInner { handlers }),
+        }
+    }
+
     /// Declare a hard dependency on one singleton service and return its stable handle.
     pub fn r#use<T>(&self, service: &Service) -> pi_js::Result<T>
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: FacetEnvironment::use")
+        let obj = (self.inner.handlers.use_fn)(service)?;
+        from_service_object(obj)
     }
 
     /// Declare a hard dependency on a keyed service and observe each live instance.
@@ -792,7 +1305,13 @@ impl FacetEnvironment {
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: FacetEnvironment::observe")
+        (self.inner.handlers.observe_fn)(
+            service,
+            Arc::new(move |obj, context| match from_service_object::<T>(obj) {
+                Ok(typed) => handler(typed, context),
+                Err(error) => Box::pin(futures::future::ready(Err(error))),
+            }),
+        )
     }
 
     /// Declare and install this facet's singleton implementation of a service.
@@ -800,7 +1319,8 @@ impl FacetEnvironment {
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: FacetEnvironment::provide")
+        let obj = into_service_object(implementation, service.local, "Service", &service.id)?;
+        (self.inner.handlers.provide_fn)(service, obj)
     }
 
     /// Declare ownership of a multi-instance service and return its deferred spawning capability.
@@ -808,7 +1328,8 @@ impl FacetEnvironment {
     where
         T: Send + Sync + 'static,
     {
-        todo!("port: FacetEnvironment::provide_many")
+        let spawn_fn = (self.inner.handlers.provide_many_fn)(service)?;
+        Ok(ServiceSpawner::new(service.id.clone(), service.local, spawn_fn))
     }
 
     /// Create initialized mutable state by taking immutable ownership of an alias-free strict-JSON root.
@@ -819,22 +1340,24 @@ impl FacetEnvironment {
     where
         T: Clone + Send + Sync + 'static,
     {
-        todo!("port: FacetEnvironment::replicated_state")
+        (self.inner.handlers.assert_replicated_state_fn)()?;
+        let impl_ = crate::services::state::MutableReplicatedStateImpl::new(initial)?;
+        Ok(MutableReplicatedState::from_impl(impl_))
     }
 
     /// Give the facet ownership of a resource cleanup function.
     pub fn own(&self, disposal: Disposal) -> pi_js::Result<()> {
-        todo!("port: FacetEnvironment::own")
+        (self.inner.handlers.own_fn)(disposal)
     }
 
     /// Register asynchronous initialization after dependencies are bound and ready.
     pub fn on_activate(&self, callback: Disposal) -> pi_js::Result<()> {
-        todo!("port: FacetEnvironment::on_activate")
+        (self.inner.handlers.on_activate_fn)(callback)
     }
 
     /// Register final facet teardown.
     pub fn on_deactivate(&self, callback: Disposal) -> pi_js::Result<()> {
-        todo!("port: FacetEnvironment::on_deactivate")
+        (self.inner.handlers.on_deactivate_fn)(callback)
     }
 }
 
@@ -864,7 +1387,7 @@ impl Facet {
     }
 
     pub fn setup(&self, env: &FacetEnvironment) -> pi_js::Result<()> {
-        todo!("port: Facet::setup")
+        (self.inner.setup)(env)
     }
 }
 
@@ -881,21 +1404,30 @@ pub struct FacetHost {
 }
 
 struct FacetHostInner {
-    _private: (),
+    kernel: crate::facets::host::FacetKernel,
 }
 
 impl FacetHost {
+    pub(crate) fn from_kernel(kernel: crate::facets::host::FacetKernel) -> Self {
+        Self {
+            inner: Arc::new(FacetHostInner { kernel }),
+        }
+    }
+
     pub fn services(&self) -> RemoteServiceProvider {
-        todo!("port: FacetHost::services")
+        self.inner
+            .kernel
+            .provider()
+            .expect("FacetHost always has an assembled provider")
     }
 
     /// Activate and replace facets with matching IDs without disconnecting consumer service handles.
     pub async fn reload(&self, facets: Vec<Facet>) -> pi_js::Result<()> {
-        todo!("port: FacetHost::reload")
+        self.inner.kernel.reload(facets).await
     }
 
     pub async fn dispose(&self) -> pi_js::Result<()> {
-        todo!("port: FacetHost::dispose")
+        self.inner.kernel.dispose().await
     }
 }
 
@@ -922,7 +1454,7 @@ impl LoadedFacets {
     }
 
     pub async fn dispose(&self) -> pi_js::Result<()> {
-        todo!("port: LoadedFacets::dispose")
+        (self.inner.dispose)().await
     }
 }
 
@@ -944,6 +1476,6 @@ impl FacetLoader {
     }
 
     pub async fn load(&self) -> pi_js::Result<LoadedFacets> {
-        todo!("port: FacetLoader::load")
+        (self.inner.load)().await
     }
 }

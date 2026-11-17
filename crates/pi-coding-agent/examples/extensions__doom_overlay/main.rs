@@ -7,4 +7,15 @@ pub mod doom_keys;
 pub mod wad_finder;
 // @generated-mods end
 
-fn main() {}
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let _ = (
+        doom_component::MODULE_INFO,
+        doom_engine::MODULE_INFO,
+        doom_keys::MODULE_INFO,
+        wad_finder::MODULE_INFO,
+    );
+    pi_js::console::error("doom-overlay: not available in pi-rs: depends on Doom WASM/WAD JS runtime assets");
+    ExitCode::from(1)
+}

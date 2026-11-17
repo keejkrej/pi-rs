@@ -14,12 +14,12 @@ type ColorFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 type AbortCallback = Arc<dyn Fn() + Send + Sync>;
 
 struct CancellableLoaderState {
-    abort_controller: pi_js::abort::AbortController,
     on_abort: Option<AbortCallback>,
 }
 
 struct CancellableLoaderInner {
     loader: Loader,
+    abort_controller: pi_js::abort::AbortController,
     state: Mutex<CancellableLoaderState>,
 }
 
@@ -57,7 +57,13 @@ impl CancellableLoader {
         message: Option<&str>,
         indicator: Option<LoaderIndicatorOptions>,
     ) -> Self {
-        todo!("port: CancellableLoader::new")
+        Self {
+            inner: Arc::new(CancellableLoaderInner {
+                loader: Loader::new(ui, spinner_color_fn, message_color_fn, message, indicator),
+                abort_controller: pi_js::abort::AbortController::new(),
+                state: Mutex::new(CancellableLoaderState { on_abort: None }),
+            }),
+        }
     }
 
     pub fn loader(&self) -> Loader {
@@ -112,20 +118,27 @@ impl CancellableLoader {
 
     /// AbortSignal that is aborted when user presses Escape.
     pub fn signal(&self) -> pi_js::abort::AbortSignal {
-        self.state().abort_controller.signal()
+        self.inner.abort_controller.signal()
     }
 
     /// Whether the loader was aborted.
     pub fn aborted(&self) -> bool {
-        self.state().abort_controller.signal().aborted()
+        self.inner.abort_controller.signal().aborted()
     }
 
     pub fn handle_input(&self, data: &str) {
-        todo!("port: CancellableLoader::handle_input")
+        let kb = crate::keybindings::get_keybindings();
+        if kb.matches(data, "tui.select.cancel") {
+            let on_abort = self.state().on_abort.clone();
+            self.inner.abort_controller.abort(None);
+            if let Some(cb) = on_abort {
+                cb();
+            }
+        }
     }
 
     pub fn dispose(&self) {
-        todo!("port: CancellableLoader::dispose")
+        self.stop();
     }
 }
 

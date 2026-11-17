@@ -401,14 +401,36 @@ impl TypedSpanStarter {
     }
 }
 
-/// Bind an explicit parent context to the combined span vocabulary of one or more schemas.
-/// Schema values are used only for type inference; no runtime schema validation is performed.
-#[allow(unused_variables)]
-pub fn create_typed_span_starter<C>(telemetry_context: C, schemas: &[TelemetrySchemaDefinition]) -> TypedSpanStarter
+fn bind_typed_span_starter<C>(telemetry_context: C) -> TypedSpanStarter
 where
     C: TelemetryContext + 'static,
 {
-    todo!("port: create_typed_span_starter")
+    let telemetry_context = Arc::new(telemetry_context);
+    TypedSpanStarter {
+        inner: Arc::new(move |name, attributes, callback| {
+            let telemetry_context = Arc::clone(&telemetry_context);
+            let options = SpanOptions {
+                name: name.to_string(),
+                attributes: Some(attributes),
+            };
+            Box::pin(async move {
+                let span_callback: SpanCallback = Arc::new(move |span| {
+                    let child_starter = bind_typed_span_starter(Arc::clone(&span));
+                    callback(span, child_starter)
+                });
+                telemetry_context.start_span(options, span_callback).await
+            })
+        }),
+    }
+}
+
+/// Bind an explicit parent context to the combined span vocabulary of one or more schemas.
+/// Schema values are used only for type inference; no runtime schema validation is performed.
+pub fn create_typed_span_starter<C>(telemetry_context: C, _schemas: &[TelemetrySchemaDefinition]) -> TypedSpanStarter
+where
+    C: TelemetryContext + 'static,
+{
+    bind_typed_span_starter(telemetry_context)
 }
 
 pub use crate::memory::{InMemoryTelemetryContext, RecordedTelemetryEvent, RecordedTelemetrySpan};

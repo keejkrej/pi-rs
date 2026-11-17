@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttributeValue, SpanAttributes, SpanCallback, SpanOptions, SpanResult, SpanStatus, SpanValue, TelemetryContext,
+    AttributeValue, NOOP_TELEMETRY_CONTEXT, SpanAttributes, SpanCallback, SpanOptions, SpanResult, SpanStatus,
+    SpanStatusError, SpanValue, TelemetryContext, TelemetrySpan,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,14 +33,12 @@ pub struct RecordedTelemetrySpan {
     pub end_sequence: Option<i64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 struct MutableRecordedTelemetryEvent {
     name: String,
     attributes: SpanAttributes,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 struct MutableRecordedTelemetrySpan {
     id: i64,
@@ -53,7 +52,6 @@ struct MutableRecordedTelemetrySpan {
     end_sequence: Option<i64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 struct InMemoryTelemetryState {
     spans: Vec<MutableRecordedTelemetrySpan>,
@@ -87,71 +85,272 @@ impl InMemoryTelemetryContext {
     }
 
     /// Returns detached snapshots in span-start order.
-    #[allow(unused_variables)]
     pub fn get_spans(&self) -> Vec<RecordedTelemetrySpan> {
-        todo!("port: InMemoryTelemetryContext::get_spans")
+        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .spans
+            .iter()
+            .map(|span| RecordedTelemetrySpan {
+                id: span.id,
+                parent_id: span.parent_id,
+                name: span.name.clone(),
+                attributes: copy_attributes(Some(&span.attributes)),
+                events: span
+                    .events
+                    .iter()
+                    .map(|event| RecordedTelemetryEvent {
+                        name: event.name.clone(),
+                        attributes: copy_attributes(Some(&event.attributes)),
+                    })
+                    .collect(),
+                status: copy_status(&span.status),
+                settled: span.settled,
+                end_sequence: span.end_sequence,
+            })
+            .collect()
+    }
+}
+
+impl Default for InMemoryTelemetryContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl TelemetryContext for InMemoryTelemetryContext {
     async fn start_span(&self, options: SpanOptions, callback: SpanCallback) -> SpanResult {
-        start_in_memory_span(&self.inner.state, None, options, callback).await
+        start_in_memory_span(&self.inner, None, options, callback).await
     }
 }
 
-#[allow(dead_code, unused_variables)]
+#[derive(Clone)]
+struct InMemoryTelemetrySpan {
+    inner: Arc<InMemoryTelemetryInner>,
+    span_id: i64,
+}
+
+#[async_trait]
+impl TelemetryContext for InMemoryTelemetrySpan {
+    async fn start_span(&self, options: SpanOptions, callback: SpanCallback) -> SpanResult {
+        start_in_memory_span(&self.inner, Some(self.span_id), options, callback).await
+    }
+}
+
+impl TelemetrySpan for InMemoryTelemetrySpan {
+    fn add_event(&self, name: &str, attributes: Option<SpanAttributes>) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(span) = find_span_mut(&mut state.spans, self.span_id) else {
+            return;
+        };
+        if span.settled {
+            return;
+        }
+        span.events.push(MutableRecordedTelemetryEvent {
+            name: name.to_string(),
+            attributes: copy_attributes(attributes.as_ref()),
+        });
+    }
+
+    fn set_attributes(&self, attributes: SpanAttributes) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(span) = find_span_mut(&mut state.spans, self.span_id) else {
+            return;
+        };
+        if span.settled {
+            return;
+        }
+        span.attributes = merge_attributes(&span.attributes, &attributes);
+    }
+
+    fn set_status(&self, status: SpanStatus) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(span) = find_span_mut(&mut state.spans, self.span_id) else {
+            return;
+        };
+        if span.settled {
+            return;
+        }
+        span.status = copy_status(&status);
+        span.explicit_status = true;
+    }
+}
+
+fn find_span(spans: &[MutableRecordedTelemetrySpan], id: i64) -> Option<&MutableRecordedTelemetrySpan> {
+    if let Ok(idx) = usize::try_from(id - 1)
+        && let Some(span) = spans.get(idx)
+        && span.id == id
+    {
+        return Some(span);
+    }
+    spans.iter().find(|s| s.id == id)
+}
+
+fn find_span_mut(spans: &mut [MutableRecordedTelemetrySpan], id: i64) -> Option<&mut MutableRecordedTelemetrySpan> {
+    if let Ok(idx) = usize::try_from(id - 1)
+        && spans.get(idx).is_some_and(|s| s.id == id)
+    {
+        return spans.get_mut(idx);
+    }
+    spans.iter_mut().find(|s| s.id == id)
+}
+
 fn copy_attribute_value(value: &AttributeValue) -> AttributeValue {
-    todo!("port: copy_attribute_value")
+    value.clone()
 }
 
-#[allow(dead_code, unused_variables)]
 fn copy_attributes(attributes: Option<&SpanAttributes>) -> SpanAttributes {
-    todo!("port: copy_attributes")
+    let mut copy = SpanAttributes::new();
+    let Some(attributes) = attributes else {
+        return copy;
+    };
+    for (name, value) in attributes {
+        copy.insert(name.clone(), copy_attribute_value(value));
+    }
+    copy
 }
 
-#[allow(dead_code, unused_variables)]
 fn merge_attributes(current: &SpanAttributes, attributes: &SpanAttributes) -> SpanAttributes {
-    todo!("port: merge_attributes")
+    let mut merged = copy_attributes(Some(current));
+    for (name, value) in attributes {
+        merged.insert(name.clone(), copy_attribute_value(value));
+    }
+    merged
 }
 
-#[allow(dead_code, unused_variables)]
 fn copy_status(status: &SpanStatus) -> SpanStatus {
-    todo!("port: copy_status")
+    status.clone()
 }
 
 // Error inspection is passive. Fall through to an error status without details.
-#[allow(dead_code, unused_variables)]
 fn automatic_error_status(error: &SpanValue) -> SpanStatus {
-    todo!("port: automatic_error_status")
+    if let Some(js_err) = error.downcast_ref::<pi_js::Error>() {
+        return SpanStatus::Error {
+            error: Some(SpanStatusError {
+                name: js_err.name().to_string(),
+                message: js_err.message(),
+            }),
+        };
+    }
+    if let Some(js_err) = error.downcast_ref::<pi_js::JsError>() {
+        return SpanStatus::Error {
+            error: Some(SpanStatusError {
+                name: js_err.name.clone(),
+                message: js_err.message.clone(),
+            }),
+        };
+    }
+    if let Some(node_err) = error.downcast_ref::<pi_js::NodeError>() {
+        return SpanStatus::Error {
+            error: Some(SpanStatusError {
+                name: "Error".to_string(),
+                message: node_err.message.clone(),
+            }),
+        };
+    }
+    SpanStatus::Error { error: None }
 }
 
-#[allow(dead_code, unused_variables)]
-fn settle_span(
-    state: &mut InMemoryTelemetryState,
-    span: &mut MutableRecordedTelemetrySpan,
-    failed: bool,
-    error: Option<&SpanValue>,
-) {
-    todo!("port: settle_span")
+fn settle_span(state: &mut InMemoryTelemetryState, span_id: i64, failed: bool, error: Option<&SpanValue>) {
+    let next_end_sequence = state.next_end_sequence;
+    let Some(span) = find_span_mut(&mut state.spans, span_id) else {
+        return;
+    };
+    if span.settled {
+        return;
+    }
+    if failed && !span.explicit_status {
+        span.status = match error {
+            Some(err) => automatic_error_status(err),
+            None => SpanStatus::Error { error: None },
+        };
+    }
+    span.settled = true;
+    span.end_sequence = Some(next_end_sequence);
+    state.next_end_sequence += 1;
 }
 
-#[allow(dead_code, unused_variables)]
 fn create_span(
     state: &mut InMemoryTelemetryState,
-    parent: Option<&MutableRecordedTelemetrySpan>,
+    parent_id: Option<i64>,
     options: &SpanOptions,
 ) -> MutableRecordedTelemetrySpan {
-    todo!("port: create_span")
+    let id = state.next_span_id;
+    state.next_span_id += 1;
+    let name = options.name.clone();
+    let attributes = copy_attributes(options.attributes.as_ref());
+    MutableRecordedTelemetrySpan {
+        id,
+        parent_id,
+        name,
+        attributes,
+        events: Vec::new(),
+        status: SpanStatus::Ok,
+        explicit_status: false,
+        settled: false,
+        end_sequence: None,
+    }
+}
+
+struct SettleGuard<'a> {
+    inner: &'a Arc<InMemoryTelemetryInner>,
+    span_id: i64,
+    disarmed: bool,
+}
+
+impl Drop for SettleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            settle_span(&mut state, self.span_id, true, None);
+        }
+    }
 }
 
 // Recording is passive. Ignore malformed or unreadable telemetry payloads.
-#[allow(unused_variables)]
 async fn start_in_memory_span(
-    state: &Mutex<InMemoryTelemetryState>,
+    inner: &Arc<InMemoryTelemetryInner>,
     parent_id: Option<i64>,
     options: SpanOptions,
     callback: SpanCallback,
 ) -> SpanResult {
-    todo!("port: start_in_memory_span")
+    let span_id = {
+        let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pid) = parent_id
+            && find_span(&state.spans, pid).is_none_or(|p| p.settled)
+        {
+            None
+        } else {
+            let recorded_span = create_span(&mut state, parent_id, &options);
+            let span_id = recorded_span.id;
+            state.spans.push(recorded_span);
+            Some(span_id)
+        }
+    };
+    let Some(span_id) = span_id else {
+        return NOOP_TELEMETRY_CONTEXT.start_span(options, callback).await;
+    };
+
+    let mut guard = SettleGuard {
+        inner,
+        span_id,
+        disarmed: false,
+    };
+
+    let span: Arc<dyn TelemetrySpan + Send + Sync> = Arc::new(InMemoryTelemetrySpan {
+        inner: Arc::clone(inner),
+        span_id,
+    });
+    let result = callback(span).await;
+
+    guard.disarmed = true;
+    {
+        let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &result {
+            Ok(_) => settle_span(&mut state, span_id, false, None),
+            Err(error) => settle_span(&mut state, span_id, true, Some(error)),
+        }
+    }
+
+    result
 }

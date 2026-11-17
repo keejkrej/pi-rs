@@ -196,7 +196,52 @@ pub enum LlmContent {
 }
 
 fn block_to_llm_content(block: &ContentBlock) -> LlmContent {
-    todo!("port: block_to_llm_content")
+    match block {
+        ContentBlock::Text(text) => LlmContent::Text {
+            text: text.text.clone(),
+        },
+        ContentBlock::Image(image) => LlmContent::Image {
+            data: image.data.clone(),
+            mime_type: image.mime_type.clone(),
+        },
+        ContentBlock::Audio(audio) => LlmContent::Text {
+            text: format!("[audio {} omitted]", audio.mime_type),
+        },
+        ContentBlock::ResourceLink(link) => LlmContent::Text {
+            text: format!("{}: {}", link.name, link.uri),
+        },
+        ContentBlock::Resource(embedded) => match &embedded.resource {
+            ResourceContents::Text(text) => LlmContent::Text {
+                text: text.text.clone(),
+            },
+            ResourceContents::Blob(blob) => {
+                if let Some(mime_type) = &blob.mime_type
+                    && mime_type.starts_with("image/")
+                {
+                    LlmContent::Image {
+                        data: blob.blob.clone(),
+                        mime_type: mime_type.clone(),
+                    }
+                } else {
+                    let mime = blob.mime_type.as_deref().unwrap_or("unknown type");
+                    LlmContent::Text {
+                        text: format!("[binary resource {} ({mime}) omitted]", blob.uri),
+                    }
+                }
+            }
+        },
+        ContentBlock::Unknown(value) => {
+            let block_type = match value.get("type") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Null) => "null".to_string(),
+                Some(other) => pi_js::json::stringify(other),
+                None => "undefined".to_string(),
+            };
+            LlmContent::Text {
+                text: format!("[unsupported MCP content {block_type}]"),
+            }
+        }
+    }
 }
 
 /// Convert a tool result to text and image content for a model. Text and images pass through,
@@ -205,5 +250,13 @@ fn block_to_llm_content(block: &ContentBlock) -> LlmContent {
 /// content blocks but with `structuredContent` becomes its JSON, since servers should, but do not
 /// always, mirror structured results as text.
 pub fn to_llm_content(result: &CallToolResult) -> Vec<LlmContent> {
-    todo!("port: to_llm_content")
+    let blocks: Vec<LlmContent> = result.content.iter().map(block_to_llm_content).collect();
+    if blocks.is_empty()
+        && let Some(structured) = &result.structured_content
+    {
+        return vec![LlmContent::Text {
+            text: pi_js::json::stringify_pretty(structured, "  "),
+        }];
+    }
+    blocks
 }

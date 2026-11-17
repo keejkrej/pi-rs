@@ -28,4 +28,9 @@ pub use types::{
     CodemodeOutputItem, CodemodeResult, CodemodeSandboxOptions, CodemodeStoreWrites, CodemodeTool, CodemodeToolContext,
     CodemodeWasmInput,
 };
+pub use vendor::quickjs_wasi::{
+    CompileFlags, EvalFlags, HandleScope, HostFunction, Intrinsics, JSDeferred, JSException, JSOwnPropertyDescriptor,
+    JSPropertyDescriptor, JSValueHandle, MAX_STACK_SIZE, ModuleLoader, PromiseRejectionHandler, PromiseResult,
+    PromiseState, QuickJS, QuickJSOptions, WasiMemory, WasiOptions, WasiOverrides,
+};
 pub use wasm::{CodemodeWasmModule, load_quick_js_wasm};

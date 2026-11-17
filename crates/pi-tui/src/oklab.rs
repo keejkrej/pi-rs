@@ -84,12 +84,20 @@ fn okhsl_to_oklab_lightness(x: f64) -> f64 {
 
 /// sRGB transfer function: linear to encoded channel, both 0-1.
 fn linear_to_srgb(value: f64) -> f64 {
-    todo!("port: linear_to_srgb")
+    if value > 0.0031308 {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    } else {
+        12.92 * value
+    }
 }
 
 /// Inverse sRGB transfer function: encoded to linear channel, both 0-1.
 fn srgb_to_linear(value: f64) -> f64 {
-    todo!("port: srgb_to_linear")
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Oklab [L, a, b] to linear sRGB [r, g, b] (0-1, may leave the gamut).
@@ -134,7 +142,34 @@ fn lms_slopes(a: f64, b: f64) -> [f64; 3] {
 
 /// Largest saturation (C/L) inside sRGB for hue (a, b): polynomial fit plus one Halley step.
 fn max_saturation(a: f64, b: f64) -> f64 {
-    todo!("port: max_saturation")
+    let channel = SATURATION_FIT
+        .iter()
+        .enumerate()
+        .position(|(index, ([x, y], _))| index == 2 || x * a + y * b > 1.0)
+        .unwrap_or(2);
+    let [k0, k1, k2, k3, k4] = SATURATION_FIT[channel].1;
+    let weights = LMS_TO_LINEAR_SRGB[channel];
+    let saturation = k0 + k1 * a + k2 * b + k3 * a * a + k4 * a * b;
+
+    let slopes = lms_slopes(a, b);
+    let base = [
+        1.0 + saturation * slopes[0],
+        1.0 + saturation * slopes[1],
+        1.0 + saturation * slopes[2],
+    ];
+    let dot = |values: [f64; 3]| weights[0] * values[0] + weights[1] * values[1] + weights[2] * values[2];
+    let f = dot([base[0].powi(3), base[1].powi(3), base[2].powi(3)]);
+    let f1 = dot([
+        3.0 * slopes[0] * base[0].powi(2),
+        3.0 * slopes[1] * base[1].powi(2),
+        3.0 * slopes[2] * base[2].powi(2),
+    ]);
+    let f2 = dot([
+        6.0 * slopes[0].powi(2) * base[0],
+        6.0 * slopes[1].powi(2) * base[1],
+        6.0 * slopes[2].powi(2) * base[2],
+    ]);
+    saturation - (f * f1) / (f1 * f1 - 0.5 * f * f2)
 }
 
 /// Oklab lightness and chroma of the most saturated sRGB color of hue (a, b).
@@ -147,7 +182,41 @@ fn cusp(a: f64, b: f64) -> [f64; 2] {
 
 /// Chroma where the constant-lightness line at `lightness` leaves the sRGB gamut.
 fn max_chroma(a: f64, b: f64, lightness: f64, [cusp_l, cusp_c]: [f64; 2]) -> f64 {
-    todo!("port: max_chroma")
+    if lightness <= cusp_l {
+        return (cusp_c * lightness) / cusp_l;
+    }
+    // Upper half: triangle edge, then one Halley step against each channel reaching 1.
+    let t = (cusp_c * (lightness - 1.0)) / (cusp_l - 1.0);
+    let slopes = lms_slopes(a, b);
+    let lms = [
+        lightness + t * slopes[0],
+        lightness + t * slopes[1],
+        lightness + t * slopes[2],
+    ];
+    let cubes = [lms[0].powi(3), lms[1].powi(3), lms[2].powi(3)];
+    let first = [
+        3.0 * slopes[0] * lms[0].powi(2),
+        3.0 * slopes[1] * lms[1].powi(2),
+        3.0 * slopes[2] * lms[2].powi(2),
+    ];
+    let second = [
+        6.0 * slopes[0].powi(2) * lms[0],
+        6.0 * slopes[1].powi(2) * lms[1],
+        6.0 * slopes[2].powi(2) * lms[2],
+    ];
+    let dot = |row: Vector, values: [f64; 3]| row[0] * values[0] + row[1] * values[1] + row[2] * values[2];
+    let mut min_step = f64::MAX;
+    for row in LMS_TO_LINEAR_SRGB {
+        let f = dot(row, cubes) - 1.0;
+        let f1 = dot(row, first);
+        let f2 = dot(row, second);
+        let u = f1 / (f1 * f1 - 0.5 * f * f2);
+        let step = if u >= 0.0 { -f * u } else { f64::MAX };
+        if step < min_step {
+            min_step = step;
+        }
+    }
+    t + min_step
 }
 
 /// OKHSL's chroma reference points at lightness L and hue (a, b): [c0, cMid, cMax].
@@ -182,11 +251,55 @@ fn chroma_stops(l: f64, a: f64, b: f64) -> [f64; 3] {
 /// @param saturation Saturation, 0-1.
 /// @param lightness Lightness, 0-1.
 pub fn okhsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> RgbColor {
-    todo!("port: okhsl_to_rgb")
+    let l = okhsl_to_oklab_lightness(lightness);
+    let mut lab = [l, 0.0, 0.0];
+    if l > 0.0 && l < 1.0 && saturation > 0.0 {
+        let angle = (2.0 * std::f64::consts::PI * (((hue % 360.0) + 360.0) % 360.0)) / 360.0;
+        let a = angle.cos();
+        let b = angle.sin();
+        let [c0, c_mid, c_max] = chroma_stops(l, a, b);
+        // Chroma rises from 0 through cMid at s = 0.8 to cMax at s = 1.
+        let chroma = if saturation < 0.8 {
+            let t = 1.25 * saturation;
+            let k1 = 0.8 * c0;
+            (t * k1) / (1.0 - (1.0 - k1 / c_mid) * t)
+        } else {
+            let t = 5.0 * (saturation - 0.8);
+            let k1 = (0.2 * c_mid.powi(2) * 1.25_f64.powi(2)) / c0;
+            c_mid + (t * k1) / (1.0 - (1.0 - k1 / (c_max - c_mid)) * t)
+        };
+        lab = [l, chroma * a, chroma * b];
+    }
+    linear_srgb_to_rgb(oklab_to_linear_srgb(lab))
 }
 
 /// Convert sRGB channels (0-255) to OKHSL.
 /// @returns Hue `h` in degrees (0 for grays), saturation `s` and lightness `l` 0-1.
 pub fn rgb_to_okhsl(rgb: RgbColor) -> OkhslChannels {
-    todo!("port: rgb_to_okhsl")
+    let [l, lab_a, lab_b] = rgb_to_oklab(rgb);
+    let chroma = lab_a.hypot(lab_b);
+    let lightness = oklab_to_okhsl_lightness(l);
+    if chroma < 1e-9 || lightness <= 0.0 || lightness >= 1.0 {
+        return OkhslChannels {
+            h: 0.0,
+            s: 0.0,
+            l: lightness,
+        };
+    }
+
+    let hue = ((lab_b.atan2(lab_a) * 180.0) / std::f64::consts::PI + 360.0) % 360.0;
+    let [c0, c_mid, c_max] = chroma_stops(l, lab_a / chroma, lab_b / chroma);
+    let saturation = if chroma < c_mid {
+        let k1 = 0.8 * c0;
+        0.8 * (chroma / (k1 + (1.0 - k1 / c_mid) * chroma))
+    } else {
+        let k1 = (0.2 * c_mid.powi(2) * 1.25_f64.powi(2)) / c0;
+        let offset = chroma - c_mid;
+        0.8 + 0.2 * (offset / (k1 + (1.0 - k1 / (c_max - c_mid)) * offset))
+    };
+    OkhslChannels {
+        h: hue,
+        s: saturation.clamp(0.0, 1.0),
+        l: lightness,
+    }
 }

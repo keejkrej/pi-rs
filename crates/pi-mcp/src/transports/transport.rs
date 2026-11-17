@@ -60,26 +60,81 @@ impl TransportEvents {
     }
 
     pub fn on_message(&self, listener: McpTransportMessageListener) -> Unsubscribe {
-        todo!("port: TransportEvents::on_message")
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = state.next_id;
+        state.next_id += 1;
+        state.message_listeners.insert(id, listener);
+        let inner = Arc::clone(&self.inner);
+        Unsubscribe::new(move || {
+            inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .message_listeners
+                .shift_remove(&id);
+        })
     }
 
     pub fn on_error(&self, listener: McpTransportErrorListener) -> Unsubscribe {
-        todo!("port: TransportEvents::on_error")
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = state.next_id;
+        state.next_id += 1;
+        state.error_listeners.insert(id, listener);
+        let inner = Arc::clone(&self.inner);
+        Unsubscribe::new(move || {
+            inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .error_listeners
+                .shift_remove(&id);
+        })
     }
 
     pub fn on_close(&self, listener: McpTransportCloseListener) -> Unsubscribe {
-        todo!("port: TransportEvents::on_close")
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = state.next_id;
+        state.next_id += 1;
+        state.close_listeners.insert(id, listener);
+        let inner = Arc::clone(&self.inner);
+        Unsubscribe::new(move || {
+            inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .close_listeners
+                .shift_remove(&id);
+        })
     }
 
     pub(crate) fn emit_message(&self, message: &JsonRpcMessage) {
-        todo!("port: TransportEvents::emit_message")
+        let listeners: Vec<McpTransportMessageListener> = {
+            let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            state.message_listeners.values().cloned().collect()
+        };
+        for listener in listeners {
+            listener(message);
+        }
     }
 
     pub(crate) fn emit_error(&self, error: &Error) {
-        todo!("port: TransportEvents::emit_error")
+        let listeners: Vec<McpTransportErrorListener> = {
+            let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            state.error_listeners.values().cloned().collect()
+        };
+        for listener in listeners {
+            listener(error);
+        }
     }
 
     pub(crate) fn emit_close(&self) {
-        todo!("port: TransportEvents::emit_close")
+        let listeners: Vec<McpTransportCloseListener> = {
+            let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if state.close_emitted {
+                return;
+            }
+            state.close_emitted = true;
+            state.close_listeners.values().cloned().collect()
+        };
+        for listener in listeners {
+            listener();
+        }
     }
 }

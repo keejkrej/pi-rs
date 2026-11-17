@@ -178,7 +178,10 @@ pub struct McpTimeoutError {
 
 impl McpTimeoutError {
     pub fn new(timeout_ms: i64) -> Self {
-        todo!("port: McpTimeoutError::new")
+        Self {
+            message: format!("MCP request timed out after {timeout_ms}ms"),
+            timeout_ms,
+        }
     }
 }
 
@@ -201,29 +204,112 @@ impl McpAbortError {
 }
 
 pub fn is_object(value: &Value) -> bool {
-    todo!("port: is_object")
+    value.is_object()
 }
 
 pub fn to_error(value: &(dyn std::error::Error + Send + Sync + 'static)) -> Error {
-    todo!("port: to_error")
+    if let Some(err) = value.downcast_ref::<Error>() {
+        return match err {
+            Error::Js(j) => Error::Js(pi_js::JsError {
+                name: j.name.clone(),
+                message: j.message.clone(),
+                code: j.code.clone(),
+                cause: j.cause.as_deref().map(|c| Box::new(to_error(c))),
+            }),
+            Error::Abort(reason) => Error::Abort(reason.clone()),
+            Error::Node(node) => Error::Node(node.clone()),
+            Error::Exit(code) => Error::Exit(*code),
+            Error::Typed(name, inner) => {
+                if let Some(e) = inner.downcast_ref::<McpError>() {
+                    Error::typed(name, e.clone())
+                } else if let Some(e) = inner.downcast_ref::<McpConnectionClosedError>() {
+                    Error::typed(name, e.clone())
+                } else if let Some(e) = inner.downcast_ref::<McpTimeoutError>() {
+                    Error::typed(name, e.clone())
+                } else if let Some(e) = inner.downcast_ref::<McpAbortError>() {
+                    Error::typed(name, e.clone())
+                } else {
+                    Error::js(name, inner.to_string())
+                }
+            }
+        };
+    }
+    if let Some(e) = value.downcast_ref::<McpError>() {
+        return Error::typed("McpError", e.clone());
+    }
+    if let Some(e) = value.downcast_ref::<McpConnectionClosedError>() {
+        return Error::typed("McpConnectionClosedError", e.clone());
+    }
+    if let Some(e) = value.downcast_ref::<McpTimeoutError>() {
+        return Error::typed("McpTimeoutError", e.clone());
+    }
+    if let Some(e) = value.downcast_ref::<McpAbortError>() {
+        return Error::typed(McpAbortError::NAME, e.clone());
+    }
+    if let Some(j) = value.downcast_ref::<pi_js::JsError>() {
+        return Error::Js(pi_js::JsError {
+            name: j.name.clone(),
+            message: j.message.clone(),
+            code: j.code.clone(),
+            cause: j.cause.as_deref().map(|c| Box::new(to_error(c))),
+        });
+    }
+    if let Some(node) = value.downcast_ref::<pi_js::NodeError>() {
+        return Error::Node(node.clone());
+    }
+    Error::msg(value.to_string())
 }
 
 pub fn is_json_rpc_id(value: &Value) -> bool {
-    todo!("port: is_json_rpc_id")
+    value.is_string() || value.as_f64().is_some_and(f64::is_finite)
 }
 
 pub fn is_json_rpc_request(message: &Value) -> bool {
-    todo!("port: is_json_rpc_request")
+    let Some(obj) = message.as_object() else {
+        return false;
+    };
+    obj.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+        && obj.get("id").is_some_and(is_json_rpc_id)
+        && obj.get("method").is_some_and(Value::is_string)
 }
 
 pub fn is_json_rpc_notification(message: &Value) -> bool {
-    todo!("port: is_json_rpc_notification")
+    let Some(obj) = message.as_object() else {
+        return false;
+    };
+    obj.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+        && !obj.contains_key("id")
+        && obj.get("method").is_some_and(Value::is_string)
 }
 
 pub fn is_json_rpc_response(message: &Value) -> bool {
-    todo!("port: is_json_rpc_response")
+    let Some(obj) = message.as_object() else {
+        return false;
+    };
+    if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return false;
+    }
+    if !obj.get("id").is_some_and(is_json_rpc_id) {
+        return false;
+    }
+    if obj.contains_key("result") {
+        return !obj.contains_key("error");
+    }
+    let Some(err) = obj.get("error").and_then(Value::as_object) else {
+        return false;
+    };
+    err.get("code").and_then(Value::as_f64).is_some_and(f64::is_finite)
+        && err.get("message").is_some_and(Value::is_string)
 }
 
 pub fn parse_json_rpc_message(value: &Value) -> Result<JsonRpcMessage> {
-    todo!("port: parse_json_rpc_message")
+    if is_json_rpc_request(value) || is_json_rpc_notification(value) || is_json_rpc_response(value) {
+        if let Ok(message) = serde_json::from_value::<JsonRpcMessage>(value.clone()) {
+            return Ok(message);
+        }
+    }
+    Err(Error::typed(
+        "McpError",
+        McpError::new(JSON_RPC_ERROR_CODES.invalid_request, "Invalid JSON-RPC message", None),
+    ))
 }
