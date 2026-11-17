@@ -188,7 +188,10 @@ async fn supports_tools_that_call_other_tools_under_any_name_through_the_extensi
     assert_eq!(harness.session.get_callable_tool_names(), vec!["echo", "helper"]);
     let tools = harness.session.agent().state().tools;
     assert_eq!(
-        tools.iter().find(|t| t.name == "run_tools").map(|t| t.description.as_str()),
+        tools
+            .iter()
+            .find(|t| t.name == "run_tools")
+            .map(|t| t.description.as_str()),
         Some("Runs tools: echo, helper")
     );
     assert_eq!(
@@ -306,7 +309,10 @@ async fn registers_codemode_and_tool_search_inactive_until_they_are_named() {
     let all_names: Vec<String> = plain.session.get_all_tools().into_iter().map(|t| t.name).collect();
     assert!(all_names.iter().any(|n| n == "codemode"));
     assert!(all_names.iter().any(|n| n == "tool_search"));
-    assert_eq!(plain.session.get_active_tool_names(), vec!["read", "bash", "edit", "write"]);
+    assert_eq!(
+        plain.session.get_active_tool_names(),
+        vec!["read", "bash", "edit", "write"]
+    );
     plain.cleanup();
 
     let allowed = create_harness(HarnessOptions {

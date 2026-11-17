@@ -5,15 +5,13 @@ mod support;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use pi_agent_core::types::AgentMessage;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{Message, StopReason, ToolResultMessage};
-use pi_agent_core::types::AgentMessage;
 use pi_coding_agent::core::agent_session::ExtensionBindings;
-use pi_coding_agent::core::extensions::types::{
-    ExtensionUIContext, ExtensionUIDialogOptions, NotifyType,
-};
+use pi_coding_agent::core::extensions::types::{ExtensionUIContext, ExtensionUIDialogOptions, NotifyType};
 use pi_coding_agent::extensions::mcp::cli::{McpCommandOptions, run_mcp_command};
 use pi_coding_agent::extensions::mcp::config::{
     LoadedMcpConfig, McpExposure, McpHttpServerConfig, McpOAuthConfig, McpServerConfig, McpServerEntry,
@@ -25,9 +23,7 @@ use pi_coding_agent::extensions::wire::{InMemoryAuthStorageBackend, auth_with_lo
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use support::suite::harness::{Harness, HarnessOptions, create_harness, get_message_text};
-use support::suite::mcp_oauth_server::{
-    OAuthMcpServerHandle, StartOAuthMcpServerOptions, start_oauth_mcp_server,
-};
+use support::suite::mcp_oauth_server::{OAuthMcpServerHandle, StartOAuthMcpServerOptions, start_oauth_mcp_server};
 use tokio::sync::{Notify, oneshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,11 +65,7 @@ impl ExtensionUIContext for OAuthUiContext {
         opts: Option<ExtensionUIDialogOptions>,
     ) -> pi_js::Result<Option<String>> {
         if self.browser == BrowserBehavior::Paste {
-            let rx = self
-                .redirect_rx
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
+            let rx = self.redirect_rx.lock().unwrap_or_else(PoisonError::into_inner).take();
             if let Some(rx) = rx {
                 return Ok(rx.await.ok());
             }
@@ -111,7 +103,11 @@ impl ExtensionUIContext for OAuthUiContext {
     fn set_status(&self, _key: &str, _text: Option<&str>) {}
     fn set_working_message(&self, _message: Option<&str>) {}
     fn set_working_visible(&self, _visible: bool) {}
-    fn set_working_indicator(&self, _options: Option<pi_coding_agent::core::extensions::types::WorkingIndicatorOptions>) {}
+    fn set_working_indicator(
+        &self,
+        _options: Option<pi_coding_agent::core::extensions::types::WorkingIndicatorOptions>,
+    ) {
+    }
     fn set_hidden_thinking_label(&self, _label: Option<&str>) {}
     fn set_widget_lines(
         &self,
@@ -227,49 +223,51 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
     let creds = McpOAuthCredentialStore::new(Some(backend_dyn), None);
     let harness = create_harness(HarnessOptions {
         initial_active_tool_names: Some(vec![]),
-        extension_factories: Some(vec![pi_coding_agent::core::extensions::types::InlineExtension::Factory(
-            create_mcp_extension(McpExtensionOptions {
-                load_config: Some(Arc::new(move |_| LoadedMcpConfig {
-                    servers: vec![entry_c.clone()],
-                    auto_enable_codemode: None,
-                    errors: vec![],
-                })),
-                credentials: Some(creds),
-                open_url: Some(Arc::new(move |url_str| {
-                    if let Ok(parsed) = url::Url::parse(url_str) {
-                        op_c.lock().unwrap_or_else(PoisonError::into_inner).push(parsed);
-                    }
-                    let url_owned = url_str.to_string();
-                    if browser == BrowserBehavior::Follow {
-                        tokio::spawn(async move {
-                            let client = reqwest::Client::new();
-                            let _ = client.get(&url_owned).send().await;
-                        });
-                    } else {
-                        let tx_slot = Arc::clone(&rtx_c);
-                        tokio::spawn(async move {
-                            let client = reqwest::Client::builder()
-                                .redirect(reqwest::redirect::Policy::none())
-                                .build()
-                                .unwrap();
-                            let loc = match client.get(&url_owned).send().await {
-                                Ok(resp) => resp
-                                    .headers()
-                                    .get("location")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                Err(_) => String::new(),
-                            };
-                            if let Some(tx) = tx_slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
-                                let _ = tx.send(loc);
-                            }
-                        });
-                    }
-                })),
-                ..Default::default()
-            }),
-        )]),
+        extension_factories: Some(vec![
+            pi_coding_agent::core::extensions::types::InlineExtension::Factory(create_mcp_extension(
+                McpExtensionOptions {
+                    load_config: Some(Arc::new(move |_| LoadedMcpConfig {
+                        servers: vec![entry_c.clone()],
+                        auto_enable_codemode: None,
+                        errors: vec![],
+                    })),
+                    credentials: Some(creds),
+                    open_url: Some(Arc::new(move |url_str| {
+                        if let Ok(parsed) = url::Url::parse(url_str) {
+                            op_c.lock().unwrap_or_else(PoisonError::into_inner).push(parsed);
+                        }
+                        let url_owned = url_str.to_string();
+                        if browser == BrowserBehavior::Follow {
+                            tokio::spawn(async move {
+                                let client = reqwest::Client::new();
+                                let _ = client.get(&url_owned).send().await;
+                            });
+                        } else {
+                            let tx_slot = Arc::clone(&rtx_c);
+                            tokio::spawn(async move {
+                                let client = reqwest::Client::builder()
+                                    .redirect(reqwest::redirect::Policy::none())
+                                    .build()
+                                    .unwrap();
+                                let loc = match client.get(&url_owned).send().await {
+                                    Ok(resp) => resp
+                                        .headers()
+                                        .get("location")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    Err(_) => String::new(),
+                                };
+                                if let Some(tx) = tx_slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                                    let _ = tx.send(loc);
+                                }
+                            });
+                        }
+                    })),
+                    ..Default::default()
+                },
+            )),
+        ]),
         ..Default::default()
     })
     .await;
@@ -337,9 +335,7 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
     ts.harness.session.prompt("/mcp", None).await.unwrap();
     {
         let notes = ts.notifications.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        assert!(notes.contains(
-            &"MCP servers need attention:\n  issues: needs sign-in\nRun /mcp to fix.".to_string()
-        ));
+        assert!(notes.contains(&"MCP servers need attention:\n  issues: needs sign-in\nRun /mcp to fix.".to_string()));
         assert_eq!(
             notes.last().map(String::as_str),
             Some("issues: needs sign-in, run /mcp login issues (direct)")
@@ -355,21 +351,24 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
             .map(String::as_str),
         Some("Signed in to MCP server \"issues\" (1 tools).")
     );
-    assert_eq!(
-        ts.server.log(),
-        vec!["401 none", "register", "token code"]
-    );
+    assert_eq!(ts.server.log(), vec!["401 none", "register", "token code"]);
     let stored = auth_with_lock(ts.backend.as_ref(), |curr| Ok((curr.map(str::to_string), None)))
         .unwrap()
         .unwrap_or_default();
     assert!(stored.contains("\"access_token\": \"access-1\"") || stored.contains("\"access_token\":\"access-1\""));
 
     let who1 = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who1))), "token access-1");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who1))),
+        "token access-1"
+    );
 
     ts.server.expire_access_tokens();
     let who2 = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who2))), "token access-2");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who2))),
+        "token access-2"
+    );
     let log2 = ts.server.log();
     assert_eq!(
         &log2[log2.len() - 3..],
@@ -377,9 +376,8 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
     );
 
     auth_with_lock(ts.backend.as_ref(), |curr| {
-        let mut states: indexmap::IndexMap<String, Value> = curr
-            .and_then(|s| pi_js::json::parse_as(s).ok())
-            .unwrap_or_default();
+        let mut states: indexmap::IndexMap<String, Value> =
+            curr.and_then(|s| pi_js::json::parse_as(s).ok()).unwrap_or_default();
         let expired_at = Value::from(pi_js::time::now_ms() - 1_000);
         for val in states.values_mut() {
             if let Some(obj) = val.as_object_mut() {
@@ -390,7 +388,10 @@ async fn signs_in_through_the_browser_refreshes_expired_tokens_and_signs_out() {
     })
     .unwrap();
     let who3 = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who3))), "token access-3");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who3))),
+        "token access-3"
+    );
     let log3 = ts.server.log();
     assert_eq!(&log3[log3.len() - 2..], &["token refresh", "call access-3"]);
 
@@ -428,7 +429,10 @@ async fn accepts_a_pasted_redirect_url_when_the_browser_cannot_reach_the_callbac
         Some("Signed in to MCP server \"issues\" (1 tools).")
     );
     let who = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who))), "token access-1");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who))),
+        "token access-1"
+    );
     assert!(ts.server.log().contains(&"token code".to_string()));
 
     ts.server.close().await;
@@ -461,11 +465,17 @@ async fn uses_the_configured_callback_url_and_scope() {
     {
         let urls = ts.opened.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let params: indexmap::IndexMap<String, String> = urls[0].query_pairs().into_owned().collect();
-        assert_eq!(params.get("redirect_uri").map(String::as_str), Some(callback_url.as_str()));
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some(callback_url.as_str())
+        );
         assert_eq!(params.get("scope").map(String::as_str), Some("issues:read"));
     }
     let who = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who))), "token access-1");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who))),
+        "token access-1"
+    );
 
     ts.server.close().await;
     ts.harness.cleanup();
@@ -499,7 +509,12 @@ async fn registers_with_the_configured_client_name() {
     assert_eq!(client_names, vec!["Claude Code"]);
 
     let fallback = setup(BrowserBehavior::Follow, None).await;
-    fallback.harness.session.prompt("/mcp login issues", None).await.unwrap();
+    fallback
+        .harness
+        .session
+        .prompt("/mcp login issues", None)
+        .await
+        .unwrap();
     let fb_names: Vec<String> = fallback
         .server
         .registrations()
@@ -599,10 +614,14 @@ async fn uses_credentials_from_pi_mcp_login_on_the_next_turn() {
                 });
             })),
             log: Some(Arc::new(move |line| {
-                out1.lock().unwrap_or_else(PoisonError::into_inner).push(line.to_string());
+                out1.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(line.to_string());
             })),
             error: Some(Arc::new(move |line| {
-                out2.lock().unwrap_or_else(PoisonError::into_inner).push(line.to_string());
+                out2.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(line.to_string());
             })),
         },
     )
@@ -610,12 +629,19 @@ async fn uses_credentials_from_pi_mcp_login_on_the_next_turn() {
     .unwrap();
     assert_eq!(exit_code, 0);
     assert_eq!(
-        output.lock().unwrap_or_else(PoisonError::into_inner).last().map(String::as_str),
+        output
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last()
+            .map(String::as_str),
         Some("Signed in to MCP server \"issues\" (1 tools).")
     );
 
     let who = call_whoami(&ts.harness).await;
-    assert_eq!(get_message_text(&AgentMessage::from(Message::ToolResult(who))), "token access-1");
+    assert_eq!(
+        get_message_text(&AgentMessage::from(Message::ToolResult(who))),
+        "token access-1"
+    );
 
     let _ = pi_js::fs::rm(&agent_dir, true, true);
     ts.server.close().await;

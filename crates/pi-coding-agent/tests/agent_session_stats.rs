@@ -104,7 +104,9 @@ async fn create_session() -> (AgentSession, SessionManager, Model) {
 
     let model_registry = create_in_memory_model_registry(auth_storage).await;
     let agent = Agent::new(AgentOptions {
-        get_api_key: Some(Arc::new(|_provider| Box::pin(async { Ok(Some("test-key".to_string())) }))),
+        get_api_key: Some(Arc::new(|_provider| {
+            Box::pin(async { Ok(Some("test-key".to_string())) })
+        })),
         stream_fn: Some(Arc::new(|m, ctx, opts| {
             Box::pin(async move { Ok(stream_simple(&m, &ctx, opts)) })
         })),
@@ -221,9 +223,7 @@ async fn uses_post_compaction_usage_for_current_context_instead_of_stale_kept_us
         .unwrap();
     session_manager.append_message(make_user_message("third", 5)).unwrap();
     session_manager
-        .append_message(
-            pi_ai::types::Message::Assistant(make_assistant_message(&model, "response3", 25_000, 6)).into(),
-        )
+        .append_message(pi_ai::types::Message::Assistant(make_assistant_message(&model, "response3", 25_000, 6)).into())
         .unwrap();
     sync_agent_messages(&session, &session_manager);
 
@@ -444,7 +444,9 @@ fn groups_tool_and_summary_usage_separately_from_model_attributed_usage() {
 
     let mut tr_usage = make_usage(100);
     tr_usage.cost.total = 1.0;
-    session_manager.append_message(make_tool_result_message(tr_usage)).unwrap();
+    session_manager
+        .append_message(make_tool_result_message(tr_usage))
+        .unwrap();
 
     let mut comp_usage = make_usage(100);
     comp_usage.cost.total = 2.0;
@@ -495,11 +497,11 @@ async fn ignores_zero_usage_messages_when_checking_for_post_compaction_context_u
         .unwrap();
     session_manager.append_message(make_user_message("third", 5)).unwrap();
     session_manager
-        .append_message(
-            pi_ai::types::Message::Assistant(make_assistant_message(&model, "response3", 25_000, 6)).into(),
-        )
+        .append_message(pi_ai::types::Message::Assistant(make_assistant_message(&model, "response3", 25_000, 6)).into())
         .unwrap();
-    session_manager.append_message(make_user_message("continue", 7)).unwrap();
+    session_manager
+        .append_message(make_user_message("continue", 7))
+        .unwrap();
     session_manager
         .append_message(pi_ai::types::Message::Assistant(make_assistant_message(&model, "partial", 0, 8)).into())
         .unwrap();

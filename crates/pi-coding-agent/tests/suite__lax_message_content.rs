@@ -219,7 +219,9 @@ fn normalizes_null_or_missing_content_when_loading_session_message_entries() {
         let expected_role = bad.get("role").and_then(Value::as_str);
         assert_eq!(msgs[0].role(), expected_role);
         let empty = match &msgs[0] {
-            AgentMessage::Message(Message::User(u)) => matches!(&u.content, pi_ai::types::UserMessageContent::Blocks(b) if b.is_empty()),
+            AgentMessage::Message(Message::User(u)) => {
+                matches!(&u.content, pi_ai::types::UserMessageContent::Blocks(b) if b.is_empty())
+            }
             AgentMessage::Message(Message::Assistant(a)) => a.content.is_empty(),
             AgentMessage::Message(Message::ToolResult(t)) => t.content.is_empty(),
             AgentMessage::Custom(v) => v.get("content").and_then(Value::as_array).is_some_and(Vec::is_empty),

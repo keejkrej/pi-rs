@@ -39,8 +39,7 @@ async fn allows_extensions_to_re_register_tools_without_strict_sampling() {
         s(&["read"]),
         s(&["read", "bash", "powershell", "edit", "write"]),
     ] {
-        let cwd =
-            pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-non-strict-tools-"])).unwrap();
+        let cwd = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-non-strict-tools-"])).unwrap();
         let agent_dir = pi_js::path::join(&[&cwd, "agent"]);
         let settings_manager = SettingsManager::in_memory(
             Some(Settings {
@@ -134,14 +133,9 @@ async fn allows_extensions_to_re_register_tools_without_strict_sampling() {
                 .into_iter()
                 .find(|t| t.name == "read")
                 .unwrap();
-            let result = (read_tool.execute)(
-                "read-test".to_string(),
-                json!({ "path": "sample.txt" }),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+            let result = (read_tool.execute)("read-test".to_string(), json!({ "path": "sample.txt" }), None, None)
+                .await
+                .unwrap();
             assert_eq!(result.content.len(), 1);
             let text = match &result.content[0] {
                 pi_ai::types::UserContentBlock::Text(t) => t.text.as_str(),

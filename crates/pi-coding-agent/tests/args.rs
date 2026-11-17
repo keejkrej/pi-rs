@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use pi_ai::ModelThinkingLevel;
 use pi_coding_agent::cli::args::{
-    ArgDiagnostic, ArgDiagnosticType, ListModelsOption, Mode, UnknownFlagValue, build_gui_forward_args,
-    dispatch_gui, is_gui_subcommand, normalize_session_name, parse_args, resolve_gui_executable_from, testing,
+    ArgDiagnostic, ArgDiagnosticType, ListModelsOption, Mode, UnknownFlagValue, build_gui_forward_args, dispatch_gui,
+    is_gui_subcommand, normalize_session_name, parse_args, resolve_gui_executable_from, testing,
 };
 use pi_tui::TuiMode;
 
@@ -54,7 +54,10 @@ fn parses_continue_and_resume_flags() {
 
 #[test]
 fn parses_flags_with_values() {
-    assert_eq!(parse_args(&["--provider", "openai"]).provider.as_deref(), Some("openai"));
+    assert_eq!(
+        parse_args(&["--provider", "openai"]).provider.as_deref(),
+        Some("openai")
+    );
     assert_eq!(parse_args(&["--model", "gpt-4o"]).model.as_deref(), Some("gpt-4o"));
     assert_eq!(
         parse_args(&["--api-key", "sk-test-key"]).api_key.as_deref(),
@@ -234,7 +237,10 @@ fn parses_resource_and_approval_flags() {
 
     let no_ext = parse_args(&["--no-extensions", "-e", "foo.ts", "-e", "bar.ts"]);
     assert_eq!(no_ext.no_extensions, Some(true));
-    assert_eq!(no_ext.extensions, Some(vec!["foo.ts".to_string(), "bar.ts".to_string()]));
+    assert_eq!(
+        no_ext.extensions,
+        Some(vec!["foo.ts".to_string(), "bar.ts".to_string()])
+    );
 
     assert_eq!(
         parse_args(&["--skill", "./skill-a", "--skill", "./skill-b"]).skills,
@@ -248,7 +254,10 @@ fn parses_resource_and_approval_flags() {
         parse_args(&["--theme", "./dark.json", "--theme", "./light.json"]).themes,
         Some(vec!["./dark.json".to_string(), "./light.json".to_string()])
     );
-    assert_eq!(parse_args(&["--use-theme", "light"]).use_theme.as_deref(), Some("light"));
+    assert_eq!(
+        parse_args(&["--use-theme", "light"]).use_theme.as_deref(),
+        Some("light")
+    );
 
     let missing_theme = parse_args(&["--use-theme", "--print"]);
     assert_eq!(missing_theme.use_theme, None);
@@ -451,6 +460,9 @@ async fn dispatch_gui_invokes_override_with_resolved_args_and_exit_code() {
     assert_eq!(code, 42);
     let calls = recorded.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1, vec!["--cwd", "/work/proj", "--session", "demo-1", "--model", "gpt-5"]);
+    assert_eq!(
+        calls[0].1,
+        vec!["--cwd", "/work/proj", "--session", "demo-1", "--model", "gpt-5"]
+    );
     assert_eq!(calls[0].2, "/work/proj");
 }

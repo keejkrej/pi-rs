@@ -16,9 +16,9 @@ use pi_ai::providers::faux::{
     faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Message, Model, ProviderHeaders,
-    StopReason, SystemMessage, SystemMessageContent, TextContent, ToolReference, Transport, Usage, UsageCost,
-    UserContentBlock, UserMessage, UserMessageContent,
+    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Message, Model, ProviderHeaders, StopReason,
+    SystemMessage, SystemMessageContent, TextContent, ToolReference, Transport, Usage, UsageCost, UserContentBlock,
+    UserMessage, UserMessageContent,
 };
 use pi_ai::utils::event_stream::create_assistant_message_event_stream;
 use pi_ai::{get_current_system_prompt, get_current_tools};
@@ -141,9 +141,7 @@ fn seed_compactable_session(harness: &Harness) {
     harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "message to compact",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("message to compact"))]),
             timestamp: now - 1000,
         })))
         .unwrap();
@@ -286,8 +284,14 @@ async fn manually_compacts_using_an_extension_provided_summary() {
     assert_eq!(compaction_entries[0].usage.as_ref(), Some(&summary_usage));
 
     let stats_after = harness.session.get_session_stats();
-    assert_eq!(stats_after.tokens.input, stats_before.tokens.input + summary_usage.input);
-    assert_eq!(stats_after.tokens.output, stats_before.tokens.output + summary_usage.output);
+    assert_eq!(
+        stats_after.tokens.input,
+        stats_before.tokens.input + summary_usage.input
+    );
+    assert_eq!(
+        stats_after.tokens.output,
+        stats_before.tokens.output + summary_usage.output
+    );
     assert_eq!(
         stats_after.tokens.cache_read,
         stats_before.tokens.cache_read + summary_usage.cache_read
@@ -334,9 +338,7 @@ async fn checkpoints_the_replayed_system_state_and_folds_summarized_and_retained
     let first_kept_entry_id = harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "kept before patch",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("kept before patch"))]),
             timestamp: pi_js::time::now_ms(),
         })))
         .unwrap();
@@ -359,9 +361,7 @@ async fn checkpoints_the_replayed_system_state_and_folds_summarized_and_retained
     harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "kept after patch",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("kept after patch"))]),
             timestamp: pi_js::time::now_ms(),
         })))
         .unwrap();
@@ -469,7 +469,10 @@ async fn allows_a_queued_prompt_to_start_when_manual_compaction_ends() {
     handle.await.unwrap().unwrap();
 
     assert!(get_user_texts(&harness).contains(&"queued after compaction".to_string()));
-    assert_eq!(harness.session.get_last_assistant_text().as_deref(), Some("queued response"));
+    assert_eq!(
+        harness.session.get_last_assistant_text().as_deref(),
+        Some("queued response")
+    );
     harness.cleanup();
 }
 
@@ -596,7 +599,11 @@ async fn manually_compacts_with_provider_resolved_bearer_auth() {
             oauth: None,
         },
     });
-    harness.session.model_runtime().register_native_provider(provider).unwrap();
+    harness
+        .session
+        .model_runtime()
+        .register_native_provider(provider)
+        .unwrap();
     seed_compactable_session(&harness);
 
     harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(|_ctx, opts, _st, _mdl| {
@@ -786,7 +793,10 @@ async fn notifies_extensions_when_auto_compaction_fails() {
 
     let failed = failed_events.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0].reason, pi_coding_agent::core::extensions::types::CompactionReason::Threshold);
+    assert_eq!(
+        failed[0].reason,
+        pi_coding_agent::core::extensions::types::CompactionReason::Threshold
+    );
     assert!(!failed[0].aborted);
     assert!(!failed[0].will_retry);
     assert!(!failed[0].from_extension);
@@ -914,8 +924,12 @@ async fn run_oversized_tool_result_compaction(model_override: bool) {
                 let ord = Arc::clone(&ord);
                 let obs = Arc::clone(&obs);
                 Box::pin(async move {
-                    ord.lock().unwrap_or_else(PoisonError::into_inner).push("compaction".to_string());
-                    obs.lock().unwrap_or_else(PoisonError::into_inner).push(event.preparation.settings);
+                    ord.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push("compaction".to_string());
+                    obs.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(event.preparation.settings);
                     Ok(Some(SessionBeforeCompactResult {
                         compaction: Some(CompactionResult {
                             summary: "compacted history".to_string(),
@@ -994,7 +1008,9 @@ async fn run_oversized_tool_result_compaction(model_override: bool) {
             let ord = Arc::clone(&ord_p);
             let rr = Arc::clone(&rr_c);
             Box::pin(async move {
-                ord.lock().unwrap_or_else(PoisonError::into_inner).push("provider".to_string());
+                ord.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push("provider".to_string());
                 *rr.lock().unwrap_or_else(PoisonError::into_inner) = pi_js::json::stringify(&ctx.messages);
                 Ok(faux_assistant_message(
                     FauxAssistantMessageContent::Text("finished after compaction".to_string()),
@@ -1452,7 +1468,8 @@ async fn keeps_overflow_wording_when_a_repeated_length_stop_fills_the_context_wi
     })
     .await;
     seed_compactable_session(&harness);
-    let length_overflow_message = create_assistant(&harness, StopReason::Length, None, 100, Some(pi_js::time::now_ms()));
+    let length_overflow_message =
+        create_assistant(&harness, StopReason::Length, None, 100, Some(pi_js::time::now_ms()));
 
     harness
         .session
@@ -1472,7 +1489,9 @@ async fn keeps_overflow_wording_when_a_repeated_length_stop_fills_the_context_wi
         .events()
         .into_iter()
         .filter_map(|e| match e {
-            AgentSessionEvent::CompactionEnd { error_message: Some(m), .. } => Some(m),
+            AgentSessionEvent::CompactionEnd {
+                error_message: Some(m), ..
+            } => Some(m),
             _ => None,
         })
         .collect();
@@ -1610,7 +1629,13 @@ async fn does_not_retry_overflow_recovery_more_than_once() {
     })
     .await;
     seed_compactable_session(&harness);
-    let overflow_msg = create_assistant(&harness, StopReason::Error, Some("prompt is too long"), 0, Some(pi_js::time::now_ms()));
+    let overflow_msg = create_assistant(
+        &harness,
+        StopReason::Error,
+        Some("prompt is too long"),
+        0,
+        Some(pi_js::time::now_ms()),
+    );
 
     harness.session.check_compaction_for_test(&overflow_msg, true).await;
     let mut second = overflow_msg.clone();
@@ -1627,7 +1652,9 @@ async fn does_not_retry_overflow_recovery_more_than_once() {
         .events()
         .into_iter()
         .filter_map(|e| match e {
-            AgentSessionEvent::CompactionEnd { error_message: Some(m), .. } => Some(m),
+            AgentSessionEvent::CompactionEnd {
+                error_message: Some(m), ..
+            } => Some(m),
             _ => None,
         })
         .collect();
@@ -1713,9 +1740,7 @@ async fn ignores_stale_pre_compaction_assistant_usage_on_pre_prompt_checks() {
     let first_kept_id = harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "before compaction",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("before compaction"))]),
             timestamp: stale_timestamp - 1000,
         })))
         .unwrap();
@@ -1737,17 +1762,12 @@ async fn ignores_stale_pre_compaction_assistant_usage_on_pre_prompt_checks() {
     harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "after compaction",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("after compaction"))]),
             timestamp: pi_js::time::now_ms(),
         })))
         .unwrap();
 
-    harness
-        .session
-        .check_compaction_for_test(&stale_assistant, false)
-        .await;
+    harness.session.check_compaction_for_test(&stale_assistant, false).await;
 
     assert!(
         !harness
@@ -1777,10 +1797,7 @@ async fn triggers_threshold_compaction_for_error_messages_using_the_last_success
         AgentMessage::from(Message::Assistant(error_assistant.clone())),
     ]);
 
-    harness
-        .session
-        .check_compaction_for_test(&error_assistant, true)
-        .await;
+    harness.session.check_compaction_for_test(&error_assistant, true).await;
 
     assert!(harness.events().into_iter().any(|e| matches!(
         e,
@@ -1804,10 +1821,7 @@ async fn does_not_trigger_threshold_compaction_for_error_messages_when_no_prior_
         AgentMessage::from(Message::Assistant(error_assistant.clone())),
     ]);
 
-    harness
-        .session
-        .check_compaction_for_test(&error_assistant, true)
-        .await;
+    harness.session.check_compaction_for_test(&error_assistant, true).await;
 
     assert!(
         !harness
@@ -1822,14 +1836,18 @@ async fn does_not_trigger_threshold_compaction_for_error_messages_when_no_prior_
 async fn does_not_trigger_threshold_compaction_when_only_kept_pre_compaction_usage_exists() {
     let harness = create_harness(HarnessOptions::default()).await;
     let pre_compaction_timestamp = pi_js::time::now_ms() - 10_000;
-    let kept_assistant = create_assistant(&harness, StopReason::Stop, None, 190_000, Some(pre_compaction_timestamp));
+    let kept_assistant = create_assistant(
+        &harness,
+        StopReason::Stop,
+        None,
+        190_000,
+        Some(pre_compaction_timestamp),
+    );
 
     let first_kept_id = harness
         .session_manager
         .append_message(AgentMessage::from(Message::User(UserMessage {
-            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                "before compaction",
-            ))]),
+            content: UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("before compaction"))]),
             timestamp: pre_compaction_timestamp - 1000,
         })))
         .unwrap();
@@ -1864,10 +1882,7 @@ async fn does_not_trigger_threshold_compaction_when_only_kept_pre_compaction_usa
         AgentMessage::from(Message::Assistant(error_assistant.clone())),
     ]);
 
-    harness
-        .session
-        .check_compaction_for_test(&error_assistant, true)
-        .await;
+    harness.session.check_compaction_for_test(&error_assistant, true).await;
 
     assert!(
         !harness
@@ -1909,8 +1924,17 @@ async fn does_not_trigger_threshold_compaction_below_the_threshold_or_when_disab
     })
     .await;
 
-    let msg_below = create_assistant(&below_threshold, StopReason::Stop, None, 1_000, Some(pi_js::time::now_ms()));
-    below_threshold.session.check_compaction_for_test(&msg_below, true).await;
+    let msg_below = create_assistant(
+        &below_threshold,
+        StopReason::Stop,
+        None,
+        1_000,
+        Some(pi_js::time::now_ms()),
+    );
+    below_threshold
+        .session
+        .check_compaction_for_test(&msg_below, true)
+        .await;
     assert!(
         !below_threshold
             .events()
@@ -1918,7 +1942,13 @@ async fn does_not_trigger_threshold_compaction_below_the_threshold_or_when_disab
             .any(|e| matches!(e, AgentSessionEvent::CompactionStart { .. }))
     );
 
-    let msg_disabled = create_assistant(&disabled, StopReason::Stop, None, 1_000_000, Some(pi_js::time::now_ms()));
+    let msg_disabled = create_assistant(
+        &disabled,
+        StopReason::Stop,
+        None,
+        1_000_000,
+        Some(pi_js::time::now_ms()),
+    );
     disabled.session.check_compaction_for_test(&msg_disabled, true).await;
     assert!(
         !disabled

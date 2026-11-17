@@ -9,9 +9,7 @@ use indexmap::IndexMap;
 use pi_ai::providers::faux::{
     FauxAssistantMessageContent, FauxModelDefinition, FauxResponseStep, faux_assistant_message,
 };
-use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, Message, StopReason, TextContent, Usage, UserMessage,
-};
+use pi_ai::types::{AssistantContentBlock, AssistantMessage, Message, StopReason, TextContent, Usage, UserMessage};
 use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionEvent};
 use pi_coding_agent::core::extensions::types::{
     CompactionReason as ExtCompactionReason, ExtensionApi, InlineExtension, SessionBeforeCompactEvent,
@@ -268,7 +266,10 @@ async fn passes_resolved_budgets_to_built_in_manual_and_automatic_summarization(
             harness.session.prompt("continue", None).await.unwrap();
         }
 
-        assert_eq!(*budgets.lock().unwrap_or_else(PoisonError::into_inner), vec![Some(1600)]);
+        assert_eq!(
+            *budgets.lock().unwrap_or_else(PoisonError::into_inner),
+            vec![Some(1600)]
+        );
         let comp_entry = harness.session_manager.get_entries().into_iter().find_map(|e| match e {
             SessionEntry::Compaction(c) => Some(c),
             _ => None,
@@ -309,7 +310,10 @@ async fn uses_the_newly_selected_model_without_changing_ordinary_settings() {
         json!({ "reserveTokens": 8000, "keepRecentTokens": 150 }),
     );
     let harness = create_harness(HarnessOptions {
-        models: Some(vec![faux_def("small", Some(4000), None), faux_def("big", Some(10_000), None)]),
+        models: Some(vec![
+            faux_def("small", Some(4000), None),
+            faux_def("big", Some(10_000), None),
+        ]),
         tools: Some(vec![]),
         settings: Some(Settings {
             compaction: Some(CompactionSettings {
@@ -345,7 +349,11 @@ async fn uses_the_newly_selected_model_without_changing_ordinary_settings() {
     );
 
     seed_history(&harness, 2500);
-    harness.session.set_model(harness.get_model_by_id("big").unwrap(), None).await.unwrap();
+    harness
+        .session
+        .set_model(harness.get_model_by_id("big").unwrap(), None)
+        .await
+        .unwrap();
     harness.session.prompt("continue on big", None).await.unwrap();
 
     let compaction_ends: Vec<_> = harness

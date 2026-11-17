@@ -25,7 +25,9 @@ use support::model_runtime_test_utils::{create_in_memory_model_registry, get_mod
 fn make_model(provider: &str, base_url: &str, id: Option<&str>) -> Model {
     Model {
         r#type: None,
-        id: id.map(str::to_string).unwrap_or_else(|| format!("{provider}-test-model")),
+        id: id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{provider}-test-model")),
         name: format!("{provider} Test Model"),
         api: "openai-completions".to_string(),
         provider: provider.to_string(),
@@ -83,8 +85,11 @@ struct CaptureOpts {
 }
 
 async fn capture_headers(model: Model, opts: CaptureOpts) -> Option<ProviderHeaders> {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-attribution-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[
+        &pi_js::env::tmp_dir(),
+        "pi-sdk-attribution-test-",
+    ]))
+    .unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&cwd, true).unwrap();
@@ -192,7 +197,10 @@ async fn adds_default_attribution_headers_for_openrouter_models() {
     )
     .await
     .unwrap();
-    assert_eq!(headers.get("HTTP-Referer").and_then(|v| v.as_deref()), Some("https://pi.dev"));
+    assert_eq!(
+        headers.get("HTTP-Referer").and_then(|v| v.as_deref()),
+        Some("https://pi.dev")
+    );
     assert_eq!(headers.get("X-OpenRouter-Title").and_then(|v| v.as_deref()), Some("pi"));
     assert_eq!(
         headers.get("X-OpenRouter-Categories").and_then(|v| v.as_deref()),
@@ -228,7 +236,10 @@ async fn adds_attribution_headers_for_custom_providers_routed_through_openrouter
     )
     .await
     .unwrap();
-    assert_eq!(headers.get("HTTP-Referer").and_then(|v| v.as_deref()), Some("https://pi.dev"));
+    assert_eq!(
+        headers.get("HTTP-Referer").and_then(|v| v.as_deref()),
+        Some("https://pi.dev")
+    );
     assert_eq!(headers.get("X-OpenRouter-Title").and_then(|v| v.as_deref()), Some("pi"));
     assert_eq!(
         headers.get("X-OpenRouter-Categories").and_then(|v| v.as_deref()),
@@ -246,7 +257,10 @@ async fn preserves_legacy_openrouter_base_url_substring_attribution_matching() {
     )
     .await
     .unwrap();
-    assert_eq!(headers.get("HTTP-Referer").and_then(|v| v.as_deref()), Some("https://pi.dev"));
+    assert_eq!(
+        headers.get("HTTP-Referer").and_then(|v| v.as_deref()),
+        Some("https://pi.dev")
+    );
     assert_eq!(headers.get("X-OpenRouter-Title").and_then(|v| v.as_deref()), Some("pi"));
     assert_eq!(
         headers.get("X-OpenRouter-Categories").and_then(|v| v.as_deref()),
@@ -333,10 +347,7 @@ async fn does_not_add_nvidia_nim_attribution_headers_when_telemetry_is_disabled(
     )
     .await
     .unwrap_or_default();
-    assert_eq!(
-        headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()),
-        None
-    );
+    assert_eq!(headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()), None);
 }
 
 #[tokio::test]
@@ -378,11 +389,11 @@ async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_th
     )
     .await
     .unwrap();
-    assert_eq!(headers.get("HTTP-Referer").and_then(|v| v.as_deref()), Some("https://pi.dev"));
     assert_eq!(
-        headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()),
-        None
+        headers.get("HTTP-Referer").and_then(|v| v.as_deref()),
+        Some("https://pi.dev")
     );
+    assert_eq!(headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()), None);
 }
 
 #[tokio::test]
@@ -399,10 +410,7 @@ async fn does_not_add_nvidia_nim_attribution_headers_for_nvidia_models_routed_th
     )
     .await
     .unwrap_or_default();
-    assert_eq!(
-        headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()),
-        None
-    );
+    assert_eq!(headers.get("X-BILLING-INVOKE-ORIGIN").and_then(|v| v.as_deref()), None);
 }
 
 #[tokio::test]

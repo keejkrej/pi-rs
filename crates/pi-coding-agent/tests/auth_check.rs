@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use pi_ai::{
-    ApiKeyCredential, AuthStorageData as _, Credential, CredentialsStore, InMemoryModelsStore,
-    OAuthCredential,
+    ApiKeyCredential, AuthStorageData as _, Credential, CredentialsStore, InMemoryModelsStore, OAuthCredential,
 };
 use pi_coding_agent::cli::args::parse_args;
 use pi_coding_agent::cli::auth_check::{
@@ -128,13 +127,7 @@ async fn reads_credentials_without_refreshing_oauth_when_requested() {
     let calls_ref = refresh_calls.clone();
     let _fetch_guard = pi_js::fetch::testing::mock_fetch(move |_req| {
         calls_ref.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move {
-            Ok(pi_js::fetch::testing::response(
-                500,
-                &[],
-                "unexpected refresh fetch",
-            ))
-        })
+        Box::pin(async move { Ok(pi_js::fetch::testing::response(500, &[], "unexpected refresh fetch")) })
     });
 
     let cred = get_provider_credential(

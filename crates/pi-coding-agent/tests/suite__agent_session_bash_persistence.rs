@@ -5,20 +5,20 @@ mod support;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::providers::faux::{
-    FauxAssistantMessageContent, FauxContentBlock, FauxAssistantMessageOptions, FauxResponseStep,
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxContentBlock, FauxResponseStep,
     faux_assistant_message, faux_tool_call,
 };
 use pi_ai::types::{StopReason, TextContent, UserContentBlock};
-use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_coding_agent::core::agent_session::{
     AgentSessionEvent, CustomMessageDelivery, ExecuteBashOptions, SendCustomMessageDraft,
 };
 use pi_coding_agent::core::bash_executor::BashResult;
 use pi_coding_agent::core::extensions::types::CustomMessageContent;
 use pi_coding_agent::core::tools::bash::{BashExecOptions, BashExecResult, BashOperations};
-use pi_js::abort::AbortSignal;
 use pi_js::BoxFuture;
+use pi_js::abort::AbortSignal;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -247,17 +247,35 @@ async fn defers_bash_results_while_streaming_and_flushes_them_before_the_next_pr
     );
 
     assert!(harness.session.has_pending_bash_messages());
-    assert!(!harness.session.messages().iter().any(|m| m.role() == Some("bashExecution")));
+    assert!(
+        !harness
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role() == Some("bashExecution"))
+    );
 
     let _ = release_tx.send(());
     first_task.await.unwrap().unwrap();
 
     assert!(!harness.session.has_pending_bash_messages());
-    assert!(harness.session.messages().iter().any(|m| m.role() == Some("bashExecution")));
+    assert!(
+        harness
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role() == Some("bashExecution"))
+    );
 
     harness.session.prompt("next turn", None).await.unwrap();
     assert!(!harness.session.has_pending_bash_messages());
-    assert!(harness.session.messages().iter().any(|m| m.role() == Some("bashExecution")));
+    assert!(
+        harness
+            .session
+            .messages()
+            .iter()
+            .any(|m| m.role() == Some("bashExecution"))
+    );
     assert!(entry_types(&harness).iter().filter(|t| **t == "message").count() > 0);
 
     harness.cleanup();
@@ -266,9 +284,16 @@ async fn defers_bash_results_while_streaming_and_flushes_them_before_the_next_pr
 #[tokio::test]
 async fn executes_bash_commands_and_records_the_result() {
     let harness = create_harness(HarnessOptions::default()).await;
-    let res = harness.session.execute_bash("printf 'hello'", None, None).await.unwrap();
+    let res = harness
+        .session
+        .execute_bash("printf 'hello'", None, None)
+        .await
+        .unwrap();
     assert!(res.output.contains("hello"));
-    assert_eq!(harness.session.messages().last().and_then(|m| m.role()), Some("bashExecution"));
+    assert_eq!(
+        harness.session.messages().last().and_then(|m| m.role()),
+        Some("bashExecution")
+    );
     harness.cleanup();
 }
 
@@ -467,14 +492,7 @@ async fn persists_user_assistant_tool_result_and_custom_messages_in_order() {
 
     assert_eq!(
         entry_types(&harness),
-        vec![
-            "custom_message",
-            "message",
-            "message",
-            "message",
-            "message",
-            "message"
-        ]
+        vec!["custom_message", "message", "message", "message", "message", "message"]
     );
     let roles: Vec<Option<&str>> = harness
         .session
@@ -595,7 +613,10 @@ async fn records_bash_output_through_custom_operations() {
         .await
         .unwrap();
     assert!(res.output.contains("hello from custom ops"));
-    assert_eq!(harness.session.messages().last().and_then(|m| m.role()), Some("bashExecution"));
+    assert_eq!(
+        harness.session.messages().last().and_then(|m| m.role()),
+        Some("bashExecution")
+    );
     harness.cleanup();
 }
 
@@ -608,10 +629,7 @@ async fn streams_bash_output_to_the_callback_and_session_events() {
     let eu_ref = Arc::clone(&event_updates);
     let unsub = harness.session.subscribe(move |ev| {
         if let AgentSessionEvent::BashExecutionUpdate { id, delta } = ev {
-            eu_ref
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((id, delta));
+            eu_ref.lock().unwrap_or_else(PoisonError::into_inner).push((id, delta));
         }
     });
 

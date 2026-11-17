@@ -19,15 +19,15 @@ use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
 use pi_coding_agent::core::agent_session_runtime::{
     AgentSessionRuntime, CreateAgentSessionFromServicesOptions, CreateAgentSessionRuntimeFactory,
     CreateAgentSessionRuntimeFactoryOptions, CreateAgentSessionRuntimeOptions, CreateAgentSessionRuntimeResult,
-    CreateAgentSessionServicesOptions, ForkPosition, RuntimeForkOptions, RuntimeForkResult, create_agent_session_from_services,
-    create_agent_session_runtime, create_agent_session_services,
+    CreateAgentSessionServicesOptions, ForkPosition, RuntimeForkOptions, RuntimeForkResult,
+    create_agent_session_from_services, create_agent_session_runtime, create_agent_session_services,
 };
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{
     ExtensionApi, InlineExtension, MessageEndEvent, MessageEndEventResult, ProviderChatModelConfig, ProviderConfig,
     ProviderModelConfig, SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
-    SessionBeforeSwitchReason, SessionBeforeSwitchResult, SessionEntry, SessionShutdownEvent,
-    SessionShutdownReason, SessionStartEvent, SessionStartReason, ToolDefinition,
+    SessionBeforeSwitchReason, SessionBeforeSwitchResult, SessionEntry, SessionShutdownEvent, SessionShutdownReason,
+    SessionStartEvent, SessionStartReason, ToolDefinition,
 };
 use pi_coding_agent::core::resource_loader::DefaultResourceLoaderOptions;
 use pi_coding_agent::core::session_manager::SessionManager;
@@ -427,7 +427,11 @@ async fn preserves_an_existing_session_when_importing_a_file_with_the_same_name(
     assert_eq!(pi_js::fs::read_to_string(&stored_path).unwrap(), stored_session);
     let active_file = runtime.session().session_file().expect("imported session file");
     assert_ne!(active_file, stored_path);
-    assert!(pi_js::fs::read_to_string(&active_file).unwrap().contains("\"id\":\"imported\""));
+    assert!(
+        pi_js::fs::read_to_string(&active_file)
+            .unwrap()
+            .contains("\"id\":\"imported\"")
+    );
 
     cleanup_runtime(runtime, faux, &temp_dir).await;
 }
@@ -758,9 +762,10 @@ async fn reports_why_an_unflushed_session_cannot_be_forked() {
         )
         .await
         .unwrap_err();
-    assert!(err
-        .message()
-        .contains("This session has not been saved yet. Send a message before cloning or forking it."));
+    assert!(
+        err.message()
+            .contains("This session has not been saved yet. Send a message before cloning or forking it.")
+    );
 
     cleanup_runtime(runtime, faux, &temp_dir).await;
 }

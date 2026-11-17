@@ -25,7 +25,9 @@ use pi_coding_agent::core::prompt_templates::{LoadPromptTemplatesResult, PromptT
 use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
 use pi_coding_agent::core::settings_manager::{CompactionSettings, Settings};
 use pi_coding_agent::core::skills::{LoadSkillsResult, Skill};
-use pi_coding_agent::core::source_info::{SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info};
+use pi_coding_agent::core::source_info::{
+    SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
+};
 use pi_coding_agent::core::tools::mcp_wire::{CompactionResult, CustomMessageContent};
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
@@ -216,7 +218,10 @@ async fn executes_multiple_tool_calls_from_one_response_and_continues_with_a_sin
             .count(),
         2
     );
-    assert_eq!(harness.session.messages().last().and_then(|m| m.role()), Some("assistant"));
+    assert_eq!(
+        harness.session.messages().last().and_then(|m| m.role()),
+        Some("assistant")
+    );
     harness.cleanup();
 }
 
@@ -226,20 +231,24 @@ async fn preserves_image_attachments_in_the_provider_context() {
     let saw_image = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let si_ref = Arc::clone(&saw_image);
 
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let si = Arc::clone(&si_ref);
-        Box::pin(async move {
-            let found = ctx.messages.iter().any(|m| match m {
-                pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| matches!(p, UserContentBlock::Image(_))),
-                _ => false,
-            });
-            si.store(found, std::sync::atomic::Ordering::SeqCst);
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("ok".to_string()),
-                None,
-            ))
-        })
-    }))]);
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let si = Arc::clone(&si_ref);
+            Box::pin(async move {
+                let found = ctx.messages.iter().any(|m| match m {
+                    pi_ai::types::TranscriptMessage::User(u) => {
+                        u.content.iter().any(|p| matches!(p, UserContentBlock::Image(_)))
+                    }
+                    _ => false,
+                });
+                si.store(found, std::sync::atomic::Ordering::SeqCst);
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("ok".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness
         .session
@@ -401,31 +410,33 @@ async fn expands_skill_commands_before_sending_the_prompt() {
 
     let expanded = Arc::new(Mutex::new(String::new()));
     let ex_ref = Arc::clone(&expanded);
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let ex = Arc::clone(&ex_ref);
-        Box::pin(async move {
-            if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                .messages
-                .iter()
-                .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-            {
-                let txt = u
-                    .content
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let ex = Arc::clone(&ex_ref);
+            Box::pin(async move {
+                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
+                    .messages
                     .iter()
-                    .filter_map(|p| match p {
-                        UserContentBlock::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
-            }
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("ok".to_string()),
-                None,
-            ))
-        })
-    }))]);
+                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
+                {
+                    let txt = u
+                        .content
+                        .iter()
+                        .filter_map(|p| match p {
+                            UserContentBlock::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
+                }
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("ok".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("/skill:test explain this", None).await.unwrap();
     let captured = expanded.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -476,31 +487,33 @@ async fn expands_prompt_templates_before_sending_the_prompt() {
 
     let expanded = Arc::new(Mutex::new(String::new()));
     let ex_ref = Arc::clone(&expanded);
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let ex = Arc::clone(&ex_ref);
-        Box::pin(async move {
-            if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                .messages
-                .iter()
-                .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-            {
-                let txt = u
-                    .content
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let ex = Arc::clone(&ex_ref);
+            Box::pin(async move {
+                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
+                    .messages
                     .iter()
-                    .filter_map(|p| match p {
-                        UserContentBlock::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
-            }
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("ok".to_string()),
-                None,
-            ))
-        })
-    }))]);
+                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
+                {
+                    let txt = u
+                        .content
+                        .iter()
+                        .filter_map(|p| match p {
+                            UserContentBlock::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
+                }
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("ok".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("/review src/index.ts", None).await.unwrap();
     assert_eq!(
@@ -549,31 +562,33 @@ async fn send_user_message_can_opt_into_prompt_template_expansion() {
 
     let expanded = Arc::new(Mutex::new(String::new()));
     let ex_ref = Arc::clone(&expanded);
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let ex = Arc::clone(&ex_ref);
-        Box::pin(async move {
-            if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
-                .messages
-                .iter()
-                .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
-            {
-                let txt = u
-                    .content
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let ex = Arc::clone(&ex_ref);
+            Box::pin(async move {
+                if let Some(pi_ai::types::TranscriptMessage::User(u)) = ctx
+                    .messages
                     .iter()
-                    .filter_map(|p| match p {
-                        UserContentBlock::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
-            }
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("ok".to_string()),
-                None,
-            ))
-        })
-    }))]);
+                    .find(|m| matches!(m, pi_ai::types::TranscriptMessage::User(_)))
+                {
+                    let txt = u
+                        .content
+                        .iter()
+                        .filter_map(|p| match p {
+                            UserContentBlock::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    *ex.lock().unwrap_or_else(PoisonError::into_inner) = txt;
+                }
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("ok".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness
         .session
@@ -1034,9 +1049,11 @@ async fn throws_when_prompted_during_manual_compaction() {
     let _ = started_rx.await;
 
     let err = harness.session.prompt("third", None).await.unwrap_err();
-    assert!(err.to_string().contains(
-        "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."
-    ));
+    assert!(
+        err.to_string().contains(
+            "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."
+        )
+    );
 
     let _ = release_tx.send(());
     let _ = compact_task.await;

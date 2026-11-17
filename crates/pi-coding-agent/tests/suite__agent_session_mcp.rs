@@ -88,7 +88,10 @@ impl Default for FakeServerOptions {
     }
 }
 
-fn create_fake_server(calls: Arc<Mutex<Vec<String>>>, options: FakeServerOptions) -> (InMemoryTransport, InMemoryTransport) {
+fn create_fake_server(
+    calls: Arc<Mutex<Vec<String>>>,
+    options: FakeServerOptions,
+) -> (InMemoryTransport, InMemoryTransport) {
     let pair = create_in_memory_transport_pair();
     let server = pair.server.clone();
     let srv_for_msg = server.clone();
@@ -406,7 +409,10 @@ async fn setup_mcp(exposure: McpExposure, opts: McpSetupOptions) -> McpSetup {
                 never_respond_initialize: false,
             },
         );
-        srvs_c.lock().unwrap_or_else(PoisonError::into_inner).push(server.clone());
+        srvs_c
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(server.clone());
         tokio::spawn(async move {
             let _ = server.start().await;
         });
@@ -541,7 +547,11 @@ async fn exposes_codemode_only_mcp_tools_through_codemode_and_hides_them_from_th
     assert_eq!(declared_tool_names(&st.harness), vec!["codemode"]);
     assert_eq!(
         st.harness.session.get_callable_tool_names(),
-        vec![search_name.clone(), "mcp__docs__fail".to_string(), "mcp__docs__shot".to_string()]
+        vec![
+            search_name.clone(),
+            "mcp__docs__fail".to_string(),
+            "mcp__docs__shot".to_string()
+        ]
     );
     let cm_desc = st
         .harness
@@ -737,7 +747,12 @@ async fn declares_directly_exposed_mcp_tools_to_the_model() {
         declared_tool_names(&st.harness),
         vec!["mcp__docs__search", "mcp__docs__fail", "mcp__docs__shot"]
     );
-    assert!(!st.harness.session.get_active_tool_names().contains(&"codemode".to_string()));
+    assert!(
+        !st.harness
+            .session
+            .get_active_tool_names()
+            .contains(&"codemode".to_string())
+    );
     let fail_ann = st
         .harness
         .session
@@ -783,10 +798,11 @@ async fn run_list_changed_test(exposure: McpExposure) {
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
     let reachable = |h: &Harness| -> Vec<String> {
@@ -858,7 +874,10 @@ async fn lists_and_reads_resources_with_codexs_resource_tools() {
             FauxAssistantMessageContent::Blocks(vec![
                 faux_tool_call("list_mcp_resources", json!({})),
                 faux_tool_call("list_mcp_resource_templates", json!({ "server": "docs" })),
-                faux_tool_call("read_mcp_resource", json!({ "server": "docs", "uri": "docs://pages/setup" })),
+                faux_tool_call(
+                    "read_mcp_resource",
+                    json!({ "server": "docs", "uri": "docs://pages/setup" }),
+                ),
             ]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
@@ -884,11 +903,7 @@ async fn lists_and_reads_resources_with_codexs_resource_tools() {
     st.harness.session.prompt("read", None).await.unwrap();
 
     let active = st.harness.session.get_active_tool_names();
-    for expected in [
-        "list_mcp_resources",
-        "list_mcp_resource_templates",
-        "read_mcp_resource",
-    ] {
+    for expected in ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"] {
         assert!(active.contains(&expected.to_string()));
     }
     let listed: Value = pi_js::json::parse(&get_message_text(&AgentMessage::from(Message::ToolResult(
@@ -986,10 +1001,7 @@ async fn makes_the_resource_tools_callable_from_codemode_for_codemode_servers() 
     ))));
     let last_line = raw.lines().last().unwrap_or("");
     let parsed: Value = pi_js::json::parse(last_line).unwrap();
-    assert_eq!(
-        parsed,
-        json!({ "uris": ["docs://intro"], "text": "# docs://intro" })
-    );
+    assert_eq!(parsed, json!({ "uris": ["docs://intro"], "text": "# docs://intro" }));
     assert_eq!(
         *st.calls.lock().unwrap_or_else(PoisonError::into_inner),
         vec!["read:docs://intro"]
@@ -1011,16 +1023,14 @@ async fn applies_per_tool_exposure_overrides() {
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
-    assert_eq!(
-        declared_tool_names(&st.harness),
-        vec!["codemode", "mcp__docs__search"]
-    );
+    assert_eq!(declared_tool_names(&st.harness), vec!["codemode", "mcp__docs__search"]);
     assert_eq!(
         st.harness.session.get_callable_tool_names(),
         vec!["mcp__docs__search", "mcp__docs__shot"]
@@ -1110,10 +1120,11 @@ async fn lists_servers_by_the_first_line_of_their_instructions_without_a_configu
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("done".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("done".to_string()),
+            None,
+        ))]);
 
     st.harness.session.prompt("go", None).await.unwrap();
 
@@ -1133,10 +1144,11 @@ async fn does_not_activate_codemode_when_auto_enable_codemode_is_false() {
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
     assert!(st.harness.session.get_active_tool_names().is_empty());
@@ -1205,7 +1217,12 @@ async fn treats_codemode_mcp_tools_as_reachable_through_an_active_tool_search() 
         )))),
         "loaded guide\nloaded faq"
     );
-    assert!(st.notifications.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert!(
+        st.notifications
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    );
     st.harness.cleanup();
 }
 
@@ -1220,10 +1237,11 @@ async fn reaches_deferred_mcp_tools_through_codemode_when_tool_search_is_not_ava
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
     assert_eq!(st.harness.session.get_active_tool_names(), vec!["codemode"]);
@@ -1233,7 +1251,12 @@ async fn reaches_deferred_mcp_tools_through_codemode_when_tool_search_is_not_ava
             .get_callable_tool_names()
             .contains(&"mcp__docs__search".to_string())
     );
-    assert!(st.notifications.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert!(
+        st.notifications
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    );
     st.harness.cleanup();
 }
 
@@ -1247,16 +1270,19 @@ async fn warns_when_deferred_mcp_tools_have_neither_tool_search_nor_codemode() {
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
     assert!(st.harness.session.get_active_tool_names().is_empty());
     assert_eq!(
         *st.notifications.lock().unwrap_or_else(PoisonError::into_inner),
-        vec!["MCP tools are only reachable from the codemode or tool_search tool, but neither is active; they cannot be called."]
+        vec![
+            "MCP tools are only reachable from the codemode or tool_search tool, but neither is active; they cannot be called."
+        ]
     );
     st.harness.cleanup();
 }
@@ -1302,10 +1328,11 @@ async fn does_not_activate_another_extensions_tool_named_codemode() {
         },
     )
     .await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
 
     assert!(st.harness.session.get_active_tool_names().is_empty());
@@ -1626,8 +1653,7 @@ async fn does_not_wait_for_servers_a_codemode_script_does_not_name() {
     harness.session.prompt("go", None).await.unwrap();
 
     let txt = get_message_text(&AgentMessage::from(Message::ToolResult(tool_result(
-        &harness,
-        "codemode",
+        &harness, "codemode",
     ))));
     assert_eq!(txt.lines().last(), Some("2"));
     harness.cleanup();
@@ -1648,10 +1674,7 @@ async fn waits_for_servers_before_tool_search_searches() {
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                "mcp__slow__search",
-                json!({ "query": "late" }),
-            )]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("mcp__slow__search", json!({ "query": "late" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1712,19 +1735,17 @@ async fn holds_the_first_prompt_for_servers_with_direct_tools_only_up_to_startup
 #[tokio::test]
 async fn does_not_let_codemode_call_itself_or_inactive_direct_tools() {
     let st = setup_mcp(McpExposure::Direct, McpSetupOptions::default()).await;
-    st.harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
-        FauxAssistantMessageContent::Text("ready".to_string()),
-        None,
-    ))]);
+    st.harness
+        .set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("ready".to_string()),
+            None,
+        ))]);
     st.harness.session.prompt("start", None).await.unwrap();
     st.harness
         .session
         .set_active_tools_by_name(&["codemode".to_string(), "mcp__docs__search".to_string()]);
 
-    assert_eq!(
-        st.harness.session.get_callable_tool_names(),
-        vec!["mcp__docs__search"]
-    );
+    assert_eq!(st.harness.session.get_callable_tool_names(), vec!["mcp__docs__search"]);
     st.harness.cleanup();
 }
 
@@ -1802,10 +1823,7 @@ async fn activates_tool_search_for_deferred_mcp_tools_and_keeps_loaded_tools_dec
             }),
         )),
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                &search_name,
-                json!({ "query": "loaded" }),
-            )]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(&search_name, json!({ "query": "loaded" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -1939,7 +1957,10 @@ async fn setup_registered(
             errors: vec![],
         })),
         create_transport: Some(Arc::new(move |entry, _url, _auth| {
-            conn_c.lock().unwrap_or_else(PoisonError::into_inner).push(entry.clone());
+            conn_c
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(entry.clone());
             let (client, server) = create_fake_server(Arc::new(Mutex::new(Vec::new())), FakeServerOptions::default());
             tokio::spawn(async move {
                 let _ = server.start().await;
@@ -1962,7 +1983,10 @@ async fn setup_registered(
 #[tokio::test]
 async fn connects_servers_registered_while_extensions_load() {
     let ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
-        pi.register_mcp_server("plugin", json!({ "url": "http://plugin.invalid", "exposure": "direct" }))
+        pi.register_mcp_server(
+            "plugin",
+            json!({ "url": "http://plugin.invalid", "exposure": "direct" }),
+        )
     }));
     let (harness, connected) = setup_registered(vec![ext], vec![]).await;
     harness.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
@@ -2024,7 +2048,12 @@ async fn connects_and_disconnects_servers_registered_during_the_session() {
         .map(|e| e.name.clone())
         .collect();
     assert_eq!(names, vec!["late"]);
-    assert!(harness.session.get_active_tool_names().contains(&"codemode".to_string()));
+    assert!(
+        harness
+            .session
+            .get_active_tool_names()
+            .contains(&"codemode".to_string())
+    );
 
     pi.unregister_mcp_server("late").unwrap();
     wait_until(
@@ -2102,7 +2131,9 @@ async fn rejects_names_another_extension_registered() {
         async move {
             for name in ["taken", "my_server"] {
                 if let Err(e) = pi.register_mcp_server(name, json!({ "url": "http://z.invalid" })) {
-                    errs.lock().unwrap_or_else(PoisonError::into_inner).push(e.message().to_string());
+                    errs.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(e.message().to_string());
                 }
             }
             Ok(())
@@ -2261,10 +2292,7 @@ async fn declares_tools_tool_search_loaded_again_on_resume_once_their_server_con
     .await;
     second.set_responses(vec![
         FauxResponseStep::Message(faux_assistant_message(
-            FauxAssistantMessageContent::Blocks(vec![faux_tool_call(
-                "mcp__docs__search",
-                json!({ "query": "again" }),
-            )]),
+            FauxAssistantMessageContent::Blocks(vec![faux_tool_call("mcp__docs__search", json!({ "query": "again" }))]),
             Some(FauxAssistantMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
@@ -2381,10 +2409,12 @@ async fn does_not_activate_restored_tools_that_register_after_the_next_prompt_st
         "delayed mcp__docs__search registered",
     )
     .await;
-    assert!(!second
-        .session
-        .get_active_tool_names()
-        .contains(&"mcp__docs__search".to_string()));
+    assert!(
+        !second
+            .session
+            .get_active_tool_names()
+            .contains(&"mcp__docs__search".to_string())
+    );
     second.cleanup();
     first.cleanup();
 }

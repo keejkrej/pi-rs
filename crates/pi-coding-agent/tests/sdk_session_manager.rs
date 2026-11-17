@@ -9,8 +9,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 fn setup_dirs() -> (String, String, String) {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-session-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-session-test-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&cwd, true).unwrap();
@@ -68,7 +67,10 @@ async fn keeps_an_explicit_session_manager_override() {
     let session = created.session;
 
     assert!(!session.session_manager().is_persisted());
-    assert_eq!(session.session_manager().get_session_id(), session_manager.get_session_id());
+    assert_eq!(
+        session.session_manager().get_session_id(),
+        session_manager.get_session_id()
+    );
 
     session.dispose();
     let _ = pi_js::fs::rm(&temp_dir, true, true);
@@ -93,8 +95,15 @@ async fn derives_cwd_from_an_explicit_session_manager_when_cwd_is_omitted() {
     .unwrap();
     let session = created.session;
 
-    assert_eq!(session.session_manager().get_session_id(), session_manager.get_session_id());
-    assert!(session.system_prompt().contains(&format!("<cwd>\n{session_cwd}\n</cwd>")));
+    assert_eq!(
+        session.session_manager().get_session_id(),
+        session_manager.get_session_id()
+    );
+    assert!(
+        session
+            .system_prompt()
+            .contains(&format!("<cwd>\n{session_cwd}\n</cwd>"))
+    );
 
     let bash_tool = session
         .agent()

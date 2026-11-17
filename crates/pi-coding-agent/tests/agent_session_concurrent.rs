@@ -54,8 +54,7 @@ fn create_assistant_message(text: &str) -> AssistantMessage {
 }
 
 async fn create_abortable_session() -> (AgentSession, String) {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
 
     let stream_fn: StreamFn = Arc::new(|_model, _context, options| {
@@ -96,10 +95,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -198,8 +194,7 @@ async fn should_allow_follow_up_while_streaming() {
 
 #[tokio::test]
 async fn should_queue_extension_origin_steering_messages_while_streaming() {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
     let saw_steering_message = Arc::new(AtomicBool::new(false));
     let last_input_source: Arc<Mutex<Option<InputSource>>> = Arc::new(Mutex::new(None));
@@ -275,10 +270,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -363,7 +355,11 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
     pi_js::time::sleep(10).await;
     assert!(session.is_streaming());
 
-    let api = ext_api_slot.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
+    let api = ext_api_slot
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .unwrap();
     api.send_user_message(
         pi_coding_agent::core::tools::mcp_wire::CustomMessageContent::Text("Steer from extension".to_string()),
         Some(SendUserMessageOptions {
@@ -375,7 +371,12 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
     pi_js::time::sleep(25).await;
 
     assert_eq!(session.pending_message_count(), 1);
-    assert!(session.get_steering_messages().iter().any(|m| m == "Steer from extension"));
+    assert!(
+        session
+            .get_steering_messages()
+            .iter()
+            .any(|m| m == "Steer from extension")
+    );
     assert_eq!(
         *last_input_source.lock().unwrap_or_else(PoisonError::into_inner),
         Some(InputSource::Extension)
@@ -398,8 +399,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
 
 #[tokio::test]
 async fn should_allow_prompt_after_previous_completes() {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
 
     let stream_fn: StreamFn = Arc::new(|_model, _ctx, _opts| {
@@ -433,10 +433,7 @@ async fn should_allow_prompt_after_previous_completes() {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -485,8 +482,7 @@ async fn should_allow_prompt_after_previous_completes() {
 
 #[tokio::test]
 async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
 
     let dummy_tool = AgentTool {
@@ -595,10 +591,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -688,8 +681,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
 
 #[tokio::test]
 async fn should_persist_message_end_events_in_order_with_slow_extension_handlers() {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-concurrent-test-"])).unwrap();
     let model = get_model("anthropic", "claude-sonnet-4-5").unwrap();
 
     let dummy_tool = AgentTool {
@@ -790,10 +782,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -861,7 +850,10 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
             _ => None,
         })
         .collect();
-    assert_eq!(roles, vec!["system", "user", "assistant", "toolResult", "system", "assistant"]);
+    assert_eq!(
+        roles,
+        vec!["system", "user", "assistant", "toolResult", "system", "assistant"]
+    );
 
     session.dispose();
     let _ = pi_js::fs::rm(&temp_dir, true, true);

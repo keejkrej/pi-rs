@@ -6,9 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use indexmap::IndexMap;
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore, InMemoryModelsStore, OAuthCredential};
 use pi_coding_agent::cli::args::parse_args;
-use pi_coding_agent::cli::auth_command::{
-    AuthCommand, AuthCommandKind, is_auth_command_help, parse_auth_command,
-};
+use pi_coding_agent::cli::auth_command::{AuthCommand, AuthCommandKind, is_auth_command_help, parse_auth_command};
 use pi_coding_agent::cli::credential_print::resolve_credential_for_print;
 use pi_coding_agent::core::auth_storage::{AuthStorage, AuthStorageData};
 use pi_coding_agent::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
@@ -122,7 +120,10 @@ async fn refreshes_an_expired_oauth_token_before_printing_it() {
     assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
 
     let stored = storage.read("openai-codex", None).await.unwrap().unwrap();
-    assert_eq!(stored.as_oauth().map(|c| c.access.as_str()), Some(expected_token.as_str()));
+    assert_eq!(
+        stored.as_oauth().map(|c| c.access.as_str()),
+        Some(expected_token.as_str())
+    );
 }
 
 #[tokio::test]

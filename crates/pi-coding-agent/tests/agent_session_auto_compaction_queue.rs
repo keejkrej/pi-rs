@@ -54,10 +54,7 @@ async fn create_session(
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     auth_storage
         .modify(
             "anthropic",
@@ -125,7 +122,9 @@ async fn should_resume_after_threshold_compaction_when_only_agent_level_queued_m
         .append_message(pi_ai::types::Message::User(u).into())
         .unwrap();
     let assistant = AssistantMessage {
-        content: vec![AssistantContentBlock::Text(TextContent::new("assistant response to compact"))],
+        content: vec![AssistantContentBlock::Text(TextContent::new(
+            "assistant response to compact",
+        ))],
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),
@@ -185,7 +184,9 @@ async fn should_resume_after_threshold_compaction_when_only_agent_level_queued_m
     assert_eq!(session.pending_message_count(), 0);
     assert!(session.agent().has_queued_messages());
 
-    let compacted = session.run_auto_compaction_for_test(CompactionReason::Threshold, false).await;
+    let compacted = session
+        .run_auto_compaction_for_test(CompactionReason::Threshold, false)
+        .await;
     assert!(compacted);
 
     session.dispose();
@@ -249,9 +250,7 @@ async fn should_not_compact_repeatedly_after_overflow_recovery_already_attempted
     let ce_ref = Arc::clone(&compaction_ends);
     let _unsub = session.subscribe(move |ev| {
         if let AgentSessionEvent::CompactionEnd {
-            reason,
-            error_message,
-            ..
+            reason, error_message, ..
         } = ev
         {
             ce_ref
@@ -381,7 +380,9 @@ async fn should_trigger_threshold_compaction_for_error_messages_using_last_succe
     let compaction_settings = settings_manager.get_compaction_settings(Some(&model));
     let threshold_tokens = model.context_window - compaction_settings.reserve_tokens + 1;
     let successful_assistant = AssistantMessage {
-        content: vec![AssistantContentBlock::Text(TextContent::new("large successful response"))],
+        content: vec![AssistantContentBlock::Text(TextContent::new(
+            "large successful response",
+        ))],
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),

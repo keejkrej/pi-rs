@@ -9,8 +9,7 @@ use serial_test::serial;
 #[test]
 #[serial]
 fn rewrites_old_key_names_to_namespaced_ids() {
-    let agent_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-keybindings-test-"])).unwrap();
+    let agent_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-keybindings-test-"])).unwrap();
     let kb_path = pi_js::path::join(&[&agent_dir, "keybindings.json"]);
     let content = pi_js::json::stringify_pretty(
         &json!({
@@ -41,8 +40,7 @@ fn rewrites_old_key_names_to_namespaced_ids() {
 #[test]
 #[serial]
 fn keeps_the_namespaced_value_when_old_and_new_names_both_exist() {
-    let agent_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-keybindings-test-"])).unwrap();
+    let agent_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-keybindings-test-"])).unwrap();
     let kb_path = pi_js::path::join(&[&agent_dir, "keybindings.json"]);
     let content = pi_js::json::stringify_pretty(
         &json!({

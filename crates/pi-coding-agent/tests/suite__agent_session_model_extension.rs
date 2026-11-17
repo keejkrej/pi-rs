@@ -54,11 +54,7 @@ async fn set_model_saves_the_model_to_the_session_and_emits_model_select() {
             pi.on::<ModelSelectEvent>(move |ev, _ctx| {
                 let list = Arc::clone(&me);
                 Box::pin(async move {
-                    let prev = ev
-                        .previous_model
-                        .as_ref()
-                        .map(|m| m.id.as_str())
-                        .unwrap_or("none");
+                    let prev = ev.previous_model.as_ref().map(|m| m.id.as_str()).unwrap_or("none");
                     let src = match ev.source {
                         ModelSelectSource::Set => "set",
                         ModelSelectSource::Cycle => "cycle",
@@ -140,9 +136,10 @@ async fn only_persists_model_and_thinking_defaults_when_requested() {
     );
     assert_eq!(harness.settings_manager.get_default_model(), Some(next_model.id));
 
-    harness
-        .session
-        .set_thinking_level(ModelThinkingLevel::High, Some(ModelMutationOptions { persist: Some(true) }));
+    harness.session.set_thinking_level(
+        ModelThinkingLevel::High,
+        Some(ModelMutationOptions { persist: Some(true) }),
+    );
     assert_eq!(
         harness.settings_manager.get_default_thinking_level(),
         Some(ModelThinkingLevel::High)
@@ -158,9 +155,10 @@ async fn persists_the_requested_default_thinking_level_even_when_the_current_mod
     })
     .await;
 
-    harness
-        .session
-        .set_thinking_level(ModelThinkingLevel::Max, Some(ModelMutationOptions { persist: Some(true) }));
+    harness.session.set_thinking_level(
+        ModelThinkingLevel::Max,
+        Some(ModelMutationOptions { persist: Some(true) }),
+    );
     assert_eq!(harness.session.thinking_level(), ModelThinkingLevel::High);
     assert_eq!(
         harness.settings_manager.get_default_thinking_level(),
@@ -295,18 +293,16 @@ async fn cycles_through_scoped_models_and_preserves_the_scoped_thinking_preferen
 
     let m1 = harness.get_model_by_id("faux-1").unwrap();
     let m2 = harness.get_model_by_id("faux-2").unwrap();
-    harness
-        .session
-        .set_scoped_models(vec![
-            pi_coding_agent::core::sdk::ScopedModelEntry {
-                model: m1,
-                thinking_level: Some(ModelThinkingLevel::High),
-            },
-            pi_coding_agent::core::sdk::ScopedModelEntry {
-                model: m2,
-                thinking_level: None,
-            },
-        ]);
+    harness.session.set_scoped_models(vec![
+        pi_coding_agent::core::sdk::ScopedModelEntry {
+            model: m1,
+            thinking_level: Some(ModelThinkingLevel::High),
+        },
+        pi_coding_agent::core::sdk::ScopedModelEntry {
+            model: m2,
+            thinking_level: None,
+        },
+    ]);
     harness.session.set_thinking_level(ModelThinkingLevel::High, None);
 
     harness.session.cycle_model(None, None).await.unwrap();
@@ -361,9 +357,18 @@ async fn cycles_xhigh_before_max_when_both_are_supported() {
         ]
     );
     harness.session.set_thinking_level(ModelThinkingLevel::High, None);
-    assert_eq!(harness.session.cycle_thinking_level(None), Some(ModelThinkingLevel::XHigh));
-    assert_eq!(harness.session.cycle_thinking_level(None), Some(ModelThinkingLevel::Max));
-    assert_eq!(harness.session.cycle_thinking_level(None), Some(ModelThinkingLevel::Off));
+    assert_eq!(
+        harness.session.cycle_thinking_level(None),
+        Some(ModelThinkingLevel::XHigh)
+    );
+    assert_eq!(
+        harness.session.cycle_thinking_level(None),
+        Some(ModelThinkingLevel::Max)
+    );
+    assert_eq!(
+        harness.session.cycle_thinking_level(None),
+        Some(ModelThinkingLevel::Off)
+    );
     harness.cleanup();
 }
 
@@ -384,7 +389,10 @@ async fn throws_when_set_model_is_called_without_configured_auth() {
         .set_model(harness.get_model_by_id("faux-2").unwrap(), None)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains(&format!("No API key for {}/faux-2", harness.get_model().provider)));
+    assert!(
+        err.to_string()
+            .contains(&format!("No API key for {}/faux-2", harness.get_model().provider))
+    );
     harness.cleanup();
 }
 
@@ -605,7 +613,12 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
         .into_iter()
         .find_map(|m| match m {
             AgentMessage::Message(Message::ToolResult(tr))
-                if tr.details.as_ref().and_then(|d| d.get("patched")).and_then(Value::as_bool) == Some(true) =>
+                if tr
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("patched"))
+                    .and_then(Value::as_bool)
+                    == Some(true) =>
             {
                 Some(tr)
             }
@@ -626,9 +639,8 @@ async fn allows_extension_context_handlers_to_modify_messages_before_the_llm_cal
                     .into_iter()
                     .map(|m| match m {
                         AgentMessage::Message(Message::User(mut u)) => {
-                            u.content = UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new(
-                                "rewritten",
-                            ))]);
+                            u.content =
+                                UserMessageContent::Blocks(vec![UserContentBlock::Text(TextContent::new("rewritten"))]);
                             AgentMessage::Message(Message::User(u))
                         }
                         other => other,
@@ -647,33 +659,35 @@ async fn allows_extension_context_handlers_to_modify_messages_before_the_llm_cal
     .await;
     let provider_user_text = Arc::new(Mutex::new(String::new()));
     let put_ref = Arc::clone(&provider_user_text);
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let put = Arc::clone(&put_ref);
-        Box::pin(async move {
-            let text = ctx
-                .messages
-                .iter()
-                .find_map(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => Some(
-                        u.content
-                            .iter()
-                            .filter_map(|p| match p {
-                                UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            *put.lock().unwrap_or_else(PoisonError::into_inner) = text;
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("done".to_string()),
-                None,
-            ))
-        })
-    }))]);
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let put = Arc::clone(&put_ref);
+            Box::pin(async move {
+                let text = ctx
+                    .messages
+                    .iter()
+                    .find_map(|m| match m {
+                        pi_ai::types::TranscriptMessage::User(u) => Some(
+                            u.content
+                                .iter()
+                                .filter_map(|p| match p {
+                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                *put.lock().unwrap_or_else(PoisonError::into_inner) = text;
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("done".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("original", None).await.unwrap();
     assert_eq!(
@@ -720,33 +734,35 @@ async fn allows_extension_input_handlers_to_transform_or_handle_input() {
     .await;
     let provider_user_text = Arc::new(Mutex::new(String::new()));
     let put_ref = Arc::clone(&provider_user_text);
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let put = Arc::clone(&put_ref);
-        Box::pin(async move {
-            let text = ctx
-                .messages
-                .iter()
-                .find_map(|m| match m {
-                    pi_ai::types::TranscriptMessage::User(u) => Some(
-                        u.content
-                            .iter()
-                            .filter_map(|p| match p {
-                                UserContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            *put.lock().unwrap_or_else(PoisonError::into_inner) = text;
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("done".to_string()),
-                None,
-            ))
-        })
-    }))]);
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let put = Arc::clone(&put_ref);
+            Box::pin(async move {
+                let text = ctx
+                    .messages
+                    .iter()
+                    .find_map(|m| match m {
+                        pi_ai::types::TranscriptMessage::User(u) => Some(
+                            u.content
+                                .iter()
+                                .filter_map(|p| match p {
+                                    UserContentBlock::Text(t) => Some(t.text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                *put.lock().unwrap_or_else(PoisonError::into_inner) = text;
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("done".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("hello", None).await.unwrap();
     harness.session.prompt("ping", None).await.unwrap();
@@ -849,25 +865,27 @@ async fn allows_before_agent_start_handlers_to_inject_custom_messages_and_modify
     let ps_ref = Arc::clone(&provider_sys);
     let si_ref = Arc::clone(&saw_injected);
 
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let ps = Arc::clone(&ps_ref);
-        let si = Arc::clone(&si_ref);
-        Box::pin(async move {
-            *ps.lock().unwrap_or_else(PoisonError::into_inner) = get_current_system_prompt(&ctx.messages);
-            let found = ctx.messages.iter().any(|m| match m {
-                pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                    UserContentBlock::Text(t) => t.text == "injected",
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let ps = Arc::clone(&ps_ref);
+            let si = Arc::clone(&si_ref);
+            Box::pin(async move {
+                *ps.lock().unwrap_or_else(PoisonError::into_inner) = get_current_system_prompt(&ctx.messages);
+                let found = ctx.messages.iter().any(|m| match m {
+                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
+                        UserContentBlock::Text(t) => t.text == "injected",
+                        _ => false,
+                    }),
                     _ => false,
-                }),
-                _ => false,
-            });
-            si.store(found, std::sync::atomic::Ordering::SeqCst);
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("done".to_string()),
-                None,
-            ))
-        })
-    }))]);
+                });
+                si.store(found, std::sync::atomic::Ordering::SeqCst);
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("done".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("hello", None).await.unwrap();
     assert!(

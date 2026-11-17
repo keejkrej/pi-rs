@@ -14,9 +14,7 @@ use pi_ai::providers::faux::{
 };
 use pi_ai::types::{AssistantMessageEvent, StopReason, TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::AgentSessionEvent;
-use pi_coding_agent::core::extensions::types::{
-    ExtensionApi, InlineExtension, MessageEndEvent, MessageStartEvent,
-};
+use pi_coding_agent::core::extensions::types::{ExtensionApi, InlineExtension, MessageEndEvent, MessageStartEvent};
 use pi_coding_agent::core::settings_manager::{RetrySettings, Settings};
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
@@ -264,10 +262,7 @@ async fn finalizes_retry_state_when_abort_is_requested_after_a_retry_attempt_fai
         } => Some((success, attempt, final_error)),
         _ => None,
     });
-    assert_eq!(
-        last_retry_end,
-        Some((false, 1, Some("Retry cancelled".to_string())))
-    );
+    assert_eq!(last_retry_end, Some((false, 1, Some("Retry cancelled".to_string()))));
     harness.cleanup();
 }
 

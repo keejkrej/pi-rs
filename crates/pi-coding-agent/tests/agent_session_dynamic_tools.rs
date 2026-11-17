@@ -7,9 +7,7 @@ use pi_agent_core::types::AgentToolResult;
 use pi_ai::compat::get_model;
 use pi_ai::types::{TextContent, UserContentBlock};
 use pi_coding_agent::core::agent_session::ExtensionBindings;
-use pi_coding_agent::core::extensions::types::{
-    ExtensionApi, InlineExtension, SessionStartEvent, ToolDefinition,
-};
+use pi_coding_agent::core::extensions::types::{ExtensionApi, InlineExtension, SessionStartEvent, ToolDefinition};
 use pi_coding_agent::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
 use pi_coding_agent::core::sdk::{CreateAgentSessionOptions, create_agent_session};
 use pi_coding_agent::core::session_manager::{NewSessionOptions, SessionManager};
@@ -54,8 +52,7 @@ fn empty_tool_def(name: &str, label: &str, description: &str) -> ToolDefinition 
 }
 
 fn setup_temp_dirs() -> (String, String) {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-dynamic-tool-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-dynamic-tool-test-"])).unwrap();
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&agent_dir, true).unwrap();
     (temp_dir, agent_dir)
@@ -156,7 +153,11 @@ async fn exposes_session_state_before_custom_bash_spawn_hooks_and_supports_optin
         .await
         .unwrap();
 
-    let captured_env = session_env.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
+    let captured_env = session_env
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .unwrap();
     assert_eq!(captured_env.get("PI_SESSION_ID"), Some(&session.session_id()));
     assert_eq!(
         captured_env.get("PI_SESSION_FILE").map(String::as_str),
@@ -173,14 +174,9 @@ async fn exposes_session_state_before_custom_bash_spawn_hooks_and_supports_optin
         .into_iter()
         .find(|t| t.name == "bash_without_session_env")
         .unwrap();
-    (opted_tool.execute)(
-        "bash-no-env".to_string(),
-        json!({ "command": "printf ok" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    (opted_tool.execute)("bash-no-env".to_string(), json!({ "command": "printf ok" }), None, None)
+        .await
+        .unwrap();
 
     let opted_captured = opted_out_env
         .lock()

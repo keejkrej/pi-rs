@@ -23,7 +23,9 @@ use pi_coding_agent::core::tools::mcp_wire::CustomMessageContent;
 use pi_js::vendor::typebox::t;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
-use support::suite::harness::{Harness, HarnessOptions, create_harness, get_assistant_texts, get_message_text, get_user_texts};
+use support::suite::harness::{
+    Harness, HarnessOptions, create_harness, get_assistant_texts, get_message_text, get_user_texts,
+};
 
 async fn create_waiting_harness(
     extension_factories: Vec<InlineExtension>,
@@ -251,7 +253,11 @@ async fn delivers_follow_up_messages_only_after_the_current_run_finishes() {
     ]);
 
     let _ = start_rx.await;
-    harness.session.follow_up("after current run", None, None).await.unwrap();
+    harness
+        .session
+        .follow_up("after current run", None, None)
+        .await
+        .unwrap();
     let _ = release_tx.send(());
     prompt_handle.await.unwrap().unwrap();
 
@@ -277,9 +283,11 @@ async fn runs_direct_steering_and_follow_up_messages_through_input_handlers() {
             pi.on::<InputEvent>(move |ev, _ctx| {
                 let list = Arc::clone(&ie);
                 Box::pin(async move {
-                    list.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push((ev.text.clone(), ev.source, ev.streaming_behavior));
+                    list.lock().unwrap_or_else(PoisonError::into_inner).push((
+                        ev.text.clone(),
+                        ev.source,
+                        ev.streaming_behavior,
+                    ));
                     if ev.text.starts_with("handle") {
                         return Ok(Some(InputEventResult::Handled));
                     }
@@ -330,13 +338,25 @@ async fn runs_direct_steering_and_follow_up_messages_through_input_handlers() {
     harness.session.steer("steer me", None, rpc_opts).await.unwrap();
     harness.session.steer("handle steer", None, rpc_opts).await.unwrap();
     harness.session.follow_up("follow me", None, rpc_opts).await.unwrap();
-    harness.session.follow_up("handle follow", None, rpc_opts).await.unwrap();
+    harness
+        .session
+        .follow_up("handle follow", None, rpc_opts)
+        .await
+        .unwrap();
 
     assert_eq!(
         *input_events.lock().unwrap_or_else(PoisonError::into_inner),
         vec![
-            ("steer me".to_string(), InputSource::Rpc, Some(InputDeliveryBehavior::Steer)),
-            ("handle steer".to_string(), InputSource::Rpc, Some(InputDeliveryBehavior::Steer)),
+            (
+                "steer me".to_string(),
+                InputSource::Rpc,
+                Some(InputDeliveryBehavior::Steer)
+            ),
+            (
+                "handle steer".to_string(),
+                InputSource::Rpc,
+                Some(InputDeliveryBehavior::Steer)
+            ),
             (
                 "follow me".to_string(),
                 InputSource::Rpc,
@@ -498,7 +518,10 @@ async fn delivers_all_steering_messages_in_one_batch_in_all_mode() {
     let _ = release_tx.send(());
     prompt_handle.await.unwrap().unwrap();
 
-    assert_eq!(*batched.lock().unwrap_or_else(PoisonError::into_inner), vec!["start", "steer 1", "steer 2"]);
+    assert_eq!(
+        *batched.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["start", "steer 1", "steer 2"]
+    );
     assert_eq!(get_assistant_texts(&harness), vec!["", "batched steer response"]);
     harness.cleanup();
 }
@@ -735,23 +758,25 @@ async fn injects_next_turn_custom_messages_into_the_next_prompt() {
         .await
         .unwrap();
 
-    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(move |ctx, _opts, _st, _mdl| {
-        let sc = Arc::clone(&sc_ref);
-        Box::pin(async move {
-            let found = ctx.messages.iter().any(|m| match m {
-                pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
-                    UserContentBlock::Text(t) => t.text == "carry this",
+    harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        move |ctx, _opts, _st, _mdl| {
+            let sc = Arc::clone(&sc_ref);
+            Box::pin(async move {
+                let found = ctx.messages.iter().any(|m| match m {
+                    pi_ai::types::TranscriptMessage::User(u) => u.content.iter().any(|p| match p {
+                        UserContentBlock::Text(t) => t.text == "carry this",
+                        _ => false,
+                    }),
                     _ => false,
-                }),
-                _ => false,
-            });
-            sc.store(found, std::sync::atomic::Ordering::SeqCst);
-            Ok(faux_assistant_message(
-                FauxAssistantMessageContent::Text("done".to_string()),
-                None,
-            ))
-        })
-    }))]);
+                });
+                sc.store(found, std::sync::atomic::Ordering::SeqCst);
+                Ok(faux_assistant_message(
+                    FauxAssistantMessageContent::Text("done".to_string()),
+                    None,
+                ))
+            })
+        },
+    ))]);
 
     harness.session.prompt("normal prompt", None).await.unwrap();
     assert!(saw_custom.load(std::sync::atomic::Ordering::SeqCst));

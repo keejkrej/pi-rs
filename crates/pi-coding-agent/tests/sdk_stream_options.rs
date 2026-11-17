@@ -95,8 +95,7 @@ async fn capture_stream_options(
     extension_factory: Option<InlineExtension>,
     provider_event: Option<Value>,
 ) -> Option<SimpleStreamOptions> {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-stream-options-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-stream-options-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&cwd, true).unwrap();
@@ -132,7 +131,8 @@ async fn capture_stream_options(
         )
         .await
         .unwrap();
-    let model_registry = create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
+    let model_registry =
+        create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
     let captured: Arc<Mutex<Option<SimpleStreamOptions>>> = Arc::new(Mutex::new(None));
     let captured_ref = Arc::clone(&captured);
 
@@ -217,8 +217,7 @@ async fn create_cache_warming_session<F>(
 where
     F: FnOnce(&SessionManager, &Model),
 {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-cache-warm-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-sdk-cache-warm-"])).unwrap();
     let cwd = pi_js::path::join(&[&temp_dir, "project"]);
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&cwd, true).unwrap();
@@ -257,7 +256,8 @@ where
         .await
         .unwrap();
 
-    let model_registry = create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
+    let model_registry =
+        create_model_registry(auth_storage, Some(&pi_js::path::join(&[&agent_dir, "models.json"]))).await;
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_ref = Arc::clone(&calls);
     let api_owned = model.api.clone();
@@ -545,15 +545,9 @@ async fn runs_before_provider_headers_on_assembled_headers() {
         Ok(())
     }));
 
-    let options = capture_stream_options(
-        "openai-completions",
-        Settings::default(),
-        req,
-        Some(ext),
-        None,
-    )
-    .await
-    .unwrap();
+    let options = capture_stream_options("openai-completions", Settings::default(), req, Some(ext), None)
+        .await
+        .unwrap();
     let headers = options.base.headers.unwrap();
     assert_eq!(headers.get("x-provider").and_then(|v| v.as_deref()), Some("provider"));
     assert_eq!(headers.get("x-model").and_then(|v| v.as_deref()), Some("model"));

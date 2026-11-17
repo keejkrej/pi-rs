@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use pi_agent_core::types::{AgentTool, AgentToolResult};
-use pi_ai::providers::faux::{FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call};
+use pi_ai::providers::faux::{
+    FauxAssistantMessageContent, FauxAssistantMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+};
 use pi_ai::types::{
-    AssistantImages, ClassifierApi, ClassifierAnswer, ClassifierResult, ClassifierStopReason, ImageApi, ImageContent,
+    AssistantImages, ClassifierAnswer, ClassifierApi, ClassifierResult, ClassifierStopReason, ImageApi, ImageContent,
     ImagesOutputContent, ImagesStopReason, ModelCost, ModelInput, ProviderClassifier, ProviderImages, StopReason,
     TextContent, ToolResultMessage, Usage, UsageCost, UserContentBlock,
 };
@@ -41,10 +43,7 @@ fn make_echo_tool() -> AgentTool {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back.\n\nSecond paragraph.".to_string(),
-        parameters: t::object(&[t::prop(
-            "text",
-            t::string().with("description", "Text to echo"),
-        )]),
+        parameters: t::object(&[t::prop("text", t::string().with("description", "Text to echo"))]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -70,11 +69,7 @@ fn make_stats_tool() -> AgentTool {
         description: "Return structured stats".to_string(),
         parameters: t::object(&[]),
         output_schema: Some(
-            t::object(&[
-                t::prop("files", t::number()),
-                t::prop("names", t::array(t::string())),
-            ])
-            .to_value(),
+            t::object(&[t::prop("files", t::number()), t::prop("names", t::array(t::string()))]).to_value(),
         ),
         constrained_sampling: None,
         execution_mode: None,
@@ -368,13 +363,23 @@ async fn runs_nested_calls_in_parallel_and_returns_only_the_script_result() {
     let statuses: Vec<(&str, &str)> = details
         .calls
         .iter()
-        .map(|c| (c.name.as_str(), match c.status {
-            pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Ok => "ok",
-            pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Error => "error",
-        }))
+        .map(|c| {
+            (
+                c.name.as_str(),
+                match c.status {
+                    pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Ok => "ok",
+                    pi_coding_agent::extensions::codemode::tool::CodemodeNestedCallStatus::Error => "error",
+                },
+            )
+        })
         .collect();
     assert_eq!(statuses, vec![("echo", "ok"), ("echo", "ok"), ("stats", "ok")]);
-    assert!(details.calls.iter().all(|c| c.id.starts_with(&format!("{}/", result.tool_call_id))));
+    assert!(
+        details
+            .calls
+            .iter()
+            .all(|c| c.id.starts_with(&format!("{}/", result.tool_call_id)))
+    );
     let tool_results_count = harness
         .session
         .messages()
@@ -390,9 +395,7 @@ async fn routes_nested_calls_through_extension_hooks() {
     let hook_ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
         pi.on::<ToolCallEvent>(|event, _ctx| {
             Box::pin(async move {
-                if event.tool_name == "echo"
-                    && event.input.get("text").and_then(Value::as_str) == Some("forbidden")
-                {
+                if event.tool_name == "echo" && event.input.get("text").and_then(Value::as_str) == Some("forbidden") {
                     return Ok(Some(ToolCallEventResult {
                         block: Some(true),
                         reason: Some("echo of forbidden text is blocked".to_string()),
@@ -673,11 +676,13 @@ async fn persists_store_writes_as_custom_entries_for_later_calls() {
     let appended_count = harness
         .events()
         .into_iter()
-        .filter(|e| matches!(
-            e,
-            AgentSessionEvent::EntryAppended { entry: SessionEntry::Custom(c), .. }
-            if c.custom_type == CODEMODE_STORE_ENTRY_TYPE
-        ))
+        .filter(|e| {
+            matches!(
+                e,
+                AgentSessionEvent::EntryAppended { entry: SessionEntry::Custom(c), .. }
+                if c.custom_type == CODEMODE_STORE_ENTRY_TYPE
+            )
+        })
         .count();
     assert_eq!(appended_count, 2);
 
@@ -762,7 +767,10 @@ fn folds_store_entries_from_the_root_ignoring_malformed_data() {
         }
     };
     let folded = read_codemode_store(&[
-        make_entry(json!({ "set": { "a": 1, "b": { "c": 2 } }, "delete": [] }), CODEMODE_STORE_ENTRY_TYPE),
+        make_entry(
+            json!({ "set": { "a": 1, "b": { "c": 2 } }, "delete": [] }),
+            CODEMODE_STORE_ENTRY_TYPE,
+        ),
         make_entry(json!({ "set": { "a": 3 }, "delete": ["b"] }), CODEMODE_STORE_ENTRY_TYPE),
         make_entry(json!({ "set": { "z": 1 } }), CODEMODE_STORE_ENTRY_TYPE),
         make_entry(json!({ "set": { "other": 1 }, "delete": [] }), "other-extension"),

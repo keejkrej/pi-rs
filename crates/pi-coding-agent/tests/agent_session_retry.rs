@@ -16,9 +16,7 @@ use pi_ai::types::{
 };
 use pi_ai::utils::event_stream::create_assistant_message_event_stream;
 use pi_ai::{ApiKeyCredential, Credential, CredentialStore};
-use pi_coding_agent::core::agent_session::{
-    AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionBindings,
-};
+use pi_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionBindings};
 use pi_coding_agent::core::auth_storage::AuthStorage;
 use pi_coding_agent::core::extensions::types::{ExtensionApi, InlineExtension, MessageEndEvent};
 use pi_coding_agent::core::session_manager::SessionManager;
@@ -102,10 +100,7 @@ async fn create_retry_session(
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -292,11 +287,8 @@ async fn retries_provider_network_error_failures() {
             let stream_clone = stream.clone();
             tokio::spawn(async move {
                 if n == 1 {
-                    let msg = make_assistant_message(
-                        "",
-                        StopReason::Error,
-                        Some("Provider finish_reason: network_error"),
-                    );
+                    let msg =
+                        make_assistant_message("", StopReason::Error, Some("Provider finish_reason: network_error"));
                     stream_clone.push(AssistantMessageEvent::Start { partial: msg.clone() });
                     stream_clone.push(AssistantMessageEvent::Error {
                         reason: StopReason::Error,
@@ -329,10 +321,7 @@ async fn retries_provider_network_error_failures() {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(
@@ -507,10 +496,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
 
     let session_manager = SessionManager::in_memory(None, None, None).unwrap();
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
-    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[
-        &temp_dir,
-        "auth.json",
-    ]))));
+    let auth_storage = Arc::new(AuthStorage::create(Some(&pi_js::path::join(&[&temp_dir, "auth.json"]))));
     let model_registry = create_model_registry(auth_storage.clone(), Some(&temp_dir)).await;
     auth_storage
         .modify(

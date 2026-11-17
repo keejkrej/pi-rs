@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pi_ai::compat::get_model;
 use pi_ai::models::{Provider, ProviderAuth};
-use pi_ai::types::{
-    ApiStreamOptions, AssistantMessageEventStream, Model, SimpleStreamOptions, TranscriptContext,
-};
+use pi_ai::types::{ApiStreamOptions, AssistantMessageEventStream, Model, SimpleStreamOptions, TranscriptContext};
 use pi_ai::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth};
 use pi_coding_agent::core::agent_session::{AgentSession, ExtensionBindings};
 use pi_coding_agent::core::auth_storage::AuthStorage;
@@ -104,8 +102,11 @@ impl Provider for NativeAnthropicProvider {
 }
 
 async fn create_session(extension_factories: Vec<InlineExtension>) -> (AgentSession, String) {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-dynamic-provider-test-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[
+        &pi_js::env::tmp_dir(),
+        "pi-dynamic-provider-test-",
+    ]))
+    .unwrap();
     let agent_dir = pi_js::path::join(&[&temp_dir, "agent"]);
     pi_js::fs::mkdir(&agent_dir, true).unwrap();
 

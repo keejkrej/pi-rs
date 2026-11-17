@@ -51,8 +51,7 @@ async fn create_runtime_host(
     pi_ai::providers::faux::FauxProviderRegistration,
     String,
 ) {
-    let temp_dir =
-        pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-runtime-events-"])).unwrap();
+    let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-runtime-events-"])).unwrap();
 
     let faux = register_faux_provider(None);
     faux.set_responses(vec![
@@ -210,36 +209,36 @@ async fn emits_session_before_switch_and_session_start_for_new_and_resume_flows(
             pi.on::<SessionBeforeSwitchEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e1);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::BeforeSwitch {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::BeforeSwitch {
                             reason: event.reason,
                             target_session_file: event.target_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });
             pi.on::<SessionShutdownEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e2);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::Shutdown {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::Shutdown {
                             reason: event.reason,
                             target_session_file: event.target_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });
             pi.on::<SessionStartEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e3);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::Start {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::Start {
                             reason: event.reason,
                             previous_session_file: event.previous_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });
@@ -330,24 +329,24 @@ async fn honors_session_before_switch_cancellation() {
             pi.on::<SessionBeforeSwitchEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e1);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::BeforeSwitch {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::BeforeSwitch {
                             reason: event.reason,
                             target_session_file: event.target_session_file,
-                        },
-                    );
+                        });
                     Ok(Some(SessionBeforeSwitchResult { cancel: Some(true) }))
                 })
             });
             pi.on::<SessionStartEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e2);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::Start {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::Start {
                             reason: event.reason,
                             previous_session_file: event.previous_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });
@@ -443,11 +442,7 @@ async fn runs_before_session_invalidate_after_session_shutdown_and_before_rebind
             "rebindSession".to_string(),
         ]
     );
-    let err = old_session
-        .extension_runner()
-        .unwrap()
-        .create_context()
-        .unwrap_err();
+    let err = old_session.extension_runner().unwrap().create_context().unwrap_err();
     assert_eq!(
         err.to_string(),
         "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload()."
@@ -479,12 +474,12 @@ async fn emits_session_before_fork_and_session_start_and_honors_cancellation() {
                 let list = Arc::clone(&e1);
                 let cn_inner = Arc::clone(&cn);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::BeforeFork {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::BeforeFork {
                             entry_id: event.entry_id,
                             position: event.position,
-                        },
-                    );
+                        });
                     if cn_inner.swap(false, std::sync::atomic::Ordering::SeqCst) {
                         return Ok(Some(SessionBeforeForkResult {
                             cancel: Some(true),
@@ -497,24 +492,24 @@ async fn emits_session_before_fork_and_session_start_and_honors_cancellation() {
             pi.on::<SessionShutdownEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e2);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::Shutdown {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::Shutdown {
                             reason: event.reason,
                             target_session_file: event.target_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });
             pi.on::<SessionStartEvent>(move |event, _ctx| {
                 let list = Arc::clone(&e3);
                 Box::pin(async move {
-                    list.lock().unwrap_or_else(PoisonError::into_inner).push(
-                        RecordedSessionEvent::Start {
+                    list.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(RecordedSessionEvent::Start {
                             reason: event.reason,
                             previous_session_file: event.previous_session_file,
-                        },
-                    );
+                        });
                     Ok(None)
                 })
             });

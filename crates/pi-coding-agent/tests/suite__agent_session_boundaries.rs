@@ -79,7 +79,9 @@ async fn commits_a_retain_none_turn_end_compaction_and_explicitly_continues_once
                 let h = Arc::clone(&h);
                 let ids = Arc::clone(&ids);
                 Box::pin(async move {
-                    ids.lock().unwrap_or_else(PoisonError::into_inner).push(event.message_entry_id);
+                    ids.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(event.message_entry_id);
                     if h.swap(true, Ordering::SeqCst) {
                         return Ok(None);
                     }
@@ -644,7 +646,10 @@ async fn continues_from_an_agent_before_settle_custom_message_before_final_settl
         _ => false,
     }));
     assert_eq!(count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentStart)), 2);
-    assert_eq!(count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled)), 1);
+    assert_eq!(
+        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled)),
+        1
+    );
     harness.cleanup();
 }
 
@@ -843,7 +848,9 @@ async fn defers_runs_started_by_agent_settled_handlers_until_every_settled_handl
             pi.on::<AgentStartEvent>(move |_ev, _ctx| {
                 let lf1 = Arc::clone(&lf1);
                 Box::pin(async move {
-                    lf1.lock().unwrap_or_else(PoisonError::into_inner).push("start".to_string());
+                    lf1.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push("start".to_string());
                     Ok(None)
                 })
             });
@@ -1716,7 +1723,9 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
         .iter()
         .filter_map(|e| match e {
             SessionEntry::Message(m) => match &m.message {
-                AgentMessage::Message(Message::Assistant(a)) if a.stop_reason == StopReason::Length => Some(m.id.clone()),
+                AgentMessage::Message(Message::Assistant(a)) if a.stop_reason == StopReason::Length => {
+                    Some(m.id.clone())
+                }
                 _ => None,
             },
             _ => None,
@@ -1757,10 +1766,7 @@ async fn gives_a_distinct_queued_follow_up_its_own_length_recovery_budget() {
                 let q = Arc::clone(&q);
                 let pi_h = pi_ev.clone();
                 Box::pin(async move {
-                    if !event
-                        .messages
-                        .iter()
-                        .any(|m| get_message_text(m) == "first recovered")
+                    if !event.messages.iter().any(|m| get_message_text(m) == "first recovered")
                         || q.swap(true, Ordering::SeqCst)
                     {
                         return Ok(None);
@@ -1843,7 +1849,9 @@ async fn gives_a_distinct_queued_follow_up_its_own_length_recovery_budget() {
         .iter()
         .filter_map(|e| match e {
             SessionEntry::Message(m) => match &m.message {
-                AgentMessage::Message(Message::Assistant(a)) if a.stop_reason == StopReason::Length => Some(m.id.clone()),
+                AgentMessage::Message(Message::Assistant(a)) if a.stop_reason == StopReason::Length => {
+                    Some(m.id.clone())
+                }
                 _ => None,
             },
             _ => None,
