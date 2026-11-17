@@ -23,9 +23,15 @@ pub struct LocalEventBus {
     inner: Arc<EventBusInner>,
 }
 
+#[derive(Clone)]
+enum Listener {
+    Sync(Arc<dyn Fn(Value) + Send + Sync>),
+    Async(EventHandler),
+}
+
 struct EventBusInner {
     next_id: AtomicU64,
-    listeners: Mutex<IndexMap<String, Vec<(u64, EventHandler)>>>,
+    listeners: Mutex<IndexMap<String, Vec<(u64, Listener)>>>,
 }
 
 impl LocalEventBus {
@@ -39,42 +45,42 @@ impl LocalEventBus {
     }
 
     pub fn emit(&self, channel: &str, data: Value) {
-        let handlers: Vec<EventHandler> = match self.inner.listeners.lock() {
+        let listeners: Vec<Listener> = match self.inner.listeners.lock() {
             Ok(guard) => guard
                 .get(channel)
                 .map(|list| list.iter().map(|(_, h)| h.clone()).collect())
                 .unwrap_or_default(),
             Err(_) => return,
         };
-        for handler in handlers {
+        for listener in listeners {
             let payload = data.clone();
-            if tokio::runtime::Handle::try_current().is_ok() {
-                tokio::spawn(async move {
-                    handler(payload).await;
-                });
-            } else {
-                futures::executor::block_on(handler(payload));
+            match listener {
+                Listener::Sync(handler) => handler(payload),
+                Listener::Async(handler) => {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        tokio::spawn(async move {
+                            handler(payload).await;
+                        });
+                    } else {
+                        futures::executor::block_on(handler(payload));
+                    }
+                }
             }
         }
     }
 
     pub fn on_sync(&self, channel: &str, handler: impl Fn(Value) + Send + Sync + 'static) -> Unsubscribe {
-        let handler = Arc::new(handler);
-        self.on(
-            channel,
-            Arc::new(move |val| {
-                let h = handler.clone();
-                Box::pin(async move {
-                    h(val);
-                })
-            }),
-        )
+        self.insert_listener(channel, Listener::Sync(Arc::new(handler)))
     }
 
     pub fn on(&self, channel: &str, handler: EventHandler) -> Unsubscribe {
+        self.insert_listener(channel, Listener::Async(handler))
+    }
+
+    fn insert_listener(&self, channel: &str, listener: Listener) -> Unsubscribe {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.inner.listeners.lock() {
-            guard.entry(channel.to_owned()).or_default().push((id, handler));
+            guard.entry(channel.to_owned()).or_default().push((id, listener));
         }
         let inner = self.inner.clone();
         let ch = channel.to_owned();

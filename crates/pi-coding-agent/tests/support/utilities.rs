@@ -356,8 +356,9 @@ pub async fn create_test_session(options: Option<TestSessionOptions>) -> Result<
     };
     let settings_manager = SettingsManager::create(&temp_dir, Some(&temp_dir), None);
     let auth_path = pi_js::path::join(&[&temp_dir, "auth.json"]);
+    let models_path = pi_js::path::join(&[&temp_dir, "models.json"]);
     let auth_storage = Arc::new(AuthStorage::create(Some(&auth_path)));
-    let model_registry = create_model_registry(auth_storage, Some(&temp_dir)).await?;
+    let model_registry = create_model_registry(auth_storage, Some(&models_path)).await?;
     let model_runtime = get_model_runtime(&model_registry);
     let resource_loader = create_test_resource_loader(None);
 

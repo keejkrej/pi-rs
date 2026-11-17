@@ -22,6 +22,9 @@ use crate::core::compaction::compaction::{complete_summarization, estimate_token
 use crate::core::compaction::utils::serialize_conversation;
 use crate::core::crash_log::{CrashKind, CrashRecord};
 use crate::core::messages::convert_to_llm;
+use crate::core::model_registry::ModelRegistry;
+use crate::core::model_runtime::ModelRuntime;
+use crate::core::provider_composer::AuthStatusSource;
 use crate::core::session_manager::{SessionEntry, SessionManager};
 use crate::core::settings_manager::Settings;
 use crate::utils::pi_user_agent::get_pi_user_agent;
@@ -247,7 +250,6 @@ fn describe_model(model: &Model) -> BugReportModelDescription {
 }
 
 /// Redacted provider descriptor supplied from `ModelRuntime` or tests.
-// WIRE(@mcp-helper2): construct from `crate::core::model_runtime::ModelRuntime` once peer helper lands.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BugReportProviderInfo {
@@ -264,6 +266,66 @@ pub struct BugReportProviderInfo {
 /// Callback source returning provider info for a provider ID.
 pub trait BugReportProviderSource: Send + Sync {
     fn get_provider_info(&self, provider_id: &str) -> Option<BugReportProviderInfo>;
+}
+
+impl BugReportProviderInfo {
+    /// Build a redacted provider descriptor from [`ModelRuntime`].
+    pub fn from_model_runtime(model_runtime: &ModelRuntime, provider_id: &str) -> Option<Self> {
+        let provider = model_runtime.get_provider(provider_id)?;
+        let mut header_names: Vec<String> = provider
+            .headers()
+            .map(|h| h.keys().cloned().collect())
+            .unwrap_or_default();
+        header_names.sort_by(|a, b| pi_js::str16::cmp(a, b));
+        let auth = provider.auth();
+        let mut auth_types = Vec::new();
+        if auth.api_key.is_some() {
+            auth_types.push("api_key".to_owned());
+        }
+        if auth.oauth.is_some() {
+            auth_types.push("oauth".to_owned());
+        }
+        let status = model_runtime.get_provider_auth_status(provider_id);
+        let auth_status = if !status.configured {
+            "unconfigured".to_owned()
+        } else {
+            match status.source {
+                Some(AuthStatusSource::Stored) => "stored".to_owned(),
+                Some(AuthStatusSource::Runtime) => "runtime".to_owned(),
+                Some(AuthStatusSource::Environment) => "environment".to_owned(),
+                Some(AuthStatusSource::Fallback) => "fallback".to_owned(),
+                Some(AuthStatusSource::ModelsJsonKey) => "models_json_key".to_owned(),
+                Some(AuthStatusSource::ModelsJsonCommand) => "models_json_command".to_owned(),
+                None => "configured".to_owned(),
+            }
+        };
+        let registered_by_extension = model_runtime
+            .get_registered_provider_ids()
+            .iter()
+            .any(|id| id == provider.id());
+        Some(describe_provider(&Self {
+            id: provider.id().to_owned(),
+            name: provider.name().to_owned(),
+            base_url: provider.base_url().map(ToOwned::to_owned),
+            header_names,
+            auth_types,
+            auth_status,
+            using_oauth: model_runtime.is_using_oauth(provider.id()),
+            registered_by_extension,
+        }))
+    }
+}
+
+impl BugReportProviderSource for ModelRuntime {
+    fn get_provider_info(&self, provider_id: &str) -> Option<BugReportProviderInfo> {
+        BugReportProviderInfo::from_model_runtime(self, provider_id)
+    }
+}
+
+impl BugReportProviderSource for ModelRegistry {
+    fn get_provider_info(&self, provider_id: &str) -> Option<BugReportProviderInfo> {
+        BugReportProviderInfo::from_model_runtime(self.runtime(), provider_id)
+    }
 }
 
 fn describe_provider(info: &BugReportProviderInfo) -> BugReportProviderInfo {

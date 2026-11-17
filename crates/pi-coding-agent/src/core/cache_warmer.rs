@@ -172,7 +172,6 @@ pub struct CacheWarmRequest {
 }
 
 /// Minimal `ModelRuntime` stream hook used by [`CacheWarmer`].
-// WIRE(@mcp-helper2): implement `CacheWarmerStreamSource` for `crate::core::model_runtime::ModelRuntime` once peer helper lands.
 pub trait CacheWarmerStreamSource: Send + Sync {
     fn stream_simple(
         &self,
@@ -180,6 +179,28 @@ pub trait CacheWarmerStreamSource: Send + Sync {
         context: &Context,
         options: Option<ModelsSimpleStreamOptions>,
     ) -> AssistantMessageEventStream;
+}
+
+impl CacheWarmerStreamSource for crate::core::model_runtime::ModelRuntime {
+    fn stream_simple(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: Option<ModelsSimpleStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        crate::core::model_runtime::ModelRuntime::stream_simple(self, model, context, options)
+    }
+}
+
+impl CacheWarmerStreamSource for crate::core::model_registry::ModelRegistry {
+    fn stream_simple(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: Option<ModelsSimpleStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        crate::core::model_registry::ModelRegistry::stream_simple(self, model, context, options)
+    }
 }
 
 /// Minimal `SessionManager` hook used by [`CacheWarmer`].

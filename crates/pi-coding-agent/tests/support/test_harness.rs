@@ -18,8 +18,8 @@ use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
 use pi_js::{Error, Result};
 
 use super::model_runtime_test_utils::{
-    ModelRegistry, ModelRuntime, ProviderModelDefinition, ProviderRegistrationConfig, create_in_memory_model_registry,
-    get_model_runtime,
+    ModelRegistry, ModelRuntime, ProviderChatModelConfig, ProviderConfigInput, ProviderModelConfig,
+    create_in_memory_model_registry, get_model_runtime,
 };
 use super::utilities::{
     CreateTestResourceLoaderOptions, TestExtensionInput, TestExtensionRunner, TestResourceLoader,
@@ -605,23 +605,29 @@ async fn create_harness_with_resource_loader(
     let model_registry = create_in_memory_model_registry(auth_storage).await?;
     model_registry.register_provider(
         &model.provider,
-        ProviderRegistrationConfig {
-            base_url: model.base_url.clone(),
-            api: model.api.clone(),
-            models: vec![ProviderModelDefinition {
+        ProviderConfigInput {
+            base_url: Some(model.base_url.clone()),
+            api: Some(model.api.clone()),
+            models: Some(vec![ProviderModelConfig::Chat(ProviderChatModelConfig {
                 id: model.id.clone(),
                 name: model.name.clone(),
-                api: model.api.clone(),
-                reasoning: model.reasoning,
+                api: Some(model.api.clone()),
+                base_url: Some(model.base_url.clone()),
                 input: model.input.clone(),
                 input_limits: model.input_limits,
                 cost: model.cost.clone(),
+                headers: model.headers.clone(),
+                reasoning: model.reasoning,
+                thinking_level_map: model.thinking_level_map.clone(),
+                prompt_cache: model.prompt_cache.clone(),
                 context_window: model.context_window,
                 max_tokens: model.max_tokens,
-                base_url: model.base_url.clone(),
-            }],
+                sampling_params: model.sampling_params.clone(),
+                compat: model.compat.clone(),
+            })]),
+            ..Default::default()
         },
-    );
+    )?;
     let model_runtime = get_model_runtime(&model_registry);
 
     let events = Arc::new(Mutex::new(Vec::new()));

@@ -5,8 +5,10 @@ mod support;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use pi_ai::ProviderHeaders;
 use pi_coding_agent::config::ENV_AGENT_DIR;
 use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::model_registry::ResolvedRequestAuth;
 use pi_coding_agent::migrations::run_migrations;
 use pi_js::env::testing::EnvGuard;
 use serde_json::{Value, json};
@@ -55,16 +57,14 @@ async fn keeps_uppercase_header_strings_as_literals_during_startup_migrations() 
         .await
         .expect("create registry");
     let model = registry.find("my-provider", "my-model").expect("my-model found");
-    let res = registry
-        .get_api_key_and_headers(&model)
-        .await
-        .expect("auth and headers");
-    assert!(res.ok);
-    assert_eq!(res.api_key.as_deref(), Some("CUSTOM_API_KEY"));
-    assert_eq!(
-        res.headers,
-        Some(IndexMap::from([("Authorization".to_owned(), "BEARER".to_owned())]))
-    );
+    let expected_headers: ProviderHeaders = IndexMap::from([("Authorization".to_owned(), Some("BEARER".to_owned()))]);
+    match registry.get_api_key_and_headers(&model).await {
+        ResolvedRequestAuth::Ok { api_key, headers, .. } => {
+            assert_eq!(api_key.as_deref(), Some("CUSTOM_API_KEY"));
+            assert_eq!(headers, Some(expected_headers));
+        }
+        ResolvedRequestAuth::Err { error } => panic!("unexpected auth error: {error}"),
+    }
 
     harness.cleanup();
 }

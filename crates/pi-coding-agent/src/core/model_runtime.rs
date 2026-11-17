@@ -79,6 +79,9 @@ pub struct CreateModelRuntimeOptions {
     pub refresh_on_create: Option<bool>,
 }
 
+/// Alias matching camelCase-to-PascalCase expectation (`ModelRuntimeCreateOptions`).
+pub type ModelRuntimeCreateOptions = CreateModelRuntimeOptions;
+
 #[derive(Clone, Debug, Default)]
 pub struct ModelRuntimeAuthOverrides {
     pub api_key: Option<String>,

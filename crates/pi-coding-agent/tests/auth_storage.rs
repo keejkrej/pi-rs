@@ -1,5 +1,4 @@
 //! Port of `packages/coding-agent/test/auth-storage.test.ts`.
-// WIRE(@mcp-helper2): multi-backend `ModelRuntime::get_auth` refresh integration covered via `pi_ai::models::create_models`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,6 +16,7 @@ use pi_ai::{
 use pi_coding_agent::core::auth_storage::{
     AuthStorage, AuthStorageBackend, AuthStorageData, FileAuthStorageBackend, LockResult,
 };
+use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use pi_coding_agent::vendor::proper_lockfile::{LockOptions, lock};
 use pi_js::abort::AbortController;
 use pi_js::error::{Error, Result};
@@ -735,4 +735,44 @@ async fn proper_lockfile_handles_symlinked_lock_targets() {
             "openai": { "type": "api_key", "key": "added-via-link" }
         })
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_runtime_retries_oauth_refresh_after_transient_modify_failure() {
+    let mut init = AuthStorageData::new();
+    init.insert(
+        "oauth-provider".to_owned(),
+        Credential::OAuth(OAuthCredential::new("refresh-token", "expired-access", 0)),
+    );
+    let base = AuthStorage::in_memory(Some(init));
+    let store = Arc::new(FlakyCredentialStore {
+        base,
+        fail_next_modify: Arc::new(AtomicBool::new(true)),
+    });
+    let runtime = ModelRuntime::create(CreateModelRuntimeOptions {
+        credentials: Some(store),
+        models_path: Some(None),
+        allow_model_network: Some(false),
+        refresh_on_create: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    runtime
+        .register_native_provider(Arc::new(MockOAuthProvider {
+            id: "oauth-provider".to_owned(),
+            auth: ProviderAuth {
+                api_key: None,
+                oauth: Some(Arc::new(MockOAuthHandler)),
+            },
+        }))
+        .unwrap();
+
+    assert!(runtime.get_auth_provider_id("oauth-provider", None).await.is_err());
+    let resolved = runtime
+        .get_auth_provider_id("oauth-provider", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.auth.api_key.as_deref(), Some("refreshed-access"));
 }

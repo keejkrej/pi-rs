@@ -5,8 +5,13 @@ mod support;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+use indexmap::IndexMap;
+use pi_coding_agent::core::package_manager::{
+    DefaultPackageManager, PackageCommandRunner, PackageManagerOptions, ParsedSource,
+};
 use pi_coding_agent::core::settings_manager::{PackageSource, SettingsManager};
-use pi_coding_agent::utils::git::{GitSource, parse_git_url};
+use pi_coding_agent::core::source_info::SourceScope;
 use pi_js::{Error, Result};
 use tempfile::TempDir;
 
@@ -50,133 +55,36 @@ fn get_file_content(repo_dir: &str, filename: &str) -> String {
     pi_js::fs::read_to_string(&pi_js::path::join(&[repo_dir, filename])).expect("read file content")
 }
 
-// WIRE(@mcp-helper2): replace local `TestPackageManager` adapter with
-// `pi_coding_agent::core::package_manager::DefaultPackageManager` once `core-models-pkg` lands.
-type CommandHook = Arc<dyn Fn(&str, &[&str], Option<&str>) -> Result<()> + Send + Sync>;
-type CaptureHook = Arc<dyn Fn(&str, &[&str], Option<&str>) -> Result<String> + Send + Sync>;
+type AsyncCommandHook = Arc<dyn Fn(&str, &[&str], Option<&str>) -> Result<()> + Send + Sync>;
+type AsyncCaptureHook = Arc<dyn Fn(&str, &[&str], Option<&str>) -> Result<String> + Send + Sync>;
 
-struct TestPackageManager {
-    agent_dir: String,
-    settings_manager: SettingsManager,
-    run_cmd: CommandHook,
-    run_capture: CaptureHook,
+struct ClosureCommandRunner {
+    run_cmd: AsyncCommandHook,
+    run_capture: Option<AsyncCaptureHook>,
 }
 
-impl TestPackageManager {
-    fn new(_cwd: &str, agent_dir: &str, settings_manager: SettingsManager) -> Self {
-        let run_cmd: CommandHook = Arc::new(|command, args, cwd| {
-            let mut cmd = Command::new(command);
-            cmd.args(args);
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            let out = cmd
-                .output()
-                .map_err(|e| Error::msg(format!("Command failed: {command} {}: {e}", args.join(" "))))?;
-            if !out.status.success() {
-                return Err(Error::msg(format!(
-                    "Command failed: {command} {}\n{}",
-                    args.join(" "),
-                    String::from_utf8_lossy(&out.stderr)
-                )));
-            }
-            Ok(())
-        });
-        let run_capture: CaptureHook = Arc::new(|command, args, cwd| {
-            let mut cmd = Command::new(command);
-            cmd.args(args);
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            let out = cmd
-                .output()
-                .map_err(|e| Error::msg(format!("Command failed: {command} {}: {e}", args.join(" "))))?;
-            if !out.status.success() {
-                return Err(Error::msg(format!(
-                    "Command failed: {command} {}\n{}",
-                    args.join(" "),
-                    String::from_utf8_lossy(&out.stderr)
-                )));
-            }
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-        });
-        Self {
-            agent_dir: agent_dir.to_owned(),
-            settings_manager,
-            run_cmd,
-            run_capture,
-        }
+#[async_trait]
+impl PackageCommandRunner for ClosureCommandRunner {
+    async fn run_command(&self, command: &str, args: &[&str], cwd: Option<&str>) -> Result<()> {
+        (self.run_cmd)(command, args, cwd)
     }
 
-    fn parse_source(&self, source: &str) -> Result<GitSource> {
-        parse_git_url(source).ok_or_else(|| Error::msg(format!("Invalid git source: {source}")))
+    async fn run_command_capture(
+        &self,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+        timeout_ms: Option<u64>,
+        extra_env: Option<&IndexMap<String, String>>,
+    ) -> Result<String> {
+        if let Some(ref hook) = self.run_capture {
+            return hook(command, args, cwd);
+        }
+        DefaultPackageManager::default_run_command_capture(command, args, cwd, timeout_ms, extra_env).await
     }
 
-    fn get_git_install_path(&self, source: &GitSource, scope: &str) -> String {
-        let base = if scope == "temporary" {
-            pi_js::path::join(&[&self.agent_dir, "tmp-git"])
-        } else {
-            pi_js::path::join(&[&self.agent_dir, "git"])
-        };
-        pi_js::path::join(&[&base, &source.host, &source.path])
-    }
-
-    fn refresh_git_dir(&self, install_dir: &str, ref_name: Option<&str>) -> Result<()> {
-        if let Some(r) = ref_name {
-            (self.run_cmd)("git", &["fetch", "--prune", "origin"], Some(install_dir))?;
-            (self.run_cmd)("git", &["checkout", r], Some(install_dir))?;
-            return Ok(());
-        }
-        let upstream = (self.run_capture)(
-            "git",
-            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-            Some(install_dir),
-        )
-        .unwrap_or_else(|_| "origin/main".to_owned());
-        let branch = upstream.strip_prefix("origin/").unwrap_or("main");
-        let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-        (self.run_cmd)(
-            "git",
-            &["fetch", "--prune", "--no-tags", "origin", &refspec],
-            Some(install_dir),
-        )?;
-        let local_head = (self.run_capture)("git", &["rev-parse", "HEAD"], Some(install_dir))?;
-        let remote_head = (self.run_capture)("git", &["rev-parse", "@{upstream}"], Some(install_dir))?;
-        if local_head != remote_head {
-            (self.run_cmd)("git", &["reset", "--hard", "@{upstream}"], Some(install_dir))?;
-            (self.run_cmd)("git", &["clean", "-fdx"], Some(install_dir))?;
-        }
-        Ok(())
-    }
-
-    fn update(&self, source: Option<&str>) -> Result<()> {
-        let sources: Vec<String> = match source {
-            Some(s) => vec![s.to_owned()],
-            None => self
-                .settings_manager
-                .get_packages()
-                .into_iter()
-                .map(|p| match p {
-                    PackageSource::String(s) => s,
-                    PackageSource::Object(o) => o.source,
-                })
-                .collect(),
-        };
-        for src in sources {
-            let parsed = self.parse_source(&src)?;
-            let dir = self.get_git_install_path(&parsed, "user");
-            self.refresh_git_dir(&dir, parsed.ref_name.as_deref())?;
-        }
-        Ok(())
-    }
-
-    fn resolve_extension_sources_temporary(&self, sources: &[&str]) -> Result<()> {
-        for src in sources {
-            let parsed = self.parse_source(src)?;
-            let dir = self.get_git_install_path(&parsed, "temporary");
-            self.refresh_git_dir(&dir, parsed.ref_name.as_deref())?;
-        }
-        Ok(())
+    fn run_command_sync(&self, command: &str, args: &[&str]) -> Result<String> {
+        DefaultPackageManager::default_run_command_sync(command, args)
     }
 }
 
@@ -188,7 +96,7 @@ struct GitUpdateFixture {
     agent_dir: String,
     installed_dir: String,
     settings_manager: SettingsManager,
-    package_manager: TestPackageManager,
+    package_manager: DefaultPackageManager,
 }
 
 impl GitUpdateFixture {
@@ -201,7 +109,12 @@ impl GitUpdateFixture {
         let installed_dir = pi_js::path::join(&[&agent_dir, "git", "github.com", "test", "extension"]);
         pi_js::fs::mkdir(&agent_dir, true, None).expect("mkdir agent_dir");
         let settings_manager = SettingsManager::in_memory(None, None);
-        let package_manager = TestPackageManager::new(&temp_dir, &agent_dir, settings_manager.clone());
+        let package_manager = DefaultPackageManager::new(PackageManagerOptions {
+            cwd: temp_dir.clone(),
+            agent_dir: agent_dir.clone(),
+            settings_manager: settings_manager.clone(),
+            builtin_extensions: Vec::new(),
+        });
         Self {
             _net_guard: net_guard,
             _temp: temp,
@@ -244,7 +157,7 @@ mod default_package_manager_git_update {
 
         #[tokio::test(flavor = "current_thread")]
         async fn should_skip_reset_clean_and_install_when_already_up_to_date() {
-            let mut fx = GitUpdateFixture::new();
+            let fx = GitUpdateFixture::new();
             pi_js::fs::mkdir(&fx.remote_dir, true, None).unwrap();
             init_git_repo(&fx.remote_dir);
             pi_js::fs::write_file(
@@ -267,27 +180,31 @@ mod default_package_manager_git_update {
 
             let executed = Arc::new(Mutex::new(Vec::<String>::new()));
             let executed_clone = executed.clone();
-            fx.package_manager.run_cmd = Arc::new(move |command, args, cwd| {
-                executed_clone
-                    .lock()
-                    .unwrap()
-                    .push(format!("{command} {}", args.join(" ")));
-                if command == "npm" {
-                    return Ok(());
-                }
-                let mut cmd = Command::new(command);
-                cmd.args(args);
-                if let Some(dir) = cwd {
-                    cmd.current_dir(dir);
-                }
-                let out = cmd.output().map_err(|e| Error::msg(e.to_string()))?;
-                if !out.status.success() {
-                    return Err(Error::msg(String::from_utf8_lossy(&out.stderr).into_owned()));
-                }
-                Ok(())
-            });
+            fx.package_manager
+                .set_command_runner(Some(Arc::new(ClosureCommandRunner {
+                    run_cmd: Arc::new(move |command, args, cwd| {
+                        executed_clone
+                            .lock()
+                            .unwrap()
+                            .push(format!("{command} {}", args.join(" ")));
+                        if command == "npm" {
+                            return Ok(());
+                        }
+                        let mut cmd = Command::new(command);
+                        cmd.args(args);
+                        if let Some(dir) = cwd {
+                            cmd.current_dir(dir);
+                        }
+                        let out = cmd.output().map_err(|e| Error::msg(e.to_string()))?;
+                        if !out.status.success() {
+                            return Err(Error::msg(String::from_utf8_lossy(&out.stderr).into_owned()));
+                        }
+                        Ok(())
+                    }),
+                    run_capture: None,
+                })));
 
-            fx.package_manager.update(None).unwrap();
+            fx.package_manager.update(None).await.unwrap();
 
             let cmds = executed.lock().unwrap().clone();
             assert!(
@@ -309,7 +226,7 @@ mod default_package_manager_git_update {
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// v1");
 
             let new_commit = create_commit(&fx.remote_dir, "extension.ts", "// v2", "Second commit");
-            fx.package_manager.update(None).unwrap();
+            fx.package_manager.update(None).await.unwrap();
 
             assert_eq!(get_current_commit(&fx.installed_dir), new_commit);
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// v2");
@@ -327,14 +244,14 @@ mod default_package_manager_git_update {
 
             create_commit(&fx.remote_dir, "extension.ts", "// v2", "v2");
             create_commit(&fx.remote_dir, "extension.ts", "// v3", "v3");
-            fx.package_manager.update(None).unwrap();
+            fx.package_manager.update(None).await.unwrap();
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// v3");
 
             git(&["reset", "--hard", "HEAD~2"], &fx.remote_dir);
             create_commit(&fx.remote_dir, "extension.ts", "// rewrite-a", "Rewrite A");
             let final_commit = create_commit(&fx.remote_dir, "extension.ts", "// rewrite-b", "Rewrite B");
 
-            fx.package_manager.update(None).unwrap();
+            fx.package_manager.update(None).await.unwrap();
 
             assert_eq!(get_current_commit(&fx.installed_dir), final_commit);
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// rewrite-b");
@@ -369,12 +286,12 @@ mod default_package_manager_git_update {
             fx.settings_manager
                 .set_packages(vec![PackageSource::String(pinned_source.clone())]);
 
-            fx.package_manager.update(None).unwrap();
+            fx.package_manager.update(None).await.unwrap();
             assert_eq!(get_current_commit(&fx.installed_dir), v2_commit);
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// v2");
 
             git(&["checkout", "v1"], &fx.installed_dir);
-            fx.package_manager.update(Some(&pinned_source)).unwrap();
+            fx.package_manager.update(Some(&pinned_source)).await.unwrap();
             assert_eq!(get_current_commit(&fx.installed_dir), v2_commit);
             assert_eq!(get_file_content(&fx.installed_dir, "extension.ts"), "// v2");
         }
@@ -386,9 +303,14 @@ mod default_package_manager_git_update {
 
         #[tokio::test(flavor = "current_thread")]
         async fn should_refresh_cached_temporary_git_sources_when_resolving() {
-            let mut fx = GitUpdateFixture::new();
-            let parsed = fx.package_manager.parse_source(GIT_SOURCE).unwrap();
-            let cached_dir = fx.package_manager.get_git_install_path(&parsed, "temporary");
+            let fx = GitUpdateFixture::new();
+            let ParsedSource::Git(parsed) = fx.package_manager.parse_source(GIT_SOURCE) else {
+                panic!("expected git source");
+            };
+            let cached_dir = fx
+                .package_manager
+                .get_git_install_path(&parsed, SourceScope::Temporary)
+                .unwrap();
             let extension_file = pi_js::path::join(&[&cached_dir, "pi-extensions", "session-breakdown.ts"]);
 
             let _ = pi_js::fs::rm(&cached_dir, true, true);
@@ -404,31 +326,35 @@ mod default_package_manager_git_update {
             let executed = Arc::new(Mutex::new(Vec::<String>::new()));
             let executed_clone = executed.clone();
             let extension_file_clone = extension_file.clone();
-            fx.package_manager.run_cmd = Arc::new(move |command, args, _cwd| {
-                executed_clone
-                    .lock()
-                    .unwrap()
-                    .push(format!("{command} {}", args.join(" ")));
-                if command == "git" && args.first().copied() == Some("reset") {
-                    pi_js::fs::write_file(&extension_file_clone, "// fresh", None)?;
-                }
-                Ok(())
-            });
-            fx.package_manager.run_capture = Arc::new(|_command, args, _cwd| {
-                if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("HEAD") {
-                    return Ok("local-head".to_owned());
-                }
-                if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("@{upstream}") {
-                    return Ok("remote-head".to_owned());
-                }
-                if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("--abbrev-ref") {
-                    return Ok("origin/main".to_owned());
-                }
-                Ok(String::new())
-            });
+            fx.package_manager
+                .set_command_runner(Some(Arc::new(ClosureCommandRunner {
+                    run_cmd: Arc::new(move |command, args, _cwd| {
+                        executed_clone
+                            .lock()
+                            .unwrap()
+                            .push(format!("{command} {}", args.join(" ")));
+                        if command == "git" && args.first().copied() == Some("reset") {
+                            pi_js::fs::write_file(&extension_file_clone, "// fresh", None)?;
+                        }
+                        Ok(())
+                    }),
+                    run_capture: Some(Arc::new(|_command, args, _cwd| {
+                        if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("HEAD") {
+                            return Ok("local-head".to_owned());
+                        }
+                        if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("@{upstream}") {
+                            return Ok("remote-head".to_owned());
+                        }
+                        if args.first().copied() == Some("rev-parse") && args.get(1).copied() == Some("--abbrev-ref") {
+                            return Ok("origin/main".to_owned());
+                        }
+                        Ok(String::new())
+                    })),
+                })));
 
             fx.package_manager
-                .resolve_extension_sources_temporary(&[GIT_SOURCE])
+                .resolve_extension_sources(&[GIT_SOURCE.to_owned()], false, true)
+                .await
                 .unwrap();
 
             let cmds = executed.lock().unwrap().clone();

@@ -41,9 +41,20 @@ pub struct CacheWasteTotals {
 }
 
 /// Minimal pricing lookup, satisfied by `ModelRuntime`. Cost is $/million tokens.
-// WIRE(@mcp-helper2): implement `ModelPriceSource` for `crate::core::model_runtime::ModelRuntime` once peer helper lands.
 pub trait ModelPriceSource: Send + Sync {
     fn get_cache_read_cost(&self, provider: &str, model_id: &str) -> Option<f64>;
+}
+
+impl ModelPriceSource for crate::core::model_runtime::ModelRuntime {
+    fn get_cache_read_cost(&self, provider: &str, model_id: &str) -> Option<f64> {
+        self.get_model(provider, model_id).map(|model| model.cost.cache_read)
+    }
+}
+
+impl ModelPriceSource for crate::core::model_registry::ModelRegistry {
+    fn get_cache_read_cost(&self, provider: &str, model_id: &str) -> Option<f64> {
+        self.find(provider, model_id).map(|model| model.cost.cache_read)
+    }
 }
 
 impl<F> ModelPriceSource for F

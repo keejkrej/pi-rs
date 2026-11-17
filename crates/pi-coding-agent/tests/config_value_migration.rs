@@ -5,8 +5,10 @@ mod support;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use pi_ai::ProviderHeaders;
 use pi_coding_agent::config::ENV_AGENT_DIR;
 use pi_coding_agent::core::auth_storage::AuthStorage;
+use pi_coding_agent::core::model_registry::ResolvedRequestAuth;
 use pi_coding_agent::migrations::run_migrations;
 use pi_js::env::testing::EnvGuard;
 use serde_json::{Value, json};
@@ -149,13 +151,16 @@ async fn leaves_uppercase_models_json_api_key_and_header_values_unchanged() {
         registry.get_api_key_for_provider("custom-provider").await.as_deref(),
         Some("CUSTOM_API_KEY")
     );
-    let auth_and_headers = registry.get_api_key_and_headers(&model).await.expect("headers");
-    let expected_headers = IndexMap::from([
-        ("x-api-key".to_owned(), "HEADER_API_KEY".to_owned()),
-        ("x-literal".to_owned(), "literal".to_owned()),
-        ("x-model-key".to_owned(), "MODEL_API_KEY".to_owned()),
+    let expected_headers: ProviderHeaders = IndexMap::from([
+        ("x-api-key".to_owned(), Some("HEADER_API_KEY".to_owned())),
+        ("x-literal".to_owned(), Some("literal".to_owned())),
+        ("x-model-key".to_owned(), Some("MODEL_API_KEY".to_owned())),
     ]);
-    assert!(auth_and_headers.ok);
-    assert_eq!(auth_and_headers.api_key.as_deref(), Some("CUSTOM_API_KEY"));
-    assert_eq!(auth_and_headers.headers, Some(expected_headers));
+    match registry.get_api_key_and_headers(&model).await {
+        ResolvedRequestAuth::Ok { api_key, headers, .. } => {
+            assert_eq!(api_key.as_deref(), Some("CUSTOM_API_KEY"));
+            assert_eq!(headers, Some(expected_headers));
+        }
+        ResolvedRequestAuth::Err { error } => panic!("unexpected auth error: {error}"),
+    }
 }

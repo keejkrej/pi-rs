@@ -13,10 +13,12 @@ use pi_js::path::{basename, dirname, join, resolve, sep};
 use pi_js::{BoxFuture, Error, Result};
 use pi_tui::colors::{Color, ParseColorValue, TerminalColorMode, background_ansi, foreground_ansi, parse_color};
 use pi_tui::terminal_image::{TerminalCapabilities, detect_capabilities, get_terminal_color_mode};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::core::diagnostics::{ResourceCollision, ResourceDiagnostic, ResourceDiagnosticType, ResourceType};
+pub use crate::core::prompt_templates::{
+    LoadPromptTemplatesOptions, LoadPromptTemplatesResult, PromptTemplate, load_prompt_templates,
+};
 
 use crate::config::CONFIG_DIR_NAME;
 use crate::core::event_bus::{EventBus, create_event_bus};
@@ -29,39 +31,15 @@ use crate::core::source_info::{
     create_synthetic_source_info, get_synthetic_path_source, is_synthetic_path,
 };
 use crate::core::timings::{TimingNamespaceKind, reset_timings};
-use crate::utils::frontmatter::try_parse_frontmatter;
 use crate::utils::paths::{PathInputOptions, canonicalize_path, is_local_path, resolve_path};
 use crate::utils::text::strip_bom;
 use crate::vendor::chalk::yellow;
 
 // ============================================================================
-// Seam types matching unowned TS modules (prompt-templates, theme, extensions)
+// Prompt template loader hook + seam types matching unowned TS modules (theme, extensions)
 // ============================================================================
 
-/// Prompt template loaded from a markdown file.
-///
-/// // WIRE(@mcp-helper1): replace/re-export from `crate::core::prompt_templates::PromptTemplate` once landed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptTemplate {
-    pub name: String,
-    pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub argument_hint: Option<String>,
-    pub content: String,
-    pub source_info: SourceInfo,
-    pub file_path: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LoadPromptTemplatesResult {
-    pub templates: Vec<PromptTemplate>,
-    pub diagnostics: Vec<ResourceDiagnostic>,
-}
-
 /// Hook for loading prompt templates from explicit paths or default directories.
-///
-/// // WIRE(@mcp-helper1): connect `crate::core::prompt_templates::load_prompt_templates`.
 pub trait PromptLoaderHook: Send + Sync {
     fn load_prompt_templates(
         &self,
@@ -72,7 +50,7 @@ pub trait PromptLoaderHook: Send + Sync {
     ) -> LoadPromptTemplatesResult;
 }
 
-/// Standalone fallback prompt-template loader implementing frontmatter + markdown parsing.
+/// Default prompt-template loader backed by [`crate::core::prompt_templates::load_prompt_templates`].
 #[derive(Clone, Default)]
 pub struct BasicPromptLoader;
 
@@ -80,136 +58,17 @@ impl PromptLoaderHook for BasicPromptLoader {
     fn load_prompt_templates(
         &self,
         cwd: &str,
-        _agent_dir: &str,
+        agent_dir: &str,
         prompt_paths: &[String],
-        _include_defaults: bool,
+        include_defaults: bool,
     ) -> LoadPromptTemplatesResult {
-        let mut templates = Vec::new();
-        let mut diagnostics = Vec::new();
-
-        for raw in prompt_paths {
-            let resolved = resolve_path(
-                raw,
-                Some(cwd),
-                PathInputOptions {
-                    trim: Some(true),
-                    ..Default::default()
-                },
-            );
-            if !exists(&resolved) {
-                continue;
-            }
-            let Ok(meta) = stat(&resolved) else {
-                continue;
-            };
-            if meta.is_directory() {
-                if let Ok(entries) = readdir_with_file_types(&resolved) {
-                    for entry in entries {
-                        let name = &entry.name;
-                        if !name.ends_with(".md") {
-                            continue;
-                        }
-                        let full = join(&[&resolved, name]);
-                        let is_file = if entry.is_symbolic_link() {
-                            stat(&full).map(|s| s.is_file()).unwrap_or(false)
-                        } else {
-                            entry.is_file()
-                        };
-                        if is_file {
-                            load_prompt_file(&full, "local", &resolved, &mut templates, &mut diagnostics);
-                        }
-                    }
-                }
-            } else if meta.is_file() && resolved.ends_with(".md") {
-                let parent = dirname(&resolved);
-                load_prompt_file(&resolved, "local", &parent, &mut templates, &mut diagnostics);
-            }
-        }
-
-        LoadPromptTemplatesResult { templates, diagnostics }
+        load_prompt_templates(LoadPromptTemplatesOptions {
+            cwd: cwd.to_owned(),
+            agent_dir: agent_dir.to_owned(),
+            prompt_paths: prompt_paths.to_vec(),
+            include_defaults,
+        })
     }
-}
-
-fn load_prompt_file(
-    file_path: &str,
-    source: &str,
-    base_dir: &str,
-    templates: &mut Vec<PromptTemplate>,
-    diagnostics: &mut Vec<ResourceDiagnostic>,
-) {
-    let raw = match read_to_string(file_path) {
-        Ok(s) => s,
-        Err(err) => {
-            diagnostics.push(ResourceDiagnostic {
-                r#type: ResourceDiagnosticType::Warning,
-                message: err.to_string(),
-                path: Some(file_path.to_owned()),
-                collision: None,
-            });
-            return;
-        }
-    };
-
-    let parsed = match try_parse_frontmatter(&raw) {
-        Ok(p) => p,
-        Err(err) => {
-            diagnostics.push(ResourceDiagnostic {
-                r#type: ResourceDiagnosticType::Warning,
-                message: err.to_string(),
-                path: Some(file_path.to_owned()),
-                collision: None,
-            });
-            return;
-        }
-    };
-
-    let stem = basename(file_path, Some(".md"));
-    let mut description = parsed
-        .frontmatter
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_default();
-
-    let argument_hint = parsed
-        .frontmatter
-        .get("argument-hint")
-        .or_else(|| parsed.frontmatter.get("argumentHint"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-
-    if description.is_empty() {
-        let first_line = parsed.body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-        if !first_line.is_empty() {
-            let truncated = if first_line.chars().count() > 60 {
-                let prefix: String = first_line.chars().take(60).collect();
-                format!("{prefix}...")
-            } else {
-                first_line.to_owned()
-            };
-            description = truncated;
-        }
-    }
-
-    let source_info = create_synthetic_source_info(
-        file_path,
-        SyntheticSourceOptions {
-            source: source.to_owned(),
-            scope: Some(SourceScope::Temporary),
-            origin: Some(SourceOrigin::TopLevel),
-            base_dir: Some(base_dir.to_owned()),
-            changelog_path: None,
-        },
-    );
-
-    templates.push(PromptTemplate {
-        name: stem,
-        description,
-        argument_hint,
-        content: parsed.body,
-        source_info,
-        file_path: file_path.to_owned(),
-    });
 }
 
 /// Loaded TUI theme instance.

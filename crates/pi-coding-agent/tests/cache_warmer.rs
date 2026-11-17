@@ -1,6 +1,5 @@
 //! Port of `packages/coding-agent/test/cache-warmer.test.ts`.
 // WIRE(@codemode-w3): `ExtensionRunner.emitCacheWarmingDecision` test awaits `core::extensions::runner`.
-// WIRE(@mcp-helper2): `ModelRuntime::stream_simple` integration awaits `core::model_runtime`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,17 +9,21 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use pi_agent_core::AgentMessage;
 use pi_ai::compat::get_model;
-use pi_ai::models::ModelsSimpleStreamOptions;
+use pi_ai::models::{ModelsSimpleStreamOptions, Provider};
+use pi_ai::providers::all::builtin_providers;
 use pi_ai::{
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, CacheRetention, Context, Message, Model,
-    ModelPromptCache, SimpleStreamOptions, StopReason, ThinkingLevel, Usage, UsageCost,
+    ApiStreamOptions, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, CacheRetention, Context,
+    Message, Model, ModelPromptCache, ProviderAuth, SimpleStreamOptions, StopReason, ThinkingLevel, TranscriptContext,
+    Usage, UsageCost,
 };
+use pi_coding_agent::core::auth_storage::{AuthStorage, AuthStorageData, make_api_key_credential};
 use pi_coding_agent::core::cache_warmer::{
     CacheWarmRequest, CacheWarmer, CacheWarmerSessionStore, CacheWarmerStreamSource, CacheWarmingAction,
     CacheWarmingDecider, CacheWarmingDecision, CacheWarmingDecisionEvent, CacheWarmingPhase, CacheWarmingRunState,
     format_cache_warming_status, format_cache_warming_usage, get_cache_warming_delay_ms, get_prompt_cache_ttl_ms,
     is_replayable,
 };
+use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use pi_coding_agent::core::session_manager::{SessionEntry, SessionManager, SessionMessageEntry, UsageEntry};
 use pi_coding_agent::core::settings_manager::CacheWarmingMode;
 use pi_js::error::Result;
@@ -602,4 +605,106 @@ fn formats_status_and_usage_entries() {
         format_cache_warming_usage(&entry),
         "Cache warmed (extension override): $0.029497"
     );
+}
+
+struct MockRuntimeWarmProvider {
+    auth: ProviderAuth,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Provider for MockRuntimeWarmProvider {
+    fn id(&self) -> &str {
+        "anthropic"
+    }
+
+    fn name(&self) -> &str {
+        "Anthropic"
+    }
+
+    fn auth(&self) -> &ProviderAuth {
+        &self.auth
+    }
+
+    fn get_models(&self) -> Vec<Model> {
+        vec![adaptive_model()]
+    }
+
+    fn stream(
+        &self,
+        _model: &Model,
+        _context: &TranscriptContext,
+        _options: Option<ApiStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        AssistantMessageEventStream::new()
+    }
+
+    fn stream_simple(
+        &self,
+        model: &Model,
+        _context: &TranscriptContext,
+        _options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        self.calls.lock().unwrap().push(model.id.clone());
+        let stream = AssistantMessageEventStream::new();
+        stream.push(AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message: response(model, StopReason::Stop),
+        });
+        stream
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cache_warmer_routes_refresh_requests_through_model_runtime() {
+    let mut now = 1_000_000_i64;
+    pi_js::time::testing::set_system_time(now);
+
+    let anthropic_auth = builtin_providers()
+        .into_iter()
+        .find(|p| p.id() == "anthropic")
+        .expect("builtin anthropic provider")
+        .auth()
+        .clone();
+    let mut creds = AuthStorageData::new();
+    creds.insert(
+        "anthropic".to_owned(),
+        make_api_key_credential(Some("test-anthropic-key".to_owned()), None),
+    );
+    let runtime = ModelRuntime::create(CreateModelRuntimeOptions {
+        credentials: Some(Arc::new(AuthStorage::in_memory(Some(creds)))),
+        models_path: Some(None),
+        allow_model_network: Some(false),
+        refresh_on_create: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let stream_calls = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .register_native_provider(Arc::new(MockRuntimeWarmProvider {
+            auth: anthropic_auth,
+            calls: Arc::clone(&stream_calls),
+        }))
+        .unwrap();
+
+    let append_calls = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(MockSessionStore {
+        sm: SessionManager::in_memory(None, None, None).unwrap(),
+        branch: Arc::new(Mutex::new(branch_with_prompt(100_000))),
+        append_calls: Arc::clone(&append_calls),
+    });
+    let warmer = CacheWarmer::new(Arc::new(runtime), store, Arc::new(|| CacheWarmingMode::Idle), None);
+
+    warmer.start(warm_req(adaptive_model(), Default::default()), Arc::new(|| true));
+    advance_clock(&mut now, 270_000).await;
+    pi_js::time::testing::set_system_time(now);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(stream_calls.lock().unwrap().as_slice(), &["claude-opus-4-6"]);
+    assert_eq!(append_calls.lock().unwrap().len(), 1);
+
+    warmer.cancel();
+    pi_js::time::testing::clear_system_time();
 }
