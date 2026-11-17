@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use crate::extensions::mcp::config::{
     LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry, add_mcp_server_config,
@@ -594,7 +594,11 @@ async fn wait_for_redirect_url(signal: AbortSignal, timeout_ms: u64, interactive
         let _ = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), token.cancelled()).await;
         return Ok(None);
     }
-    eprint!("If the browser cannot reach this machine, paste the URL it was redirected to: ");
+    let mut stderr = tokio::io::stderr();
+    let _ = stderr
+        .write_all(b"If the browser cannot reach this machine, paste the URL it was redirected to: ")
+        .await;
+    let _ = stderr.flush().await;
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut line = String::new();
     tokio::select! {
