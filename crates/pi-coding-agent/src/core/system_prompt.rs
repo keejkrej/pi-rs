@@ -22,7 +22,8 @@ pub struct ContextFile {
 }
 
 /// Options accepted by [`build_system_prompt_sections`] and [`build_system_prompt`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildSystemPromptOptions {
     /// Custom system prompt (replaces the default prefix).
     pub custom_prompt: Option<String>,
@@ -51,7 +52,8 @@ pub struct BuildSystemPromptOptions {
 }
 
 /// Normalized collection-complete representation of [`BuildSystemPromptOptions`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NormalizedBuildSystemPromptOptions {
     pub custom_prompt: Option<String>,
     pub force_system_prompt: Option<String>,
@@ -316,6 +318,24 @@ pub fn build_system_prompt(input: &BuildSystemPromptOptions) -> Result<String> {
         timestamp: 0,
     };
     Ok(get_system_message_text(&msg))
+}
+
+/// Build a full system prompt from [`NormalizedBuildSystemPromptOptions`].
+pub fn build_system_prompt_from_normalized(options: &NormalizedBuildSystemPromptOptions) -> Result<String> {
+    build_system_prompt(&BuildSystemPromptOptions {
+        custom_prompt: options.custom_prompt.clone(),
+        force_system_prompt: options.force_system_prompt.clone(),
+        selected_tools: Some(options.selected_tools.clone()),
+        hidden_tools: Some(options.hidden_tools.clone()),
+        tool_snippets: Some(options.tool_snippets.clone()),
+        tool_guidelines: Some(options.tool_guidelines.clone()),
+        prompt_guidelines: Some(options.prompt_guidelines.clone()),
+        append_system_prompt: Some(options.append_system_prompt.clone()),
+        sections: Some(options.sections.clone()),
+        cwd: options.cwd.clone(),
+        context_files: Some(options.context_files.clone()),
+        skills: Some(options.skills.clone()),
+    })
 }
 
 /// Diff the sections currently active against desired sections.

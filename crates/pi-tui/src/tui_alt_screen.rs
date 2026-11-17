@@ -645,6 +645,14 @@ impl TuiAltScreen {
         self.copy_selection_to_clipboard().await
     }
 
+    /// Drop the text selection and multi-click history, e.g. before the host replaces the transcript.
+    pub fn reset_text_selection(&self) {
+        self.clear_text_selection();
+        let mut state = self.state();
+        state.last_click = None;
+        state.last_component_click = None;
+    }
+
     /// The lines of the last rendered frame, one per terminal row, as written to the terminal.
     pub fn get_screen_lines(&self) -> Vec<String> {
         self.state().previous_screen.clone()
@@ -3324,6 +3332,10 @@ impl TUI for TuiAltScreen {
 
     fn as_viewport(&self) -> Option<&dyn ViewportTUI> {
         Some(self)
+    }
+
+    fn reset_text_selection(&self) {
+        TuiAltScreen::reset_text_selection(self);
     }
 }
 

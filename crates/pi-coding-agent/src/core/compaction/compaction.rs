@@ -868,7 +868,8 @@ pub async fn generate_summary_with_usage(
 // ============================================================================
 
 /// Prepared inputs needed to summarize older turns and retain recent ones.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompactionPreparation {
     /// ID of first entry to keep.
     pub first_kept_entry_id: String,

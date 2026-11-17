@@ -70,13 +70,22 @@ fn write_crash_log(records: &[CrashRecord], path: &str) -> pi_js::Result<()> {
     pi_js::fs::write_file(path, formatted.as_bytes(), None)
 }
 
-/// Extension stack metadata projection (`Pick<Extension, "path" | "resolvedPath" | "sourceInfo">`).
-/// WIRE(@codemode-w3): impl `From<&crate::core::extensions::Extension>` once `core/extensions` lands.
+/// Extension stack metadata projection (`Pick<LoadedExtension, "path" | "resolvedPath" | "sourceInfo">`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionStackMetadata {
     pub path: String,
     pub resolved_path: String,
     pub source_info: SourceInfo,
+}
+
+impl From<&crate::core::extensions::types::LoadedExtension> for ExtensionStackMetadata {
+    fn from(ext: &crate::core::extensions::types::LoadedExtension) -> Self {
+        Self {
+            path: ext.path.clone(),
+            resolved_path: ext.resolved_path.clone(),
+            source_info: ext.source_info.clone(),
+        }
+    }
 }
 
 fn normalize_stack_path(value: &str) -> String {

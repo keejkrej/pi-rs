@@ -3321,3 +3321,42 @@ async fn keeps_viewport_scrolling_while_transcript_search_is_focused() {
     assert!(terminal.get_viewport().iter().any(|line| line.contains("↑ ↓")));
     tui.stop(None);
 }
+
+#[tokio::test]
+#[serial]
+async fn resets_text_selection_and_multi_click_history_through_tui_trait() {
+    let terminal = VirtualTerminal::new(30, 4);
+    let tui = TuiAltScreen::new(
+        Arc::new(terminal.clone()),
+        None,
+        None,
+        Some(TuiAltScreenOptions {
+            copy_on_select: Some(false),
+            ..default_tui_options()
+        }),
+    );
+    let _guard = StopGuard::new(tui.clone());
+    tui.add_child(Arc::new(Text::new(Some("alpha beta"), Some(0), Some(0), None)));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    // Double-click selects "alpha" and leaves click count = 2 in last_click.
+    terminal.send_input("\x1b[<0;2;1M");
+    terminal.send_input("\x1b[<0;2;1m");
+    terminal.send_input("\x1b[<0;2;1M");
+    terminal.send_input("\x1b[<0;2;1m");
+    terminal.wait_for_render().await;
+    assert!(tui.has_active_selection());
+
+    let tui_trait: Arc<dyn pi_tui::tui::TUI> = Arc::new(tui.clone());
+    tui_trait.reset_text_selection();
+    assert!(!tui.has_active_selection());
+
+    // A subsequent single click must not advance to triple-click line selection.
+    terminal.send_input("\x1b[<0;2;1M");
+    terminal.send_input("\x1b[<0;2;1m");
+    tui.render_now(Some(true));
+    assert!(!tui.has_active_selection());
+
+    tui.stop(None);
+}

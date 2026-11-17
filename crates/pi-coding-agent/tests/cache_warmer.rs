@@ -1,5 +1,4 @@
 //! Port of `packages/coding-agent/test/cache-warmer.test.ts`.
-// WIRE(@codemode-w3): `ExtensionRunner.emitCacheWarmingDecision` test awaits `core::extensions::runner`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +22,12 @@ use pi_coding_agent::core::cache_warmer::{
     format_cache_warming_status, format_cache_warming_usage, get_cache_warming_delay_ms, get_prompt_cache_ttl_ms,
     is_replayable,
 };
+use pi_coding_agent::core::event_bus::{EventBus, create_event_bus};
+use pi_coding_agent::core::extensions::{
+    CacheWarmingDecisionEventResult, ExtensionApi, ExtensionRunner, create_extension_runtime,
+    load_extension_from_factory,
+};
+use pi_coding_agent::core::model_registry::ModelRegistry;
 use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use pi_coding_agent::core::session_manager::{SessionEntry, SessionManager, SessionMessageEntry, UsageEntry};
 use pi_coding_agent::core::settings_manager::CacheWarmingMode;
@@ -707,4 +712,73 @@ async fn cache_warmer_routes_refresh_requests_through_model_runtime() {
 
     warmer.cancel();
     pi_js::time::testing::clear_system_time();
+}
+
+#[tokio::test]
+async fn extension_runner_emit_cache_warming_decision_uses_last_extension_override() {
+    let runtime = create_extension_runtime();
+    let event_bus: Arc<dyn EventBus> = create_event_bus();
+    let cwd = pi_js::env::cwd();
+
+    let first = load_extension_from_factory(
+        Arc::new(|pi: ExtensionApi| {
+            Box::pin(async move {
+                pi.on::<CacheWarmingDecisionEvent>(|_event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Some(CacheWarmingDecisionEventResult {
+                            action: Some(CacheWarmingAction::Warm),
+                        }))
+                    })
+                });
+                Ok(())
+            })
+        }),
+        &cwd,
+        Arc::clone(&event_bus),
+        runtime.clone(),
+        Some("<inline:warm>"),
+    )
+    .await
+    .expect("load first extension");
+
+    let second = load_extension_from_factory(
+        Arc::new(|pi: ExtensionApi| {
+            Box::pin(async move {
+                pi.on::<CacheWarmingDecisionEvent>(|_event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Some(CacheWarmingDecisionEventResult {
+                            action: Some(CacheWarmingAction::Stop),
+                        }))
+                    })
+                });
+                Ok(())
+            })
+        }),
+        &cwd,
+        Arc::clone(&event_bus),
+        runtime.clone(),
+        Some("<inline:stop>"),
+    )
+    .await
+    .expect("load second extension");
+
+    let model_registry = ModelRegistry::in_memory();
+    let runner = ExtensionRunner::new(
+        vec![first, second],
+        runtime,
+        &cwd,
+        SessionManager::default(),
+        model_registry,
+    );
+
+    let decision = runner
+        .emit_cache_warming_decision(CacheWarmingDecisionEvent {
+            r#type: "cache_warming_decision",
+            warm_cost: 0.05,
+            miss_cost: 0.5,
+            continuation_probability: 0.15,
+            action: CacheWarmingAction::Warm,
+        })
+        .await;
+    assert_eq!(decision, CacheWarmingAction::Stop);
 }
