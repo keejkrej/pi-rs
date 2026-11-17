@@ -31,6 +31,7 @@ pub struct InteractiveTuiOptions {
     pub on_right_click_paste: Option<Arc<dyn Fn() + Send + Sync>>,
     pub fullscreen_copy_on_select: Option<bool>,
     pub fullscreen_wheel_scroll_lines: Option<WheelScrollLines>,
+    pub copy_selection: Option<CopySelectionFn>,
 }
 
 fn open_browser_wire(_target: &str) {
@@ -214,12 +215,14 @@ pub fn create_interactive_tui(options: InteractiveTuiOptions) -> InteractiveTui 
             let t = theme();
             t.bg(ThemeBg::SearchMatchBg, &t.fg(ThemeColor::SearchMatchText, text))
         };
-        let copy_selection: CopySelectionFn = Arc::new(|text: String| {
-            Box::pin(async move {
-                match copy_to_clipboard_wire(&text).await {
-                    Ok(()) => CopySelectionResult::Bool(true),
-                    Err(err) => CopySelectionResult::Message(err.to_string()),
-                }
+        let copy_selection: CopySelectionFn = options.copy_selection.unwrap_or_else(|| {
+            Arc::new(|text: String| {
+                Box::pin(async move {
+                    match copy_to_clipboard_wire(&text).await {
+                        Ok(()) => CopySelectionResult::Bool(true),
+                        Err(err) => CopySelectionResult::Message(err.to_string()),
+                    }
+                })
             })
         });
         let alt_opts = TuiAltScreenOptions {

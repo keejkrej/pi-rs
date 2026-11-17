@@ -600,6 +600,16 @@ pub trait Expandable: Send + Sync {
     fn set_expanded(&self, expanded: bool);
 }
 
+pub(crate) struct BashExecutionExpandable(
+    pub(crate) crate::modes::interactive::components::bash_execution::BashExecutionComponent,
+);
+
+impl Expandable for BashExecutionExpandable {
+    fn set_expanded(&self, expanded: bool) {
+        self.0.set_expanded(expanded);
+    }
+}
+
 #[derive(Clone)]
 pub struct ExpandableText {
     inner: ThemedText,
@@ -1272,6 +1282,10 @@ pub struct InteractiveModeHooks {
     pub keybindings_reload: Arc<dyn Fn(&KeybindingsManager) + Send + Sync>,
     pub clipboard_copy: Arc<dyn Fn(&str) -> BoxFuture<Result<()>> + Send + Sync>,
     pub clipboard_read_text: Arc<dyn Fn() -> BoxFuture<Result<Option<String>>> + Send + Sync>,
+    pub platform_is_windows: Option<bool>,
+    pub suspend_process:
+        Option<Arc<dyn Fn(Arc<dyn Fn() + Send + Sync>) -> std::result::Result<(), String> + Send + Sync>>,
+    pub install_change_warning: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Default for InteractiveModeHooks {
@@ -1283,6 +1297,9 @@ impl Default for InteractiveModeHooks {
             keybindings_reload: Arc::new(|_| {}),
             clipboard_copy: Arc::new(|_| Box::pin(async { Ok(()) })),
             clipboard_read_text: Arc::new(|| Box::pin(async { Ok(None) })),
+            platform_is_windows: None,
+            suspend_process: None,
+            install_change_warning: None,
         }
     }
 }
@@ -1934,5 +1951,49 @@ impl InteractiveMode {
 
     pub fn program_status(&self) -> &ProgramStatusReporter {
         &self.inner.program_status
+    }
+
+    pub fn default_editor(&self) -> &CustomEditor {
+        &self.inner.default_editor
+    }
+
+    pub fn renderer(&self) -> InteractiveTui {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .renderer
+            .clone()
+    }
+
+    pub fn active_status_indicator_kind(
+        &self,
+    ) -> Option<crate::modes::interactive::components::status_indicator::StatusIndicatorKind> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_status_indicator
+            .as_ref()
+            .map(|ind| ind.kind())
+    }
+
+    pub fn active_working_indicator_embedded(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_working_indicator_embedded
+    }
+
+    pub fn pending_user_inputs(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_user_inputs
+            .iter()
+            .cloned()
+            .collect()
     }
 }
