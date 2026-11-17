@@ -103,8 +103,88 @@ fn highlights_code_through_syntect_syntax_highlighter() {
     assert!(rendered.contains("[number:1]"), "rendered: {rendered}");
 }
 
-// WIRE(@tui-w3): once `pi_coding_agent::modes::interactive::theme::theme` lands, add tests for:
-// - `get_language_from_path` (`lib/main.dart`, `flake.nix`, `script.groovy`, `build.gradle`, `src/Main.kt`)
-// - `theme` syntax highlighting (`colors_each_line_of_python_docstrings_independently`,
-//   `colors_diff_additions_and_deletions_in_fenced_diff_blocks`,
-//   `keeps_cli_highlight_default_styled_scopes_mapped_to_theme_styles`).
+use pi_coding_agent::modes::interactive::theme::theme::{
+    ThemeColor, get_language_from_path, get_markdown_theme, highlight_code, init_theme, theme,
+};
+use serial_test::serial;
+
+#[test]
+fn maps_new_extension_paths_via_get_language_from_path() {
+    assert_eq!(get_language_from_path("lib/main.dart"), Some("dart"));
+    assert_eq!(get_language_from_path("flake.nix"), Some("nix"));
+    assert_eq!(get_language_from_path("script.groovy"), Some("groovy"));
+    assert_eq!(get_language_from_path("build.gradle"), Some("groovy"));
+    assert_eq!(get_language_from_path("src/Main.kt"), Some("kotlin"));
+}
+
+#[test]
+#[serial]
+fn colors_each_line_of_python_docstrings_independently() {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+    init_theme(Some("dark"), Some(true));
+    let _guard = Guard;
+
+    let lines = highlight_code("\"\"\"\nline 1\nline 2\n\"\"\"", Some("python"));
+    assert_eq!(lines.len(), 4);
+    for (idx, line) in lines.iter().enumerate() {
+        assert!(
+            line.contains("\x1b["),
+            "line {idx} should carry its own ANSI styling: {line:?}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn colors_diff_additions_and_deletions_in_fenced_diff_blocks() {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+    init_theme(Some("dark"), Some(true));
+    let _guard = Guard;
+
+    let t = theme();
+    let lines = highlight_code("+added line\n-removed line", Some("diff"));
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].contains(&t.get_fg_ansi(ThemeColor::SyntaxString))
+            || lines[0].contains(&t.get_fg_ansi(ThemeColor::ToolDiffAdded))
+            || lines[0].contains("\x1b["),
+        "added line: {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains(&t.get_fg_ansi(ThemeColor::SyntaxKeyword))
+            || lines[1].contains(&t.get_fg_ansi(ThemeColor::ToolDiffRemoved))
+            || lines[1].contains("\x1b["),
+        "removed line: {:?}",
+        lines[1]
+    );
+}
+
+#[test]
+#[serial]
+fn keeps_cli_highlight_default_styled_scopes_mapped_to_theme_styles() {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+    init_theme(Some("dark"), Some(true));
+    let _guard = Guard;
+
+    let md_theme = get_markdown_theme();
+    let highlight_fn = md_theme.highlight_code.expect("markdown theme highlight_code");
+    let lines = highlight_fn("const x = 1;", Some("typescript"));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("\x1b["), "highlighted line: {:?}", lines[0]);
+}

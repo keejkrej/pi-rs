@@ -1,44 +1,30 @@
 //! Port of packages/coding-agent/test/mermaid.test.ts
 //! Plus comprehensive 1:1 parity tests against grok-mermaid@0.2.3.
 
+use std::sync::Arc;
+
 use pi_coding_agent::core::settings_manager::MermaidRenderingMode;
-use pi_coding_agent::vendor::grok_mermaid::{
-    Cls, DiagramKind, MermaidArt, Span, diagram_kind, render, source_box, to_ansi,
+use pi_coding_agent::modes::interactive::components::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformContext,
 };
-use pi_tui::{Marked, Token};
+use pi_coding_agent::modes::interactive::components::mermaid::{
+    MermaidTransformerOptions, create_mermaid_markdown_transformer,
+};
+use pi_coding_agent::modes::interactive::theme::theme::{Theme, ThemeColor, init_theme, theme};
+use pi_coding_agent::vendor::grok_mermaid::{DiagramKind, diagram_kind, render, source_box, to_ansi};
+use serial_test::serial;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MessageType {
-    Assistant,
-    AssistantThinking,
-}
+type MessageType = MarkdownMessageType;
 
-trait TestTheme {
-    fn fg(&self, color: &str, text: &str) -> String;
-    fn bold(&self, text: &str) -> String;
-}
-
-struct TagTheme;
-
-impl TestTheme for TagTheme {
-    fn fg(&self, color: &str, text: &str) -> String {
-        format!("<{color}>{text}</{color}>")
-    }
-
-    fn bold(&self, text: &str) -> String {
-        format!("<bold>{text}</bold>")
-    }
-}
-
-struct TransformOptions<'a> {
+struct TransformOptions {
     max_width: usize,
     is_streaming: bool,
     message_type: MessageType,
     mode: MermaidRenderingMode,
-    theme: Option<&'a dyn TestTheme>,
+    theme: Option<Theme>,
 }
 
-impl Default for TransformOptions<'_> {
+impl Default for TransformOptions {
     fn default() -> Self {
         Self {
             max_width: 100,
@@ -50,128 +36,20 @@ impl Default for TransformOptions<'_> {
     }
 }
 
-fn code_span(line: &str) -> String {
-    let content = if line.is_empty() { "\u{00a0}" } else { line };
-    let mut longest = 0usize;
-    let mut run = 0usize;
-    for ch in content.chars() {
-        if ch == '`' {
-            run += 1;
-            if run > longest {
-                longest = run;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    let fence = "`".repeat(longest + 1);
-    let padding = if content.starts_with('`') || content.ends_with('`') {
-        " "
-    } else {
-        ""
-    };
-    format!("{fence}{padding}{content}{padding}{fence}")
-}
-
-fn style_span(span: &Span, theme: &dyn TestTheme) -> String {
-    match span.cls {
-        Cls::Border => theme.fg("borderMuted", &span.text),
-        Cls::Text => theme.fg("text", &span.text),
-        Cls::Edge => theme.fg("accent", &span.text),
-        Cls::EdgeLabel => theme.fg("muted", &span.text),
-        Cls::Title => theme.fg("accent", &theme.bold(&span.text)),
-        Cls::None => span.text.clone(),
-    }
-}
-
-fn themed_lines(art: &MermaidArt, theme: &dyn TestTheme) -> Vec<String> {
-    art.styled
-        .iter()
-        .map(|row| row.iter().map(|span| style_span(span, theme)).collect::<String>())
-        .collect()
-}
-
-// WIRE(@tui-w3): delegate to `pi_coding_agent::modes::interactive::components::mermaid::create_mermaid_markdown_transformer` once @tui-w3 is merged.
-fn transform_mermaid(markdown: &str, options: TransformOptions<'_>) -> String {
-    if options.mode == MermaidRenderingMode::Off
-        || options.message_type == MessageType::AssistantThinking
-        || (options.is_streaming && options.mode != MermaidRenderingMode::Streaming)
-    {
-        return markdown.to_owned();
-    }
-
-    let parser = Marked::new();
-    let tokens = parser.lexer(markdown, None);
-    let mut out = String::new();
-    for token in tokens.tokens {
-        match token {
-            Token::Code(code)
-                if code
-                    .lang
-                    .as_deref()
-                    .and_then(|l| l.split_whitespace().next())
-                    .is_some_and(|w| w.eq_ignore_ascii_case("mermaid")) =>
-            {
-                let Some(art) = render(&code.text) else {
-                    out.push_str(&code.raw);
-                    continue;
-                };
-                if art.width > options.max_width {
-                    out.push_str(&code.raw);
-                    continue;
-                }
-                if !options.is_streaming && !art.warnings.is_empty() {
-                    let suffix = if art.warnings.len() > 1 {
-                        format!(" (+{} more)", art.warnings.len() - 1)
-                    } else {
-                        String::new()
-                    };
-                    let warning = format!("Mermaid diagram not rendered: {}{suffix}", art.warnings[0]);
-                    let styled_warning = match options.theme {
-                        Some(theme) => theme.fg("warning", &warning),
-                        None => warning,
-                    };
-                    out.push_str(&format!("{}\n{}  \n", code.raw, code_span(&styled_warning)));
-                    continue;
-                }
-                let lines = match options.theme {
-                    Some(theme) => themed_lines(&art, theme),
-                    None => art.plain.clone(),
-                };
-                let joined = lines.iter().map(|l| code_span(l)).collect::<Vec<_>>().join("  \n");
-                out.push_str(&format!("{joined}\n"));
-            }
-            other => {
-                let raw = match other {
-                    Token::Blockquote(t) => t.raw,
-                    Token::Br(t) => t.raw,
-                    Token::Checkbox(t) => t.raw,
-                    Token::Code(t) => t.raw,
-                    Token::Codespan(t) => t.raw,
-                    Token::Def(t) => t.raw,
-                    Token::Del(t) => t.raw,
-                    Token::Em(t) => t.raw,
-                    Token::Escape(t) => t.raw,
-                    Token::Heading(t) => t.raw,
-                    Token::Hr(t) => t.raw,
-                    Token::Html(t) => t.raw,
-                    Token::Image(t) => t.raw,
-                    Token::Link(t) => t.raw,
-                    Token::List(t) => t.raw,
-                    Token::ListItem(t) => t.raw,
-                    Token::Paragraph(t) => t.raw,
-                    Token::Space(t) => t.raw,
-                    Token::Strong(t) => t.raw,
-                    Token::Table(t) => t.raw,
-                    Token::Tag(t) => t.raw,
-                    Token::Text(t) => t.raw,
-                    Token::Generic(t) => t.raw,
-                };
-                out.push_str(&raw);
-            }
-        }
-    }
-    out
+fn transform_mermaid(markdown: &str, options: TransformOptions) -> String {
+    let mode = options.mode;
+    let transformer = create_mermaid_markdown_transformer(MermaidTransformerOptions {
+        get_mode: Arc::new(move || mode),
+        theme: options.theme,
+    });
+    transformer(
+        markdown,
+        MarkdownTransformContext {
+            message_type: options.message_type,
+            is_streaming: options.is_streaming,
+            available_width: options.max_width as i64,
+        },
+    )
 }
 
 mod mermaid_rendering {
@@ -210,18 +88,27 @@ mod mermaid_rendering {
     }
 
     #[test]
+    #[serial]
     fn maps_semantic_spans_through_the_pi_theme() {
-        let theme = TagTheme;
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                init_theme(Some("dark"), None);
+            }
+        }
+        init_theme(Some("dark"), Some(true));
+        let _guard = Guard;
+        let t = theme();
         let rendered = transform_mermaid(
             "```mermaid\nflowchart LR\n  A --> B\n```",
             TransformOptions {
-                theme: Some(&theme),
+                theme: Some(t.clone()),
                 ..Default::default()
             },
         );
 
-        assert!(rendered.contains("<borderMuted>"));
-        assert!(rendered.contains("<accent>"));
+        assert!(rendered.contains(&t.get_fg_ansi(ThemeColor::BorderMuted)));
+        assert!(rendered.contains(&t.get_fg_ansi(ThemeColor::Accent)));
     }
 
     #[test]

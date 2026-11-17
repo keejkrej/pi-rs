@@ -897,7 +897,7 @@ impl InteractiveMode {
         }));
     }
 
-    async fn complete_provider_authentication(
+    pub async fn complete_provider_authentication(
         &self,
         provider_id: &str,
         provider_name: &str,

@@ -1177,4 +1177,94 @@ async fn execute_bash_with_operations_sanitizes_ansi_and_persists_line_truncated
     assert!(full_output.contains("2998\n2999\n3000"));
 }
 
-// WIRE(@w3-b): ToolExecutionComponent text-only model image warning renderer test awaits Stage 3B.
+#[tokio::test]
+#[serial]
+async fn text_only_model_image_warning_stays_out_of_model_output() {
+    use pi_coding_agent::modes::interactive::components::tool_execution::{ToolExecutionComponent, ToolRenderers};
+    use pi_coding_agent::modes::interactive::theme::theme::init_theme;
+    use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
+    use pi_tui::{TUI, TuiMainScreen, strip_terminal_sequences};
+
+    struct DummyTerminal;
+    #[async_trait::async_trait]
+    impl Terminal for DummyTerminal {
+        fn start(&self, _on_input: TerminalInputHandler, _on_resize: TerminalResizeHandler) {}
+        fn stop(&self) {}
+        async fn drain_input(&self, _max_ms: Option<i64>, _idle_ms: Option<i64>) {}
+        fn write(&self, _data: &str) {}
+        fn columns(&self) -> i64 {
+            120
+        }
+        fn rows(&self) -> i64 {
+            24
+        }
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+        fn move_by(&self, _lines: i64) {}
+        fn hide_cursor(&self) {}
+        fn show_cursor(&self) {}
+        fn clear_line(&self) {}
+        fn clear_from_cursor(&self) {}
+        fn clear_screen(&self) {}
+        fn set_title(&self, _title: &str) {}
+        fn set_progress(&self, _active: bool) {}
+    }
+    struct ThemeGuard;
+    impl Drop for ThemeGuard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+
+    init_theme(Some("dark"), Some(false));
+    let _guard = ThemeGuard;
+
+    let dir = TempDir::new().unwrap();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+    let bytes = pi_js::b64::decode(tiny_png_b64);
+    let img_path = dir.path().join("dot.png");
+    std::fs::write(&img_path, bytes).unwrap();
+
+    let ctx = fake_ctx(&cwd);
+    let read_def = create_read_tool_definition(&cwd, None);
+    let result = (read_def.execute)("call-img".into(), json!({ "path": "dot.png" }), None, None, ctx)
+        .await
+        .unwrap();
+    let text = get_text_output(&result);
+    assert!(text.contains("Read image file [image/png]"), "text output was: {text}");
+    assert!(
+        !text.contains("text-only model"),
+        "model output leaked UI warning: {text}"
+    );
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| matches!(b, UserContentBlock::Image(img) if img.mime_type == "image/png"))
+    );
+
+    let tui: Arc<dyn TUI + Send + Sync> = Arc::new(TuiMainScreen::new(Arc::new(DummyTerminal), None, None));
+    let component = ToolExecutionComponent::new(
+        "read",
+        "call-img",
+        json!({ "path": "dot.png" }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&read_def)),
+        tui,
+        &cwd,
+    );
+    component.update_result(
+        pi_coding_agent::modes::interactive::components::tool_execution::ToolExecutionResult {
+            content: result.content,
+            details: result.details,
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let rendered = strip_terminal_sequences(&component.render(120).join("\n"));
+    assert!(rendered.contains("read"), "rendered: {rendered}");
+    assert!(rendered.contains("dot.png"), "rendered: {rendered}");
+}

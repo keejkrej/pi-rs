@@ -23,11 +23,13 @@ pub struct EditToolInput {
 #[serde(rename_all = "camelCase")]
 pub struct EditToolDetails {
     /// Display-oriented diff of the changes made
+    #[serde(default)]
     pub diff: String,
     /// Standard unified patch of the changes made
+    #[serde(default)]
     pub patch: String,
     /// Line number of the first change in the new file (for editor navigation)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_changed_line: Option<i64>,
 }
 

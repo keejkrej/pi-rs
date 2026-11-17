@@ -23,24 +23,55 @@ pub(crate) fn extract_text_output(content: &[UserContentBlock], show_images: boo
     get_text_output(&vals, show_images)
 }
 
-/// Reuse or initialize a `pi_tui::Text` component stored inside `context.state`.
-/// Avoids downcasting `dyn Component` and reuses cached component allocations across renders.
-pub(crate) fn reuse_or_init_text(
+#[derive(Default)]
+struct RendererTextSlots {
+    call: Option<Text>,
+    result: Option<Text>,
+}
+
+fn reuse_or_init_slot_text(
     context: &ToolRenderContext,
+    is_result: bool,
     content: &str,
     padding_x: i64,
     padding_y: i64,
 ) -> Arc<dyn Component> {
     if let Ok(mut guard) = context.state.lock() {
-        if let Some(existing) = guard.as_mut().and_then(|any| any.downcast_mut::<Text>()) {
-            existing.set_text(content);
-            return Arc::new(existing.clone());
+        if guard.is_none() {
+            *guard = Some(Box::new(RendererTextSlots::default()));
         }
-        let widget = Text::new(Some(content), Some(padding_x), Some(padding_y), None);
-        *guard = Some(Box::new(widget.clone()));
-        return Arc::new(widget);
+        if let Some(slots) = guard.as_mut().and_then(|any| any.downcast_mut::<RendererTextSlots>()) {
+            let slot = if is_result { &mut slots.result } else { &mut slots.call };
+            if let Some(existing) = slot.as_ref() {
+                existing.set_text(content);
+                return Arc::new(existing.clone());
+            }
+            let widget = Text::new(Some(content), Some(padding_x), Some(padding_y), None);
+            *slot = Some(widget.clone());
+            return Arc::new(widget);
+        }
     }
     Arc::new(Text::new(Some(content), Some(padding_x), Some(padding_y), None))
+}
+
+/// Reuse or initialize the call-header `pi_tui::Text` component stored inside `context.state`.
+pub(crate) fn reuse_or_init_call_text(
+    context: &ToolRenderContext,
+    content: &str,
+    padding_x: i64,
+    padding_y: i64,
+) -> Arc<dyn Component> {
+    reuse_or_init_slot_text(context, false, content, padding_x, padding_y)
+}
+
+/// Reuse or initialize the result `pi_tui::Text` component stored inside `context.state`.
+pub(crate) fn reuse_or_init_result_text(
+    context: &ToolRenderContext,
+    content: &str,
+    padding_x: i64,
+    padding_y: i64,
+) -> Arc<dyn Component> {
+    reuse_or_init_slot_text(context, true, content, padding_x, padding_y)
 }
 
 /// Preview-truncate lines cleanly when collapsed, appending a dim `key_hint` footer.

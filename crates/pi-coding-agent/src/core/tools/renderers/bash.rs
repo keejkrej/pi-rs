@@ -8,8 +8,8 @@ use serde_json::Value;
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderContext};
 use crate::core::tools::bash::BashToolDetails;
 use crate::core::tools::render_utils::{replace_tabs, str_val};
+use crate::core::tools::renderers::extract_text_output;
 use crate::core::tools::renderers::w3b_wire::key_hint;
-use crate::core::tools::renderers::{extract_text_output, reuse_or_init_text};
 use crate::core::tools::truncate::format_size;
 
 fn now_epoch_ms() -> u64 {
@@ -18,11 +18,34 @@ fn now_epoch_ms() -> u64 {
 
 const BASH_PREVIEW_LINES: usize = 5;
 
+#[derive(Default)]
 struct BashTimerState {
     started_at_ms: Option<u64>,
     ended_at_ms: Option<u64>,
     timer_spawned: bool,
-    text: pi_tui::Text,
+    call_text: Option<pi_tui::Text>,
+    result_text: Option<pi_tui::Text>,
+}
+
+fn reuse_bash_text(context: &ToolRenderContext, is_result: bool, content: &str) -> Arc<dyn pi_tui::Component> {
+    if let Ok(mut guard) = context.state.lock() {
+        let state = guard.get_or_insert_with(|| Box::new(BashTimerState::default()));
+        if let Some(st) = state.downcast_mut::<BashTimerState>() {
+            let slot = if is_result {
+                &mut st.result_text
+            } else {
+                &mut st.call_text
+            };
+            if let Some(existing) = slot.as_ref() {
+                existing.set_text(content);
+                return Arc::new(existing.clone());
+            }
+            let widget = pi_tui::Text::new(Some(content), Some(0), Some(0), None);
+            *slot = Some(widget.clone());
+            return Arc::new(widget);
+        }
+    }
+    Arc::new(pi_tui::Text::new(Some(content), Some(0), Some(0), None))
 }
 
 fn format_duration_ms(ms: u64) -> String {
@@ -59,7 +82,7 @@ pub fn render_call() -> RenderCallFn {
             text.push_str(&theme.fg("dim", &suffix));
         }
 
-        reuse_or_init_text(&context, &text, 0, 0)
+        reuse_bash_text(&context, false, &text)
     })
 }
 
@@ -74,15 +97,11 @@ pub fn render_result() -> RenderResultFn {
 
         let mut duration_ms = None;
         if let Ok(mut guard) = context.state.lock() {
-            let state = guard.get_or_insert_with(|| {
-                Box::new(BashTimerState {
-                    started_at_ms: Some(now_epoch_ms()),
-                    ended_at_ms: None,
-                    timer_spawned: false,
-                    text: pi_tui::Text::new(Some(""), Some(0), Some(0), None),
-                })
-            });
+            let state = guard.get_or_insert_with(|| Box::new(BashTimerState::default()));
             if let Some(st) = state.downcast_mut::<BashTimerState>() {
+                if st.started_at_ms.is_none() {
+                    st.started_at_ms = Some(now_epoch_ms());
+                }
                 if options.is_partial {
                     if !st.timer_spawned && context.execution_started {
                         st.timer_spawned = true;
@@ -149,13 +168,6 @@ pub fn render_result() -> RenderResultFn {
         }
 
         let content = rendered_parts.join("\n");
-        if let Ok(mut guard) = context.state.lock()
-            && let Some(st) = guard.as_mut().and_then(|b| b.downcast_mut::<BashTimerState>())
-        {
-            st.text.set_text(&content);
-            return Arc::new(st.text.clone());
-        }
-
-        Arc::new(pi_tui::Text::new(Some(&content), Some(0), Some(0), None))
+        reuse_bash_text(&context, true, &content)
     })
 }

@@ -1,5 +1,6 @@
 //! Port of `packages/coding-agent/test/session-share.test.ts`.
-// WIRE(@tui-w3): interactive `shareSession` gist-upload orchestration awaits `modes::interactive::session_share`.
+
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexSet;
 use pi_agent_core::{AgentMessage, AgentState, ThinkingLevel};
@@ -7,6 +8,16 @@ use pi_ai::compat::get_model;
 use pi_ai::{Message, UserMessage, UserMessageContent};
 use pi_coding_agent::core::export_html::{ExportOptions, export_session_to_html};
 use pi_coding_agent::core::session_manager::{NewSessionOptions, SessionManager};
+use pi_coding_agent::modes::interactive::session_share::{
+    SessionShareContext, SessionShareDestination, ShareSession, ShareToolSummary, export_session_for_share,
+    share_session,
+};
+use pi_coding_agent::modes::interactive::theme::theme::init_theme;
+use pi_js::BoxFuture;
+use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
+use pi_tui::{Component, Container, Spacer, TUI, TuiMainScreen};
+use serde_json::Value;
+use serial_test::serial;
 use tempfile::TempDir;
 
 fn make_session(dir: &std::path::Path, id: &str, text: &str) -> SessionManager {
@@ -102,4 +113,132 @@ async fn keeps_concurrent_session_exports_isolated() {
     assert!(!data_a.contains("marker-payload-B"));
     assert!(data_b.contains("marker-payload-B"));
     assert!(!data_b.contains("marker-payload-A"));
+}
+
+#[tokio::test]
+#[serial]
+async fn share_session_exports_for_share_and_reports_unconfigured_radius_offline() {
+    struct ThemeGuard;
+    impl Drop for ThemeGuard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+    struct DummyTerminal;
+    #[async_trait::async_trait]
+    impl Terminal for DummyTerminal {
+        fn start(&self, _on_input: TerminalInputHandler, _on_resize: TerminalResizeHandler) {}
+        fn stop(&self) {}
+        async fn drain_input(&self, _max_ms: Option<i64>, _idle_ms: Option<i64>) {}
+        fn write(&self, _data: &str) {}
+        fn columns(&self) -> i64 {
+            80
+        }
+        fn rows(&self) -> i64 {
+            24
+        }
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+        fn move_by(&self, _lines: i64) {}
+        fn hide_cursor(&self) {}
+        fn show_cursor(&self) {}
+        fn clear_line(&self) {}
+        fn clear_from_cursor(&self) {}
+        fn clear_screen(&self) {}
+        fn set_title(&self, _title: &str) {}
+        fn set_progress(&self, _active: bool) {}
+    }
+    struct StubShareSession {
+        sm: SessionManager,
+        exported_paths: Arc<Mutex<Vec<String>>>,
+    }
+    impl ShareSession for StubShareSession {
+        fn system_prompt(&self) -> String {
+            "share test system prompt".to_owned()
+        }
+        fn state_tools(&self) -> Vec<ShareToolSummary> {
+            Vec::new()
+        }
+        fn export_session_jsonl(
+            &self,
+            file_path: &str,
+            trailing_entries_fn: Arc<dyn Fn(Option<&str>, &str) -> Vec<Value> + Send + Sync>,
+        ) -> pi_coding_agent::Result<()> {
+            let cb = |parent_id: Option<&str>, ts: &str| trailing_entries_fn(parent_id, ts);
+            pi_coding_agent::core::session_export::export_session_to_jsonl(&self.sm, Some(file_path), Some(&cb))?;
+            self.exported_paths.lock().unwrap().push(file_path.to_owned());
+            Ok(())
+        }
+        fn export_to_html(&self, html_path: &str, _theme_name: &str) -> BoxFuture<pi_coding_agent::Result<()>> {
+            let sm = self.sm.clone();
+            let path = html_path.to_owned();
+            Box::pin(async move {
+                export_session_to_html(
+                    &sm,
+                    None,
+                    Some(ExportOptions {
+                        output_path: Some(path),
+                        theme_name: None,
+                        tool_renderer: None,
+                        theme_override: None,
+                    }),
+                )
+                .await
+                .map(|_| ())
+            })
+        }
+        fn session_share_destination(&self) -> SessionShareDestination {
+            SessionShareDestination::Radius
+        }
+        fn has_radius_provider(&self) -> bool {
+            false
+        }
+        fn get_radius_auth_token(&self, _min_oauth_validity_ms: i64) -> BoxFuture<Option<String>> {
+            Box::pin(async { None })
+        }
+    }
+
+    init_theme(Some("dark"), Some(false));
+    let _guard = ThemeGuard;
+
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let sm = SessionManager::in_memory(Some(cwd), None, None).unwrap();
+    sm.append_message(AgentMessage::Message(Message::User(UserMessage {
+        content: UserMessageContent::Text("share html probe".to_owned()),
+        timestamp: 1,
+    })))
+    .unwrap();
+
+    let exported_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let statuses = Arc::new(Mutex::new(Vec::<String>::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let st_ref = Arc::clone(&statuses);
+    let err_ref = Arc::clone(&errors);
+    let tui: Arc<dyn TUI + Send + Sync> = Arc::new(TuiMainScreen::new(Arc::new(DummyTerminal), Some(false), None));
+    let editor: Arc<dyn Component> = Arc::new(Spacer::new(Some(1)));
+
+    let session = Arc::new(StubShareSession {
+        sm,
+        exported_paths: Arc::clone(&exported_paths),
+    });
+    let _ = export_session_for_share;
+    share_session(&SessionShareContext {
+        session,
+        ui: tui,
+        editor_container: Container::new(),
+        editor,
+        show_status: Arc::new(move |msg| st_ref.lock().unwrap().push(msg.to_owned())),
+        show_error: Arc::new(move |msg| err_ref.lock().unwrap().push(msg.to_owned())),
+    })
+    .await;
+
+    assert_eq!(exported_paths.lock().unwrap().len(), 1);
+    let errs = errors.lock().unwrap().clone();
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("Radius authentication is not configured")),
+        "errors: {errs:?}"
+    );
 }

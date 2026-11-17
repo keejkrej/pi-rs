@@ -317,8 +317,7 @@ async fn handles_validation_help_trust_gate_install_list_remove_and_config() {
         assert!(rm_cap.stdout().contains("Removed npm:@foo/bar"));
     }
 
-    // `handle_config_command` enforces trust gate and passes `ConfigSelectorInput` to hook
-    // // WIRE(@tui-w3): tests `select_config` invocation without interactive `ConfigSelectorComponent`
+    // `handle_config_command` enforces trust gate and invokes `select_config` hook with project settings scope
     {
         let received = Arc::new(Mutex::new(Option::<(SettingsScope, bool)>::None));
         let received_ref = received.clone();
@@ -516,4 +515,100 @@ async fn handles_managed_and_standard_self_updates_and_cleanup() {
     }
 
     let _: Value = json!({});
+}
+
+#[test]
+#[serial]
+fn config_selector_component_renders_and_toggles_project_and_builtin_resources() {
+    use pi_coding_agent::core::keybindings::KEYBINDINGS;
+    use pi_coding_agent::core::settings_manager::SettingsManager;
+    use pi_coding_agent::modes::interactive::components::config_selector::{
+        ConfigSelectorComponent, ConfigWriteScope, PathMetadata, ResolvedPaths, ResolvedResource, ScopedResolvedPaths,
+        SourceOrigin, SourceScope,
+    };
+    use pi_coding_agent::modes::interactive::theme::theme::init_theme;
+    use pi_tui::{Component, KeybindingsManager, TUI_KEYBINDINGS, set_keybindings, strip_terminal_sequences};
+
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+            set_keybindings(KeybindingsManager::new(TUI_KEYBINDINGS.clone(), None));
+        }
+    }
+    init_theme(Some("dark"), Some(false));
+    set_keybindings(KeybindingsManager::new(KEYBINDINGS.clone(), None));
+    let _guard = Guard;
+
+    let fx = CliFixture::new();
+    let settings = Arc::new(SettingsManager::create(
+        fx.cwd.to_str().unwrap(),
+        Some(fx.agent_dir.to_str().unwrap()),
+        None,
+    ));
+    let ext_path = fx.cwd.join("project-ext.ts");
+    fs::write(&ext_path, "export default function() {}").unwrap();
+
+    let resolved = ScopedResolvedPaths {
+        global: ResolvedPaths {
+            extensions: vec![ResolvedResource {
+                path: "builtin:ext-one".to_owned(),
+                enabled: true,
+                metadata: PathMetadata {
+                    source: "builtin".to_owned(),
+                    scope: SourceScope::User,
+                    origin: SourceOrigin::TopLevel,
+                    base_dir: None,
+                    package_root: None,
+                    changelog_path: None,
+                },
+            }],
+            ..Default::default()
+        },
+        project: ResolvedPaths {
+            extensions: vec![ResolvedResource {
+                path: ext_path.to_string_lossy().into_owned(),
+                enabled: true,
+                metadata: PathMetadata {
+                    source: "local".to_owned(),
+                    scope: SourceScope::Project,
+                    origin: SourceOrigin::TopLevel,
+                    base_dir: None,
+                    package_root: None,
+                    changelog_path: None,
+                },
+            }],
+            ..Default::default()
+        },
+    };
+
+    let selector = ConfigSelectorComponent::new(
+        &resolved,
+        settings.clone(),
+        fx.cwd.to_str().unwrap(),
+        fx.agent_dir.to_str().unwrap(),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        Some(24),
+        ConfigWriteScope::Global,
+        true,
+    );
+
+    let initial = strip_terminal_sequences(&selector.render(120).join("\n"));
+    assert!(initial.contains("Built-in"));
+    assert!(initial.contains("ext-one"));
+
+    // Toggle the first item (builtin:ext-one) via Enter, persisting exclusion in global settings
+    selector.handle_input("\r");
+    let global_exts = settings.get_global_settings().extensions.unwrap_or_default();
+    assert!(
+        global_exts.iter().any(|p| p == "-builtin:ext-one"),
+        "expected -builtin:ext-one in global extensions, got {global_exts:?}"
+    );
+
+    // Switch write scope via Tab and toggle builtin in project scope
+    selector.handle_input("\t");
+    let after_tab = strip_terminal_sequences(&selector.render(120).join("\n"));
+    assert!(after_tab.contains("project-ext.ts") || after_tab.contains("Project"));
 }

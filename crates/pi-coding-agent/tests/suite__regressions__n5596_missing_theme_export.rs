@@ -23,12 +23,22 @@ use pi_coding_agent::core::extensions::types::{ProviderChatModelConfig, Provider
 use pi_coding_agent::core::messages::convert_to_llm;
 use pi_coding_agent::core::session_manager::SessionManager;
 use pi_coding_agent::core::settings_manager::{Settings, SettingsManager};
+use pi_coding_agent::modes::interactive::theme::theme::init_theme;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
 use support::model_runtime_test_utils::{create_in_memory_model_registry, get_model_runtime};
 use support::suite::harness::create_suite_resource_loader;
 
 #[tokio::test]
+#[serial]
 async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_missing() {
+    struct ThemeGuard;
+    impl Drop for ThemeGuard {
+        fn drop(&mut self) {
+            init_theme(Some("dark"), None);
+        }
+    }
+    let _theme_guard = ThemeGuard;
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-5596-"])).unwrap();
     let faux = register_faux_provider(Some(RegisterFauxProviderOptions {
         models: Some(vec![FauxModelDefinition {
@@ -153,7 +163,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
     });
 
     session.prompt("hi", None).await.unwrap();
-    // WIRE(@tui-w3): call `init_theme(settings_manager.get_theme().as_deref())` before `export_to_html` and restore `init_theme(Some("dark"))` in cleanup.
+    init_theme(settings_manager.get_theme().as_deref(), None);
 
     let output_path = pi_js::path::join(&[&temp_dir, "export.html"]);
     let exported = session.export_to_html(Some(&output_path), None).await.unwrap();

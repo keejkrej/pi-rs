@@ -758,6 +758,207 @@ fn falls_back_cleanly_when_custom_renderers_panic() {
     assert!(rendered.contains("fallback output"));
 }
 
-// WIRE(@tui-w3): port built-in bash/read/edit/write tool integration tests
-// (`create_bash_tool_definition`, `create_read_tool_definition`, `create_write_tool_definition`,
-// `with_built_in_renderers`) once codemode-w3 merges onto main.
+#[test]
+#[serial]
+fn renders_streamed_partial_write_arguments_once_per_frame_with_latest_arguments() {
+    use pi_coding_agent::core::tools::write::create_write_tool_definition;
+    use pi_coding_agent::modes::interactive::theme::theme::theme;
+
+    let (_g, _fake, ui) = setup();
+
+    let base_write = ToolRenderers::from_tool_definition(&create_write_tool_definition(".", None));
+    let base_render_call = base_write.render_call.expect("write render_call");
+    let render_calls = Arc::new(AtomicUsize::new(0));
+    let rc_ref = Arc::clone(&render_calls);
+    let mut counted = ToolRenderers::default();
+    counted.render_shell = base_write.render_shell;
+    counted.render_result = base_write.render_result;
+    counted.render_call = Some(Arc::new(move |args, th, ctx| {
+        rc_ref.fetch_add(1, Ordering::SeqCst);
+        base_render_call(args, th, ctx)
+    }));
+
+    let component = ToolExecutionComponent::new("write", "tool-9", json!({}), None, Some(counted), ui, ".");
+
+    let mut content = String::new();
+    for i in 0..40 {
+        content.push_str(&format!("const line{i} = {i};\n"));
+        component.update_args(json!({ "path": "src/file.ts", "content": content }));
+    }
+    let before = render_calls.load(Ordering::SeqCst);
+    let streamed = strip_terminal_sequences(&component.render(120).join("\n"));
+    assert!(streamed.contains("src/file.ts"));
+    assert!(streamed.contains("line0 = 0"));
+    assert!(render_calls.load(Ordering::SeqCst) >= before);
+
+    // Calling render again without changing args preserves memoized output without spurious invalidation errors
+    let again = strip_terminal_sequences(&component.render(120).join("\n"));
+    assert_eq!(again, streamed);
+    let _ = theme();
+}
+
+#[test]
+#[serial]
+fn renders_builtin_read_and_write_previews_collapse_and_click_expand() {
+    use pi_coding_agent::core::tools::read::create_read_tool_definition;
+    use pi_coding_agent::core::tools::write::create_write_tool_definition;
+    use pi_coding_agent::modes::interactive::theme::theme::theme;
+
+    let (_g, _fake, tui) = setup();
+
+    // write trims trailing blank display lines
+    let write_def = create_write_tool_definition(".", None);
+    let write_comp = ToolExecutionComponent::new(
+        "write",
+        "tool-write",
+        json!({ "path": "README.md", "content": "one\ntwo\n" }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&write_def)),
+        Arc::clone(&tui),
+        ".",
+    );
+    write_comp.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new("ok"))],
+            details: None,
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let write_rendered = strip_terminal_sequences(&write_comp.render(120).join("\n"));
+    assert!(write_rendered.contains("one"));
+    assert!(write_rendered.contains("two"));
+    assert!(!write_rendered.contains("two\n\n"));
+
+    // read collapses >10 lines and expands when clicked
+    let read_def = create_read_tool_definition(".", None);
+    let read_comp = ToolExecutionComponent::new(
+        "read",
+        "tool-read-collapse",
+        json!({ "path": "notes.txt" }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&read_def)),
+        Arc::clone(&tui),
+        ".",
+    );
+    let many_lines: String = (1..=15).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+    read_comp.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new(many_lines))],
+            details: None,
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let collapsed = strip_terminal_sequences(&read_comp.render(120).join("\n"));
+    assert!(collapsed.contains("notes.txt"));
+    assert!(collapsed.contains("line-10"));
+    assert!(!collapsed.contains("line-11"));
+    assert!(collapsed.contains("5 more lines"));
+
+    let lines = read_comp.render(120);
+    let row = lines
+        .iter()
+        .position(|l| strip_terminal_sequences(l).contains("notes.txt"))
+        .expect("read header row");
+    let res = read_comp.handle_mouse(&TuiMouseEvent {
+        r#type: TuiMouseEventType::Click,
+        button: TuiMouseButton::Left,
+        x: 2,
+        y: row as i64,
+        screen_x: 2,
+        screen_y: row as i64,
+        width: 120,
+        height: lines.len() as i64,
+        shift: false,
+        alt: false,
+        ctrl: false,
+        wheel_delta: None,
+        click_count: Some(1),
+    });
+    assert!(res.is_some_and(|r| r.handled == Some(true)));
+    let expanded = strip_terminal_sequences(&read_comp.render(120).join("\n"));
+    assert!(expanded.contains("line-15"));
+
+    // read errors are not syntax-highlighted by file extension
+    let err_comp = ToolExecutionComponent::new(
+        "read",
+        "tool-read-err",
+        json!({ "path": "config.exs", "offset": 120, "limit": 130 }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&read_def)),
+        tui,
+        ".",
+    );
+    let err_msg = "Offset 120 is beyond end of file (96 lines total)";
+    err_comp.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new(err_msg))],
+            details: None,
+            is_error: true,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let err_rendered = err_comp.render(120).join("\n");
+    assert!(strip_terminal_sequences(&err_rendered).contains(err_msg));
+    let _ = theme();
+}
+
+#[test]
+#[serial]
+fn renders_builtin_bash_and_edit_tool_definitions_end_to_end() {
+    use pi_coding_agent::core::tools::bash::create_bash_tool_definition;
+    use pi_coding_agent::core::tools::edit::create_edit_tool_definition;
+
+    let (_g, _fake, tui) = setup();
+
+    let bash_def = create_bash_tool_definition(".", None);
+    let bash_comp = ToolExecutionComponent::new(
+        "bash",
+        "tool-bash-1",
+        json!({ "command": "echo hi" }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&bash_def)),
+        Arc::clone(&tui),
+        ".",
+    );
+    bash_comp.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new("hi\nthere\n"))],
+            details: None,
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let bash_out = strip_terminal_sequences(&bash_comp.render(120).join("\n"));
+    assert!(bash_out.contains("$ echo hi"));
+    assert!(bash_out.contains("hi"));
+
+    let edit_def = create_edit_tool_definition(".", None);
+    let edit_comp = ToolExecutionComponent::new(
+        "edit",
+        "tool-edit-1",
+        json!({ "path": "notes.txt", "edits": [{ "oldText": "a", "newText": "b" }] }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&edit_def)),
+        tui,
+        ".",
+    );
+    edit_comp.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new("edited"))],
+            details: Some(json!({ "diff": "-1 a\n+1 b\n", "firstChangedLine": 1 })),
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    let edit_out = strip_terminal_sequences(&edit_comp.render(120).join("\n"));
+    assert!(edit_out.contains("edit"));
+    assert!(edit_out.contains("notes.txt"));
+    assert!(edit_out.contains("+1 b"));
+}

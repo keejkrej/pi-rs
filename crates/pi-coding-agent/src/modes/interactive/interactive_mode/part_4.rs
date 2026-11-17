@@ -2471,7 +2471,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn register_signal_handlers(&self) {
+    pub fn register_signal_handlers(&self) {
         self.unregister_signal_handlers();
         #[cfg(unix)]
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

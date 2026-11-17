@@ -1565,7 +1565,11 @@ pub fn quote_if_needed(value: &str) -> String {
 }
 
 pub fn format_resume_command(session_manager: &dyn InteractiveSessionManager) -> Option<String> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+    format_resume_command_with_tty(session_manager, std::io::IsTerminal::is_terminal(&std::io::stdout()))
+}
+
+pub fn format_resume_command_with_tty(session_manager: &dyn InteractiveSessionManager, is_tty: bool) -> Option<String> {
+    if !is_tty {
         return None;
     }
     if !session_manager.is_persisted() {
@@ -1857,6 +1861,10 @@ impl InteractiveMode {
         Arc::clone(&self.inner.ui) as Arc<dyn TUI + Send + Sync>
     }
 
+    pub fn document_container(&self) -> &Container {
+        &self.inner.document_container
+    }
+
     pub fn chat_container(&self) -> &Container {
         &self.inner.chat_container
     }
@@ -1927,6 +1935,23 @@ impl InteractiveMode {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub fn signal_handler_count(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .signal_handles
+            .len()
+    }
+
+    pub fn hide_thinking_block(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hide_thinking_block
     }
 }
 

@@ -102,8 +102,9 @@ fn build_large_diff() -> String {
     hunks.join("\n     ...\n")
 }
 
-// WIRE(@tui-w3): Replace local mock edit renderers with `crate::core::tools::edit::create_edit_tool_definition`
-// and `crate::core::tools::edit_diff::compute_edits_diff` once codemode-w3 merges onto main.
+use pi_coding_agent::core::tools::edit::{
+    EditDiffPreview, EditReplacement, compute_edits_diff, create_edit_tool_definition,
+};
 #[derive(Clone)]
 struct MockEditCallState {
     box_comp: TuiBox,
@@ -465,6 +466,81 @@ async fn shows_a_preflight_error_without_rendering_a_diff_when_edits_do_not_appl
     .await;
     assert!(!rendered.contains("+1 "));
     assert!(!rendered.contains("-1 "));
+
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn real_edit_tool_definition_and_compute_edits_diff_settle_without_full_redraw() {
+    init_theme(Some("dark"), None);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let file_path = dir.path().join("notes.txt");
+    std::fs::write(&file_path, "line 1\nline 2 old\nline 3\n").expect("write notes.txt");
+
+    let preview = compute_edits_diff(
+        "notes.txt",
+        &[EditReplacement {
+            old_text: "line 2 old".to_string(),
+            new_text: "line 2 new".to_string(),
+        }],
+        &cwd,
+        None,
+    )
+    .await;
+    let diff = match preview {
+        EditDiffPreview::Success { diff, .. } => diff,
+        EditDiffPreview::Error { error } => panic!("unexpected compute_edits_diff error: {error}"),
+    };
+    assert!(diff.contains("-2 line 2 old") && diff.contains("+2 line 2 new"));
+
+    let edit_def = create_edit_tool_definition(&cwd, None);
+    let terminal = Arc::new(FakeTerminal::new());
+    let tui = Arc::new(TuiMainScreen::new(
+        Arc::clone(&terminal) as Arc<dyn Terminal>,
+        None,
+        None,
+    ));
+    let tui_trait: Arc<dyn TUI + Send + Sync> = tui.clone();
+
+    let component = ToolExecutionComponent::new(
+        "edit",
+        "real-edit-1",
+        json!({
+            "path": "notes.txt",
+            "edits": [{ "oldText": "line 2 old", "newText": "line 2 new" }]
+        }),
+        None,
+        Some(ToolRenderers::from_tool_definition(&edit_def)),
+        tui_trait,
+        &cwd,
+    );
+    tui.add_child(Arc::new(component.clone()));
+    tui.start();
+    wait_for_render().await;
+
+    let redraws_before = tui.full_redraws();
+    let clears_before = terminal.full_clear_count();
+    component.update_result(
+        ToolExecutionResult {
+            content: vec![UserContentBlock::Text(TextContent::new(
+                "Successfully replaced 1 block in notes.txt.",
+            ))],
+            details: Some(json!({ "diff": diff, "firstChangedLine": 2 })),
+            is_error: false,
+            duration_ms: None,
+        },
+        Some(false),
+    );
+    tui.request_render(None);
+    wait_for_render().await;
+
+    assert_eq!(tui.full_redraws(), redraws_before);
+    assert_eq!(terminal.full_clear_count(), clears_before);
+    let rendered = strip_terminal_sequences(&component.render(80).join("\n"));
+    assert!(rendered.contains("notes.txt"), "rendered:\n{rendered}");
+    assert!(rendered.contains("line 2 new"), "rendered:\n{rendered}");
 
     tui.stop(None);
 }
