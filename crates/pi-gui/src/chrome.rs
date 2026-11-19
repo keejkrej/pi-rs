@@ -1,44 +1,56 @@
-//! Top-level Rune AppSpec, window chrome, keyboard routing, and split-pane composition.
+//! Top-level Rune AppSpec, Waku 3-pane window chrome, borderless titlebar, keyboard routing, and toasts.
 
-use rune::{App, AppSpec, Chrome, Color, Cursor, Cx, El, Icon, Key, KeyEvent, Tx, col, el, icon, row, text};
-use rune_kit::shell::{INSPECTOR, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, IconButton, IconButtonVariant, Kit};
+use rune::{App, AppSpec, Chrome, Color, Cursor, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, col, el, icon, row, text};
+use rune_kit::Kit;
 
 use crate::bridge::GuiBridge;
 use crate::composer;
 use crate::overlays;
 use crate::right_panel;
+use crate::settings;
 use crate::sidebar;
-use crate::state::{LaunchConfig, OverlayKind, PiGuiAction, PiGuiState, SCENE_ENTRIES};
-use crate::theme::{LayoutMetrics, WakuPalette, palette, waku_kit};
+use crate::state::{LaunchConfig, OverlayKind, PiGuiAction, PiGuiState, PopoverKind, SCENE_ENTRIES, SettingsPage};
+use crate::theme::{LayoutMetrics, WakuPalette, WakuRadius, palette, waku_kit};
 use crate::transcript;
 
-static ICON_COMMAND: Icon = Icon {
-    name: "pi-command",
+static ICON_PANEL_LEFT: Icon = Icon {
+    name: "waku-hdr-panel-left",
     view: 16.0,
-    body: r#"<path d="M5 5a1.5 1.5 0 1 1 1.5 1.5h-1.5V5Zm4.5 1.5V5A1.5 1.5 0 1 1 11 6.5h-1.5ZM6.5 9.5V11A1.5 1.5 0 1 1 5 9.5h1.5Zm3 0H11A1.5 1.5 0 1 1 9.5 11V9.5ZM6.5 6.5h3v3h-3v-3Z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/>"#,
+    body: r#"<rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2" stroke="currentColor" stroke-width="1.25" fill="none"/><path d="M6.2 2.8v10.4" stroke="currentColor" stroke-width="1.25"/>"#,
 };
 
-static ICON_CPU: Icon = Icon {
-    name: "pi-model",
+static ICON_PANEL_RIGHT: Icon = Icon {
+    name: "waku-hdr-panel-right",
     view: 16.0,
-    body: r#"<rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M6.5 2v2M9.5 2v2M6.5 12v2M9.5 12v2M2 6.5h2M2 9.5h2M12 6.5h2M12 9.5h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    body: r#"<rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2" stroke="currentColor" stroke-width="1.25" fill="none"/><path d="M9.8 2.8v10.4" stroke="currentColor" stroke-width="1.25"/>"#,
 };
 
-static ICON_SETTINGS: Icon = Icon {
-    name: "pi-settings",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 2.2v1.3M8 12.5v1.3M2.2 8h1.3M12.5 8h1.3M3.9 3.9l.9.9M11.2 11.2l.9.9M12.1 3.9l-.9.9M4.8 11.2l-.9.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+static ICON_ARROW_LEFT: Icon = Icon {
+    name: "waku-hdr-arrow-left",
+    view: 56.0,
+    body: r#"<path fill="currentColor" d="M6.238 28c0 .586.258 1.125.727 1.57l15.562 15.54c.492.445.985.656 1.524.656c1.172 0 2.062-.844 2.062-2.016c0-.562-.21-1.125-.586-1.477l-5.226-5.343l-7.922-7.196l5.695.352H47.7c1.219 0 2.063-.867 2.063-2.086s-.844-2.086-2.063-2.086H18.074l-5.672.352l7.899-7.196l5.226-5.343c.399-.376.586-.915.586-1.477c0-1.172-.89-2.016-2.062-2.016c-.54 0-1.055.188-1.57.704L6.964 26.43c-.469.445-.727.984-.727 1.57"/>"#,
 };
 
-static ICON_BRANCH: Icon = Icon {
-    name: "pi-branch",
+static ICON_ARROW_RIGHT: Icon = Icon {
+    name: "waku-hdr-arrow-right",
+    view: 56.0,
+    body: r#"<path fill="currentColor" d="M49.762 28c0-.586-.234-1.125-.703-1.57L33.543 10.938c-.516-.516-1.031-.704-1.594-.704c-1.148 0-2.039.844-2.039 2.016c0 .563.188 1.101.563 1.477l5.25 5.343l7.898 7.196l-5.672-.352H8.301c-1.195 0-2.063.867-2.063 2.086s.867 2.086 2.063 2.086h29.648l5.696-.352l-7.922 7.196l-5.25 5.343c-.375.352-.563.914-.563 1.477c0 1.172.89 2.016 2.04 2.016c.562 0 1.054-.211 1.523-.657L49.059 29.57c.469-.445.703-.984.703-1.57"/>"#,
+};
+
+static ICON_TOAST_CHECK: Icon = Icon {
+    name: "waku-toast-check",
     view: 16.0,
-    body: r#"<circle cx="5" cy="4" r="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="5" cy="12" r="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="11" cy="6" r="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M5 5.5v5M11 7.5c0 2-1.5 3-6 3" stroke="currentColor" stroke-width="1.2" fill="none"/>"#,
+    body: r#"<path d="M3.5 8.3l3 3 6-6.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+
+static ICON_TOAST_ALERT: Icon = Icon {
+    name: "waku-toast-alert",
+    view: 16.0,
+    body: r#"<circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.35" fill="none"/><path d="M8 4.8v3.6M8 11v.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
 };
 
 static ICON_CLOSE_SMALL: Icon = Icon {
-    name: "pi-close-sm",
+    name: "waku-toast-close",
     view: 16.0,
     body: r#"<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
 };
@@ -82,11 +94,11 @@ pub fn poll_state(s: &mut PiGuiState, _clock: f64, tx: &mut Tx) -> bool {
     changed
 }
 
-/// Global keyboard shortcuts (Escape, Cmd/Ctrl+B/K/P/N/Shift+I/,).
+/// Global keyboard shortcuts (`Escape`, `Cmd/Ctrl+B/K/P/L/N/Shift+I/,`).
 pub fn on_key(s: &mut PiGuiState, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if ev.key == Key::Escape {
-        if s.overlay.is_some() {
-            s.dispatch(PiGuiAction::CloseOverlay, Some(tx));
+        if s.handle_escape() {
+            tx.settle();
             return true;
         }
         if s.active_stream.is_some() {
@@ -106,19 +118,29 @@ pub fn on_key(s: &mut PiGuiState, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         if ev.is_command('k') && !ev.mods.shift {
-            toggle_overlay(s, OverlayKind::CommandPalette, tx);
+            if matches!(s.overlay, Some(OverlayKind::CommandPalette)) {
+                s.dispatch(PiGuiAction::CloseOverlay, Some(tx));
+            } else {
+                s.dispatch(PiGuiAction::OpenOverlay(OverlayKind::CommandPalette), Some(tx));
+            }
             return true;
         }
-        if ev.is_command('p') && !ev.mods.shift {
-            toggle_overlay(s, OverlayKind::ModelPicker, tx);
+        if (ev.is_command('p') || ev.is_command('l')) && !ev.mods.shift {
+            s.dispatch(PiGuiAction::TogglePopover(PopoverKind::ModelPicker), Some(tx));
             return true;
         }
         if ev.is_command(',') && !ev.mods.shift {
-            toggle_overlay(s, OverlayKind::Settings, tx);
+            if s.settings_open.is_some() {
+                s.dispatch(PiGuiAction::CloseSettings, Some(tx));
+            } else {
+                s.dispatch(PiGuiAction::OpenSettings(SettingsPage::General), Some(tx));
+            }
             return true;
         }
         if ev.is_command('n') && !ev.mods.shift {
+            s.dispatch(PiGuiAction::ClosePopover, Some(tx));
             s.dispatch(PiGuiAction::CloseOverlay, Some(tx));
+            s.dispatch(PiGuiAction::CloseSettings, Some(tx));
             s.dispatch(PiGuiAction::NewThread, Some(tx));
             return true;
         }
@@ -126,154 +148,213 @@ pub fn on_key(s: &mut PiGuiState, ev: &KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
-fn toggle_overlay(s: &mut PiGuiState, kind: OverlayKind, tx: &mut Tx) {
-    let same = match (&s.overlay, &kind) {
-        (Some(OverlayKind::CommandPalette), OverlayKind::CommandPalette)
-        | (Some(OverlayKind::ModelPicker), OverlayKind::ModelPicker)
-        | (Some(OverlayKind::Settings), OverlayKind::Settings) => true,
-        _ => false,
-    };
-    let next = if same {
-        PiGuiAction::CloseOverlay
-    } else {
-        PiGuiAction::OpenOverlay(kind)
-    };
-    s.dispatch(next, Some(tx));
+fn header_icon_btn(
+    key: &'static str,
+    label: &'static str,
+    ic: &'static Icon,
+    pal: &WakuPalette,
+    action: PiGuiAction,
+) -> El {
+    el().key(key)
+        .role("button")
+        .label_static(label)
+        .size(26.0, 26.0)
+        .radius(WakuRadius::SM)
+        .center()
+        .cursor(Cursor::Pointer)
+        .hover(pal.overlay)
+        .on_press(move |st: &mut PiGuiState| st.dispatch(action.clone(), None))
+        .child(icon(ic, 14.0).color(pal.text_secondary))
 }
 
-fn workspace_name(cwd: &str) -> &str {
-    let trimmed = cwd.trim_end_matches(['/', '\\']);
-    trimmed
-        .rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(if cwd.is_empty() { "workspace" } else { cwd })
-}
-
-fn build_toolbar(s: &PiGuiState, k: &Kit, pal: &WakuPalette) -> Toolbar {
+fn build_main_header(s: &PiGuiState, sidebar_open: bool, right_open: bool, pal: &WakuPalette) -> El {
     let title = s
         .active_thread_id
         .as_deref()
         .and_then(|id| s.threads.iter().find(|t| t.id == id))
-        .map_or("New thread", |t| t.title.as_str());
-    let ws_label = workspace_name(&s.config.cwd);
+        .map_or("New task", |t| t.title.as_str());
 
-    let mut leading = row()
-        .key("toolbar-leading-crumb")
-        .gap(8.0)
+    let pl = if sidebar_open {
+        14.0
+    } else {
+        LayoutMetrics::traffic_light_clearance()
+    };
+
+    let mut hdr = row()
+        .key("workspace.main.header")
+        .role("region")
+        .w_full()
+        .h(LayoutMetrics::TITLEBAR_HEIGHT)
+        .pl(pl)
+        .pr(14.0)
+        .justify_between()
         .center_y()
-        .min_w(0.0)
-        .child(
-            el().key("toolbar-workspace-pill")
-                .px(8.0)
-                .py(3.0)
-                .radius(k.radius.sm)
-                .fill(pal.raised)
-                .border(1.0, pal.border)
-                .help(s.config.cwd.clone())
-                .child(text(ws_label).font(k.ty.small_medium).color(pal.text_secondary)),
-        )
-        .child(text("/").font(k.ty.small).color(pal.text_ghost))
-        .child(
+        .gap(8.0)
+        .shrink()
+        .clip_rounded(0.0);
+
+    if !sidebar_open {
+        let nav_row = row()
+            .center_y()
+            .min_w(0.0)
+            .grow(1.0)
+            .child(header_icon_btn(
+                "workspace.main.header.sidebar_toggle",
+                "Toggle Sidebar",
+                &ICON_PANEL_LEFT,
+                pal,
+                PiGuiAction::ToggleSidebar,
+            ))
+            .child(
+                header_icon_btn(
+                    "workspace.main.header.nav_back",
+                    "Previous Session",
+                    &ICON_ARROW_LEFT,
+                    pal,
+                    PiGuiAction::NavigateSessionHistory(-1),
+                )
+                .ml(6.0),
+            )
+            .child(
+                header_icon_btn(
+                    "workspace.main.header.nav_forward",
+                    "Next Session",
+                    &ICON_ARROW_RIGHT,
+                    pal,
+                    PiGuiAction::NavigateSessionHistory(1),
+                )
+                .ml(2.0),
+            )
+            .child(
+                text(title)
+                    .key("workspace.main.header.title")
+                    .role("heading")
+                    .ml(8.0)
+                    .font(TextStyle::new(13.5, 500.0).lh(18.0))
+                    .color(pal.text)
+                    .truncate()
+                    .shrink(),
+            );
+        hdr = hdr.child(nav_row);
+    } else {
+        hdr = hdr.child(
             text(title)
-                .key("toolbar-thread-title")
-                .font(k.ty.ui_medium)
+                .key("workspace.main.header.title")
+                .role("heading")
+                .font(TextStyle::new(13.5, 500.0).lh(18.0))
                 .color(pal.text)
                 .truncate()
                 .shrink(),
         );
-
-    if let Some(branch) = s.diff.branch.as_deref().filter(|b| !b.is_empty()) {
-        let mut chip = row()
-            .key("toolbar-branch-chip")
-            .px(7.0)
-            .py(3.0)
-            .gap(4.0)
-            .center_y()
-            .radius(k.radius.sm)
-            .fill(pal.inset)
-            .border(1.0, pal.border)
-            .cursor(Cursor::Pointer)
-            .hover(pal.overlay)
-            .on_press(|st: &mut PiGuiState| {
-                st.dispatch(PiGuiAction::SelectInspectorTab(crate::state::InspectorTab::Diff), None);
-            })
-            .child(icon(&ICON_BRANCH, 12.0).color(pal.text_tertiary))
-            .child(text(branch).font(k.ty.small_medium).color(pal.text_secondary));
-        if s.diff.total_additions > 0 || s.diff.total_deletions > 0 {
-            chip = chip
-                .child(
-                    text(format!("+{}", s.diff.total_additions))
-                        .font(k.ty.small)
-                        .color(pal.success),
-                )
-                .child(
-                    text(format!("-{}", s.diff.total_deletions))
-                        .font(k.ty.small)
-                        .color(pal.danger),
-                );
-        }
-        leading = leading.child(chip);
     }
 
-    if s.active_stream.is_some() {
-        leading = leading.child(Badge::new("Live").variant(rune_kit::BadgeVariant::Accent).build(k));
+    if !right_open {
+        hdr = hdr.child(header_icon_btn(
+            "workspace.main.header.right_panel_toggle",
+            "Toggle Right Panel",
+            &ICON_PANEL_RIGHT,
+            pal,
+            PiGuiAction::ToggleInspector,
+        ));
     }
-
-    let cmd_btn = IconButton::new(&ICON_COMMAND)
-        .variant(IconButtonVariant::GhostMuted)
-        .label("Command Palette")
-        .shortcut(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl+K" })
-        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::OpenOverlay(OverlayKind::CommandPalette), None))
-        .build(k)
-        .key("toolbar-cmd-palette");
-
-    let model_btn = IconButton::new(&ICON_CPU)
-        .variant(IconButtonVariant::GhostMuted)
-        .label("Model Picker")
-        .shortcut(if cfg!(target_os = "macos") { "⌘P" } else { "Ctrl+P" })
-        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::OpenOverlay(OverlayKind::ModelPicker), None))
-        .build(k)
-        .key("toolbar-model-picker");
-
-    let inspector_btn = IconButton::new(&INSPECTOR)
-        .variant(IconButtonVariant::GhostMuted)
-        .expanded(s.inspector_pane.is_open())
-        .label(if s.inspector_pane.is_open() {
-            "Hide Inspector"
-        } else {
-            "Show Inspector"
-        })
-        .shortcut(if cfg!(target_os = "macos") {
-            "⇧⌘I"
-        } else {
-            "Ctrl+Shift+I"
-        })
-        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::ToggleInspector, None))
-        .build(k)
-        .key("toolbar-inspector-toggle");
-
-    let settings_btn = IconButton::new(&ICON_SETTINGS)
-        .variant(IconButtonVariant::GhostMuted)
-        .label("Settings")
-        .shortcut(if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," })
-        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::OpenOverlay(OverlayKind::Settings), None))
-        .build(k)
-        .key("toolbar-settings");
-
-    Toolbar::new()
-        .leading(leading)
-        .trailing(cmd_btn)
-        .trailing(model_btn)
-        .trailing(inspector_btn)
-        .trailing(settings_btn)
+    hdr
 }
 
-/// Renders the primary split-view workspace frame inside Rune's window root.
+fn build_toast_layer(s: &PiGuiState, pal: &WakuPalette) -> Option<El> {
+    let toast = s.toasts.last()?;
+    let toast_id = toast.id;
+    let (status_ic, accent) = match toast.tone {
+        crate::state::ToastTone::Info => (&ICON_TOAST_ALERT, pal.gauge),
+        crate::state::ToastTone::Success => (&ICON_TOAST_CHECK, pal.success),
+        crate::state::ToastTone::Warning => (&ICON_TOAST_ALERT, pal.warning),
+        crate::state::ToastTone::Error => (&ICON_TOAST_ALERT, pal.danger),
+    };
+    let shadow_color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: if pal.is_dark { 0.45 } else { 0.14 },
+    };
+
+    let card = row()
+        .key("workspace.toast")
+        .role("status")
+        .max_w(LayoutMetrics::TOAST_MAX_WIDTH)
+        .min_w(0.0)
+        .py(7.0)
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
+        .radius(WakuRadius::TOAST)
+        .fill(pal.raised)
+        .border_layout()
+        .border(1.0, pal.border_strong)
+        .shadow(8.0, 24.0, shadow_color)
+        .clip_rounded(WakuRadius::TOAST)
+        .child(icon(status_ic, 14.0).color(accent).shrink())
+        .child(
+            text(&toast.message)
+                .font(TextStyle::new(12.5, 400.0).lh(16.0))
+                .color(pal.text)
+                .wrap_anywhere()
+                .grow(1.0)
+                .min_w(0.0)
+                .shrink(),
+        )
+        .child(
+            el().key("workspace.toast.dismiss")
+                .role("button")
+                .label_static("Dismiss notification")
+                .size(26.0, 26.0)
+                .shrink()
+                .radius(WakuRadius::SM)
+                .center()
+                .cursor(Cursor::Pointer)
+                .hover(pal.overlay)
+                .on_press(move |st: &mut PiGuiState| st.dispatch(PiGuiAction::DismissToast(toast_id), None))
+                .child(icon(&ICON_CLOSE_SMALL, 12.0).color(pal.text_tertiary)),
+        );
+
+    Some(
+        row()
+            .key("workspace.toast.host")
+            .absolute(0.0, LayoutMetrics::TOAST_TOP)
+            .w_full()
+            .px(16.0)
+            .justify_center()
+            .child(card),
+    )
+}
+
+/// Renders Waku's exact 3-pane workspace or full-window 2-pane Settings screen.
 pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, cx: &mut Cx<PiGuiState>) -> El {
-    let mut main_pane = col().key("main-pane").grow(1.0).min_w(0.0).min_h(0.0).fill(pal.surface);
+    if s.settings_open.is_some() {
+        return settings::view(s, k, pal, cx);
+    }
+
+    let sidebar_open = s.sidebar_pane.is_open();
+    let right_open = s.inspector_pane.is_open();
+
+    let mut main_col = col()
+        .key("workspace.main")
+        .role("region")
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(0.0)
+        .h_full()
+        .fill(pal.canvas)
+        .clip_rounded(0.0);
+
+    if sidebar_open {
+        main_col = main_col
+            .border_layout()
+            .border_sides([0.0, 0.0, 0.0, 1.0], pal.sidebar_border);
+    }
+
+    main_col = main_col.child(build_main_header(s, sidebar_open, right_open, pal));
 
     if let Some(banner) = s.status_banner.as_deref().filter(|b| !b.is_empty()) {
-        main_pane = main_pane.child(
+        main_col = main_col.child(
             row()
                 .key("status-banner")
                 .w_full()
@@ -284,49 +365,43 @@ pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, cx: &mut Cx<PiGuiState>)
                 .fill(pal.raised)
                 .border_sides([0.0, 0.0, 1.0, 0.0], pal.border)
                 .child(text(banner).font(k.ty.small).color(pal.warning).truncate().shrink())
-                .child(
-                    IconButton::new(&ICON_CLOSE_SMALL)
-                        .variant(IconButtonVariant::GhostMuted)
-                        .label("Dismiss banner")
-                        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::SetStatusBanner(None), None))
-                        .build(k),
-                ),
+                .child(header_icon_btn(
+                    "status-banner-dismiss",
+                    "Dismiss banner",
+                    &ICON_CLOSE_SMALL,
+                    pal,
+                    PiGuiAction::SetStatusBanner(None),
+                )),
         );
     }
 
-    main_pane = main_pane
+    main_col = main_col
         .child(transcript::view(s, k, pal, cx))
         .child(composer::view(s, k, pal, cx));
 
-    let unread = s.threads.iter().any(|t| t.has_unread);
-    let toolbar = build_toolbar(s, k, pal);
+    if let Some(toast_layer) = build_toast_layer(s, pal) {
+        main_col = main_col.child(toast_layer);
+    }
 
-    SplitView::new(main_pane)
-        .sidebar(
-            &s.sidebar_pane,
-            |st: &mut PiGuiState| &mut st.sidebar_pane,
-            sidebar::view(s, k, pal, cx),
-        )
-        .inspector(
-            &s.inspector_pane,
-            |st: &mut PiGuiState| &mut st.inspector_pane,
-            right_panel::view(s, k, pal, cx),
-        )
-        .toolbar(toolbar)
-        .sidebar_toggle(
-            SidebarToggle::new()
-                .past_lights(10.0)
-                .in_header()
-                .unread(unread)
-                .shortcut(if cfg!(target_os = "macos") { "⌘B" } else { "Ctrl+B" }),
-        )
-        .frame_inset(0.0)
-        .titlebar_inset(cx.titlebar_inset())
-        .reduced_motion(s.reduced_motion)
-        .build(k)
+    let mut workspace = row()
+        .key("workspace")
+        .role("main")
+        .w_full()
+        .h_full()
+        .fill(pal.canvas)
+        .clip_rounded(0.0);
+
+    if sidebar_open {
+        workspace = workspace.child(sidebar::view(s, k, pal, cx));
+    }
+    workspace = workspace.child(main_col);
+    if right_open {
+        workspace = workspace.child(right_panel::view(s, k, pal, cx));
+    }
+    workspace
 }
 
-/// Top-level Rune view callback resolving theme, reduced motion, split chrome, and overlays.
+/// Top-level Rune view callback resolving theme, reduced motion, Waku workspace/settings, and overlays.
 pub fn app_view(s: &PiGuiState, cx: &mut Cx<PiGuiState>) -> El {
     if s.reduced_motion {
         cx.reduced_motion(true);
@@ -341,8 +416,9 @@ pub fn app_view(s: &PiGuiState, cx: &mut Cx<PiGuiState>) -> El {
         .min_h(0.0)
         .fill(Color::TRANSPARENT)
         .child(view(s, k, &pal, cx));
-    let overlay_layers = overlays::view(s, k, &pal, cx);
-    rune_kit::root(base, overlay_layers)
+    let modal_layer = overlays::view(s, k, &pal, cx);
+    let popover_layer = overlays::view_popover(s, k, &pal, cx);
+    rune_kit::root(base, modal_layer.or(popover_layer))
 }
 
 /// Builds the Rune [`AppSpec`] for `pi-gui`.
@@ -409,18 +485,41 @@ mod tests {
     }
 
     fn assert_scene_layout(scene_id: &str, st: PiGuiState) {
-        let nav_tab = st.nav_tab;
+        let is_settings = st.settings_open.is_some();
+        let sidebar_open = st.sidebar_pane.is_open();
+        let is_empty = st.messages.is_empty() && st.active_stream.is_none();
         let rt = test_runtime(st, (1280.0, 820.0));
-        let mut keys = vec![
-            "main-pane",
-            "transcript-scroll-host",
-            "composer-card",
-            "composer-status-footer",
-            "sidebar",
-            "sidebar-nav-rail",
-        ];
-        if nav_tab == crate::state::NavRailTab::Sessions {
-            keys.push("new-thread-btn");
+        let mut keys: Vec<&str> = Vec::new();
+        if is_settings {
+            keys.extend([
+                "settings",
+                "settings.sidebar",
+                "settings.sidebar.back",
+                "settings.content",
+                "settings.content.inner",
+            ]);
+        } else {
+            keys.extend([
+                "workspace",
+                "workspace.main",
+                "workspace.main.header",
+                "workspace.main.composer",
+                "workspace.main.footer",
+            ]);
+            keys.push(if is_empty {
+                "workspace.main.empty_state"
+            } else {
+                "workspace.main.transcript"
+            });
+            if sidebar_open {
+                keys.extend([
+                    "workspace.sidebar",
+                    "workspace.sidebar.new_task",
+                    "workspace.sidebar.settings",
+                ]);
+            } else {
+                keys.push("workspace.main.header.sidebar_toggle");
+            }
         }
         for key in keys {
             let (rect, opacity) = rt
@@ -501,8 +600,8 @@ mod tests {
         }
 
         let rt = test_runtime(st, (LayoutMetrics::MIN_WINDOW_WIDTH, LayoutMetrics::MIN_WINDOW_HEIGHT));
-        let (scroll_rect, _) = rt.presented("transcript-scroll-host").expect("scroll host");
-        let (composer_rect, _) = rt.presented("composer-card").expect("composer");
+        let (scroll_rect, _) = rt.presented("workspace.main.transcript").expect("transcript viewport");
+        let (composer_rect, _) = rt.presented("workspace.main.composer").expect("composer");
         assert!(scroll_rect[3] > 80.0, "scroll host collapsed: {scroll_rect:?}");
         assert!(composer_rect[3] > 60.0, "composer collapsed: {composer_rect:?}");
     }
@@ -549,6 +648,13 @@ mod tests {
             mods: cmd_mods(true),
         });
         rt.frame(0.016);
-        assert!(!rt.state.inspector_pane.is_open());
+        assert!(rt.state.inspector_pane.is_open());
+
+        rt.key(KeyEvent {
+            key: Key::Command(','),
+            mods: cmd_mods(false),
+        });
+        rt.frame(0.016);
+        assert!(rt.state.settings_open.is_some());
     }
 }

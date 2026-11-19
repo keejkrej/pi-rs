@@ -177,10 +177,14 @@ pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, _cx: &mut Cx<PiGuiState>
         );
 
     col()
-        .key("terminal-view")
+        .key("right_panel.terminal.surface")
+        .role("region")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
+        .h_full()
+        .gap(4.0)
+        .fill(pal.terminal)
         .child(status_bar)
         .child(
             col()

@@ -529,10 +529,8 @@ pub fn convert_agent_messages(messages: &[AgentMessage]) -> Vec<MessageViewModel
 #[must_use]
 pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
     let md_body = concat!(
-        "## Bridge & QuickJS Pipeline Ready\n\n- Connected `AgentSessionRuntime` off-thread\n- Streaming text, thinking deltas, and tool cards\n\n",
-        "```rust\npub fn palette(dark: bool) -> WakuPalette {\n    if dark { WakuPalette::dark() } else { WakuPalette::light() }\n}\n```\n\n",
-        "```ts\nexport default function (pi: ExtensionAPI) {\n  pi.on(\"input\", (ev) => ({ action: \"continue\", text: ev.text }));\n}\n```\n\n",
-        "```mermaid\nflowchart LR\n  RuneUI --> BridgeCommand --> AgentSession --> BridgeEvent\n```"
+        "Workspace active: off-thread `AgentSessionRuntime`, **Rune** graphite layout, ",
+        "and QuickJS plugin sandbox."
     );
     let models = vec![
         ModelViewModel {
@@ -543,17 +541,31 @@ pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
             context_window: 200_000,
         },
         ModelViewModel {
+            provider: "anthropic".into(),
+            id: "claude-opus-4-1".into(),
+            name: "Claude Opus 4.1".into(),
+            reasoning: true,
+            context_window: 200_000,
+        },
+        ModelViewModel {
             provider: "openai".into(),
             id: "gpt-5".into(),
             name: "GPT-5".into(),
             reasoning: true,
             context_window: 256_000,
         },
+        ModelViewModel {
+            provider: "google".into(),
+            id: "gemini-2.5-pro".into(),
+            name: "Gemini 2.5 Pro".into(),
+            reasoning: true,
+            context_window: 1_000_000,
+        },
     ];
     let threads = vec![
         ThreadSummary {
             id: "demo-session-1".into(),
-            title: "Wire QuickJS plugins and Rune diff panel".into(),
+            title: "give me a quick overview".into(),
             cwd: cwd.into(),
             model: Some("claude-sonnet-4-5".into()),
             updated_at_ms: 1_763_370_000_000,
@@ -567,11 +579,11 @@ pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
             title: "Verify Waku graphite palette parity".into(),
             cwd: cwd.into(),
             model: Some("gpt-5".into()),
-            updated_at_ms: 1_763_280_000_000,
+            updated_at_ms: 1_763_368_000_000,
             message_count: 5,
             is_streaming: false,
             has_unread: false,
-            group: ThreadGroup::Yesterday,
+            group: ThreadGroup::Today,
         },
     ];
     let tc = ContentBlockView::ToolCall(ToolCallViewModel {
@@ -581,7 +593,7 @@ pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
         output_preview: Some("Read 280 lines from crates/pi-gui/src/bridge.rs".into()),
         status: ToolCallStatus::Success,
         duration_ms: Some(14),
-        expanded: true,
+        expanded: false,
     });
     let messages = vec![
         mk_msg(
@@ -590,7 +602,7 @@ pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
             1_763_369_900_000,
             None,
             vec![ContentBlockView::Text(
-                "Inspect workspace diff and QuickJS .ts extensions.".into(),
+                "Give me a quick overview of the coding agent workspace, QuickJS hooks, and GUI layout.".into(),
             )],
             false,
             None,
@@ -601,7 +613,7 @@ pub fn build_demo_bundle(cwd: &str) -> DemoSceneBundle {
             1_763_369_960_000,
             Some("anthropic / claude-sonnet-4-5".into()),
             vec![
-                ContentBlockView::Thinking("Checking git diff hunks and QuickJS extensions in .pi/extensions/".into()),
+                ContentBlockView::Thinking("Checking workspace crates, git status, and QuickJS hooks".into()),
                 tc,
                 ContentBlockView::Text(md_body.into()),
             ],

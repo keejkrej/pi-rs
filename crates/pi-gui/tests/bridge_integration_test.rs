@@ -246,11 +246,11 @@ export default function (pi) {
         rt.frame(0.016);
     }
     for key in [
-        "sidebar",
-        "transcript-scroll-host",
-        "composer-card",
-        "right-panel",
-        "terminal-view",
+        "workspace.sidebar",
+        "workspace.main.transcript",
+        "workspace.main.composer",
+        "right_panel",
+        "right_panel.terminal.surface",
     ] {
         let rect = rt
             .elements()
