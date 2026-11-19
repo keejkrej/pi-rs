@@ -4,66 +4,61 @@ use indexmap::IndexSet;
 use rune::{Cx, El, ScrollSpec, col, el, rich, row, text};
 use rune_highlights::Lang;
 use rune_kit::syntax::{SyntaxTheme, highlight, lang_for_path};
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, FileNode, Kit, Tree, TreeItem, TreeStyle};
+use rune_kit::{Badge, BadgeVariant, FileNode, Kit, Tree, TreeItem, TreeStyle};
 
 use crate::models::OpenFileView;
-use crate::state::{InspectorTab, PiGuiAction, PiGuiState};
-use crate::theme::WakuPalette;
+use crate::state::{PiGuiAction, PiGuiState};
+use crate::theme::{LayoutMetrics, WakuPalette};
 
-/// Renders the virtualized workspace file tree and/or syntax-highlighted file preview pane.
+/// Renders Waku's side-by-side 184px workspace file tree and syntax-highlighted file preview pane.
 pub fn view(s: &PiGuiState, k: &Kit, pal: &WakuPalette, _cx: &mut Cx<PiGuiState>) -> El {
-    if s.inspector_tab == InspectorTab::File
-        && let Some(file) = &s.open_file
-    {
-        return render_open_file_pane(k, pal, file, true);
-    }
+    let tree_section = col()
+        .key("right_panel.files.tree")
+        .role("list")
+        .w(LayoutMetrics::DEFAULT_FILE_TREE_WIDTH)
+        .h_full()
+        .border_layout()
+        .border_sides([0.0, 1.0, 0.0, 0.0], pal.border)
+        .child(render_tree_section(s, k, pal));
 
-    let tree_section = render_tree_section(s, k, pal);
-    if let Some(file) = &s.open_file {
-        return col()
-            .key("file-view")
-            .grow(1.0)
+    let preview = if let Some(file) = &s.open_file {
+        el().grow(1.0)
+            .min_w(0.0)
             .min_h(0.0)
-            .w_full()
-            .child(el().grow(1.0).min_h(0.0).w_full().child(tree_section))
-            .child(
-                el().h(260.0)
-                    .min_h(0.0)
-                    .w_full()
-                    .border_sides([1.0, 0.0, 0.0, 0.0], pal.border)
-                    .child(render_open_file_pane(k, pal, file, false)),
-            );
-    }
+            .h_full()
+            .child(render_open_file_pane(k, pal, file))
+    } else {
+        col().grow(1.0).min_w(0.0).h_full().center().child(
+            text("Select a file to preview")
+                .font(k.ty.small)
+                .color(pal.text_tertiary),
+        )
+    };
 
-    col().key("file-view").grow(1.0).min_h(0.0).w_full().child(tree_section)
+    row()
+        .key("file-view")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .h_full()
+        .child(tree_section)
+        .child(preview)
 }
 
 fn render_tree_section(s: &PiGuiState, k: &Kit, pal: &WakuPalette) -> El {
     let header = row()
         .key("file-tree-header")
         .w_full()
-        .px(12.0)
+        .px(10.0)
         .py(8.0)
         .justify_between()
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], pal.border)
-        .child(text("Workspace Files").font(k.ty.ui_medium).color(pal.text))
+        .child(text("Files").font(k.ty.ui_medium).color(pal.text))
         .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(
-                    Badge::new(format!("{}", s.files.len()))
-                        .variant(BadgeVariant::Subtle)
-                        .build(k),
-                )
-                .child(
-                    Button::new("Refresh")
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Small)
-                        .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::ReloadPlugins, None))
-                        .build(k),
-                ),
+            Badge::new(format!("{}", s.files.len()))
+                .variant(BadgeVariant::Subtle)
+                .build(k),
         );
 
     if s.file_tree.visible_len() > 0 {
@@ -170,7 +165,7 @@ fn render_tree_section(s: &PiGuiState, k: &Kit, pal: &WakuPalette) -> El {
         .child(fallback)
 }
 
-fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView, standalone: bool) -> El {
+fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView) -> El {
     let resolved_lang = file
         .language
         .as_deref()
@@ -189,23 +184,6 @@ fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView, standa
                 .font(k.ty.small)
                 .color(pal.text_tertiary),
         );
-    if standalone {
-        controls = controls.child(
-            Button::new("Files")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::SelectInspectorTab(InspectorTab::Files), None))
-                .build(k),
-        );
-    } else {
-        controls = controls.child(
-            Button::new("Expand")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press(|st: &mut PiGuiState| st.dispatch(PiGuiAction::SelectInspectorTab(InspectorTab::File), None))
-                .build(k),
-        );
-    }
 
     let file_header = row()
         .key("open-file-header")
@@ -224,6 +202,7 @@ fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView, standa
         .key("open-file-lines")
         .grow(1.0)
         .min_h(0.0)
+        .min_w(0.0)
         .w_full()
         .padding(10.0)
         .gap(2.0)
@@ -241,18 +220,24 @@ fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView, standa
             }
         } else {
             text(line).font(k.ty.mono).color(pal.text)
-        };
+        }
+        .grow(1.0)
+        .min_w(0.0)
+        .shrink()
+        .wrap_anywhere();
         lines_col = lines_col.child(
             row()
                 .key(format!("file-line-{idx}"))
                 .w_full()
+                .min_w(0.0)
                 .gap(10.0)
-                .center_y()
+                .items_start()
                 .child(
                     el().w(34.0)
+                        .shrink()
                         .child(text(format!("{:>4}", idx + 1)).font(k.ty.mono).color(pal.text_ghost)),
                 )
-                .child(el().grow(1.0).min_w(0.0).child(rendered_line)),
+                .child(rendered_line),
         );
     }
 
@@ -260,6 +245,7 @@ fn render_open_file_pane(k: &Kit, pal: &WakuPalette, file: &OpenFileView, standa
         .key("open-file-view")
         .grow(1.0)
         .min_h(0.0)
+        .min_w(0.0)
         .w_full()
         .child(file_header)
         .child(lines_col)

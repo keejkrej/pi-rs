@@ -7,6 +7,7 @@ pub mod diff_view;
 pub mod file_view;
 pub mod models;
 pub mod overlays;
+pub mod replication;
 pub mod right_panel;
 pub mod settings;
 pub mod sidebar;
@@ -20,9 +21,10 @@ pub use chrome::{app_spec, app_view, init_state, on_key, poll_state, run, setup_
 pub use state::{
     ActiveStreamState, AuthProviderViewModel, ContentBlockView, ContextUsageView, DemoScene, DiffFileViewModel,
     DiffHunkViewModel, DiffLineKind, DiffLineViewModel, DiffSummary, ExtensionDialogView, FileTreeEntryView,
-    InspectorTab, LaunchConfig, MessageRoleView, MessageViewModel, ModelUsageSummary, ModelViewModel, NavRailTab,
+    InspectorTab, LaunchConfig, MessageRoleView, MessageViewModel, ModelPickerTab, ModelUsageSummary, ModelViewModel,
     OpenFileView, OverlayKind, PiGuiAction, PiGuiError, PiGuiState, PluginKind, PluginOrigin, PluginViewModel,
-    SCENE_ENTRIES, SteeringQueueItem, TerminalOutputLine, TerminalSessionView, ThreadGroup, ThreadSummary,
-    ToastMessage, ToastTone, ToolCallStatus, ToolCallViewModel,
+    PopoverKind, SCENE_ENTRIES, SettingsPage, SidebarGrouping, SidebarOrdering, SteeringQueueItem, TerminalOutputLine,
+    TerminalSessionView, ThreadGroup, ThreadSummary, ToastMessage, ToastTone, ToolCallStatus, ToolCallViewModel,
+    WorkspaceMode,
 };
 pub use theme::{LayoutMetrics, ThemePreference, WakuPalette, palette, sp, waku_kit};

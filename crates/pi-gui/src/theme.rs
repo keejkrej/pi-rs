@@ -59,9 +59,13 @@ pub struct WakuRadius;
 
 impl WakuRadius {
     pub const SM: f32 = 6.0;
-    pub const MD: f32 = 8.0;
+    pub const MD: f32 = 9.0;
     pub const LG: f32 = 12.0;
-    pub const PILL: f32 = 999.0;
+    pub const COMPOSER: f32 = 13.0;
+    pub const PALETTE: f32 = 15.0;
+    pub const DIALOG: f32 = 18.0;
+    pub const TOAST: f32 = 10.0;
+    pub const PILL: f32 = 9999.0;
 }
 
 /// Shared layout constants matching Waku's desktop geometry.
@@ -75,13 +79,28 @@ impl LayoutMetrics {
     pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 420.0;
+    pub const SIDEBAR_HEADER_HEIGHT: f32 = 48.0;
+    pub const SIDEBAR_ACTION_ROW_HEIGHT: f32 = 32.0;
+    pub const SIDEBAR_GROUP_HEADER_HEIGHT: f32 = 28.0;
+    pub const SIDEBAR_SESSION_CARD_HEIGHT: f32 = 51.0;
+    pub const SIDEBAR_FOOTER_HEIGHT: f32 = 40.0;
     pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
     pub const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;
     pub const RIGHT_PANEL_MAX_WIDTH: f32 = 1000.0;
+    pub const RIGHT_PANEL_HEADER_HEIGHT: f32 = 48.0;
+    pub const RIGHT_PANEL_TAB_HEIGHT: f32 = 28.0;
     pub const DEFAULT_FILE_TREE_WIDTH: f32 = 184.0;
     pub const CONTENT_MAX_WIDTH: f32 = 720.0;
-    pub const NAV_RAIL_WIDTH: f32 = 44.0;
-    pub const TITLEBAR_HEIGHT: f32 = 40.0;
+    pub const QUEUE_TRAY_MAX_WIDTH: f32 = 692.0;
+    pub const USER_BUBBLE_MAX_WIDTH: f32 = 540.0;
+    pub const COMMAND_PALETTE_MAX_WIDTH: f32 = 680.0;
+    pub const COMMAND_PALETTE_MAX_HEIGHT: f32 = 480.0;
+    pub const COMMIT_DIALOG_MAX_WIDTH: f32 = 420.0;
+    pub const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
+    pub const SETTINGS_USAGE_MAX_WIDTH: f32 = 1024.0;
+    pub const TOAST_TOP: f32 = 56.0;
+    pub const TOAST_MAX_WIDTH: f32 = 560.0;
+    pub const TITLEBAR_HEIGHT: f32 = 48.0;
     pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 
     #[must_use]
@@ -302,6 +321,63 @@ impl WakuPalette {
         } else {
             srgba(0.15, 0.39, 0.92, 0.08)
         }
+    }
+
+    /// Formats a linear Rune [`Color`] as an sRGB CSS hex or `rgba(...)` string.
+    #[must_use]
+    pub fn color_to_css(color: Color) -> String {
+        let hex = color.hex();
+        let bytes = hex.as_bytes();
+        let r = u8::from_str_radix(std::str::from_utf8(&bytes[1..3]).unwrap_or("00"), 16).unwrap_or(0);
+        let g = u8::from_str_radix(std::str::from_utf8(&bytes[3..5]).unwrap_or("00"), 16).unwrap_or(0);
+        let b = u8::from_str_radix(std::str::from_utf8(&bytes[5..7]).unwrap_or("00"), 16).unwrap_or(0);
+        if color.a >= 0.999 {
+            format!("#{r:02X}{g:02X}{b:02X}")
+        } else {
+            let trimmed = format!("{:.2}", color.a)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string();
+            format!("rgba({r}, {g}, {b}, {trimmed})")
+        }
+    }
+
+    /// Returns all canonical `ui-tokens/1` color token entries for this resolved palette.
+    #[must_use]
+    pub fn color_tokens(self) -> Vec<(String, String)> {
+        let prefix = if self.is_dark { "dark" } else { "light" };
+        [
+            ("bg.canvas", self.canvas),
+            ("bg.surface", self.surface),
+            ("bg.sidebar", self.sidebar),
+            ("bg.sidebar_item", self.sidebar_item_background),
+            ("bg.raised", self.raised),
+            ("bg.composer", self.composer),
+            ("bg.inset", self.inset),
+            ("bg.terminal", self.terminal),
+            ("bg.overlay", self.overlay),
+            ("bg.overlay_strong", self.overlay_strong),
+            ("border.default", self.border),
+            ("border.strong", self.border_strong),
+            ("border.sidebar", self.sidebar_border),
+            ("fg.primary", self.text),
+            ("fg.secondary", self.text_secondary),
+            ("fg.tertiary", self.text_tertiary),
+            ("fg.ghost", self.text_ghost),
+            ("accent.default", self.accent),
+            ("gauge.default", self.gauge),
+            ("code.text", self.code_text),
+            ("code.wash", self.code_wash),
+            ("inverse.bg", self.inverse),
+            ("inverse.fg", self.on_inverse),
+            ("status.warning", self.warning),
+            ("status.success", self.success),
+            ("status.favorite", self.favorite),
+            ("status.danger", self.danger),
+        ]
+        .into_iter()
+        .map(|(k, c)| (format!("{prefix}.{k}"), Self::color_to_css(c)))
+        .collect()
     }
 }
 

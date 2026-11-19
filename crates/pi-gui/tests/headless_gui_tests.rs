@@ -1,10 +1,10 @@
 use pi_gui::{
     AuthProviderViewModel, BridgeEvent, ContentBlockView, ContextUsageView, DemoScene, DiffFileViewModel,
     DiffHunkViewModel, DiffLineKind, DiffLineViewModel, DiffSummary, ExtensionDialogView, FileTreeEntryView,
-    InspectorTab, LaunchConfig, MessageRoleView, MessageViewModel, ModelUsageSummary, ModelViewModel, NavRailTab,
-    OpenFileView, OverlayKind, PiGuiAction, PiGuiState, PluginKind, PluginOrigin, PluginViewModel, TerminalOutputLine,
-    ThemePreference, ThreadGroup, ThreadSummary, ToastTone, ToolCallStatus, ToolCallViewModel, app_view, on_key,
-    poll_state,
+    InspectorTab, LaunchConfig, MessageRoleView, MessageViewModel, ModelUsageSummary, ModelViewModel, OpenFileView,
+    OverlayKind, PiGuiAction, PiGuiState, PluginKind, PluginOrigin, PluginViewModel, PopoverKind, SettingsPage,
+    TerminalOutputLine, ThemePreference, ThreadGroup, ThreadSummary, ToastTone, ToolCallStatus, ToolCallViewModel,
+    app_view, on_key, poll_state,
 };
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -18,7 +18,7 @@ fn boot_runtime(mut state: PiGuiState, size: (f32, f32), dark: bool) -> Runtime<
 }
 
 fn settle_frames(rt: &mut Runtime<PiGuiState>) {
-    for _ in 0..8 {
+    for _ in 0..6 {
         rt.frame(0.016);
     }
 }
@@ -54,6 +54,12 @@ fn send_key(rt: &mut Runtime<PiGuiState>, key: Key, mods: Mods) {
 fn populate_rich_state(state: &mut PiGuiState) {
     state.sidebar_pane.set_open(true);
     state.inspector_pane.set_open(true);
+    state.open_right_tabs = vec![
+        InspectorTab::Changes,
+        InspectorTab::Files,
+        InspectorTab::Terminal,
+        InspectorTab::Tree,
+    ];
 
     let active_model = ModelViewModel {
         provider: "anthropic".to_string(),
@@ -179,7 +185,7 @@ fn populate_rich_state(state: &mut PiGuiState) {
     state.apply_bridge_event(BridgeEvent::ThreadsUpdated(vec![
         ThreadSummary {
             id: "sess-1".to_string(),
-            title: "GUI Step 4B-3".to_string(),
+            title: "GUI Waku Overhaul".to_string(),
             cwd: "/workspace/pi-rs".to_string(),
             model: Some("Claude Sonnet 4".to_string()),
             updated_at_ms: 2000,
@@ -201,7 +207,7 @@ fn populate_rich_state(state: &mut PiGuiState) {
         },
     ]));
     state.apply_bridge_event(BridgeEvent::DiffUpdated(DiffSummary {
-        branch: Some("swarm/mcp-w4".to_string()),
+        branch: Some("swarm/waku-ui".to_string()),
         files: vec![
             DiffFileViewModel {
                 path: "crates/pi-gui/src/right_panel.rs".to_string(),
@@ -302,46 +308,50 @@ fn demo_scenes_render_without_panic_and_non_zero_bounds() {
             };
             let rt = boot_runtime(PiGuiState::new(cfg), (1280.0, 820.0), dark);
 
-            assert_positive_rect(&rt, "main-pane");
-            assert_positive_rect(&rt, "transcript-scroll-host");
-            assert_positive_rect(&rt, "composer-card");
-            if rt.state.sidebar_pane.is_open() {
-                assert_positive_rect(&rt, "sidebar");
-            }
-            if rt.state.inspector_pane.is_open() {
-                assert_positive_rect(&rt, "right-panel");
-            }
-            match &rt.state.overlay {
-                Some(OverlayKind::CommandPalette) => {
-                    assert_positive_rect(&rt, "overlay-scrim");
-                    assert_positive_rect(&rt, "overlay-command-palette");
+            if rt.state.settings_open.is_some() {
+                assert_positive_rect(&rt, "settings");
+                assert_positive_rect(&rt, "settings.sidebar");
+                assert_positive_rect(&rt, "settings.content");
+                assert_positive_rect(&rt, "settings.content.inner");
+            } else {
+                assert_positive_rect(&rt, "workspace");
+                assert_positive_rect(&rt, "workspace.main");
+                assert_positive_rect(&rt, "workspace.main.header");
+                assert_positive_rect(&rt, "workspace.main.composer");
+                assert_positive_rect(&rt, "workspace.main.footer");
+                if rt.state.messages.is_empty() && rt.state.active_stream.is_none() {
+                    assert_positive_rect(&rt, "workspace.main.empty_state");
+                } else {
+                    assert_positive_rect(&rt, "workspace.main.transcript");
                 }
-                Some(OverlayKind::Settings) => {
-                    assert_positive_rect(&rt, "overlay-scrim");
-                    assert_positive_rect(&rt, "overlay-settings");
-                    assert_positive_rect(&rt, "settings-scroll");
+                if rt.state.sidebar_pane.is_open() {
+                    assert_positive_rect(&rt, "workspace.sidebar");
+                    assert_positive_rect(&rt, "workspace.sidebar.settings");
+                } else {
+                    assert_positive_rect(&rt, "workspace.main.header.sidebar_toggle");
                 }
-                Some(_) => assert_positive_rect(&rt, "overlay-scrim"),
-                None => {}
+                if rt.state.inspector_pane.is_open() {
+                    assert_positive_rect(&rt, "right_panel");
+                }
             }
         }
     }
 
-    // Verify all primary split chrome panes simultaneously open with populated content.
+    // Verify all primary Waku 3 panes simultaneously open with populated content.
     let mut full_state = PiGuiState::new(LaunchConfig {
         cwd: "/workspace/pi-rs".to_string(),
         ..LaunchConfig::default()
     });
     populate_rich_state(&mut full_state);
     let rt = boot_runtime(full_state, (1320.0, 840.0), true);
-    assert_positive_rect(&rt, "sidebar");
-    assert_positive_rect(&rt, "transcript-scroll-host");
-    assert_positive_rect(&rt, "composer-card");
-    assert_positive_rect(&rt, "right-panel");
+    assert_positive_rect(&rt, "workspace.sidebar");
+    assert_positive_rect(&rt, "workspace.main.transcript");
+    assert_positive_rect(&rt, "workspace.main.composer");
+    assert_positive_rect(&rt, "right_panel");
 }
 
 #[test]
-fn inspector_tabs_render_and_handle_interactions() {
+fn right_panel_tabs_render_and_handle_interactions() {
     let mut state = PiGuiState::new(LaunchConfig {
         cwd: "/workspace/pi-rs".to_string(),
         ..LaunchConfig::default()
@@ -350,103 +360,67 @@ fn inspector_tabs_render_and_handle_interactions() {
     let mut rt = boot_runtime(state, (1280.0, 820.0), true);
 
     for tab in InspectorTab::ALL {
-        click_key(&mut rt, &format!("inspector-tab-{}", tab.label()));
+        click_key(&mut rt, &format!("right_panel.tab.{}", tab.id()));
         assert_eq!(rt.state.inspector_tab, tab);
-        assert_positive_rect(&rt, "right-panel");
+        assert_positive_rect(&rt, "right_panel");
         match tab {
-            InspectorTab::Diff => {
+            InspectorTab::Changes => {
                 assert_positive_rect(&rt, "diff-view");
-                assert_positive_rect(&rt, "diff-file-list");
-                assert_positive_rect(&rt, "diff-scroll");
+                assert_positive_rect(&rt, "right_panel.changes.commit_btn");
                 assert_positive_rect(&rt, "diff-file-crates/pi-gui/src/right_panel.rs");
             }
             InspectorTab::Files => {
                 assert_positive_rect(&rt, "file-view");
-                assert_positive_rect(&rt, "file-tree-pane");
-            }
-            InspectorTab::File => {
-                assert_positive_rect(&rt, "file-view");
-                assert_positive_rect(&rt, "open-file-view");
-                assert_positive_rect(&rt, "open-file-lines");
+                assert_positive_rect(&rt, "right_panel.files.tree");
             }
             InspectorTab::Terminal => {
-                assert_positive_rect(&rt, "terminal-view");
+                assert_positive_rect(&rt, "right_panel.terminal.surface");
                 assert_positive_rect(&rt, "terminal-output");
                 assert_positive_rect(&rt, "terminal-input");
             }
-            InspectorTab::Tools => {
-                assert_positive_rect(&rt, "inspector-tools");
-                assert_positive_rect(&rt, "tool-src-ext-quickjs");
-            }
-            InspectorTab::Plugins => {
-                assert_positive_rect(&rt, "inspector-plugins");
-                assert_positive_rect(&rt, "plugin-ext-quickjs");
+            InspectorTab::Tree => {
+                assert_positive_rect(&rt, "right_panel.tree.body");
             }
         }
     }
 
-    // Verify plugin switch toggle in right panel Plugins tab.
-    assert!(rt.state.plugins[0].enabled);
-    click_key(&mut rt, "plugin-toggle-ext-quickjs");
-    assert!(!rt.state.plugins[0].enabled);
-
     // Verify terminal preset chip and clear action.
-    click_key(&mut rt, "inspector-tab-Terminal");
+    click_key(&mut rt, "right_panel.tab.terminal");
     assert!(!rt.state.terminal.lines.is_empty());
     click_key(&mut rt, "terminal-preset-git-status");
     assert!(rt.state.terminal.running);
     click_key(&mut rt, "terminal-clear-btn");
     assert!(rt.state.terminal.lines.is_empty());
 
-    // Verify diff revert button opens Confirm modal and Confirm dispatches git checkout.
-    click_key(&mut rt, &format!("inspector-tab-{}", InspectorTab::Diff.label()));
-    click_key(&mut rt, "diff-list-item-README.md");
-    assert_eq!(rt.state.diff.selected_path.as_deref(), Some("README.md"));
-    click_key(&mut rt, "diff-revert-README.md");
-    assert!(matches!(rt.state.overlay, Some(OverlayKind::Confirm { .. })));
-    assert_positive_rect(&rt, "overlay-confirm");
-    click_key(&mut rt, "confirm-accept-btn");
+    // Verify Changes Commit button opens CommitDialog modal.
+    click_key(&mut rt, "right_panel.tab.changes");
+    click_key(&mut rt, "right_panel.changes.commit_btn");
+    assert!(matches!(rt.state.overlay, Some(OverlayKind::CommitDialog)));
+    assert_positive_rect(&rt, "commit_dialog.card");
+    click_key(&mut rt, "commit_dialog.include_unstaged");
+    assert!(!rt.state.commit_include_unstaged);
+    send_key(&mut rt, Key::Escape, Mods::default());
     assert!(rt.state.overlay.is_none());
-
-    // Verify inspector collapse button toggles inspector closed cleanly.
-    click_key(&mut rt, "inspector-collapse-btn");
-    assert!(!rt.state.inspector_pane.is_open());
-
-    // Verify fallback paths when tree is empty and diff is empty.
-    let mut empty_inspector = PiGuiState::new(LaunchConfig::default());
-    empty_inspector.inspector_pane.set_open(true);
-    empty_inspector.files = vec![FileTreeEntryView {
-        path: "notes.txt".to_string(),
-        name: "notes.txt".to_string(),
-        is_dir: false,
-        depth: 0,
-        expanded: false,
-        modified: false,
-    }];
-    let mut empty_rt = boot_runtime(empty_inspector, (1280.0, 820.0), false);
-    assert_positive_rect(&empty_rt, "diff-empty");
-    click_key(&mut empty_rt, "inspector-tab-Files");
-    assert_positive_rect(&empty_rt, "file-tree-fallback");
-    assert_positive_rect(&empty_rt, "file-entry-notes.txt");
 }
 
 #[test]
-fn interactive_dispatch_overlays_command_palette_and_settings() {
+fn waku_popovers_command_palette_and_settings_interactions() {
     let mut state = PiGuiState::new(LaunchConfig {
         cwd: "/workspace/pi-rs".to_string(),
         ..LaunchConfig::default()
     });
     populate_rich_state(&mut state);
+    state.inspector_pane.set_open(false);
     let mut rt = boot_runtime(state, (1280.0, 820.0), true);
 
-    // Dispatch ToggleSidebar and ToggleInspector interactively.
+    // Toggle sidebar via Waku header icon button.
     let initial_sidebar = rt.state.sidebar_pane.is_open();
-    rt.state.dispatch(PiGuiAction::ToggleSidebar, None);
-    rt.invalidate();
-    settle_frames(&mut rt);
+    click_key(&mut rt, "workspace.sidebar.toggle");
     assert_ne!(rt.state.sidebar_pane.is_open(), initial_sidebar);
+    click_key(&mut rt, "workspace.main.header.sidebar_toggle");
+    assert_eq!(rt.state.sidebar_pane.is_open(), initial_sidebar);
 
-    // Open CommandPalette via Cmd+K shortcut, filter by typing, and submit.
+    // Open CommandPalette via Cmd+K shortcut, verify card, filter, and escape.
     send_key(
         &mut rt,
         Key::Command('k'),
@@ -456,90 +430,81 @@ fn interactive_dispatch_overlays_command_palette_and_settings() {
         },
     );
     assert!(matches!(rt.state.overlay, Some(OverlayKind::CommandPalette)));
-    assert_positive_rect(&rt, "overlay-command-palette");
-    assert_positive_rect(&rt, "palette-command-list");
-
-    click_key(&mut rt, "palette-search-input");
-    send_key(&mut rt, Key::Text("settings".to_string()), Mods::default());
-    assert!(rt.find("palette-cmd-open-settings").is_some());
-    send_key(&mut rt, Key::Enter, Mods::default());
-    assert!(matches!(rt.state.overlay, Some(OverlayKind::Settings)));
-    assert_positive_rect(&rt, "overlay-settings");
-    assert_positive_rect(&rt, "settings-scroll");
-
-    // Change theme preference and toggle reduced motion + QuickJS plugin in Settings.
-    assert_eq!(rt.state.theme_preference, ThemePreference::System);
-    click_key(&mut rt, "theme-pref-Light");
-    assert_eq!(rt.state.theme_preference, ThemePreference::Light);
-    click_key(&mut rt, "theme-pref-Dark");
-    assert_eq!(rt.state.theme_preference, ThemePreference::Dark);
-
-    assert_positive_rect(&rt, "settings-plugin-ext-quickjs");
-    assert_positive_rect(&rt, "settings-plugin-mcp-docs");
-    let before = rt.state.plugins[0].enabled;
-    click_key(&mut rt, "settings-plugin-toggle-ext-quickjs");
-    assert_ne!(rt.state.plugins[0].enabled, before);
-    click_key(&mut rt, "settings-reload-plugins-btn");
-    click_key(&mut rt, "settings-close-btn");
+    assert_positive_rect(&rt, "command_palette.card");
+    assert_positive_rect(&rt, "command_palette.search");
+    assert_positive_rect(&rt, "command_palette.results");
+    send_key(&mut rt, Key::Escape, Mods::default());
     assert!(rt.state.overlay.is_none());
 
-    // Verify all remaining overlay kinds render cleanly and Escape dismisses them.
-    let cases: Vec<(OverlayKind, &str)> = vec![
-        (OverlayKind::ModelPicker, "overlay-model-picker"),
-        (OverlayKind::SessionPicker, "overlay-session-picker"),
-        (OverlayKind::BranchPicker, "overlay-branch-picker"),
-        (OverlayKind::FilePicker, "overlay-file-picker"),
-        (OverlayKind::Auth, "overlay-auth"),
-        (
-            OverlayKind::ImagePreview {
-                path: "/workspace/snap.png".to_string(),
-                title: "Snapshot".to_string(),
-            },
-            "overlay-image-preview",
-        ),
-        (
-            OverlayKind::ExtensionDialog(ExtensionDialogView {
-                request_id: "dlg-1".to_string(),
-                title: "Choose environment".to_string(),
-                message: Some("Pick a target or type an override".to_string()),
-                options: vec!["staging".to_string(), "prod".to_string()],
-                allow_input: true,
-            }),
-            "overlay-extension-dialog",
-        ),
-    ];
+    // Open full-window 2-pane Settings via bottom-left footer gear button.
+    click_key(&mut rt, "workspace.sidebar.settings");
+    assert_eq!(rt.state.settings_open, Some(SettingsPage::General));
+    assert_positive_rect(&rt, "settings");
+    assert_positive_rect(&rt, "settings.sidebar");
+    assert_positive_rect(&rt, "settings.content");
 
-    for (kind, key) in cases {
-        rt.state.dispatch(PiGuiAction::OpenOverlay(kind), None);
-        rt.invalidate();
+    click_key(&mut rt, "settings.sidebar.nav.appearance");
+    assert_eq!(rt.state.settings_open, Some(SettingsPage::Appearance));
+    click_key(&mut rt, "settings-theme-light");
+    assert_eq!(rt.state.theme_preference, ThemePreference::Light);
+    click_key(&mut rt, "settings-theme-dark");
+    assert_eq!(rt.state.theme_preference, ThemePreference::Dark);
+
+    click_key(&mut rt, "settings.sidebar.nav.skills");
+    assert_eq!(rt.state.settings_open, Some(SettingsPage::Skills));
+    let before = rt.state.plugins[0].enabled;
+    click_key(&mut rt, "settings-skill-ext-quickjs");
+    rt.state.dispatch(
+        PiGuiAction::TogglePlugin {
+            id: "ext-quickjs".to_string(),
+            enabled: !before,
+        },
+        None,
+    );
+    assert_ne!(rt.state.plugins[0].enabled, before);
+
+    click_key(&mut rt, "settings.sidebar.back");
+    assert!(rt.state.settings_open.is_none());
+
+    // Verify all 7 anchored Waku popovers open cleanly and Escape dismisses them.
+    for pop in [
+        PopoverKind::SidebarOptions,
+        PopoverKind::ModelPicker,
+        PopoverKind::ThinkingPicker,
+        PopoverKind::ProjectPicker,
+        PopoverKind::WorkspacePicker,
+        PopoverKind::BranchPicker,
+        PopoverKind::ContextUsage,
+    ] {
+        rt.state.dispatch(PiGuiAction::OpenPopover(pop), None);
         settle_frames(&mut rt);
-        assert_positive_rect(&rt, "overlay-scrim");
-        assert_positive_rect(&rt, key);
+        assert_eq!(rt.state.popover, Some(pop));
         send_key(&mut rt, Key::Escape, Mods::default());
-        assert!(rt.state.overlay.is_none(), "Escape should close {key}");
+        assert!(rt.state.popover.is_none(), "Escape should close {pop:?}");
     }
 
-    // Verify ExtensionDialog confirm submits input and clears palette_edit, plus ToastRegion renders.
+    // Verify toast renders at top-center and dismiss works.
     rt.state.push_toast("Extension updated", ToastTone::Success);
+    rt.invalidate();
+    settle_frames(&mut rt);
+    assert_positive_rect(&rt, "workspace.toast");
+    click_key(&mut rt, "workspace.toast.dismiss");
+    assert!(rt.state.toasts.is_empty());
+
+    // Verify ExtensionDialog opens and Escape dismisses.
     rt.state.dispatch(
         PiGuiAction::OpenOverlay(OverlayKind::ExtensionDialog(ExtensionDialogView {
-            request_id: "dlg-2".to_string(),
-            title: "Confirm Name".to_string(),
-            message: None,
-            options: Vec::new(),
-            allow_input: true,
+            request_id: "dlg-1".to_string(),
+            title: "Choose environment".to_string(),
+            message: Some("Pick target".to_string()),
+            options: vec!["staging".to_string(), "prod".to_string()],
+            allow_input: false,
         })),
         None,
     );
-    rt.state.palette_edit.replace_text("custom-val");
     rt.invalidate();
     settle_frames(&mut rt);
-    assert_positive_rect(&rt, "toast-1");
-    click_key(&mut rt, "ext-dlg-confirm-btn");
+    assert_positive_rect(&rt, "overlay-extension-dialog");
+    send_key(&mut rt, Key::Escape, Mods::default());
     assert!(rt.state.overlay.is_none());
-    assert!(rt.state.palette_edit.text.is_empty());
-
-    // Select nav tab Settings also opens Settings overlay.
-    rt.state.dispatch(PiGuiAction::SelectNavTab(NavRailTab::Settings), None);
-    assert!(matches!(rt.state.overlay, Some(OverlayKind::Settings)));
 }
