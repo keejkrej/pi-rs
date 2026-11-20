@@ -3,292 +3,261 @@
 use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
+use pi_ai::types::SamplingParamsByThinkingLevel;
 use pi_ai::{ModelCost, ModelCostTier, ModelInput, ModelInputLimits, ModelPromptCache, ThinkingLevelMap};
-use pi_js::vendor::typebox::{Schema, Validator, ValueError, compile, t};
+use pi_schema::{
+    CompileOptions, NumOptions, Schema, StrOptions, ValidationError, Validator, arr, bool_with, compile, map_with,
+    num_with, obj_with, opt, str, str_with, unknown,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::core::pi_ai_schemas::{
+    model_cost_schema, model_input_limits_schema, model_input_modality_schema, model_prompt_cache_schema,
+    partial_model_cost_schema, provider_compat_schema, thinking_level_map_schema,
+};
 use crate::utils::json::strip_json_comments;
 use crate::utils::paths::normalize_path;
 use crate::utils::text::strip_bom;
 
-static MODELS_CONFIG_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&models_config_schema()));
+static MODELS_CONFIG_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(models_config_schema(), CompileOptions::default()).expect("valid models config schema"));
 
-fn models_config_schema() -> Schema {
-    let percentile_cutoffs = t::object([
-        ("p50", t::number().optional()),
-        ("p75", t::number().optional()),
-        ("p90", t::number().optional()),
-        ("p99", t::number().optional()),
-    ]);
+fn sampling_params_schema() -> Schema {
+    map_with(unknown(), pi_schema::Annotations::default())
+}
 
-    let open_router_routing = t::object([
-        ("allow_fallbacks", t::boolean().optional()),
-        ("require_parameters", t::boolean().optional()),
-        (
-            "data_collection",
-            t::union([t::literal("deny"), t::literal("allow")]).optional(),
-        ),
-        ("zdr", t::boolean().optional()),
-        ("enforce_distillable_text", t::boolean().optional()),
-        ("order", t::array(t::string()).optional()),
-        ("only", t::array(t::string()).optional()),
-        ("ignore", t::array(t::string()).optional()),
-        ("quantizations", t::array(t::string()).optional()),
-        (
-            "sort",
-            t::union([
-                t::string(),
-                t::object([
-                    ("by", t::string().optional()),
-                    ("partition", t::union([t::string(), t::null()]).optional()),
-                ]),
-            ])
-            .optional(),
-        ),
-        (
-            "max_price",
-            t::object([
-                ("prompt", t::union([t::number(), t::string()]).optional()),
-                ("completion", t::union([t::number(), t::string()]).optional()),
-                ("image", t::union([t::number(), t::string()]).optional()),
-                ("audio", t::union([t::number(), t::string()]).optional()),
-                ("request", t::union([t::number(), t::string()]).optional()),
-            ])
-            .optional(),
-        ),
-        (
-            "preferred_min_throughput",
-            t::union([t::number(), percentile_cutoffs.clone()]).optional(),
-        ),
-        (
-            "preferred_max_latency",
-            t::union([t::number(), percentile_cutoffs]).optional(),
-        ),
-    ]);
+fn sampling_params_by_thinking_level_schema() -> Schema {
+    obj_with(
+        [
+            ("off", opt(sampling_params_schema())),
+            ("minimal", opt(sampling_params_schema())),
+            ("low", opt(sampling_params_schema())),
+            ("medium", opt(sampling_params_schema())),
+            ("high", opt(sampling_params_schema())),
+            ("xhigh", opt(sampling_params_schema())),
+            ("max", opt(sampling_params_schema())),
+        ],
+        pi_schema::ObjOptions::default(),
+    )
+    .description("samplingParams per thinking level, merged over samplingParams.")
+}
 
-    let vercel_gateway_routing = t::object([
-        ("only", t::array(t::string()).optional()),
-        ("order", t::array(t::string()).optional()),
-    ]);
+fn headers_schema() -> Schema {
+    map_with(
+        str(),
+        pi_schema::Annotations {
+            description: Some("Request headers. Values resolve like apiKey.".to_owned()),
+            ..Default::default()
+        },
+    )
+}
 
-    let thinking_level_map_value = t::union([t::string(), t::null()]);
-    let thinking_level_map = t::object([
-        ("off", thinking_level_map_value.clone().optional()),
-        ("minimal", thinking_level_map_value.clone().optional()),
-        ("low", thinking_level_map_value.clone().optional()),
-        ("medium", thinking_level_map_value.clone().optional()),
-        ("high", thinking_level_map_value.clone().optional()),
-        ("xhigh", thinking_level_map_value.clone().optional()),
-        ("max", thinking_level_map_value.optional()),
-    ]);
+fn non_empty_str(description: &str) -> Schema {
+    str_with(StrOptions {
+        annotations: pi_schema::Annotations {
+            description: Some(description.to_owned()),
+            ..Default::default()
+        },
+        min_length: Some(1),
+        ..Default::default()
+    })
+}
 
-    let chat_template_kwarg_scalar = t::union([t::string(), t::number(), t::boolean(), t::null()]);
-    let chat_template_kwarg_var = t::object([
-        (
-            "$var",
-            t::union([t::literal("thinking.enabled"), t::literal("thinking.effort")]),
-        ),
-        ("omitWhenOff", t::boolean().optional()),
-    ]);
-    let chat_template_kwarg = t::union([chat_template_kwarg_scalar, chat_template_kwarg_var]);
+pub fn model_definition_schema() -> Schema {
+    obj_with(
+        [
+            ("id", non_empty_str("Model ID sent to the API.")),
+            (
+                "name",
+                opt(non_empty_str("Display name, also matched by --model patterns.")),
+            ),
+            ("api", opt(non_empty_str("Overrides the provider api."))),
+            ("baseUrl", opt(non_empty_str("Overrides the provider baseUrl."))),
+            (
+                "reasoning",
+                opt(bool_with(pi_schema::Annotations {
+                    description: Some("Whether the model supports thinking.".to_owned()),
+                    ..Default::default()
+                })
+                .with("default", false)),
+            ),
+            ("thinkingLevelMap", opt(thinking_level_map_schema())),
+            (
+                "input",
+                opt(arr(model_input_modality_schema()).with("default", json!(["text"]))),
+            ),
+            ("inputLimits", opt(model_input_limits_schema())),
+            ("cost", opt(model_cost_schema())),
+            ("promptCache", opt(model_prompt_cache_schema())),
+            (
+                "contextWindow",
+                opt(num_with(NumOptions {
+                    annotations: pi_schema::Annotations {
+                        description: Some("Context window in tokens.".to_owned()),
+                        ..Default::default()
+                    },
+                    exclusive_minimum: Some(0.0),
+                    ..Default::default()
+                })
+                .with("default", 128_000)),
+            ),
+            (
+                "maxTokens",
+                opt(num_with(NumOptions {
+                    annotations: pi_schema::Annotations {
+                        description: Some("Maximum output tokens.".to_owned()),
+                        ..Default::default()
+                    },
+                    exclusive_minimum: Some(0.0),
+                    ..Default::default()
+                })
+                .with("default", 16_384)),
+            ),
+            (
+                "samplingParams",
+                opt(map_with(
+                    unknown(),
+                    pi_schema::Annotations {
+                        description: Some(
+                            "Fields merged into every request body. Applies only to OpenAI-compatible APIs.".to_owned(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "samplingParamsByThinkingLevel",
+                opt(sampling_params_by_thinking_level_schema()),
+            ),
+            ("headers", opt(headers_schema())),
+            ("compat", opt(provider_compat_schema())),
+        ],
+        pi_schema::ObjOptions::default(),
+    )
+}
 
-    let session_affinity_format = t::union([
-        t::literal("openai"),
-        t::literal("openai-nosession"),
-        t::literal("openrouter"),
-    ]);
+pub fn model_override_schema() -> Schema {
+    obj_with(
+        [
+            (
+                "name",
+                opt(non_empty_str("Display name, also matched by --model patterns.")),
+            ),
+            (
+                "reasoning",
+                opt(bool_with(pi_schema::Annotations {
+                    description: Some("Whether the model supports thinking.".to_owned()),
+                    ..Default::default()
+                })),
+            ),
+            ("thinkingLevelMap", opt(thinking_level_map_schema())),
+            ("input", opt(arr(model_input_modality_schema()))),
+            ("inputLimits", opt(model_input_limits_schema())),
+            ("cost", opt(partial_model_cost_schema())),
+            ("promptCache", opt(model_prompt_cache_schema())),
+            (
+                "contextWindow",
+                opt(num_with(NumOptions {
+                    annotations: pi_schema::Annotations {
+                        description: Some("Context window in tokens.".to_owned()),
+                        ..Default::default()
+                    },
+                    exclusive_minimum: Some(0.0),
+                    ..Default::default()
+                })),
+            ),
+            (
+                "maxTokens",
+                opt(num_with(NumOptions {
+                    annotations: pi_schema::Annotations {
+                        description: Some("Maximum output tokens.".to_owned()),
+                        ..Default::default()
+                    },
+                    exclusive_minimum: Some(0.0),
+                    ..Default::default()
+                })),
+            ),
+            (
+                "samplingParams",
+                opt(map_with(
+                    unknown(),
+                    pi_schema::Annotations {
+                        description: Some(
+                            "Fields merged into every request body. Applies only to OpenAI-compatible APIs.".to_owned(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "samplingParamsByThinkingLevel",
+                opt(sampling_params_by_thinking_level_schema()),
+            ),
+            ("headers", opt(headers_schema())),
+            ("compat", opt(provider_compat_schema())),
+        ],
+        pi_schema::ObjOptions::default(),
+    )
+}
 
-    let openai_completions_compat = t::object([
-        ("supportsStore", t::boolean().optional()),
-        ("supportsDeveloperRole", t::boolean().optional()),
-        ("supportsReasoningEffort", t::boolean().optional()),
-        ("supportsUsageInStreaming", t::boolean().optional()),
-        ("supportsFinishReason", t::boolean().optional()),
-        (
-            "maxTokensField",
-            t::union([t::literal("max_completion_tokens"), t::literal("max_tokens")]).optional(),
-        ),
-        ("requiresToolResultName", t::boolean().optional()),
-        ("requiresAssistantAfterToolResult", t::boolean().optional()),
-        ("requiresThinkingAsText", t::boolean().optional()),
-        ("requiresReasoningContentOnAssistantMessages", t::boolean().optional()),
-        (
-            "thinkingFormat",
-            t::union([
-                t::literal("openai"),
-                t::literal("openrouter"),
-                t::literal("together"),
-                t::literal("baseten"),
-                t::literal("deepseek"),
-                t::literal("zai"),
-                t::literal("qwen"),
-                t::literal("chat-template"),
-                t::literal("qwen-chat-template"),
-                t::literal("string-thinking"),
-                t::literal("ant-ling"),
-            ])
-            .optional(),
-        ),
-        (
-            "chatTemplateKwargs",
-            t::record(t::string(), chat_template_kwarg.clone()).optional(),
-        ),
-        (
-            "chatTemplateArgs",
-            t::record(t::string(), chat_template_kwarg).optional(),
-        ),
-        ("cacheControlFormat", t::literal("anthropic").optional()),
-        ("openRouterRouting", open_router_routing.optional()),
-        ("vercelGatewayRouting", vercel_gateway_routing.optional()),
-        ("supportsOpenAIGrammarTools", t::boolean().optional()),
-        ("supportsStrictMode", t::boolean().optional()),
-        ("sendSessionAffinityHeaders", t::boolean().optional()),
-        ("sessionAffinityFormat", session_affinity_format.clone().optional()),
-        ("supportsLongCacheRetention", t::boolean().optional()),
-        ("vllmPriority", t::number().optional()),
-    ]);
+pub fn provider_config_schema() -> Schema {
+    obj_with(
+        [
+            ("name", opt(non_empty_str("Display name."))),
+            (
+                "baseUrl",
+                opt(non_empty_str(
+                    "API base URL. Also applies to the provider's built-in models.",
+                )),
+            ),
+            (
+                "apiKey",
+                opt(non_empty_str(
+                    "Literal key, \"$NAME\" environment interpolation, or \"!command\" output.",
+                )),
+            ),
+            (
+                "api",
+                opt(non_empty_str(
+                    "API for the provider's models, such as \"openai-completions\", \"openai-responses\", \"anthropic-messages\", or \"google-generative-ai\".",
+                )),
+            ),
+            (
+                "oauth",
+                opt(pi_schema::lit("radius").description("OAuth login flow. Requires baseUrl.")),
+            ),
+            ("headers", opt(headers_schema())),
+            ("compat", opt(provider_compat_schema())),
+            (
+                "authHeader",
+                opt(bool_with(pi_schema::Annotations {
+                    description: Some("Whether to send the resolved API key as Authorization: Bearer.".to_owned()),
+                    ..Default::default()
+                })
+                .with("default", false)),
+            ),
+            ("models", opt(arr(model_definition_schema()))),
+            (
+                "modelOverrides",
+                opt(map_with(model_override_schema(), pi_schema::Annotations::default())),
+            ),
+        ],
+        pi_schema::ObjOptions::default(),
+    )
+}
 
-    let openai_responses_compat = t::object([
-        ("supportsDeveloperRole", t::boolean().optional()),
-        ("sessionAffinityFormat", session_affinity_format.optional()),
-        ("supportsLongCacheRetention", t::boolean().optional()),
-        ("supportsStrictMode", t::boolean().optional()),
-        ("supportsOpenAIGrammarTools", t::boolean().optional()),
-        ("supportsMaxOutputTokens", t::boolean().optional()),
-    ]);
-
-    let model_cost_tier = t::object([
-        ("inputTokensAbove", t::number()),
-        ("input", t::number()),
-        ("output", t::number()),
-        ("cacheRead", t::number()),
-        ("cacheWrite", t::number()),
-    ]);
-
-    let model_cost = t::object([
-        ("input", t::number()),
-        ("output", t::number()),
-        ("cacheRead", t::number()),
-        ("cacheWrite", t::number()),
-        ("tiers", t::array(model_cost_tier.clone()).optional()),
-    ]);
-
-    let model_prompt_cache = t::object([
-        ("short", t::number().with("exclusiveMinimum", 0).optional()),
-        ("long", t::number().with("exclusiveMinimum", 0).optional()),
-    ]);
-
-    let image_resize = t::object([
-        ("maxWidth", t::integer().with("minimum", 1).optional()),
-        ("maxHeight", t::integer().with("minimum", 1).optional()),
-        ("maxBytes", t::integer().with("minimum", 1).optional()),
-        (
-            "jpegQuality",
-            t::integer().with("minimum", 1).with("maximum", 100).optional(),
-        ),
-    ]);
-
-    let model_input_limits = t::object([
-        ("maxRequestBytes", t::integer().with("minimum", 1).optional()),
-        (
-            "images",
-            t::object([
-                ("resize", image_resize.optional()),
-                ("maxPerMessage", t::integer().with("minimum", 1).optional()),
-                ("maxPerRequest", t::integer().with("minimum", 1).optional()),
-            ])
-            .optional(),
-        ),
-    ]);
-
-    let anthropic_messages_compat = t::object([
-        ("supportsEagerToolInputStreaming", t::boolean().optional()),
-        ("supportsLongCacheRetention", t::boolean().optional()),
-        ("sendSessionAffinityHeaders", t::boolean().optional()),
-        ("supportsCacheControlOnTools", t::boolean().optional()),
-        ("supportsTemperature", t::boolean().optional()),
-        ("forceAdaptiveThinking", t::boolean().optional()),
-        ("allowEmptySignature", t::boolean().optional()),
-        ("supportsStrictTools", t::boolean().optional()),
-        ("supportsMidConvoEffort", t::boolean().optional()),
-        (
-            "allowedFallbackModels",
-            t::array(t::object([
-                ("provider", t::string().with("minLength", 1)),
-                ("model", t::string().with("minLength", 1)),
-                ("cost", model_cost.clone()),
-            ]))
-            .with("maxItems", 3)
-            .optional(),
-        ),
-    ]);
-
-    let provider_compat = t::union([
-        openai_completions_compat,
-        openai_responses_compat,
-        anthropic_messages_compat,
-    ]);
-
-    let model_input = t::array(t::union([t::literal("text"), t::literal("image")]));
-
-    let model_definition = t::object([
-        ("id", t::string().with("minLength", 1)),
-        ("name", t::string().with("minLength", 1).optional()),
-        ("api", t::string().with("minLength", 1).optional()),
-        ("baseUrl", t::string().with("minLength", 1).optional()),
-        ("reasoning", t::boolean().optional()),
-        ("thinkingLevelMap", thinking_level_map.clone().optional()),
-        ("input", model_input.clone().optional()),
-        ("inputLimits", model_input_limits.clone().optional()),
-        ("cost", model_cost.optional()),
-        ("promptCache", model_prompt_cache.clone().optional()),
-        ("contextWindow", t::number().optional()),
-        ("maxTokens", t::number().optional()),
-        ("samplingParams", t::record(t::string(), t::unknown()).optional()),
-        ("headers", t::record(t::string(), t::string()).optional()),
-        ("compat", provider_compat.clone().optional()),
-    ]);
-
-    let model_override = t::object([
-        ("name", t::string().with("minLength", 1).optional()),
-        ("reasoning", t::boolean().optional()),
-        ("thinkingLevelMap", thinking_level_map.optional()),
-        ("input", model_input.optional()),
-        ("inputLimits", model_input_limits.optional()),
-        (
-            "cost",
-            t::object([
-                ("input", t::number().optional()),
-                ("output", t::number().optional()),
-                ("cacheRead", t::number().optional()),
-                ("cacheWrite", t::number().optional()),
-                ("tiers", t::array(model_cost_tier).optional()),
-            ])
-            .optional(),
-        ),
-        ("promptCache", model_prompt_cache.optional()),
-        ("contextWindow", t::number().optional()),
-        ("maxTokens", t::number().optional()),
-        ("samplingParams", t::record(t::string(), t::unknown()).optional()),
-        ("headers", t::record(t::string(), t::string()).optional()),
-        ("compat", provider_compat.clone().optional()),
-    ]);
-
-    let provider_config = t::object([
-        ("name", t::string().with("minLength", 1).optional()),
-        ("baseUrl", t::string().with("minLength", 1).optional()),
-        ("apiKey", t::string().with("minLength", 1).optional()),
-        ("api", t::string().with("minLength", 1).optional()),
-        ("oauth", t::literal("radius").optional()),
-        ("headers", t::record(t::string(), t::string()).optional()),
-        ("compat", provider_compat.optional()),
-        ("authHeader", t::boolean().optional()),
-        ("models", t::array(model_definition).optional()),
-        ("modelOverrides", t::record(t::string(), model_override).optional()),
-    ]);
-
-    t::object([("providers", t::record(t::string(), provider_config))])
+pub fn models_config_schema() -> Schema {
+    obj_with(
+        [
+            ("$schema", opt(str())),
+            (
+                "providers",
+                map_with(provider_config_schema(), pi_schema::Annotations::default()),
+            ),
+        ],
+        pi_schema::ObjOptions::default(),
+    )
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -319,6 +288,8 @@ pub struct ModelsJsonModel {
     pub max_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<IndexMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +335,8 @@ pub struct ModelsJsonModelOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<IndexMap<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Value>,
@@ -397,28 +370,13 @@ pub struct ModelsJsonProvider {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelsJson {
+    #[serde(rename = "$schema", default)]
+    pub schema: Option<String>,
     pub providers: IndexMap<String, ModelsJsonProvider>,
 }
 
-fn format_validation_path(error: &ValueError) -> String {
-    if error.keyword == "required" {
-        if let Some(required_property) = error
-            .params
-            .get("requiredProperties")
-            .and_then(Value::as_array)
-            .and_then(|arr| arr.first())
-            .and_then(Value::as_str)
-        {
-            let trimmed = error.instance_path.strip_prefix('/').unwrap_or(&error.instance_path);
-            let base_path = trimmed.replace('/', ".");
-            return if base_path.is_empty() {
-                required_property.to_owned()
-            } else {
-                format!("{base_path}.{required_property}")
-            };
-        }
-    }
-    let trimmed = error.instance_path.strip_prefix('/').unwrap_or(&error.instance_path);
+fn format_validation_path(error: &ValidationError) -> String {
+    let trimmed = error.path.strip_prefix('/').unwrap_or(&error.path);
     let path = trimmed.replace('/', ".");
     if path.is_empty() { "root".to_owned() } else { path }
 }

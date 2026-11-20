@@ -60,3 +60,13 @@ pub mod trust_manager;
 pub mod usage_totals;
 pub mod virtual_models;
 // @generated-mods end
+
+pub mod client_identity;
+pub mod key_id_schema;
+pub mod keybindings_schema;
+pub mod pi_ai_schemas;
+pub mod preferred_providers;
+pub mod provider_matching;
+pub mod radius_mcp;
+pub mod settings_defaults;
+pub mod settings_schema;

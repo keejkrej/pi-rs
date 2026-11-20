@@ -483,6 +483,7 @@ pub fn stream_git_lab_duo(
                 error_message: Some(err.to_string()),
                 raw_stop_reason: None,
                 end_turn: None,
+                duration_ms: None,
                 timestamp: now_ms(),
             };
             stream_clone.push(AssistantMessageEvent::Error {
@@ -526,6 +527,7 @@ impl Extension for GitLabDuoExtension {
                     context_window: m.context_window,
                     max_tokens: m.max_tokens,
                     sampling_params: None,
+                    sampling_params_by_thinking_level: None,
                     compat: None,
                 })
             })

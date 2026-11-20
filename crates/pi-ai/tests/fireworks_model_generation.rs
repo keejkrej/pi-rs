@@ -53,11 +53,13 @@ fn messages_reasoners_enable_force_adaptive_thinking_and_native_levels() {
 }
 
 #[test]
-fn toggle_and_fixed_reasoning_models_omit_force_adaptive_thinking() {
+fn messages_models_enable_force_adaptive_thinking_and_preserve_effort_maps() {
     let models = fireworks_models();
     for id in [
-        "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
-        "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+        "accounts/fireworks/models/deepseek-v4p1-flash",
+        "accounts/fireworks/models/ember-1",
+        "accounts/fireworks/models/minimax-m3",
+        "accounts/fireworks/models/minimax-m3p1-flash",
     ] {
         let model = models.get(id).expect(id);
         let compat = model
@@ -65,8 +67,8 @@ fn toggle_and_fixed_reasoning_models_omit_force_adaptive_thinking() {
             .as_ref()
             .and_then(ModelCompat::as_anthropic_messages)
             .expect("anthropic compat");
-        assert_eq!(compat.force_adaptive_thinking, None, "{id}");
-        assert_eq!(model.thinking_level_map, None, "{id}");
+        assert_eq!(compat.force_adaptive_thinking, Some(true), "{id}");
+        assert!(model.thinking_level_map.is_some(), "{id}");
     }
 }
 

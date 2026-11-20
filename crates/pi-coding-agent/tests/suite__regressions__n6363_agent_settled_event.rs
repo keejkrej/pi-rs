@@ -30,7 +30,7 @@ fn create_wait_tool(released: Arc<Notify>) -> AgentTool {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait until released".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -99,7 +99,7 @@ async fn emits_one_agent_settled_event_after_automatic_retry_finishes() {
     let public_events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
     let pe_c = Arc::clone(&public_events);
     let _unsub = harness.session.subscribe(move |ev| {
-        if matches!(ev, AgentSessionEvent::AgentSettled) {
+        if matches!(ev, AgentSessionEvent::AgentSettled { .. }) {
             pe_c.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push("agent_settled");
@@ -135,7 +135,7 @@ async fn emits_one_agent_settled_event_after_automatic_retry_finishes() {
     let settled_count = harness
         .events()
         .into_iter()
-        .filter(|e| matches!(e, AgentSessionEvent::AgentSettled))
+        .filter(|e| matches!(e, AgentSessionEvent::AgentSettled { .. }))
         .count();
     assert_eq!(settled_count, 1);
     assert_eq!(
@@ -220,7 +220,7 @@ async fn settles_only_after_follow_ups_queued_by_agent_end_handlers_run() {
         harness
             .events()
             .into_iter()
-            .filter(|e| matches!(e, AgentSessionEvent::AgentSettled))
+            .filter(|e| matches!(e, AgentSessionEvent::AgentSettled { .. }))
             .count(),
         1
     );
@@ -354,7 +354,7 @@ async fn extension_command_wait_for_idle_waits_for_session_level_settlement() {
         harness
             .events()
             .into_iter()
-            .filter(|e| matches!(e, AgentSessionEvent::AgentSettled))
+            .filter(|e| matches!(e, AgentSessionEvent::AgentSettled { .. }))
             .count(),
         1
     );

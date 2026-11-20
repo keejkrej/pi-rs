@@ -14,7 +14,7 @@ use crate::providers::openai_codex_models::openai_codex_models;
 pub fn openai_codex_provider() -> Result<Arc<dyn Provider + Send + Sync>> {
     create_provider(CreateProviderOptions {
         id: "openai-codex".to_string(),
-        name: Some("OpenAI Codex (legacy)".to_string()),
+        name: Some("OpenAI Codex".to_string()),
         base_url: Some("https://chatgpt.com/backend-api".to_string()),
         headers: None,
         auth: ProviderAuth {

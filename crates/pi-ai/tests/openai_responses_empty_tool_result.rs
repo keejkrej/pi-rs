@@ -10,16 +10,17 @@ use pi_ai::types::{
 use pi_js::time;
 use serde_json::{Value, json};
 
-fn build_empty_tool_result(tool_call_id: &str, timestamp: i64) -> Message {
+fn build_empty_tool_result(tool_call_id: &str, timestamp: i64, text: &str) -> Message {
     Message::ToolResult(ToolResultMessage {
         tool_call_id: tool_call_id.to_owned(),
         tool_name: "bash".to_owned(),
-        content: vec![UserContentBlock::Text(TextContent::new(""))],
+        content: vec![UserContentBlock::Text(TextContent::new(text))],
         details: None,
         usage: None,
         nested_calls: None,
         is_error: false,
         timestamp,
+        duration_ms: None,
     })
 }
 
@@ -47,32 +48,37 @@ fn uses_no_tool_output_placeholder_for_empty_tool_results_without_images() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now,
-    });
-
-    let context = normalize_context(&Context {
-        system_prompt: None,
-        messages: vec![
-            Message::User(UserMessage {
-                content: UserMessageContent::Text("Run the command".to_owned()),
-                timestamp: now - 1,
-            }),
-            assistant,
-            build_empty_tool_result("tool-1", now + 1),
-        ],
-        tools: None,
+        duration_ms: None,
     });
 
     let allowed: IndexSet<String> = ["openai", "openai-codex", "opencode"]
         .into_iter()
         .map(str::to_owned)
         .collect();
-    let input = convert_responses_messages(&model, &context, &allowed, None);
-    let function_call_output = input
-        .into_iter()
-        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
-        .unwrap();
 
-    let output = function_call_output.get("output").and_then(Value::as_str).unwrap();
-    assert_eq!(output, "(no tool output)");
-    assert!(!output.contains("see attached image"));
+    // Whitespace-only cases: https://github.com/earendil-works/pi/issues/8720
+    for text in ["", "\r\n", " \n\t"] {
+        let context = normalize_context(&Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage {
+                    content: UserMessageContent::Text("Run the command".to_owned()),
+                    timestamp: now - 1,
+                }),
+                assistant.clone(),
+                build_empty_tool_result("tool-1", now + 1, text),
+            ],
+            tools: None,
+        });
+
+        let input = convert_responses_messages(&model, &context, &allowed, None);
+        let function_call_output = input
+            .into_iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .unwrap();
+
+        let output = function_call_output.get("output").and_then(Value::as_str).unwrap();
+        assert_eq!(output, "(no tool output)");
+        assert!(!output.contains("see attached image"));
+    }
 }

@@ -679,6 +679,7 @@ async fn in_memory_serialization_cancellation_and_refresh_error_recovery() {
         credentials: Some(store),
         models_store: None,
         auth_context: None,
+        identity: None,
     }));
     models.set_provider(Arc::new(MockOAuthProvider {
         id: "oauth-provider".to_owned(),
@@ -775,4 +776,72 @@ async fn model_runtime_retries_oauth_refresh_after_transient_modify_failure() {
         .unwrap()
         .unwrap();
     assert_eq!(resolved.auth.api_key.as_deref(), Some("refreshed-access"));
+}
+
+// #11655: aliases of the same auth.json must share one lock.
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_auth_json_path_waits_for_lock_held_on_real_file_11655() {
+    use pi_js::abort::AbortController;
+    use tokio::time::Duration;
+
+    let tmp = TempDir::new().unwrap();
+    let real_file = tmp.path().join("auth.json");
+    let alias_file = tmp.path().join("alias.json");
+    write_auth_json(
+        &real_file,
+        &json!({ "anthropic": { "type": "api_key", "key": "stored" } }),
+    );
+    std::os::unix::fs::symlink(&real_file, &alias_file).unwrap();
+
+    let real_str = real_file.to_string_lossy().into_owned();
+    let alias_str = alias_file.to_string_lossy().into_owned();
+    let release = lock(
+        &real_str,
+        LockOptions {
+            realpath: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let backend = Arc::new(FileAuthStorageBackend::new(Some(&alias_str)));
+    let update_called = Arc::new(AtomicUsize::new(0));
+    let sync_called = Arc::new(AtomicUsize::new(0));
+
+    let ctrl = Arc::new(AbortController::new());
+    let sig = ctrl.signal();
+    let b_async = Arc::clone(&backend);
+    let uc = Arc::clone(&update_called);
+    let pending = tokio::spawn(async move {
+        b_async
+            .with_lock_async(
+                move |_| {
+                    uc.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(LockResult::write((), "{}".to_owned())) }.map_res()
+                },
+                Some(AuthOperationOptions { signal: Some(sig) }),
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    ctrl.abort(None);
+    assert!(pending.await.unwrap().unwrap_err().is_abort());
+
+    let sc = Arc::clone(&sync_called);
+    let sync_err = backend.with_lock(move |_| {
+        sc.fetch_add(1, Ordering::SeqCst);
+        Ok(LockResult::write((), "{}".to_owned()))
+    });
+    assert!(sync_err.is_err());
+
+    release.release().await.unwrap();
+    assert_eq!(update_called.load(Ordering::SeqCst), 0);
+    assert_eq!(sync_called.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read_auth_json(&real_file),
+        json!({ "anthropic": { "type": "api_key", "key": "stored" } })
+    );
 }

@@ -163,22 +163,31 @@ async fn login_anthropic(interaction: &ProviderAuthInteraction) -> Result<OAuthC
     let verifier = pkce.verifier;
     let challenge = pkce.challenge;
 
-    let callback = start_oauth_callback_server(OAuthCallbackServerOptions {
-        provider_name: "Anthropic".to_owned(),
-        host: callback_host(),
-        port: CALLBACK_PORT,
-        path: CALLBACK_PATH.to_owned(),
-        redirect_host: None,
-        state: Some(verifier.clone()),
-        complete: Box::new(|code| Box::pin(async move { Ok(code) })),
-        signal: Some(interaction.signal.clone()),
-        timeout_ms: None,
-    })
-    .await
-    .ok();
+    let start_callback_server = |port: u16| {
+        start_oauth_callback_server(OAuthCallbackServerOptions {
+            provider_name: "Anthropic".to_owned(),
+            host: callback_host(),
+            port,
+            path: CALLBACK_PATH.to_owned(),
+            redirect_host: Some("localhost".to_owned()),
+            state: Some(verifier.clone()),
+            complete: Box::new(|code| Box::pin(async move { Ok(code) })),
+            signal: Some(interaction.signal.clone()),
+            timeout_ms: None,
+        })
+    };
+    // Without a callback server, login continues with the pasted redirect URL.
+    let callback = match start_callback_server(CALLBACK_PORT).await {
+        Ok(cb) => Some(cb),
+        Err(_) => start_callback_server(0).await.ok(),
+    };
+    let redirect_uri = callback
+        .as_ref()
+        .map(|c| c.redirect_uri.as_str())
+        .unwrap_or(REDIRECT_URI);
 
     let result = async {
-        let auth_url = build_authorize_url(&challenge, &verifier, REDIRECT_URI)?;
+        let auth_url = build_authorize_url(&challenge, &verifier, redirect_uri)?;
         interaction.notify(AuthEvent::AuthUrl {
             url: auth_url,
             instructions: Some(
@@ -191,7 +200,7 @@ async fn login_anthropic(interaction: &ProviderAuthInteraction) -> Result<OAuthC
             interaction,
             callback.as_ref(),
             "Complete login in your browser, or paste the authorization code / redirect URL here:",
-            REDIRECT_URI,
+            redirect_uri,
         )
         .await?;
 
@@ -214,7 +223,7 @@ async fn login_anthropic(interaction: &ProviderAuthInteraction) -> Result<OAuthC
         interaction.notify(AuthEvent::Progress {
             message: "Exchanging authorization code for tokens...".to_owned(),
         });
-        exchange_authorization_code(&code, &state, &verifier, REDIRECT_URI, &interaction.signal).await
+        exchange_authorization_code(&code, &state, &verifier, redirect_uri, &interaction.signal).await
     }
     .await;
 

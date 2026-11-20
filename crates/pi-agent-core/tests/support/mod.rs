@@ -4,5 +4,6 @@
 // @generated-mods begin (scaffold-owned, do not edit)
 pub mod utils {
     pub mod calculate;
+    pub mod get_current_time;
 }
 // @generated-mods end

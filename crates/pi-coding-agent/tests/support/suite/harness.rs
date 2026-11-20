@@ -363,6 +363,7 @@ pub fn create_test_ui_context() -> Arc<dyn ExtensionUIContext> {
 
 #[derive(Clone, Default)]
 pub struct HarnessOptions {
+    pub provider: Option<String>,
     pub models: Option<Vec<FauxModelDefinition>>,
     pub settings: Option<Settings>,
     pub tools: Option<Vec<AgentTool>>,
@@ -425,6 +426,7 @@ impl Harness {
 pub async fn create_harness(options: HarnessOptions) -> Harness {
     let temp_dir = pi_js::fs::mkdtemp(&pi_js::path::join(&[&pi_js::env::tmp_dir(), "pi-suite-"])).unwrap();
     let faux_provider = register_faux_provider(Some(RegisterFauxProviderOptions {
+        provider: options.provider,
         models: options.models,
         ..Default::default()
     }));
@@ -500,6 +502,7 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
                     context_window: m.context_window,
                     max_tokens: m.max_tokens,
                     sampling_params: m.sampling_params.clone(),
+                    sampling_params_by_thinking_level: m.sampling_params_by_thinking_level.clone(),
                     compat: m.compat.clone(),
                 })
             })
@@ -579,6 +582,7 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
         .resource_loader
         .unwrap_or_else(|| create_suite_resource_loader(extensions_result));
 
+    let uses_default_tools = options.initial_active_tool_names.is_none();
     let session = AgentSession::new(AgentSessionConfig {
         agent,
         session_manager: session_manager.clone(),
@@ -594,10 +598,11 @@ pub async fn create_harness(options: HarnessOptions) -> Harness {
         scoped_models: None,
         custom_tools: None,
         cache_warmer: None,
-        uses_default_tools: None,
+        uses_default_tools: Some(uses_default_tools),
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     let events = Arc::new(Mutex::new(Vec::new()));

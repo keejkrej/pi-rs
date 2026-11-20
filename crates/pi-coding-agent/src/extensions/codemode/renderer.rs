@@ -5,9 +5,11 @@ use std::sync::{Arc, LazyLock};
 use serde_json::{Value, json};
 
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, Theme, ToolRenderContext, ToolRenderResultOptions};
-use crate::core::tools::render_utils::{get_text_output, replace_tabs, str_val};
+use crate::core::tools::render_utils::{
+    ToolTimerState, get_text_output, replace_tabs, start_tool_timer, str_val, tool_timer_text,
+};
 use crate::extensions::codemode::tool::{CodemodeNestedCall, CodemodeNestedCallStatus, CodemodeToolDetails};
-use crate::extensions::wire::{VisualLinePreview, VisualTruncateKeep, highlight_code, key_hint};
+use crate::extensions::wire::{CodeHighlighter, VisualLinePreview, VisualTruncateKeep, key_hint};
 use pi_agent_core::AgentToolResult;
 use pi_ai::UserContentBlock;
 use pi_tui::components::spacer::Spacer;
@@ -18,6 +20,12 @@ const CODE_PREVIEW_LINES: usize = 10;
 const CALL_PREVIEW_COUNT: usize = 8;
 const OUTPUT_PREVIEW_LINES: usize = 5;
 const COLLAPSED_ARGS_CHARS: usize = 80;
+
+#[derive(Default)]
+struct CodemodeRenderState {
+    timer: ToolTimerState,
+    script_highlighter: CodeHighlighter,
+}
 
 static SCRIPT_HEADER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^Script (?:completed|failed)\nWall time [0-9.]+ seconds\nOutput:\n$")
@@ -121,6 +129,7 @@ fn content_block_to_value(block: &UserContentBlock) -> Value {
 }
 
 pub fn render_call(args: Value, theme: Theme, context: ToolRenderContext) -> Arc<dyn Component> {
+    start_tool_timer(&context);
     let code = str_val(args.get("code"));
     let title = theme.fg("toolTitle", &theme.bold("codemode"));
     let component = Container::new();
@@ -139,7 +148,27 @@ pub fn render_call(args: Value, theme: Theme, context: ToolRenderContext) -> Arc
             if !code.is_empty() {
                 let cleaned = code.replace('\r', "");
                 let trimmed = cleaned.trim_end();
-                let highlighted = highlight_code(&replace_tabs(trimmed), Some("javascript"), &theme).join("\n");
+                let highlighter = context
+                    .state
+                    .lock()
+                    .ok()
+                    .map(|mut guard| {
+                        let state = guard.get_or_insert_with(|| Box::new(ToolTimerState::default()));
+                        if let Some(st) = state.downcast_mut::<ToolTimerState>() {
+                            if let Some(existing) = st.custom.as_ref().and_then(|c| c.downcast_ref::<CodeHighlighter>())
+                            {
+                                return existing.clone();
+                            }
+                            let created = CodeHighlighter::new();
+                            st.custom = Some(Arc::new(created.clone()));
+                            return created;
+                        }
+                        CodeHighlighter::new()
+                    })
+                    .unwrap_or_else(CodeHighlighter::new);
+                let highlighted = highlighter
+                    .highlight(&replace_tabs(trimmed), Some("javascript"), &theme)
+                    .join("\n");
                 if context.expanded {
                     component.add_child(Arc::new(Text::new(Some(&highlighted), Some(0), Some(0), None)));
                 } else {
@@ -163,6 +192,7 @@ pub fn render_result(
     theme: Theme,
     context: ToolRenderContext,
 ) -> Arc<dyn Component> {
+    let timer_text = tool_timer_text(&context, options.is_partial);
     let component = Container::new();
     let details: Option<CodemodeToolDetails> = result
         .details
@@ -249,6 +279,16 @@ pub fn render_result(
                 )));
             }
         }
+    }
+
+    if let Some(timer) = timer_text {
+        component.add_child(Arc::new(Spacer::new(Some(1))));
+        component.add_child(Arc::new(Text::new(
+            Some(&theme.fg("muted", &timer)),
+            Some(0),
+            Some(0),
+            None,
+        )));
     }
 
     Arc::new(component)

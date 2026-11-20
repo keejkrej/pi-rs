@@ -73,7 +73,31 @@ fn save_auth_file(auth: &IndexMap<String, OAuthCredential>) -> Result<()> {
         root.insert(k.clone(), Value::Object(obj));
     }
     let pretty = format_json_pretty(&Value::Object(root), 0);
-    std::fs::write(AUTH_FILE, pretty).map_err(|e| Error::msg(format!("Failed writing {AUTH_FILE}: {e}")))
+    write_private_auth_file(Path::new(AUTH_FILE), &pretty)
+}
+
+fn write_private_auth_file(path: &Path, content: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| Error::msg(format!("Failed setting permissions on {AUTH_FILE}: {e}")))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| Error::msg(format!("Failed opening {AUTH_FILE}: {e}")))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| Error::msg(format!("Failed writing {AUTH_FILE}: {e}")))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content).map_err(|e| Error::msg(format!("Failed writing {AUTH_FILE}: {e}")))
+    }
 }
 
 fn format_json_pretty(value: &Value, indent: usize) -> String {
@@ -202,6 +226,7 @@ async fn login_provider(provider_id: &str, providers: &[Arc<dyn Provider + Send 
             interaction,
             Some(LoginOptions {
                 get_device_id: Some(get_device_id),
+                agent_name: None,
             }),
         )
         .await?;

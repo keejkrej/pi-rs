@@ -8,21 +8,47 @@ use serde_json::Value;
 use crate::api::anthropic_messages_lazy::anthropic_messages_api;
 use crate::api::openai_completions_lazy::openai_completions_api;
 use crate::api::openai_responses_lazy::openai_responses_api;
+use crate::api::typesafe_system_one_lazy::typesafe_system_one_api;
 use crate::auth::helpers::{env_api_key_auth, lazy_oauth};
 use crate::auth::oauth::load::load_github_copilot_oauth;
 use crate::auth::types::{Credential, ProviderAuth};
 use crate::models::{CreateProviderApi, CreateProviderOptions, Provider};
 use crate::providers::all::build_provider;
-use crate::providers::github_copilot_models::github_copilot_models;
-use crate::types::{AnyModel, Model};
+use crate::providers::github_copilot_models::{github_copilot_classifier_models, github_copilot_models};
+use crate::types::{AnyModel, ClassifierModel, Model, ProviderClassifier};
+
+/// Copilot serves System One at `/v1/systemone`, while its chat APIs have no version prefix.
+/// The login replaces the catalog base URL with the account's endpoint, so the prefix is added per request.
+fn copilot_system_one(classifier: ProviderClassifier) -> ProviderClassifier {
+    let classify_fn = Arc::clone(&classifier.classify);
+    ProviderClassifier {
+        classify: Arc::new(move |model: &ClassifierModel, context, options| {
+            let mut adjusted = model.clone();
+            adjusted.base_url = format!("{}/v1", model.base_url.trim_end_matches('/'));
+            classify_fn(&adjusted, context, options)
+        }),
+    }
+}
 
 pub fn github_copilot_provider() -> Arc<dyn Provider + Send + Sync> {
-    let models: Vec<AnyModel> = github_copilot_models().values().cloned().map(AnyModel::Chat).collect();
+    let mut models: Vec<AnyModel> = github_copilot_models().values().cloned().map(AnyModel::Chat).collect();
+    models.extend(
+        github_copilot_classifier_models()
+            .values()
+            .cloned()
+            .map(AnyModel::Classifier),
+    );
 
     let mut apis = IndexMap::new();
     apis.insert("anthropic-messages".to_owned(), anthropic_messages_api());
     apis.insert("openai-completions".to_owned(), openai_completions_api());
     apis.insert("openai-responses".to_owned(), openai_responses_api());
+
+    let mut classifiers = IndexMap::new();
+    classifiers.insert(
+        "typesafe-system-one".to_owned(),
+        copilot_system_one(typesafe_system_one_api()),
+    );
 
     build_provider(CreateProviderOptions {
         id: "github-copilot".to_owned(),
@@ -63,6 +89,6 @@ pub fn github_copilot_provider() -> Arc<dyn Provider + Send + Sync> {
         filter_all_models: None,
         api: Some(CreateProviderApi::ByApi(apis)),
         images: None,
-        classifiers: None,
+        classifiers: Some(classifiers),
     })
 }

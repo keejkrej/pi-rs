@@ -14,13 +14,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use pi_js::{Error, Unsubscribe};
 
-use crate::protocol::jsonrpc::{JsonRpcMessage, McpConnectionClosedError, parse_json_rpc_message};
+use crate::protocol::jsonrpc::{JsonRpcMessage, McpConnectionClosedError};
+use crate::transports::lines::{JsonRpcLineReader, JsonRpcLineReaderOptions};
 use crate::transports::transport::{
-    DEFAULT_MAX_MESSAGE_BYTES, McpTransport, McpTransportCloseListener, McpTransportErrorListener,
-    McpTransportMessageListener, TransportEvents,
+    McpTransport, McpTransportCloseListener, McpTransportErrorListener, McpTransportMessageListener, TransportEvents,
 };
 
-const DEFAULT_MAX_STDERR_BYTES: i64 = 64 * 1024;
 const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 2_000;
 /// How long a server gets to exit on its own after stdin closes, before it is sent SIGTERM.
 const STDIN_CLOSE_GRACE_MS: i64 = 500;
@@ -107,9 +106,8 @@ pub struct StdioTransportOptions {
 
 struct StdioTransportState {
     pid: Option<u32>,
+    process_exited: bool,
     exited: bool,
-    stdout_buffer: Vec<u8>,
-    stderr_buffer: Vec<u8>,
     started: bool,
     closed: bool,
 }
@@ -117,6 +115,7 @@ struct StdioTransportState {
 struct StdioTransportInner {
     options: StdioTransportOptions,
     events: TransportEvents,
+    lines: JsonRpcLineReader,
     state: Mutex<StdioTransportState>,
     stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
     exit_notify: tokio::sync::Notify,
@@ -129,15 +128,25 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     pub fn new(options: StdioTransportOptions) -> Self {
+        let events = TransportEvents::new();
+        let events_msg = events.clone();
+        let events_err = events.clone();
+        let lines = JsonRpcLineReader::new(JsonRpcLineReaderOptions {
+            max_message_bytes: options.max_message_bytes,
+            max_stderr_bytes: options.max_stderr_bytes,
+            on_stderr: options.on_stderr.clone(),
+            on_message: Arc::new(move |message| events_msg.emit_message(message)),
+            on_error: Arc::new(move |error| events_err.emit_error(error)),
+        });
         Self {
             inner: Arc::new(StdioTransportInner {
                 options,
-                events: TransportEvents::new(),
+                events,
+                lines,
                 state: Mutex::new(StdioTransportState {
                     pid: None,
+                    process_exited: false,
                     exited: false,
-                    stdout_buffer: Vec::new(),
-                    stderr_buffer: Vec::new(),
                     started: false,
                     closed: false,
                 }),
@@ -152,28 +161,11 @@ impl StdioTransport {
     }
 
     pub fn stderr(&self) -> String {
-        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        String::from_utf8_lossy(&state.stderr_buffer).into_owned()
+        self.inner.lines.stderr()
     }
 
     pub fn options(&self) -> &StdioTransportOptions {
         &self.inner.options
-    }
-
-    fn max_message_bytes(&self) -> usize {
-        self.inner
-            .options
-            .max_message_bytes
-            .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES)
-            .max(0) as usize
-    }
-
-    fn max_stderr_bytes(&self) -> usize {
-        self.inner
-            .options
-            .max_stderr_bytes
-            .unwrap_or(DEFAULT_MAX_STDERR_BYTES)
-            .max(0) as usize
     }
 
     fn close_timeout_ms(&self) -> i64 {
@@ -182,65 +174,6 @@ impl StdioTransport {
             .close_timeout_ms
             .unwrap_or(DEFAULT_CLOSE_TIMEOUT_MS)
             .max(0)
-    }
-
-    fn handle_stdout(&self, chunk: &[u8]) {
-        let max_bytes = self.max_message_bytes();
-        let outcomes: Vec<std::result::Result<JsonRpcMessage, Error>> = {
-            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            if !chunk.is_empty() {
-                state.stdout_buffer.extend_from_slice(chunk);
-            }
-            let mut out = Vec::new();
-            while let Some(newline_idx) = state.stdout_buffer.iter().position(|&b| b == b'\n') {
-                let raw_line: Vec<u8> = state.stdout_buffer.drain(..newline_idx).collect();
-                // Drop the '\n' delimiter itself.
-                state.stdout_buffer.drain(..1);
-                if raw_line.len() > max_bytes {
-                    out.push(Err(Error::msg(format!("MCP message exceeds {max_bytes} bytes"))));
-                    continue;
-                }
-                let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(&raw_line);
-                let text = String::from_utf8_lossy(raw_line);
-                if pi_js::str16::trim(&text).is_empty() {
-                    continue;
-                }
-                match pi_js::json::parse(&text).and_then(|v| parse_json_rpc_message(&v)) {
-                    Ok(msg) => out.push(Ok(msg)),
-                    Err(err) => out.push(Err(err)),
-                }
-            }
-            if state.stdout_buffer.len() > max_bytes {
-                let size = state.stdout_buffer.len();
-                state.stdout_buffer.clear();
-                out.push(Err(Error::msg(format!(
-                    "MCP buffered message exceeds {max_bytes} bytes (got {size})"
-                ))));
-            }
-            out
-        };
-        for outcome in outcomes {
-            match outcome {
-                Ok(msg) => self.inner.events.emit_message(&msg),
-                Err(err) => self.inner.events.emit_error(&err),
-            }
-        }
-    }
-
-    fn handle_stderr(&self, chunk: &[u8]) {
-        let max_bytes = self.max_stderr_bytes();
-        {
-            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.stderr_buffer.extend_from_slice(chunk);
-            if state.stderr_buffer.len() > max_bytes {
-                let drop_len = state.stderr_buffer.len() - max_bytes;
-                state.stderr_buffer.drain(..drop_len);
-            }
-        }
-        if let Some(cb) = &self.inner.options.on_stderr {
-            let text = String::from_utf8_lossy(chunk);
-            cb(&text);
-        }
     }
 }
 
@@ -344,7 +277,7 @@ impl McpTransport for StdioTransport {
                 loop {
                     match out.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => this.handle_stdout(&buf[..n]),
+                        Ok(n) => this.inner.lines.read_stdout(&buf[..n]),
                     }
                 }
             })
@@ -357,7 +290,7 @@ impl McpTransport for StdioTransport {
                 loop {
                     match err.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => this.handle_stderr(&buf[..n]),
+                        Ok(n) => this.inner.lines.read_stderr(&buf[..n]),
                     }
                 }
             })
@@ -366,15 +299,16 @@ impl McpTransport for StdioTransport {
         let this = self.clone();
         tokio::spawn(async move {
             let _ = child.wait().await;
-            if let Some(pid) = pid {
-                LIVE_PROCESS_GROUPS
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .shift_remove(&pid);
-                let is_closed = this.inner.state.lock().unwrap_or_else(|e| e.into_inner()).closed;
-                if is_closed && use_process_groups() {
-                    kill_process_tree_pid(pid, true, "SIGTERM");
-                }
+            let is_closed = {
+                let mut state = this.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.process_exited = true;
+                state.closed
+            };
+            if let Some(pid) = pid
+                && is_closed
+                && use_process_groups()
+            {
+                kill_process_tree_pid(pid, true, "SIGTERM");
             }
             if let Some(task) = stdout_task {
                 let _ = task.await;
@@ -382,20 +316,20 @@ impl McpTransport for StdioTransport {
             if let Some(task) = stderr_task {
                 let _ = task.await;
             }
-            let incomplete = {
+            // Not on wait/exit: children of the server can outlive it while still holding its pipes.
+            if let Some(pid) = pid {
+                LIVE_PROCESS_GROUPS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .shift_remove(&pid);
+            }
+            {
                 let mut state = this.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.exited = true;
                 state.closed = true;
-                let has_trailing = !pi_js::str16::trim(&String::from_utf8_lossy(&state.stdout_buffer)).is_empty();
-                state.stdout_buffer.clear();
-                has_trailing
-            };
-            let _ = this.inner.stdin.lock().await.take();
-            if incomplete {
-                this.inner.events.emit_error(&Error::msg(
-                    "MCP stdio server closed with an incomplete JSON-RPC message",
-                ));
             }
+            let _ = this.inner.stdin.lock().await.take();
+            this.inner.lines.end();
             this.inner.events.emit_close();
             this.inner.exit_notify.notify_waiters();
         });
@@ -434,16 +368,18 @@ impl McpTransport for StdioTransport {
         let notified = self.inner.exit_notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let (pid, exited) = {
+        let (pid, exited, process_exited) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
                 return Ok(());
             }
             state.closed = true;
-            (state.pid, state.exited)
+            (state.pid, state.exited, state.process_exited)
         };
         let _ = self.inner.stdin.lock().await.take();
-        if pid.is_none() || exited {
+        // With process groups, a server that already exited can leave children holding its pipes; the
+        // group cleanup below still has to run for them.
+        if pid.is_none() || exited || (!use_process_groups() && process_exited) {
             self.inner.events.emit_close();
             return Ok(());
         }
@@ -456,14 +392,24 @@ impl McpTransport for StdioTransport {
             _ = pi_js::time::sleep(stdin_grace_ms as u64, None) => false,
         };
         if !exited_during_grace {
-            let exited_now = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).exited;
+            let exited_now = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .process_exited;
             kill_process_tree_pid(pid, exited_now, "SIGTERM");
             let exited_after_term = tokio::select! {
                 () = &mut notified => true,
                 _ = pi_js::time::sleep(close_timeout_ms as u64, None) => false,
             };
             if !exited_after_term {
-                let exited_now = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).exited;
+                let exited_now = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .process_exited;
                 kill_process_tree_pid(pid, exited_now, "SIGKILL");
                 let _ = tokio::time::timeout(Duration::from_secs(2), &mut notified).await;
             }

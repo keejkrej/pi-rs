@@ -9,10 +9,13 @@ use serde_json::{Map, Value};
 use crate::config::CONFIG_DIR_NAME;
 pub use crate::core::mcp_servers::{
     McpExposure, McpHttpServerConfig, McpOAuthConfig, McpProviderAuthConfig, McpServerConfig, McpStdioServerConfig,
-    get_mcp_tool_exposure, mcp_namespace, validate_mcp_server_config,
+    get_mcp_tool_exposure, validate_mcp_server_config,
 };
 use crate::utils::text::strip_bom;
 use pi_js::{Error, Result};
+pub use pi_mcp::mcp_namespace;
+
+const OVERRIDE_KEYS: &[&str] = &["enabled", "exposure", "toolExposure"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpScope {
@@ -39,6 +42,8 @@ pub struct McpServerEntry {
     pub source: String,
     /// `Global`, `Project`, or `Extension` (`pi.registerMcpServer()`).
     pub scope: Option<McpScope>,
+    /// Project `mcp.json` with an override of this global server's `enabled`, `exposure`, or `toolExposure`.
+    pub override_path: Option<String>,
 }
 
 impl McpServerEntry {
@@ -55,6 +60,8 @@ pub struct LoadedMcpConfig {
     pub servers: Vec<McpServerEntry>,
     pub auto_enable_codemode: Option<bool>,
     pub errors: Vec<String>,
+    /// The project `mcp.json` when the project is trusted, where `/mcp` saves project overrides.
+    pub project_config: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +121,55 @@ fn read_config_file(path: &str, scope: McpScope, state: &mut McpConfigState) {
         return;
     };
     for (name, value) in mcp_servers {
+        if scope == McpScope::Project
+            && let Some(val_obj) = value.as_object()
+            && pi_mcp::is_mcp_server_override(val_obj)
+        {
+            let extra: Vec<&str> = val_obj
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !OVERRIDE_KEYS.contains(k))
+                .collect();
+            let Some(base) = state.servers.get(name).cloned() else {
+                state.errors.push(format!(
+                    "{path}: server \"{name}\" needs \"command\" or \"url\", or a global server to override"
+                ));
+                continue;
+            };
+            if !extra.is_empty() {
+                state.errors.push(format!(
+                    "{path}: server \"{name}\": an override can only set {}",
+                    OVERRIDE_KEYS.join(", ")
+                ));
+                continue;
+            }
+            let base_json = match &base.config {
+                McpServerConfig::Stdio(s) => pi_js::json::stringify(s),
+                McpServerConfig::Http(h) => pi_js::json::stringify(h),
+            };
+            let mut merged = pi_js::json::parse(&base_json).unwrap_or_else(|_| Value::Object(Map::new()));
+            if let Some(merged_obj) = merged.as_object_mut() {
+                for (k, v) in val_obj {
+                    merged_obj.insert(k.clone(), v.clone());
+                }
+            }
+            match validate_mcp_server_config(name, &merged) {
+                Ok(cfg) => {
+                    state.servers.insert(
+                        name.clone(),
+                        McpServerEntry {
+                            name: base.name,
+                            config: cfg,
+                            source: base.source,
+                            scope: base.scope,
+                            override_path: Some(path.to_string()),
+                        },
+                    );
+                }
+                Err(err) => state.errors.push(format!("{path}: {err}")),
+            }
+            continue;
+        }
         let config = match validate_mcp_server_config(name, value) {
             Ok(cfg) => cfg,
             Err(err) => {
@@ -146,6 +202,7 @@ fn read_config_file(path: &str, scope: McpScope, state: &mut McpConfigState) {
                 config,
                 source: path.to_string(),
                 scope: Some(scope),
+                override_path: None,
             },
         );
     }
@@ -155,14 +212,18 @@ pub fn load_mcp_config(options: &LoadMcpConfigOptions) -> LoadedMcpConfig {
     let mut state = McpConfigState::default();
     let global_path = pi_js::path::join(&[&options.agent_dir, "mcp.json"]);
     read_config_file(&global_path, McpScope::Global, &mut state);
-    if options.project_trusted {
+    let project_config = if options.project_trusted {
         let project_path = pi_js::path::join(&[&options.cwd, *CONFIG_DIR_NAME, "mcp.json"]);
         read_config_file(&project_path, McpScope::Project, &mut state);
-    }
+        Some(project_path)
+    } else {
+        None
+    };
     LoadedMcpConfig {
         servers: state.servers.into_values().collect(),
         auto_enable_codemode: state.auto_enable_codemode,
         errors: state.errors,
+        project_config,
     }
 }
 
@@ -172,12 +233,17 @@ pub struct McpServerConfigPatch {
     pub exposure: Option<McpExposure>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UpdateMcpConfigOptions {
+    pub r#override: bool,
+}
+
 static INDENT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?m)^([ \t]+)\S").expect("valid indent regex"));
 
 fn edit_mcp_servers<F>(path: &str, edit: F) -> Result<()>
 where
-    F: FnOnce(Option<&mut Map<String, Value>>, &mut Map<String, Value>) -> Result<bool>,
+    F: FnOnce(&mut Option<Map<String, Value>>, &mut Map<String, Value>) -> Result<bool>,
 {
     let text = if Path::new(path).exists() {
         let raw = std::fs::read_to_string(path).map_err(|e| Error::from_io(e, "readFile", Some(path), None))?;
@@ -206,7 +272,7 @@ where
         Value::Object(m) => Some(m),
         _ => None,
     });
-    let changed = edit(servers_opt.as_mut(), root)?;
+    let changed = edit(&mut servers_opt, root)?;
     if let Some(servers_map) = servers_opt
         && !root.contains_key("mcpServers")
     {
@@ -232,23 +298,36 @@ where
     Ok(())
 }
 
-pub fn update_mcp_server_config(path: &str, name: &str, patch: McpServerConfigPatch) -> Result<()> {
+pub fn update_mcp_server_config(
+    path: &str,
+    name: &str,
+    patch: McpServerConfigPatch,
+    options: Option<UpdateMcpConfigOptions>,
+) -> Result<()> {
+    let override_opt = options.is_some_and(|o| o.r#override);
     edit_mcp_servers(path, |servers, _root| {
-        let Some(servers_map) = servers else {
+        if override_opt {
+            let map = servers.get_or_insert_with(Map::new);
+            if !map.contains_key(name) {
+                map.insert(name.to_string(), Value::Object(Map::new()));
+            }
+        }
+        let Some(servers_map) = servers.as_mut() else {
             return Err(Error::msg(format!("{path} does not define MCP server \"{name}\"")));
         };
         let Some(Value::Object(server)) = servers_map.get_mut(name) else {
             return Err(Error::msg(format!("{path} does not define MCP server \"{name}\"")));
         };
+        let keep_defaults = pi_mcp::is_mcp_server_override(server);
         if let Some(enabled) = patch.enabled {
-            if enabled {
+            if enabled && !keep_defaults {
                 server.shift_remove("enabled");
             } else {
-                server.insert("enabled".to_string(), Value::Bool(false));
+                server.insert("enabled".to_string(), Value::Bool(enabled));
             }
         }
         if let Some(exposure) = patch.exposure {
-            if exposure == McpExposure::Codemode {
+            if exposure == McpExposure::Codemode && !keep_defaults {
                 server.shift_remove("exposure");
             } else if let Ok(val) = pi_js::json::parse(&pi_js::json::stringify(&exposure)) {
                 server.insert("exposure".to_string(), val);
@@ -266,7 +345,7 @@ pub fn add_mcp_server_config(path: &str, name: &str, config: &McpServerConfig) -
     };
     let config_val = pi_js::json::parse(&serialized_str)?;
     edit_mcp_servers(path, |servers, root| {
-        let mut target = servers.cloned().unwrap_or_default();
+        let mut target = servers.take().unwrap_or_default();
         replaced = target.contains_key(name);
         target.insert(name.to_string(), config_val);
         root.insert("mcpServers".to_string(), Value::Object(target));
@@ -281,7 +360,7 @@ pub fn remove_mcp_server_config(path: &str, name: &str) -> Result<bool> {
     }
     let mut removed = false;
     edit_mcp_servers(path, |servers, _root| {
-        let Some(servers_map) = servers else {
+        let Some(servers_map) = servers.as_mut() else {
             return Ok(false);
         };
         if !servers_map.contains_key(name) {

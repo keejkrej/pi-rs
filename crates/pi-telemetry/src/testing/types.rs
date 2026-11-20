@@ -5,13 +5,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_js::BoxFuture;
 
-use crate::memory::RecordedTelemetrySpan;
-use crate::{Result, TelemetryContext};
+use crate::memory::{RecordedTelemetryMeasurement, RecordedTelemetrySpan};
+use crate::metrics::TelemetryMetrics;
+use crate::{Error, Result, TelemetryContext, TelemetryPropagation};
 
 /// A fresh adapter instance and normalized snapshot reader owned by one conformance case.
 #[async_trait]
 pub trait TelemetryAdapterFixture: Send + Sync {
     fn context(&self) -> Arc<dyn TelemetryContext + Send + Sync>;
+
+    fn propagation(&self) -> Option<Arc<dyn TelemetryPropagation + Send + Sync>> {
+        None
+    }
+
+    fn metrics(&self) -> Option<Arc<dyn TelemetryMetrics + Send + Sync>> {
+        None
+    }
+
+    async fn get_metrics(&self) -> Result<Vec<RecordedTelemetryMeasurement>> {
+        Err(Error::msg("Metrics reader not implemented by fixture"))
+    }
 
     async fn get_spans(&self) -> Result<Vec<RecordedTelemetrySpan>>;
 

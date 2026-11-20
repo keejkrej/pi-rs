@@ -11,19 +11,19 @@ use pi_tui::{Component, Container, Markdown, Spacer, visible_width};
 
 use crate::modes::interactive::bug_report::{BugReportContext, report_bug};
 use crate::modes::interactive::components::armin::ArminComponent;
-use crate::modes::interactive::components::armin_3d_lazy::play_armin_3d;
 use crate::modes::interactive::components::bash_execution::{BashExecutionComponent, TruncationResult};
 use crate::modes::interactive::components::dynamic_border::DynamicBorder;
 use crate::modes::interactive::components::earendil_announcement::EarendilAnnouncementComponent;
+use crate::modes::interactive::components::easter_egg_3d_lazy::play_armin_3d;
 use crate::modes::interactive::components::extension_selector::{ExtensionSelectorComponent, ExtensionSelectorOptions};
 use crate::modes::interactive::components::keybinding_hints::{
     KeyTextFormatOptions, format_key_text, key_display_text,
 };
 use crate::modes::interactive::components::login_dialog::{DeviceCodeInfo, LoginDialogComponent};
-use crate::modes::interactive::components::oauth_selector::provider_brand::{RADIUS_PROVIDER_ID, compare_providers};
 use crate::modes::interactive::components::oauth_selector::{
     AuthSelectorProvider, OAuthSelectorComponent, OAuthSelectorMode, format_auth_selector_provider_status,
 };
+use crate::modes::interactive::components::provider_brand::{RADIUS_PROVIDER_ID, compare_providers};
 use crate::modes::interactive::components::radius_login_selector::{RadiusOption, create_login_menu_selector};
 use crate::modes::interactive::components::session_selector::{SessionSelectorComponent, SessionSelectorOptions};
 use crate::modes::interactive::components::settings_selector::{FullscreenExitOutput, TreeFilterMode};
@@ -414,7 +414,7 @@ impl InteractiveMode {
         }));
     }
 
-    pub(crate) async fn handle_resume_session(&self, session_path: &str) -> CancelledResult {
+    pub async fn handle_resume_session(&self, session_path: &str) -> CancelledResult {
         self.clear_status_indicator(None);
         match self.inner.runtime_host.switch_session(session_path, None).await {
             Ok(res) => {
@@ -1243,14 +1243,16 @@ impl InteractiveMode {
             AuthEvent::DeviceCode {
                 user_code,
                 verification_uri,
+                open_browser_on_confirm,
+                copy_code_on_confirm,
                 interval_seconds,
                 expires_in_seconds,
             } => {
                 dialog.show_device_code(DeviceCodeInfo {
                     user_code,
                     verification_uri,
-                    open_browser_on_confirm: None,
-                    copy_code_on_confirm: None,
+                    open_browser_on_confirm,
+                    copy_code_on_confirm,
                     interval_seconds,
                     expires_in_seconds,
                 });

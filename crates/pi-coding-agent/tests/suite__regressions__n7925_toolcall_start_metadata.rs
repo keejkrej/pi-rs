@@ -63,7 +63,7 @@ mod regression_7925_tool_call_metadata_is_available_when_streaming_starts {
             name: "write".to_string(),
             label: "write".to_string(),
             description: "Write a file".to_string(),
-            parameters: t::object([("path", t::string()), ("content", t::string())]),
+            parameters: t::object([("path", t::string()), ("content", t::string())]).into(),
             constrained_sampling: None,
             output_schema: None,
             execution_mode: None,

@@ -49,6 +49,7 @@ pub fn faux_model() -> Model {
         max_tokens: 16_384,
         headers: None,
         sampling_params: None,
+        sampling_params_by_thinking_level: None,
         compat: None,
     }
 }
@@ -204,6 +205,7 @@ fn build_assistant_message(resp: &FauxResponse) -> AssistantMessage {
         error_message: resp.error.clone(),
         raw_stop_reason: None,
         end_turn: None,
+        duration_ms: None,
         timestamp: pi_js::time::now_ms(),
     }
 }
@@ -555,6 +557,7 @@ async fn create_harness_with_resource_loader(
                 context_window: model.context_window,
                 max_tokens: model.max_tokens,
                 sampling_params: model.sampling_params.clone(),
+                sampling_params_by_thinking_level: model.sampling_params_by_thinking_level.clone(),
                 compat: model.compat.clone(),
             })]),
             ..Default::default()
@@ -596,6 +599,7 @@ async fn create_harness_with_resource_loader(
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     let session_events = events.clone();
     let session_unsub = agent_session.subscribe(move |ev| match ev {

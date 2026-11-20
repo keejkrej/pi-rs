@@ -19,7 +19,7 @@ use crate::models_generated::{
 };
 use crate::providers::{
     amazon_bedrock::amazon_bedrock_provider, ant_ling::ant_ling_provider, anthropic::anthropic_provider,
-    azure_openai_responses::azure_openai_responses_provider, baseten::baseten_provider, cerebras::cerebras_provider,
+    azure::azure_provider, baseten::baseten_provider, cerebras::cerebras_provider,
     cloudflare_ai_gateway::cloudflare_ai_gateway_provider, cloudflare_workers_ai::cloudflare_workers_ai_provider,
     deepseek::deepseek_provider, fireworks::fireworks_provider, github_copilot::github_copilot_provider,
     google::google_provider, google_vertex::google_vertex_provider, groq::groq_provider,
@@ -29,8 +29,9 @@ use crate::providers::{
     openai::openai_provider, openai_codex::openai_codex_provider, opencode::opencode_provider,
     opencode_go::opencode_go_provider, openrouter::openrouter_provider, qwen_token_plan::qwen_token_plan_provider,
     qwen_token_plan_cn::qwen_token_plan_cn_provider, qwen_token_plan_individual::qwen_token_plan_individual_provider,
-    together::together_provider, typesafe::typesafe_provider, vercel_ai_gateway::vercel_ai_gateway_provider,
-    xai::xai_provider, xiaomi::xiaomi_provider, xiaomi_token_plan_ams::xiaomi_token_plan_ams_provider,
+    qwen_token_plan_individual_cn::qwen_token_plan_individual_cn_provider, together::together_provider,
+    typesafe::typesafe_provider, vercel_ai_gateway::vercel_ai_gateway_provider, xai::xai_provider,
+    xiaomi::xiaomi_provider, xiaomi_token_plan_ams::xiaomi_token_plan_ams_provider,
     xiaomi_token_plan_cn::xiaomi_token_plan_cn_provider, xiaomi_token_plan_sgp::xiaomi_token_plan_sgp_provider,
     zai::zai_provider, zai_coding_cn::zai_coding_cn_provider,
 };
@@ -255,7 +256,7 @@ pub fn builtin_providers() -> Vec<Arc<dyn Provider + Send + Sync>> {
         amazon_bedrock_provider(),
         ant_ling_provider(),
         unwrap_provider_result("anthropic", anthropic_provider()),
-        unwrap_provider_result("azure-openai-responses", azure_openai_responses_provider()),
+        unwrap_provider_result("azure", azure_provider()),
         baseten_provider(),
         cerebras_provider(),
         cloudflare_ai_gateway_provider(),
@@ -283,6 +284,7 @@ pub fn builtin_providers() -> Vec<Arc<dyn Provider + Send + Sync>> {
         qwen_token_plan_provider(),
         qwen_token_plan_cn_provider(),
         qwen_token_plan_individual_provider(),
+        qwen_token_plan_individual_cn_provider(),
         radius_provider(),
         together_provider(),
         typesafe_provider(),

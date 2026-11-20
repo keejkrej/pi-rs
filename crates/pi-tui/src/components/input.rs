@@ -9,14 +9,11 @@ use crate::keys::decode_kitty_printable;
 use crate::kill_ring::{KillRing, KillRingPushOptions};
 use crate::tui::{
     CURSOR_MARKER, Component, Focusable, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType,
+    render_fake_cursor,
 };
 use crate::undo_stack::UndoStack;
 use crate::utils::{get_grapheme_segmenter, is_whitespace_char, slice_by_column, truncate_to_width, visible_width};
 use crate::word_navigation::{find_word_backward, find_word_forward};
-
-fn render_fake_cursor(text: &str) -> String {
-    format!("\x1b[7m{text}\x1b[27m")
-}
 
 pub type InputSubmitCallback = Arc<dyn Fn(&str) + Send + Sync>;
 pub type InputEscapeCallback = Arc<dyn Fn() + Send + Sync>;

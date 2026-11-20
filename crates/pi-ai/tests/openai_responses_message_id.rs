@@ -4,20 +4,20 @@ use indexmap::IndexSet;
 use pi_ai::api::openai_responses_shared::convert_responses_messages;
 use pi_ai::compat::{get_model, normalize_context};
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, Context, Message, StopReason, TextContent, ThinkingContent, Usage,
-    UserMessage, UserMessageContent,
+    AssistantContentBlock, AssistantMessage, Context, Message, StopReason, TextContent, Usage, UserMessage,
+    UserMessageContent,
 };
 use pi_js::time;
 use serde_json::Value;
 
 #[test]
 fn generates_unique_fallback_message_ids_for_multiple_text_blocks_in_one_assistant_turn() {
-    let model = get_model("openai-codex", "gpt-5.5").unwrap();
+    let model = get_model("openai-codex", "gpt-6.1-sol").unwrap();
     let now = time::now_ms();
 
     let assistant = AssistantMessage {
         content: vec![
-            AssistantContentBlock::Thinking(ThinkingContent::new("private reasoning")),
+            AssistantContentBlock::Text(TextContent::new("first answer")),
             AssistantContentBlock::Text(TextContent::new("visible answer")),
         ],
         api: "anthropic-messages".to_owned(),
@@ -35,6 +35,7 @@ fn generates_unique_fallback_message_ids_for_multiple_text_blocks_in_one_assista
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now - 1000,
+        duration_ms: None,
     };
 
     let context = normalize_context(&Context {

@@ -32,6 +32,7 @@ fn model() -> ClassifierModel {
         context_window: 32768,
         cost: ModelCost::default(),
         headers: None,
+        compat: None,
     }
 }
 
@@ -216,7 +217,11 @@ fn sample_context() -> ClassifierContext {
         },
     );
 
-    ClassifierContext { state, questions }
+    ClassifierContext {
+        state,
+        questions,
+        images: None,
+    }
 }
 
 fn completion_depths(requests: &[RecordedRequest]) -> Vec<u64> {
@@ -405,6 +410,7 @@ async fn divides_label_log_probabilities_by_the_temperature() {
         &ClassifierContext {
             state: IndexMap::new(),
             questions,
+            images: None,
         },
         Some(opts),
     )
@@ -458,6 +464,7 @@ async fn retries_deeper_readouts_when_a_label_is_missing_and_fails_without_inven
     let ctx = ClassifierContext {
         state: IndexMap::new(),
         questions,
+        images: None,
     };
 
     let (deep_fetch, deep_reqs) = fake_server(FakeServerOptions {
@@ -519,6 +526,7 @@ async fn closes_a_reasoning_block_the_template_leaves_open() {
         &ClassifierContext {
             state: IndexMap::new(),
             questions,
+            images: None,
         },
         Some(opts),
     )
@@ -559,6 +567,7 @@ async fn reads_labels_in_reply_position_and_rejects_labels_that_are_not_one_toke
         &ClassifierContext {
             state: IndexMap::new(),
             questions: q_choice,
+            images: None,
         },
         Some(opts1),
     )
@@ -584,6 +593,7 @@ async fn reads_labels_in_reply_position_and_rejects_labels_that_are_not_one_toke
         &ClassifierContext {
             state: IndexMap::new(),
             questions: q_bool,
+            images: None,
         },
         Some(opts2),
     )
@@ -616,6 +626,7 @@ async fn caches_label_tokens_per_server_and_model() {
     let ctx = ClassifierContext {
         state: IndexMap::new(),
         questions,
+        images: None,
     };
 
     let mut opts1 = ClassifierOptions::default();
@@ -664,6 +675,7 @@ async fn validates_option_counts_before_sending_requests() {
         &ClassifierContext {
             state: IndexMap::new(),
             questions: q_many,
+            images: None,
         },
         Some(opts1),
     )
@@ -684,6 +696,7 @@ async fn validates_option_counts_before_sending_requests() {
         &ClassifierContext {
             state: IndexMap::new(),
             questions: q_few,
+            images: None,
         },
         Some(opts2),
     )
@@ -750,6 +763,7 @@ async fn passes_completion_payloads_and_responses_through_the_request_hooks() {
         &ClassifierContext {
             state: IndexMap::new(),
             questions,
+            images: None,
         },
         Some(opts),
     )

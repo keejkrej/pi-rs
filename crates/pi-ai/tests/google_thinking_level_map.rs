@@ -44,6 +44,7 @@ fn google_model(id: &str, thinking_level_map: ThinkingLevelMap) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn vertex_model(id: &str, thinking_level_map: ThinkingLevelMap) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -295,6 +297,32 @@ async fn disables_gemini_2_5_thinking_when_reasoning_is_omitted() {
     let v_payload =
         capture_vertex_payload(&vertex_model("gemini-2.5-flash", ThinkingLevelMap::new()), None, None).await;
     assert_eq!(v_payload["config"]["thinkingConfig"], json!({ "thinkingBudget": 0 }));
+}
+
+// Regression test for https://github.com/earendil-works/pi/issues/10890
+#[tokio::test]
+async fn uses_thinking_levels_for_gemini_4_models() {
+    let g_payload = capture_google_payload(
+        &google_model("gemini-4-argon", ThinkingLevelMap::new()),
+        Some(ThinkingLevel::Medium),
+        None,
+    )
+    .await;
+    assert_eq!(
+        g_payload["config"]["thinkingConfig"],
+        json!({ "includeThoughts": true, "thinkingLevel": "MEDIUM" })
+    );
+
+    let v_payload = capture_vertex_payload(
+        &vertex_model("gemini-4-argon", ThinkingLevelMap::new()),
+        Some(ThinkingLevel::Medium),
+        None,
+    )
+    .await;
+    assert_eq!(
+        v_payload["config"]["thinkingConfig"],
+        json!({ "includeThoughts": true, "thinkingLevel": "MEDIUM" })
+    );
 }
 
 #[tokio::test]

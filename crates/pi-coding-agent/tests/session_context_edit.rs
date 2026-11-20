@@ -42,6 +42,7 @@ fn assistant(text: &str) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 
@@ -108,6 +109,7 @@ fn omits_target_only_from_model_projection() {
         nested_calls: None,
         usage: None,
         timestamp: 0,
+        duration_ms: None,
     };
     let result_id = sm
         .append_message(AgentMessage::Message(Message::ToolResult(result.clone())))
@@ -184,6 +186,7 @@ fn normalizes_string_replacements_and_keeps_edits_branch_relative() {
             nested_calls: None,
             usage: None,
             timestamp: 0,
+            duration_ms: None,
         })))
         .unwrap();
 

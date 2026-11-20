@@ -14,9 +14,9 @@ use pi_codemode::{
     CodemodeSandboxOptions, CodemodeTool, RenderDeclarationsOptions, render_declarations,
 };
 use pi_js::abort::AbortSignal;
-use pi_js::vendor::typebox::{Schema, t};
 use pi_js::{BoxFuture, Error, Result};
 use pi_mcp::{LlmContent, McpClient, McpRequestOptions, to_llm_content};
+use pi_schema::{Annotations, ObjOptions, Schema, StrOptions, obj_with, str_with};
 use serde_json::{Map, Value, json};
 
 pub const CODEMODE_TOOL_NAME: &str = "codemode";
@@ -74,7 +74,7 @@ fn mcp_object_schema(input_schema: &IndexMap<String, Value>) -> Schema {
     if !map.contains_key("properties") || map.get("properties").is_some_and(Value::is_null) {
         map.insert("properties".to_string(), Value::Object(Map::new()));
     }
-    t::unsafe_(Value::Object(map))
+    Schema::from_value(Value::Object(map))
 }
 
 fn string_output_schema() -> CodemodeJsonSchema {
@@ -158,9 +158,7 @@ pub async fn create_mcp_tools(client: McpClient, prefix: &str) -> Result<Vec<Age
                         Ok(AgentToolResult {
                             content,
                             details: None,
-                            structured_content: result
-                                .structured_content
-                                .map(|m| Value::Object(m.into_iter().collect())),
+                            structured_content: result.structured_content,
                             usage: None,
                             is_error: Some(failed),
                             terminate: None,
@@ -218,11 +216,22 @@ pub fn create_nested_tool_runner(agent: Agent) -> NestedToolRunner {
 /// A tool that runs model-written JavaScript in the codemode sandbox, where `tools.<name>(args)`
 /// calls `tools`.
 pub fn create_codemode_tool(tools: &[AgentTool], run_tool: NestedToolRunner) -> AgentTool {
-    let codemode_parameters = t::object([(
-        "code",
-        t::string().with("description", "JavaScript source. Top-level await and return work."),
-    )])
-    .with("additionalProperties", true);
+    let codemode_parameters = obj_with(
+        [(
+            "code",
+            str_with(StrOptions {
+                annotations: Annotations {
+                    description: Some("JavaScript source. Top-level await and return work.".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )],
+        ObjOptions {
+            open: true,
+            ..Default::default()
+        },
+    );
 
     let sandbox_tools: Vec<CodemodeTool> = tools
         .iter()

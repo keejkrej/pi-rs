@@ -2524,6 +2524,7 @@ async fn totals_assistant_usage_per_model_and_tool_usage_per_tool_and_sums_the_s
             cache_read: 0.3,
             cache_write: 0.4,
             total: 1.0,
+            total_from_provider: None,
         },
         ..Default::default()
     };

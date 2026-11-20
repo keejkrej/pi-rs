@@ -417,7 +417,7 @@ async fn allows_extension_tool_call_handlers_to_block_tool_execution() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -508,6 +508,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
             cache_read: 0.3,
             cache_write: 0.4,
             total: 1.0,
+            total_from_provider: None,
         },
     };
     let patched_usage = Usage {
@@ -524,6 +525,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
             cache_read: 0.7,
             cache_write: 0.8,
             total: 2.6,
+            total_from_provider: None,
         },
     };
     let observed_usage: Arc<Mutex<Option<Usage>>> = Arc::new(Mutex::new(None));
@@ -532,7 +534,7 @@ async fn allows_extension_tool_result_handlers_to_modify_tool_results() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

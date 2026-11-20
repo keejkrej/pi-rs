@@ -14,7 +14,7 @@ use crate::core::extensions::types::{
 use crate::core::sdk::CreateAgentSessionResult;
 use crate::core::session_cwd::{SessionCwdSource, assert_session_cwd_exists};
 use crate::core::session_manager::{NewSessionOptions as ManagerNewSessionOptions, SessionEntry, SessionManager};
-use crate::utils::paths::{PathInputOptions, resolve_path};
+use crate::utils::paths::{PathInputOptions, paths_equal, resolve_path};
 
 pub use crate::core::agent_session_services::{
     AgentSessionRuntimeDiagnostic, AgentSessionRuntimeDiagnostic as RuntimeDiagnostic,
@@ -588,7 +588,7 @@ impl AgentSessionRuntime {
 
         let base_name = pi_js::path::basename(&resolved_path, None);
         let mut destination_path = pi_js::path::join(&[&session_dir, &base_name]);
-        let source_already_stored = pi_js::path::resolve(&[&destination_path]) == resolved_path;
+        let source_already_stored = paths_equal(&destination_path, &resolved_path);
         if !source_already_stored {
             let ext = pi_js::path::extname(&destination_path);
             let stem = pi_js::path::basename(&destination_path, Some(&ext));
@@ -615,7 +615,13 @@ impl AgentSessionRuntime {
         }
 
         let session_manager = SessionManager::open(&destination_path, Some(&session_dir), cwd_override)?;
-        assert_session_cwd_exists(&session_manager as &dyn SessionCwdSource, &current_cwd)?;
+        if let Err(err) = assert_session_cwd_exists(&session_manager as &dyn SessionCwdSource, &current_cwd) {
+            // The import did not happen; drop the copy so a retry with a cwd override or a fork leaves no stray file.
+            if !source_already_stored {
+                let _ = pi_js::fs::rm(&destination_path, false, true);
+            }
+            return Err(err);
+        }
         let next_file = session_manager.get_session_file();
         let target_cwd = session_manager.get_cwd();
         self.teardown_current(SessionShutdownReason::Resume, next_file).await;
@@ -636,10 +642,15 @@ impl AgentSessionRuntime {
     }
 
     pub async fn dispose(&self) {
-        let (session, before_invalidate) = {
+        let (session, services, before_invalidate) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            (guard.session.clone(), guard.before_session_invalidate.clone())
+            (
+                guard.session.clone(),
+                guard.services.clone(),
+                guard.before_session_invalidate.clone(),
+            )
         };
+        session.abort().await;
         if let Some(ref runner) = session.extension_runner() {
             emit_session_shutdown_event(
                 runner,
@@ -654,6 +665,7 @@ impl AgentSessionRuntime {
             cb();
         }
         session.dispose();
+        let _ = services.model_runtime.settle_credential_writes().await;
     }
 }
 

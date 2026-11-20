@@ -915,6 +915,7 @@ mod interactive_session_start_tests {
                     max_tokens: m.max_tokens,
                     sampling_params: m.sampling_params.clone(),
                     compat: m.compat.clone(),
+                    sampling_params_by_thinking_level: None,
                 })
             })
             .collect();

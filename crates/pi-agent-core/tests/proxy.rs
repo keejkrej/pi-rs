@@ -322,9 +322,14 @@ async fn streams_text_and_thinking_with_signatures_and_handles_http_errors() {
         Box::pin(async move { Ok(chunked_response(200, &[("content-type", "text/event-stream")], chunks)) })
     });
 
-    let mut opts = ProxyStreamOptions::new("secret-token", "https://proxy.example.com/");
-    opts.temperature = Some(0.25);
-    opts.session_id = Some("sess-1".to_string());
+    let mut simple = pi_ai::SimpleStreamOptions::default();
+    simple.base.temperature = Some(0.25);
+    simple.base.session_id = Some("sess-1".to_string());
+    simple.base.disable_continuation = Some(true);
+    let mut sampling = pi_ai::SamplingParams::new();
+    sampling.insert("top_p".to_string(), json!(0.9));
+    simple.base.sampling_params = Some(sampling);
+    let opts = ProxyStreamOptions::from_simple(simple, "secret-token", "https://proxy.example.com/");
     let mut stream = stream_proxy(test_model(), empty_context(), opts);
     while stream.next().await.is_some() {}
     let msg = stream.result().await;
@@ -353,6 +358,8 @@ async fn streams_text_and_thinking_with_signatures_and_handles_http_errors() {
     let body = req_info.3.expect("json request body");
     assert_eq!(body["options"]["temperature"], 0.25);
     assert_eq!(body["options"]["sessionId"], "sess-1");
+    assert_eq!(body["options"]["disableContinuation"], true);
+    assert_eq!(body["options"]["samplingParams"], json!({ "top_p": 0.9 }));
 }
 
 #[tokio::test]

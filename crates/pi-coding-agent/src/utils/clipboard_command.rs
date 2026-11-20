@@ -15,8 +15,14 @@ pub struct ClipboardCommandOptions {
 
 /// Undefined (`None`) means the command failed; an empty `Vec` is a successful result.
 pub async fn run_clipboard_command(command: &str, args: &[&str], options: ClipboardCommandOptions) -> Option<Vec<u8>> {
+    // Detach on POSIX so the daemon leaves pi's process group and Ctrl+Z suspend
+    // (SIGTSTP to the group) does not stop the clipboard owner (#11179).
+    // Run from / (the current drive root on Windows): clipboard tools ignore the cwd, and WSL cannot start
+    // Windows executables (powershell.exe) when the cwd's \\wsl.localhost\... path
+    // exceeds MAX_PATH (#11592). This also keeps daemons from pinning pi's cwd.
     let mut cmd = Command::new(command);
     cmd.args(args)
+        .current_dir("/")
         .env_clear()
         .envs(pi_js::env::vars())
         .stdin(Stdio::piped())
@@ -26,6 +32,11 @@ pub async fn run_clipboard_command(command: &str, args: &[&str], options: Clipbo
             Stdio::null()
         })
         .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    if pi_js::env::platform() != "win32" {
+        cmd.process_group(0);
+    }
 
     #[cfg(windows)]
     {

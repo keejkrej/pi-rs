@@ -212,6 +212,7 @@ fn create_context_message(model: &pi_ai::Model, percent: f64) -> AssistantMessag
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -283,6 +284,7 @@ async fn inspect_context_footer(session: &AgentSession, agent_dir: &str) -> Resu
             cache_read: 0.0,
             cache_write: 0.0,
             total: 1.008,
+            total_from_provider: None,
         },
     };
     oracle_session
@@ -513,5 +515,169 @@ pub fn suite() -> EvalSuite {
                 })
             }),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_ai::providers::faux::faux_provider;
+    use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
+    use pi_coding_agent::core::resource_loader::DefaultResourceLoaderOptions;
+    use pi_coding_agent::core::sdk::{CreateAgentSessionServicesOptions, create_agent_session_services};
+    use pi_coding_agent::core::settings_manager::SettingsManager;
+    use tempfile::TempDir;
+
+    #[test]
+    fn levenshtein_similarity_handles_identical_empty_and_partial_strings() {
+        assert_eq!(levenshtein_similarity("", ""), 1.0);
+        assert_eq!(levenshtein_similarity("footer", "footer"), 1.0);
+        assert_eq!(levenshtein_similarity("abc", "xyz"), 0.0);
+        let sim = levenshtein_similarity("a b c", "a x c");
+        assert!(sim > 0.5 && sim < 1.0, "sim={sim}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recording_terminal_captures_synchronized_renders_and_rejects_incomplete() {
+        let terminal = RecordingTerminal::new();
+        let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resized_flag = Arc::clone(&resized);
+        terminal.start(
+            Arc::new(|_| {}),
+            Arc::new(move || {
+                resized_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        terminal.request_resize();
+        assert!(resized.load(std::sync::atomic::Ordering::SeqCst));
+
+        terminal.write("\x1b[?2026h\x1b[32mhello\x1b[0m\x1b[?2026l");
+        let renders = terminal.take_renders().await.unwrap();
+        assert_eq!(renders, vec!["hello"]);
+
+        terminal.write("\x1b[?2026hpartial");
+        let err = terminal.take_renders().await.unwrap_err();
+        assert!(err.to_string().contains("incomplete synchronized render"), "{err}");
+        terminal.stop();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_context_footer_captures_built_in_status_line_offline() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let workspace = pi_js::path::join(&[&root, "workspace"]);
+        let agent_dir = pi_js::path::join(&[&root, "agent"]);
+        pi_js::fs::promises::mkdir(&workspace, true, None).await.unwrap();
+        pi_js::fs::promises::mkdir(&agent_dir, true, None).await.unwrap();
+
+        let faux = faux_provider(None);
+        let model = faux.get_model();
+        let runtime = ModelRuntime::create(CreateModelRuntimeOptions {
+            models_path: Some(None),
+            auth_path: Some(pi_js::path::join(&[&agent_dir, "auth.json"])),
+            models_store_path: Some(pi_js::path::join(&[&agent_dir, "models-store.json"])),
+            allow_model_network: Some(false),
+            refresh_on_create: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        runtime.register_native_provider(faux.provider()).unwrap();
+        let settings_manager = SettingsManager::in_memory(None, None);
+        let services = create_agent_session_services(CreateAgentSessionServicesOptions {
+            cwd: workspace.clone(),
+            agent_dir: Some(agent_dir.clone()),
+            settings_manager: Some(settings_manager),
+            model_runtime: Some(runtime),
+            resource_loader_options: Some(DefaultResourceLoaderOptions {
+                no_extensions: true,
+                no_skills: true,
+                no_prompt_templates: true,
+                no_themes: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let created = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
+            services,
+            session_manager: SessionManager::in_memory(Some(&workspace), None, None).unwrap(),
+            session_start_event: None,
+            model: Some(model),
+            thinking_level: Some(ModelThinkingLevel::Off),
+            scoped_models: None,
+            tools: None,
+            exclude_tools: None,
+            no_tools: Some(NoToolsMode::All),
+            custom_tools: None,
+        })
+        .await
+        .unwrap();
+
+        let output = inspect_context_footer(&created.session, &agent_dir).await.unwrap();
+        assert!(output.extension_errors.is_empty());
+        assert_eq!(output.observations.len(), CONTEXT_FIXTURES.len());
+        assert!(
+            output
+                .built_in_status_line
+                .as_deref()
+                .is_some_and(|line| BUILT_IN_CONTEXT_PATTERN.as_ref().is_some_and(|re| re.is_match(line))),
+            "built_in_status_line={:?}",
+            output.built_in_status_line
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_footer_judge_scores_valid_and_invalid_outputs() {
+        let judge = context_footer_judge();
+        let valid_output = TuiFooterOutput {
+            built_in_status_line: Some("↑106k ↓5.8k R606k $1.008 263.9%/272k (auto)".to_string()),
+            observations: CONTEXT_FIXTURES
+                .iter()
+                .map(|&(percent, bar)| TuiFooterObservation {
+                    percent,
+                    rendered_output: format!("~/workspace\n↑106k ↓5.8k R606k $1.008 {bar}\n"),
+                    context_usage: Some(ContextUsageObservation {
+                        tokens: Some(100),
+                        context_window: CONTEXT_WINDOW,
+                        percent: Some(percent),
+                    }),
+                })
+                .collect(),
+            extension_errors: Vec::new(),
+        };
+        let run = crate::report::HarnessRun::default();
+        let pass = judge
+            .assess(crate::harness::JudgeContext {
+                input: Value::Null,
+                output: Some(serialize_to_json_value(&valid_output)),
+                tool_calls: Vec::new(),
+                run: run.clone(),
+                session: run.session.clone(),
+                signal: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(pass.score, Some(1.0));
+        assert_eq!(
+            pass.metadata.as_ref().and_then(|m| m.get("retainedPercent")),
+            Some(&Value::from(100))
+        );
+
+        let mut invalid_output = valid_output;
+        invalid_output.extension_errors.push("boom".to_string());
+        let fail = judge
+            .assess(crate::harness::JudgeContext {
+                input: Value::Null,
+                output: Some(serialize_to_json_value(&invalid_output)),
+                tool_calls: Vec::new(),
+                run: run.clone(),
+                session: run.session,
+                signal: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fail.score, Some(0.0));
     }
 }

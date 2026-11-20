@@ -4,10 +4,9 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context,
-    FauxAssistantMessageContent, FauxToolCallOptions, JsonObject, Model, OnPayloadFn, ProviderHeaders,
-    SimpleStreamOptions, StopReason, ThinkingBudgets, ToolCall, Transport, Usage,
+    FauxAssistantMessageContent, FauxToolCallOptions, JsonObject, Model, OnPayloadFn, ProviderHeaders, SamplingParams,
+    SimpleStreamOptions, StopReason, ThinkingBudgets, ToolCall, ToolCallArgumentsStream, Transport, Usage,
     create_assistant_message_event_stream, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
-    parse_streaming_json,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Request, fetch};
@@ -108,6 +107,8 @@ struct ProxyRequestOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    sampling_params: Option<SamplingParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<pi_ai::ThinkingLevel>,
@@ -115,6 +116,8 @@ struct ProxyRequestOptions {
     cache_retention: Option<pi_ai::CacheRetention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disable_continuation: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     headers: Option<ProviderHeaders>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,11 +142,13 @@ struct ProxyRequestBody {
 #[derive(Clone)]
 pub struct ProxyStreamOptions {
     pub temperature: Option<f64>,
+    pub sampling_params: Option<SamplingParams>,
     pub max_tokens: Option<i64>,
     pub signal: Option<AbortSignal>,
     pub cache_retention: Option<pi_ai::CacheRetention>,
     pub reasoning: Option<pi_ai::ThinkingLevel>,
     pub session_id: Option<String>,
+    pub disable_continuation: Option<bool>,
     pub transport: Option<Transport>,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub max_retry_delay_ms: Option<u64>,
@@ -159,11 +164,13 @@ impl ProxyStreamOptions {
     pub fn new(auth_token: impl Into<String>, proxy_url: impl Into<String>) -> Self {
         Self {
             temperature: None,
+            sampling_params: None,
             max_tokens: None,
             signal: None,
             cache_retention: None,
             reasoning: None,
             session_id: None,
+            disable_continuation: None,
             transport: None,
             thinking_budgets: None,
             max_retry_delay_ms: None,
@@ -183,11 +190,13 @@ impl ProxyStreamOptions {
     ) -> Self {
         Self {
             temperature: simple.base.temperature,
+            sampling_params: simple.base.sampling_params,
             max_tokens: simple.base.max_tokens,
             signal: simple.base.signal,
             cache_retention: simple.base.cache_retention,
             reasoning: simple.reasoning,
             session_id: simple.base.session_id,
+            disable_continuation: simple.base.disable_continuation,
             transport: simple.base.transport,
             thinking_budgets: simple.thinking_budgets,
             max_retry_delay_ms: simple.base.max_retry_delay_ms,
@@ -216,7 +225,7 @@ pub fn stream_proxy(model: Model, context: Context, options: ProxyStreamOptions)
 
     tokio::spawn(async move {
         let mut partial = init_assistant_message(&model);
-        let mut tool_call_json_buffers = IndexMap::<usize, String>::new();
+        let mut tool_arguments = IndexMap::<usize, ToolCallArgumentsStream>::new();
 
         let result = run_proxy_stream(
             &model,
@@ -224,7 +233,7 @@ pub fn stream_proxy(model: Model, context: Context, options: ProxyStreamOptions)
             &options,
             &stream_task,
             &mut partial,
-            &mut tool_call_json_buffers,
+            &mut tool_arguments,
         )
         .await;
 
@@ -256,7 +265,7 @@ async fn run_proxy_stream(
     options: &ProxyStreamOptions,
     stream: &AssistantMessageEventStream,
     partial: &mut AssistantMessage,
-    tool_call_json_buffers: &mut IndexMap<usize, String>,
+    tool_arguments: &mut IndexMap<usize, ToolCallArgumentsStream>,
 ) -> Result<()> {
     let endpoint = format!("{}/api/stream", options.proxy_url.trim_end_matches('/'));
     let payload = ProxyRequestBody {
@@ -264,10 +273,12 @@ async fn run_proxy_stream(
         context,
         options: ProxyRequestOptions {
             temperature: options.temperature,
+            sampling_params: options.sampling_params.clone(),
             max_tokens: options.max_tokens,
             reasoning: options.reasoning,
             cache_retention: options.cache_retention,
             session_id: options.session_id.clone(),
+            disable_continuation: options.disable_continuation,
             headers: options.headers.clone(),
             metadata: options.metadata.clone(),
             transport: options.transport,
@@ -317,7 +328,7 @@ async fn run_proxy_stream(
         let mut start = 0;
         while let Some(rel_nl) = line_buffer[start..].find('\n') {
             let line_end = start + rel_nl;
-            if process_sse_line(&line_buffer[start..line_end], partial, tool_call_json_buffers, stream)? {
+            if process_sse_line(&line_buffer[start..line_end], partial, tool_arguments, stream)? {
                 saw_terminal_event = true;
             }
             start = line_end + 1;
@@ -337,7 +348,7 @@ async fn run_proxy_stream(
     }
     if !line_buffer.is_empty() {
         for raw_line in line_buffer.split('\n') {
-            if process_sse_line(raw_line, partial, tool_call_json_buffers, stream)? {
+            if process_sse_line(raw_line, partial, tool_arguments, stream)? {
                 saw_terminal_event = true;
             }
         }
@@ -358,7 +369,7 @@ async fn run_proxy_stream(
 fn process_sse_line(
     raw_line: &str,
     partial: &mut AssistantMessage,
-    tool_call_json_buffers: &mut IndexMap<usize, String>,
+    tool_arguments: &mut IndexMap<usize, ToolCallArgumentsStream>,
     stream: &AssistantMessageEventStream,
 ) -> Result<bool> {
     let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
@@ -370,7 +381,7 @@ fn process_sse_line(
         return Ok(false);
     }
     let proxy_event: ProxyAssistantMessageEvent = pi_js::json::parse_as(trimmed)?;
-    let Some(event) = process_proxy_event(proxy_event, partial, tool_call_json_buffers)? else {
+    let Some(event) = process_proxy_event(proxy_event, partial, tool_arguments)? else {
         return Ok(false);
     };
     let is_terminal = matches!(
@@ -381,12 +392,12 @@ fn process_sse_line(
     Ok(is_terminal)
 }
 
-/// Applies one decoded [`ProxyAssistantMessageEvent`] to `partial`, tracking streamed tool-call JSON
-/// buffers separately from `ToolCall` arguments.
+/// Applies one decoded [`ProxyAssistantMessageEvent`] to `partial`, tracking streamed tool-call
+/// argument parsers separately from `ToolCall` arguments.
 pub fn process_proxy_event(
     proxy_event: ProxyAssistantMessageEvent,
     partial: &mut AssistantMessage,
-    tool_call_json_buffers: &mut IndexMap<usize, String>,
+    tool_arguments: &mut IndexMap<usize, ToolCallArgumentsStream>,
 ) -> Result<Option<AssistantMessageEvent>> {
     match proxy_event {
         ProxyAssistantMessageEvent::Start => Ok(Some(AssistantMessageEvent::Start {
@@ -473,7 +484,7 @@ pub fn process_proxy_event(
                 Some(FauxToolCallOptions { id: Some(id) }),
             );
             set_content_slot(partial, content_index, AssistantContentBlock::ToolCall(call))?;
-            tool_call_json_buffers.insert(content_index, String::new());
+            tool_arguments.insert(content_index, ToolCallArgumentsStream::new());
             Ok(Some(AssistantMessageEvent::ToolCallStart {
                 content_index,
                 partial: partial.clone(),
@@ -483,10 +494,8 @@ pub fn process_proxy_event(
             let Some(AssistantContentBlock::ToolCall(call)) = partial.content.get_mut(content_index) else {
                 return Err(Error::msg("Received toolcall_delta for non-toolCall content"));
             };
-            let buf = tool_call_json_buffers.entry(content_index).or_default();
-            buf.push_str(&delta);
-            let parsed = parse_streaming_json(Some(buf.as_str()));
-            call.arguments = parsed;
+            let args = tool_arguments.entry(content_index).or_default();
+            call.arguments = args.append(&delta);
             Ok(Some(AssistantMessageEvent::ToolCallDelta {
                 content_index,
                 delta,
@@ -497,7 +506,7 @@ pub fn process_proxy_event(
             content_index,
             tool_call,
         } => {
-            tool_call_json_buffers.shift_remove(&content_index);
+            tool_arguments.shift_remove(&content_index);
             let Some(AssistantContentBlock::ToolCall(call)) = partial.content.get_mut(content_index) else {
                 return Ok(None);
             };

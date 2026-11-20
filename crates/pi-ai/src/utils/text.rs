@@ -135,3 +135,8 @@ pub fn render_system_message_update(message: &SystemMessage) -> String {
     }
     parts.join("\n\n")
 }
+
+/// Owned UTF-16 slice copy matching upstream `ownedSlice(text, start, end)`.
+pub fn owned_slice(text: &str, start: usize, end: Option<usize>) -> String {
+    pi_js::str16::slice(text, start as i64, end.map(|e| e as i64))
+}

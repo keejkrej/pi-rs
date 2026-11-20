@@ -200,6 +200,8 @@ impl SelectSubmenu {
             let kb = get_keybindings();
             let is_nav = kb.matches(data, "tui.select.up")
                 || kb.matches(data, "tui.select.down")
+                || kb.matches(data, "tui.select.pageUp")
+                || kb.matches(data, "tui.select.pageDown")
                 || kb.matches(data, "tui.select.confirm")
                 || kb.matches(data, "tui.select.cancel");
             if is_nav {

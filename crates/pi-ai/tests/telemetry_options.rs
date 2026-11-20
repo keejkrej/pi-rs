@@ -15,7 +15,7 @@ use pi_ai::types::{
     AnyModel, AssistantImages, AssistantMessage, AssistantMessageEvent, Context, DeferredCancelOptions,
     DeferredFetchOptions, DeferredHandle, ImageModel, ImagesContext, ImagesOptions, ImagesStopReason, Model, ModelCost,
     ModelInput, ModelOutput, ProviderImages, ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StopReason,
-    StreamOptions, TelemetryContextHandle, TextContent, Usage, UserContentBlock,
+    StreamOptions, TelemetryContextHandle, TelemetrySpanHandle, TextContent, Usage, UserContentBlock,
 };
 use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use pi_ai::utils::transcript::normalize_context;
@@ -41,6 +41,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn completed_stream(req: &Model) -> AssistantMessageEventStream {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     };
     stream.push(AssistantMessageEvent::Done {
         reason: StopReason::Stop,
@@ -455,4 +457,24 @@ async fn survives_direct_and_models_image_dispatch() {
             .all(|v| v.as_ref().is_some_and(|t| Arc::ptr_eq(t, &telemetry)))
     );
     clear_images_api_providers();
+}
+
+#[test]
+fn telemetry_span_handle_survives_simple_stream_conversion() {
+    let span: TelemetrySpanHandle = Arc::new(NOOP_TELEMETRY_CONTEXT);
+    let simple_opts = SimpleStreamOptions {
+        base: StreamOptions {
+            telemetry: Some(Arc::clone(&span)),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let model = test_model();
+    let ctx = normalize_context(&Context {
+        system_prompt: None,
+        messages: Vec::new(),
+        tools: None,
+    });
+    let base_opts = build_base_options(&model, &ctx, Some(&simple_opts), None);
+    assert!(Arc::ptr_eq(base_opts.telemetry.as_ref().unwrap(), &span));
 }

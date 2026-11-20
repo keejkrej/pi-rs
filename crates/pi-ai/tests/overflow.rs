@@ -21,6 +21,7 @@ fn create_error_message(error_message: &str, provider: &str) -> AssistantMessage
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1,
+        duration_ms: None,
     }
 }
 
@@ -57,11 +58,51 @@ fn create_length_stop_message(
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1,
+        duration_ms: None,
     }
 }
 
 #[test]
 fn detects_overflow_error_messages() {
+    for err_msg in [
+        r#"github-copilot API error (413): {"message":"failed to parse request","code":""}"#,
+        "custom-provider API error (413): Payload Too Large",
+        r#"413 {"error":{"message":"failed to parse request","code":""}}"#,
+        "413",
+    ] {
+        assert!(is_context_overflow(
+            &create_error_message(err_msg, "ollama"),
+            Some(1_000_000)
+        ));
+        assert!(is_context_overflow(&create_error_message(err_msg, "ollama"), None));
+    }
+    for err_msg in [
+        r#"github-copilot API error (400): {"message":"failed to parse request","code":""}"#,
+        "custom-provider API error (429): Too many requests",
+        r#"github-copilot API error (400): {"message":"failed to parse request: invalid value 413"}"#,
+        "custom-provider API error (400): upstream mentioned OpenAI API error (413): invalid input",
+        "custom-provider API error (4130): invalid input",
+        "4130 failed to parse request",
+    ] {
+        assert!(!is_context_overflow(&create_error_message(err_msg, "ollama"), None));
+    }
+    let aborted_413 = AssistantMessage {
+        stop_reason: StopReason::Aborted,
+        ..create_error_message(
+            r#"OpenAI API error (413): {"message":"failed to parse request"}"#,
+            "openai",
+        )
+    };
+    let stopped_413 = AssistantMessage {
+        stop_reason: StopReason::Stop,
+        ..create_error_message(
+            r#"OpenAI API error (413): {"message":"failed to parse request"}"#,
+            "openai",
+        )
+    };
+    assert!(!is_context_overflow(&aborted_413, None));
+    assert!(!is_context_overflow(&stopped_413, None));
+
     let msg = create_error_message(
         "400 `prompt too long; exceeded max context length by 100918 tokens`",
         "ollama",
@@ -85,6 +126,13 @@ fn detects_overflow_error_messages() {
         "ollama",
     );
     assert!(is_context_overflow(&litellm, Some(131_072)));
+
+    // Regression for #11492.
+    let litellm_pre = create_error_message(
+        "400: {\"message\":\"litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.\nModel=Qwen3.8-Flash-Next, Max Input Tokens=262144, Got=265262\nmodel=Qwen3.8-Flash-Next. context_window_fallbacks=None. fallbacks=[].\"}",
+        "ollama",
+    );
+    assert!(is_context_overflow(&litellm_pre, Some(262_144)));
 
     let parens = create_error_message(
         "Error: 400 Input length (265330) exceeds model's maximum context length (262144).",
@@ -113,16 +161,15 @@ fn detects_overflow_error_messages() {
     let non_overflow = create_error_message("500 `model runner crashed unexpectedly`", "ollama");
     assert!(!is_context_overflow(&non_overflow, Some(32_768)));
 
-    for err_msg in ["400 status code (no body)", "413 status code (no body)"] {
-        assert!(is_context_overflow(
-            &create_error_message(err_msg, "cerebras"),
-            Some(131_072)
-        ));
-        assert!(!is_context_overflow(
-            &create_error_message(err_msg, "opencode-go"),
-            Some(1_000_000)
-        ));
-    }
+    let err_msg = "400 status code (no body)";
+    assert!(is_context_overflow(
+        &create_error_message(err_msg, "cerebras"),
+        Some(131_072)
+    ));
+    assert!(!is_context_overflow(
+        &create_error_message(err_msg, "opencode-go"),
+        Some(1_000_000)
+    ));
 
     assert!(!is_context_overflow(
         &create_error_message(
@@ -147,7 +194,7 @@ fn detects_overflow_error_messages() {
 
 #[test]
 fn detects_length_stop_overflow_and_recoverable_length() {
-    let xiaomi = create_length_stop_message(58, 1_048_512, 0, 0, "openai-completions", "xiaomi", "mimo-v2.5-pro");
+    let xiaomi = create_length_stop_message(58, 1_048_512, 0, 0, "openai-completions", "xiaomi", "mimo-v2.6-pro");
     assert!(is_context_overflow(&xiaomi, Some(1_048_576)));
 
     let recoverable = create_length_stop_message(3, 253_584, 16, 25_554, "openai-responses", "openai", "gpt-5.6-sol");

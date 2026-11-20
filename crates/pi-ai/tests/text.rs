@@ -22,6 +22,7 @@ fn extracts_assistant_text_blocks_with_default_and_custom_separators() {
             namespace: None,
             arguments: IndexMap::new(),
             thought_signature: None,
+            arguments_error: None,
         }),
         AssistantContentBlock::Text(TextContent {
             text: "second".to_string(),

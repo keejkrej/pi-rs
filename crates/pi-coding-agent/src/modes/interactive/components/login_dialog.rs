@@ -1,5 +1,4 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/login-dialog.ts
-//! and packages/coding-agent/src/modes/interactive/components/auth-url.ts
 
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +12,10 @@ use pi_tui::{
 };
 use tokio::sync::oneshot;
 
+pub use crate::utils::web_url::{display_url, web_url};
+
 use super::super::theme::theme::{ThemeColor, theme};
+pub use super::auth_url::AuthUrlComponent;
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::key_hint;
 
@@ -48,48 +50,18 @@ fn open_browser_wire(target: &str) {
     crate::utils::open_browser::open_browser(target);
 }
 
-async fn copy_to_clipboard_with_override(text: &str, override_fn: Option<Arc<CopyToClipboardFn>>) -> pi_js::Result<()> {
+pub(crate) fn current_copy_to_clipboard_override() -> Option<Arc<CopyToClipboardFn>> {
+    COPY_TO_CLIPBOARD_OVERRIDE.with(|s| s.get())
+}
+
+pub(crate) async fn copy_to_clipboard_with_override(
+    text: &str,
+    override_fn: Option<Arc<CopyToClipboardFn>>,
+) -> pi_js::Result<()> {
     if let Some(f) = override_fn {
         return f(text).await;
     }
     crate::utils::clipboard::copy_to_clipboard(text).await
-}
-
-/// Replace each run of C0 and C1 control characters (ESC, BEL, newlines, ...) with one space.
-fn replace_control_characters_local(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut in_run = false;
-    for c in value.chars() {
-        let code = c as u32;
-        if code <= 0x1f || (0x7f..=0x9f).contains(&code) {
-            if !in_run {
-                out.push(' ');
-                in_run = true;
-            }
-        } else {
-            out.push(c);
-            in_run = false;
-        }
-    }
-    out
-}
-
-/// The `http:` or `https:` URL `value` names, normalized, or None. The shared launcher also opens files and custom
-/// protocols, so login only opens web URLs. Normalizing percent-encodes control characters, which would otherwise end a
-/// terminal hyperlink early.
-pub fn web_url(value: &str) -> Option<String> {
-    let url = url::Url::parse(value).ok()?;
-    if url.scheme() == "https" || url.scheme() == "http" {
-        Some(url.into())
-    } else {
-        None
-    }
-}
-
-/// `value` normalized as a web URL, else with control characters replaced: an untrusted string printed as is could end a
-/// hyperlink early or send its own escape sequences to the terminal.
-pub fn display_url(value: &str) -> String {
-    web_url(value).unwrap_or_else(|| replace_control_characters_local(value))
 }
 
 /// `text` as a terminal hyperlink to `url` when that is a web URL, else plain `text`.
@@ -97,113 +69,6 @@ fn web_link(text: &str, url: &str) -> String {
     match web_url(url) {
         Some(target) => hyperlink(text, &target),
         None => text.to_string(),
-    }
-}
-
-struct AuthUrlInner {
-    container: Container,
-    url: String,
-    tui: Arc<dyn TUI + Send + Sync>,
-    hint: Text,
-}
-
-/// A sign-in URL with a click hint and a copy hint. Hosts call `copy()` when `app.message.copy` is
-/// pressed, since a long URL wraps and often cannot be selected or clicked as a whole (SSH, tmux).
-#[derive(Clone)]
-pub struct AuthUrlComponent {
-    inner: Arc<AuthUrlInner>,
-}
-
-impl AuthUrlComponent {
-    pub fn new(tui: Arc<dyn TUI + Send + Sync>, url: &str) -> Self {
-        let container = Container::new();
-        let t = theme();
-        container.add_child(Arc::new(Text::new(
-            Some(&t.fg(ThemeColor::Accent, &hyperlink(url, url))),
-            Some(1),
-            Some(0),
-            None,
-        )));
-        let hint = Text::new(Some(""), Some(1), Some(0), None);
-        container.add_child(Arc::new(hint.clone()));
-
-        let comp = Self {
-            inner: Arc::new(AuthUrlInner {
-                container,
-                url: url.to_string(),
-                tui,
-                hint,
-            }),
-        };
-        comp.set_hint(&key_hint(&"app.message.copy".to_string(), "to copy"));
-        comp
-    }
-
-    pub fn url(&self) -> &str {
-        &self.inner.url
-    }
-
-    fn set_hint(&self, suffix: &str) {
-        let click_hint = if pi_js::env::platform() == "darwin" {
-            "Cmd+click to open"
-        } else {
-            "Ctrl+click to open"
-        };
-        let t = theme();
-        self.inner.hint.set_text(&format!(
-            "{} {} {suffix}",
-            t.fg(ThemeColor::Dim, &hyperlink(click_hint, &self.inner.url)),
-            t.fg(ThemeColor::Dim, "•"),
-        ));
-        self.inner.tui.request_render(None);
-    }
-
-    async fn copy_with_override(&self, copy_override: Option<Arc<CopyToClipboardFn>>) {
-        match copy_to_clipboard_with_override(&self.inner.url, copy_override).await {
-            Ok(()) => self.set_hint(&theme().fg(ThemeColor::Success, "Copied URL to clipboard")),
-            Err(err) => self.set_hint(&theme().fg(ThemeColor::Error, &err.to_string())),
-        }
-    }
-
-    pub async fn copy(&self) {
-        let copy_override = COPY_TO_CLIPBOARD_OVERRIDE.with(|s| s.get());
-        self.copy_with_override(copy_override).await;
-    }
-
-    pub fn render(&self, width: usize) -> Vec<String> {
-        self.inner.container.render(width)
-    }
-
-    pub fn invalidate(&self) {
-        self.inner.container.invalidate();
-    }
-}
-
-impl Component for AuthUrlComponent {
-    fn render(&self, width: usize) -> Vec<String> {
-        AuthUrlComponent::render(self, width)
-    }
-
-    fn handle_input(&self, _data: &str) {}
-
-    fn handle_mouse(&self, event: &TuiMouseEvent) -> Option<TuiMouseEventResult> {
-        self.inner.container.handle_mouse(event)
-    }
-
-    fn wants_key_release(&self) -> bool {
-        false
-    }
-
-    fn invalidate(&self) {
-        AuthUrlComponent::invalidate(self)
-    }
-
-    fn is_container_handle_mouse(&self) -> bool {
-        true
-    }
-
-    fn container_children(&self) -> Option<Vec<Arc<dyn Component>>> {
-        Some(self.inner.container.children())
     }
 }
 
@@ -418,7 +283,9 @@ impl LoginDialogComponent {
         self.inner.content_container.add_child(Arc::new(Spacer::new(Some(1))));
 
         let target = web_url(url);
-        let shown = target.clone().unwrap_or_else(|| replace_control_characters_local(url));
+        let shown = target
+            .clone()
+            .unwrap_or_else(|| pi_tui::utils::replace_control_characters(url));
         let auth_url = AuthUrlComponent::new(Arc::clone(&self.inner.tui), &shown);
         {
             self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).auth_url = Some(auth_url.clone());
@@ -978,6 +845,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: "https://example.com/device".to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });
@@ -1036,6 +905,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: "https://example.com/device".to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });
@@ -1061,6 +932,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: "https://example.com/device".to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });
@@ -1093,6 +966,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: "https://example.com/device".to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });
@@ -1127,6 +1002,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: "https://example.com/device\x07\x1b]52;c;Zm9v\x07".to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });
@@ -1157,6 +1034,8 @@ mod tests {
         dialog.show_device_code(OAuthDeviceCodeInfo {
             user_code: "ABCD-EFGH".to_string(),
             verification_uri: injected.to_string(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: None,
             expires_in_seconds: None,
         });

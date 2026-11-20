@@ -35,6 +35,12 @@ use crate::core::tools::tool_definition_wrapper::{
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use crate::utils::shell::get_power_shell_config;
 
+const UTF8_OUTPUT_PREFIX: &str = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
+
+// Windows PowerShell 5.1 turns redirected native stderr into error records and sets $? to false, so
+// `git push 2>&1 | Select-Object -Last 3` exits 1 although git exited 0 (#8842). PowerShell 7 does not.
+const WINDOWS_POWERSHELL_EXIT_SUFFIX: &str = "\n;\nif ($?) { exit 0 }\nif (($LASTEXITCODE -eq 0) -and (\"$($Error[0].FullyQualifiedErrorId)\" -like \"NativeCommandError*\")) { exit 0 }\nexit 1";
+
 struct LocalPowerShellOperations;
 
 impl BashOperations for LocalPowerShellOperations {
@@ -48,7 +54,7 @@ impl BashOperations for LocalPowerShellOperations {
         let cwd = cwd.to_string();
         Box::pin(async move {
             let shell_cfg = get_power_shell_config()?;
-            let wrapped = wrap_powershell_command(&command);
+            let wrapped = wrap_powershell_command_for_shell(&command, &shell_cfg.shell);
             execute_shell_process(shell_cfg, &wrapped, &cwd, options).await
         })
     }
@@ -56,8 +62,20 @@ impl BashOperations for LocalPowerShellOperations {
 
 pub fn wrap_powershell_command(command: &str) -> String {
     format!(
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8\n{command}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }} elseif ($LASTEXITCODE) {{ exit $LASTEXITCODE }}"
+        "{UTF8_OUTPUT_PREFIX}$OutputEncoding = [System.Text.Encoding]::UTF8\n{command}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }} elseif ($LASTEXITCODE) {{ exit $LASTEXITCODE }}"
     )
+}
+
+pub fn wrap_powershell_command_for_shell(command: &str, shell_path: &str) -> String {
+    if pi_js::path::win32::basename(shell_path, None).eq_ignore_ascii_case("powershell.exe") {
+        if command.ends_with('`') {
+            format!("{UTF8_OUTPUT_PREFIX}{command}")
+        } else {
+            format!("{UTF8_OUTPUT_PREFIX}{command}{WINDOWS_POWERSHELL_EXIT_SUFFIX}")
+        }
+    } else {
+        wrap_powershell_command(command)
+    }
 }
 
 pub fn create_local_power_shell_operations() -> Arc<PowerShellOperations> {

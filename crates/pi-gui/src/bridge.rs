@@ -208,6 +208,9 @@ impl BridgeState {
             }
             AgentSessionEvent::AgentEnd { .. } => {
                 emitter.emit(BridgeEvent::StreamFinished);
+            }
+            AgentSessionEvent::AgentSettled { .. } => {
+                emitter.emit(BridgeEvent::StreamFinished);
                 let _ = cmd_tx.send(BridgeCommand::RefreshWorkspace);
             }
             _ => {}

@@ -29,7 +29,7 @@ async fn aborts_all_batched_parallel_tool_calls_without_execution_when_preflight
         name: "external_write".to_string(),
         label: "External Write".to_string(),
         description: "Test external write tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: t::object([("value", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: Some(ToolExecutionMode::Parallel),

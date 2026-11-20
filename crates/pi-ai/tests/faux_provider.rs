@@ -530,6 +530,7 @@ async fn estimates_prompt_and_output_tokens_from_serialized_context() {
                 nested_calls: None,
                 is_error: false,
                 timestamp: 2,
+                duration_ms: None,
             }),
         ],
         tools: Some(vec![tool.clone()]),
@@ -682,6 +683,84 @@ async fn simulates_prompt_caching_per_session_id() {
     .await;
     assert!(second.usage.cache_read > 0);
     assert!(second.usage.input + second.usage.cache_read > second.usage.input);
+}
+
+#[tokio::test]
+#[serial]
+async fn counts_cached_characters_up_to_the_first_difference_in_the_joined_prompt() {
+    let mut regs = AutoUnregister::new();
+    let reg = register_faux_provider(None);
+    reg.set_responses(vec![
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("a".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("b".to_owned()),
+            None,
+        )),
+        FauxResponseStep::Message(faux_assistant_message(
+            FauxAssistantMessageContent::Text("c".to_owned()),
+            None,
+        )),
+    ]);
+    let model = reg.get_model();
+    regs.push(reg);
+
+    let opts = || {
+        Some(
+            StreamOptions {
+                session_id: Some("session-1".to_owned()),
+                cache_retention: Some(CacheRetention::Short),
+                ..Default::default()
+            }
+            .into(),
+        )
+    };
+
+    // Prompt texts: "user:hello world" (16 characters), then 16 + 2 + "user:next" (9) = 27.
+    let first = complete(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![user_msg("hello world", 1)],
+            tools: None,
+        },
+        opts(),
+    )
+    .await;
+    assert_eq!(first.usage.input, 0);
+    assert_eq!(first.usage.cache_read, 0);
+    assert_eq!(first.usage.cache_write, 4);
+
+    let extended = complete(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![user_msg("hello world", 1), user_msg("next", 1)],
+            tools: None,
+        },
+        opts(),
+    )
+    .await;
+    assert_eq!(extended.usage.input, 0);
+    assert_eq!(extended.usage.cache_read, 4);
+    assert_eq!(extended.usage.cache_write, 3);
+
+    // First message differs after "user:hello w" (12 chars): "user:hello wide" + 2 + 9 = 26.
+    let edited = complete(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![user_msg("hello wide", 1), user_msg("next", 1)],
+            tools: None,
+        },
+        opts(),
+    )
+    .await;
+    assert_eq!(edited.usage.input, 0);
+    assert_eq!(edited.usage.cache_read, 3);
+    assert_eq!(edited.usage.cache_write, 4);
 }
 
 #[tokio::test]

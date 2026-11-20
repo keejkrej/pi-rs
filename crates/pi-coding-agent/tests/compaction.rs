@@ -66,6 +66,7 @@ fn assistant_msg(text: &str, usage: Option<Usage>) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 
@@ -337,6 +338,7 @@ fn find_cut_point_scenarios() {
         nested_calls: None,
         is_error: false,
         timestamp: 0,
+        duration_ms: None,
     })));
     let entries4 = vec![
         old_user.clone(),

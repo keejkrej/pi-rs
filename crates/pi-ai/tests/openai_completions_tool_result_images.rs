@@ -40,19 +40,21 @@ fn build_tool_result(tool_call_id: &str, timestamp: i64) -> ToolResultMessage {
         nested_calls: None,
         usage: None,
         timestamp,
+        duration_ms: None,
     }
 }
 
-fn build_empty_tool_result(tool_call_id: &str, timestamp: i64) -> ToolResultMessage {
+fn build_empty_tool_result(tool_call_id: &str, timestamp: i64, text: &str) -> ToolResultMessage {
     ToolResultMessage {
         tool_call_id: tool_call_id.to_owned(),
         tool_name: "bash".to_owned(),
-        content: vec![UserContentBlock::Text(TextContent::new(""))],
+        content: vec![UserContentBlock::Text(TextContent::new(text))],
         details: None,
         is_error: false,
         nested_calls: None,
         usage: None,
         timestamp,
+        duration_ms: None,
     }
 }
 
@@ -118,6 +120,7 @@ fn batches_tool_result_images_after_consecutive_tool_results() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now,
+        duration_ms: None,
     };
 
     let context = normalize_context(&Context {
@@ -176,27 +179,31 @@ fn uses_no_tool_output_placeholder_for_empty_tool_results_without_images() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now,
+        duration_ms: None,
     };
 
-    let context = normalize_context(&Context {
-        system_prompt: None,
-        messages: vec![
-            Message::User(UserMessage {
-                content: UserMessageContent::Text("Run the command".to_owned()),
-                timestamp: now - 1,
-            }),
-            Message::Assistant(assistant),
-            Message::ToolResult(build_empty_tool_result("tool-1", now + 1)),
-        ],
-        tools: None,
-    });
+    // Whitespace-only cases: https://github.com/earendil-works/pi/issues/8720
+    for text in ["", "\r\n", " \n\t"] {
+        let context = normalize_context(&Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage {
+                    content: UserMessageContent::Text("Run the command".to_owned()),
+                    timestamp: now - 1,
+                }),
+                Message::Assistant(assistant.clone()),
+                Message::ToolResult(build_empty_tool_result("tool-1", now + 1, text)),
+            ],
+            tools: None,
+        });
 
-    let messages = convert_messages(&model, &context, &compat, None);
-    let tool_msg = messages
-        .iter()
-        .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-        .expect("expected tool message");
-    let content = tool_msg.get("content").and_then(Value::as_str).unwrap();
-    assert_eq!(content, "(no tool output)");
-    assert!(!content.contains("see attached image"));
+        let messages = convert_messages(&model, &context, &compat, None);
+        let tool_msg = messages
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .expect("expected tool message");
+        let content = tool_msg.get("content").and_then(Value::as_str).unwrap();
+        assert_eq!(content, "(no tool output)");
+        assert!(!content.contains("see attached image"));
+    }
 }

@@ -13,11 +13,11 @@ use serde_json::Value;
 use crate::auth_provider::{AuthProvider, McpFetch, McpFetchInit, UnauthorizedContext};
 use crate::protocol::jsonrpc::{
     JSON_RPC_ERROR_CODES, JsonRpcErrorObject, JsonRpcErrorResponse, JsonRpcId, JsonRpcMessage, JsonRpcResponse,
-    JsonRpcVersion, McpConnectionClosedError, parse_json_rpc_message,
+    JsonRpcVersion, McpAbortError, McpConnectionClosedError, parse_json_rpc_message,
 };
 use crate::transports::transport::{
     DEFAULT_MAX_MESSAGE_BYTES, McpTransport, McpTransportCloseListener, McpTransportErrorListener,
-    McpTransportMessageListener, TransportEvents,
+    McpTransportMessageListener, McpTransportSendOptions, TransportEvents,
 };
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::fetch::{Body, BodyStream, Headers, Request, Response};
@@ -76,13 +76,12 @@ pub async fn consume_sse_stream(mut stream: BodyStream, options: ConsumeSseOptio
         *data_bytes = 0;
     };
 
-    let process_line = |raw: &str,
+    let process_line = |line: &str,
                         event_name: &mut Option<String>,
                         event_id: &mut Option<String>,
                         data_lines: &mut Vec<String>,
                         data_bytes: &mut usize|
      -> Result<()> {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
         if line.is_empty() {
             dispatch(event_name, event_id, data_lines, data_bytes);
             return Ok(());
@@ -129,19 +128,83 @@ pub async fn consume_sse_stream(mut stream: BodyStream, options: ConsumeSseOptio
         Ok(())
     };
 
+    // SSE lines end with CRLF, LF, or a lone CR.
+    let mut skip_leading_lf = false;
+    let consume_lines = |buffered: &mut String,
+                         skip_leading_lf: &mut bool,
+                         event_name: &mut Option<String>,
+                         event_id: &mut Option<String>,
+                         data_lines: &mut Vec<String>,
+                         data_bytes: &mut usize|
+     -> Result<()> {
+        let mut start = 0usize;
+        let bytes = buffered.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b != b'\r' && b != b'\n' {
+                i += 1;
+                continue;
+            }
+            process_line(&buffered[start..i], event_name, event_id, data_lines, data_bytes)?;
+            if b == b'\r' {
+                if i + 1 < bytes.len() {
+                    if bytes[i + 1] == b'\n' {
+                        i += 1;
+                    }
+                } else {
+                    *skip_leading_lf = true;
+                }
+            }
+            i += 1;
+            start = i;
+        }
+        buffered.drain(..start);
+        Ok(())
+    };
+
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res?;
-        buffered.push_str(&decoder.decode(&chunk, true));
-        while let Some(newline_idx) = buffered.find('\n') {
-            let line = buffered[..newline_idx].to_string();
-            buffered.drain(..=newline_idx);
-            process_line(&line, &mut event_name, &mut event_id, &mut data_lines, &mut data_bytes)?;
+        let decoded = decoder.decode(&chunk, true);
+        let mut text = decoded.as_str();
+        // A CRLF split across chunks: the CR already ended the line, so drop the LF.
+        if skip_leading_lf && !text.is_empty() {
+            if let Some(rest) = text.strip_prefix('\n') {
+                text = rest;
+            }
+            skip_leading_lf = false;
+        }
+        buffered.push_str(text);
+        if let Err(err) = consume_lines(
+            &mut buffered,
+            &mut skip_leading_lf,
+            &mut event_name,
+            &mut event_id,
+            &mut data_lines,
+            &mut data_bytes,
+        ) {
+            drop(stream);
+            return Err(err);
         }
         if buffered.len() > max_event_bytes {
+            drop(stream);
             return Err(Error::msg(format!("MCP SSE event exceeds {max_event_bytes} bytes")));
         }
     }
-    buffered.push_str(&decoder.decode(&[], false));
+    let tail_decoded = decoder.decode(&[], false);
+    let mut tail = tail_decoded.as_str();
+    if skip_leading_lf && let Some(rest) = tail.strip_prefix('\n') {
+        tail = rest;
+    }
+    buffered.push_str(tail);
+    consume_lines(
+        &mut buffered,
+        &mut skip_leading_lf,
+        &mut event_name,
+        &mut event_id,
+        &mut data_lines,
+        &mut data_bytes,
+    )?;
     if !buffered.is_empty() {
         process_line(
             &buffered,
@@ -262,6 +325,38 @@ async fn discard(response: &Response) {
     response.cancel_body();
 }
 
+struct ReadBodyTextResult {
+    text: String,
+    truncated: bool,
+}
+
+/// Reads a response body as text, decoding chunks as they arrive. Once the body exceeds `max_bytes`,
+/// the rest is cancelled and the text holds only the first `max_bytes` bytes.
+async fn read_body_text(response: &Response, max_bytes: usize) -> Result<ReadBodyTextResult> {
+    if !response.has_body() {
+        return Ok(ReadBodyTextResult {
+            text: String::new(),
+            truncated: false,
+        });
+    }
+    let mut stream = response.body_stream()?;
+    let mut decoder = pi_js::text::Utf8StreamDecoder::new();
+    let mut text = String::new();
+    let mut remaining = max_bytes;
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res?;
+        if chunk.len() > remaining {
+            drop(stream);
+            text.push_str(&decoder.decode(&chunk[..remaining], true));
+            return Ok(ReadBodyTextResult { text, truncated: true });
+        }
+        remaining -= chunk.len();
+        text.push_str(&decoder.decode(&chunk, true));
+    }
+    text.push_str(&decoder.decode(&[], false));
+    Ok(ReadBodyTextResult { text, truncated: false })
+}
+
 fn describe_http_failure(status: i64, body: &str) -> String {
     let text = pi_js::str16::trim(body);
     let max_chars = ERROR_MESSAGE_BODY_CHARS as usize;
@@ -330,6 +425,8 @@ struct StreamableHttpState {
     session_id: Option<String>,
     protocol_version: Option<String>,
     get_stream_started: bool,
+    /// Access token of the latest request, which `close()` reuses instead of asking the auth provider.
+    last_token: Option<String>,
 }
 
 impl StreamableHttpTransport {
@@ -368,6 +465,7 @@ impl StreamableHttpTransport {
                     session_id: None,
                     protocol_version: None,
                     get_stream_started: false,
+                    last_token: None,
                 }),
             }),
         }
@@ -392,15 +490,23 @@ impl StreamableHttpTransport {
 
     /// Fetch with auth headers. A 401 (or a 403 asking for more scope) is handed to the auth provider
     /// once, and the request is retried with whatever credentials it left behind.
+    ///
+    /// `signal` only stops dispatch: getting a token or the authorization recovery can take a while, and a
+    /// request its sender gave up on in the meantime must not reach the server. It does not abort the shared
+    /// recovery, which other requests may wait for.
     async fn authorized_fetch(
         &self,
         method: FetchMethod,
         headers: IndexMap<String, String>,
         body: Option<String>,
+        signal: Option<&AbortSignal>,
     ) -> Result<Response> {
         let mut attempt = 0u32;
         loop {
             let prepared = self.headers(&headers).await?;
+            if signal.is_some_and(AbortSignal::aborted) {
+                return Err(Error::typed(McpAbortError::NAME, McpAbortError::new(None)));
+            }
             let init = McpFetchInit {
                 method: Some(method.as_str().to_string()),
                 headers: Some(prepared.headers),
@@ -431,6 +537,17 @@ impl StreamableHttpTransport {
     }
 
     async fn headers(&self, extra: &IndexMap<String, String>) -> Result<PreparedHeaders> {
+        let token = if let Some(auth_provider) = &self.inner.options.auth_provider {
+            auth_provider.token().await?.filter(|t| !t.is_empty())
+        } else {
+            None
+        };
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).last_token = token.clone();
+        let headers = self.build_headers(extra, token.as_deref());
+        Ok(PreparedHeaders { headers, token })
+    }
+
+    fn build_headers(&self, extra: &IndexMap<String, String>, token: Option<&str>) -> Headers {
         let mut headers = Headers::new();
         if let Some(custom) = &self.inner.options.headers {
             for (name, value) in custom {
@@ -450,15 +567,10 @@ impl StreamableHttpTransport {
         if let Some(pv) = protocol_version {
             headers.set("MCP-Protocol-Version", &pv);
         }
-        let token = if let Some(auth_provider) = &self.inner.options.auth_provider {
-            auth_provider.token().await?.filter(|t| !t.is_empty())
-        } else {
-            None
-        };
-        if let Some(t) = &token {
+        if let Some(t) = token {
             headers.set("Authorization", &format!("Bearer {t}"));
         }
-        Ok(PreparedHeaders { headers, token })
+        headers
     }
 
     fn capture_session(&self, response: &Response) {
@@ -479,12 +591,11 @@ impl StreamableHttpTransport {
             .unwrap_or_else(|e| e.into_inner())
             .session_id
             .is_some();
-        let raw_body = response.text().await.unwrap_or_default();
-        let body = if pi_js::str16::len(&raw_body) > MAX_ERROR_BODY_BYTES as usize {
-            pi_js::str16::slice(&raw_body, 0, Some(MAX_ERROR_BODY_BYTES))
-        } else {
-            raw_body
-        };
+        // Reads only the excerpt the error keeps and cancels the rest, so a huge error body is never buffered.
+        let body = read_body_text(response, MAX_ERROR_BODY_BYTES as usize)
+            .await
+            .map(|r| r.text)
+            .unwrap_or_default();
         if status == 401 {
             return Err(Error::typed(
                 "McpAuthRequiredError",
@@ -737,7 +848,7 @@ impl StreamableHttpTransport {
         if let Some(id) = last_event_id {
             extra.insert("last-event-id".to_string(), id.to_string());
         }
-        let response = self.authorized_fetch(FetchMethod::Get, extra, None).await?;
+        let response = self.authorized_fetch(FetchMethod::Get, extra, None, None).await?;
         if response.status() == 405 {
             discard(&response).await;
             return Ok(None);
@@ -821,24 +932,8 @@ impl StreamableHttpTransport {
     }
 }
 
-#[async_trait]
-impl McpTransport for StreamableHttpTransport {
-    async fn start(&self) -> Result<()> {
-        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.started {
-            return Err(Error::msg("MCP Streamable HTTP transport already started"));
-        }
-        if state.closed {
-            return Err(Error::typed(
-                "McpConnectionClosedError",
-                McpConnectionClosedError::new(None),
-            ));
-        }
-        state.started = true;
-        Ok(())
-    }
-
-    async fn send(&self, message: JsonRpcMessage) -> Result<()> {
+impl StreamableHttpTransport {
+    async fn send_inner(&self, message: JsonRpcMessage, signal: Option<&AbortSignal>) -> Result<()> {
         {
             let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.started || state.closed {
@@ -852,7 +947,9 @@ impl McpTransport for StreamableHttpTransport {
         extra.insert("accept".to_string(), "application/json, text/event-stream".to_string());
         extra.insert("content-type".to_string(), "application/json".to_string());
         let body = pi_js::json::stringify(&message);
-        let response = self.authorized_fetch(FetchMethod::Post, extra, Some(body)).await?;
+        let response = self
+            .authorized_fetch(FetchMethod::Post, extra, Some(body), signal)
+            .await?;
         self.check_response(&response).await?;
         self.capture_session(&response);
 
@@ -887,7 +984,17 @@ impl McpTransport for StreamableHttpTransport {
         }
         let ct = content_type(&response);
         if ct.as_deref() == Some("application/json") {
-            let parsed = response.json().await?;
+            let max_bytes = self
+                .inner
+                .options
+                .max_message_bytes
+                .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES)
+                .max(0) as usize;
+            let read = read_body_text(&response, max_bytes).await?;
+            if read.truncated {
+                return Err(Error::msg(format!("MCP JSON response exceeds {max_bytes} bytes")));
+            }
+            let parsed = pi_js::json::parse(&read.text)?;
             match parsed {
                 Value::Array(items) => {
                     for item in items {
@@ -921,29 +1028,56 @@ impl McpTransport for StreamableHttpTransport {
             ),
         ))
     }
+}
+
+#[async_trait]
+impl McpTransport for StreamableHttpTransport {
+    async fn start(&self) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.started {
+            return Err(Error::msg("MCP Streamable HTTP transport already started"));
+        }
+        if state.closed {
+            return Err(Error::typed(
+                "McpConnectionClosedError",
+                McpConnectionClosedError::new(None),
+            ));
+        }
+        state.started = true;
+        Ok(())
+    }
+
+    async fn send(&self, message: JsonRpcMessage) -> Result<()> {
+        self.send_inner(message, None).await
+    }
+
+    async fn send_with_options(&self, message: JsonRpcMessage, options: McpTransportSendOptions) -> Result<()> {
+        self.send_inner(message, options.signal.as_ref()).await
+    }
 
     async fn close(&self) -> Result<()> {
-        let should_delete = {
+        let (should_delete, last_token) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
                 return Ok(());
             }
             state.closed = true;
-            state.started && state.session_id.is_some()
+            (state.started && state.session_id.is_some(), state.last_token.clone())
         };
         self.inner.controller.abort(None);
         if should_delete {
-            if let Ok(prepared) = self.headers(&IndexMap::new()).await {
-                let timeout_signal = AbortSignal::timeout(1_000);
-                let init = McpFetchInit {
-                    method: Some("DELETE".to_string()),
-                    headers: Some(prepared.headers),
-                    body: None,
-                    signal: Some(timeout_signal),
-                };
-                if let Ok(response) = (self.inner.fetch)(self.inner.url.as_str(), Some(init)).await {
-                    discard(&response).await;
-                }
+            // Best effort: the session expires on the server anyway. The auth provider may refresh tokens
+            // over the network, so it is not asked here and closing never waits for a refresh.
+            let headers = self.build_headers(&IndexMap::new(), last_token.as_deref());
+            let timeout_signal = AbortSignal::timeout(1_000);
+            let init = McpFetchInit {
+                method: Some("DELETE".to_string()),
+                headers: Some(headers),
+                body: None,
+                signal: Some(timeout_signal),
+            };
+            if let Ok(response) = (self.inner.fetch)(self.inner.url.as_str(), Some(init)).await {
+                discard(&response).await;
             }
         }
         self.inner.events.emit_close();

@@ -105,11 +105,11 @@ fn tui_keybindings() -> KeybindingDefinitions {
     );
     let _ = m.insert(
         "tui.editor.cursorLineStart".to_string(),
-        definition(many(&["home", "ctrl+home", "ctrl+a"]), "Move to line start"),
+        definition(many(&["home", "ctrl+a"]), "Move to line start"),
     );
     let _ = m.insert(
         "tui.editor.cursorLineEnd".to_string(),
-        definition(many(&["end", "ctrl+end", "ctrl+e"]), "Move to line end"),
+        definition(many(&["end", "ctrl+e"]), "Move to line end"),
     );
     let _ = m.insert(
         "tui.editor.jumpForward".to_string(),
@@ -242,11 +242,11 @@ fn tui_keybindings() -> KeybindingDefinitions {
     );
     let _ = m.insert(
         "tui.altScreen.top".to_string(),
-        definition(one("home"), "Scroll viewport to top"),
+        definition(one("ctrl+home"), "Scroll viewport to top"),
     );
     let _ = m.insert(
         "tui.altScreen.bottom".to_string(),
-        definition(one("end"), "Scroll viewport to bottom"),
+        definition(one("ctrl+end"), "Scroll viewport to bottom"),
     );
     m
 }
@@ -419,4 +419,25 @@ pub fn get_keybindings() -> KeybindingsManager {
     let created = KeybindingsManager::new((&*TUI_KEYBINDINGS).clone(), None);
     *global = Some(created.clone());
     created
+}
+
+/// Returns the selection index after a `tui.select.pageUp` or `tui.select.pageDown` key,
+/// moved by `page_size` and clamped to `0..=item_count - 1`. Returns `None` when `data`
+/// is not a selection page key, and `Some(0)` for a page key on an empty list, so callers
+/// must still check that the list has items before selecting.
+pub fn get_select_page_index(
+    keybindings: &KeybindingsManager,
+    data: &str,
+    selected_index: i64,
+    item_count: i64,
+    page_size: i64,
+) -> Option<i64> {
+    let direction = if keybindings.matches(data, "tui.select.pageUp") {
+        -1
+    } else if keybindings.matches(data, "tui.select.pageDown") {
+        1
+    } else {
+        return None;
+    };
+    Some((selected_index + direction * page_size).min(item_count - 1).max(0))
 }

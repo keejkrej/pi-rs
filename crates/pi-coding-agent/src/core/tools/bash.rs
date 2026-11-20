@@ -102,7 +102,7 @@ use crate::core::tools::tool_definition_wrapper::{
     wrap_tool_definition,
 };
 use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, format_size};
-use crate::utils::child_process::{ChildProcessExit, wait_for_child_process_status};
+use crate::utils::child_process::{ChildProcessExit, wait_for_child_process_status_with_exit_observer};
 use crate::utils::shell::{
     CommandTransport, ShellConfig, get_shell_config as real_get_shell_config, get_shell_env, kill_process_tree,
     sanitize_binary_output, track_detached_child_pid, untrack_detached_child_pid,
@@ -254,8 +254,18 @@ pub(crate) async fn execute_shell_process(
         TimedOut,
     }
 
+    let started_at_ms = pi_js::time::performance_now();
+    let shell_exit: Arc<StdMutex<Option<(i32, f64)>>> = Arc::new(StdMutex::new(None));
+    let shell_exit_cb = Arc::clone(&shell_exit);
+
     let race = {
-        let wait_fut = wait_for_child_process_status(child, on_stdout, on_stderr);
+        let exit_observer: Box<dyn FnOnce(ChildProcessExit) + Send> = Box::new(move |exit| {
+            let elapsed_ms = (pi_js::time::performance_now() - started_at_ms).max(0.0);
+            let code = exit.into_shell_code().unwrap_or(1);
+            *shell_exit_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some((code, elapsed_ms));
+        });
+        let wait_fut =
+            wait_for_child_process_status_with_exit_observer(child, on_stdout, on_stderr, Some(exit_observer));
         tokio::pin!(wait_fut);
         tokio::pin!(abort_fut);
         tokio::pin!(timeout_fut);
@@ -287,7 +297,15 @@ pub(crate) async fn execute_shell_process(
             } else {
                 format!("{secs}")
             };
-            Err(pi_js::Error::msg(format!("timeout:{secs_str}")))
+            let exited_before = *shell_exit.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((code, elapsed_ms)) = exited_before {
+                let after_secs = (elapsed_ms / 100.0).round() / 10.0;
+                Err(pi_js::Error::msg(format!(
+                    "timeout:{secs_str}|shellExit:{code}:{after_secs}"
+                )))
+            } else {
+                Err(pi_js::Error::msg(format!("timeout:{secs_str}")))
+            }
         }
     };
 
@@ -496,9 +514,21 @@ where
             } else {
                 format!("{model_text}\n\n")
             };
-            if let Some(secs) = msg.strip_prefix("timeout:") {
+            if let Some(rest) = msg.strip_prefix("timeout:") {
+                let (secs, shell_note) = if let Some((s, extra)) = rest.split_once("|shellExit:")
+                    && let Some((code, after)) = extra.split_once(':')
+                {
+                    (
+                        s,
+                        format!(
+                            ". The shell exited with code {code} after {after} seconds, but background processes it started kept writing output until the timeout."
+                        ),
+                    )
+                } else {
+                    (rest, String::new())
+                };
                 return Err(pi_js::Error::msg(format!(
-                    "{prefix}Command timed out after {secs} seconds"
+                    "{prefix}Command timed out after {secs} seconds{shell_note}"
                 )));
             }
             if msg == "aborted" {

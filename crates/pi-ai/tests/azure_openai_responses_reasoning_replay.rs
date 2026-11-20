@@ -20,7 +20,7 @@ fn create_model() -> Model {
         id: "gpt-5-mini".to_owned(),
         name: "GPT-5 Mini".to_owned(),
         api: "azure-openai-responses".to_owned(),
-        provider: "azure-openai-responses".to_owned(),
+        provider: "azure".to_owned(),
         base_url: "https://example.invalid".to_owned(),
         reasoning: true,
         thinking_level_map: None,
@@ -33,6 +33,7 @@ fn create_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -54,6 +55,7 @@ fn create_output(model: &Model) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -103,7 +105,7 @@ fn get_replayed_reasoning(model: &Model, assistant: AssistantMessage) -> Option<
         tools: None,
     });
     let mut allowed = IndexSet::new();
-    allowed.insert("azure-openai-responses".to_owned());
+    allowed.insert("azure".to_owned());
     let input = convert_responses_messages(model, &context, &allowed, None);
     input
         .into_iter()

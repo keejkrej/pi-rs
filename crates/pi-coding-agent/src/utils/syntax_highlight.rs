@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
+use pi_js::seam::{Guard, Slot};
 use syntect::easy::ScopeRangeIterator;
 use syntect::parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 
@@ -347,7 +348,22 @@ pub fn render_highlighted_html(html: &str, theme: Option<&HighlightTheme>) -> St
     output
 }
 
+type OnHighlightFn = Arc<dyn Fn() + Send + Sync>;
+static ON_HIGHLIGHT_SLOT: LazyLock<Slot<OnHighlightFn>> = LazyLock::new(Slot::new);
+
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    pub fn override_on_highlight(func: OnHighlightFn) -> Guard {
+        ON_HIGHLIGHT_SLOT.set(Arc::new(func))
+    }
+}
+
 pub fn highlight(code: &str, options: HighlightOptions) -> String {
+    if let Some(cb) = ON_HIGHLIGHT_SLOT.get() {
+        cb();
+    }
     let html = highlight_to_hljs_html(code, options.language.as_deref());
     render_highlighted_html(&html, options.theme.as_ref())
 }

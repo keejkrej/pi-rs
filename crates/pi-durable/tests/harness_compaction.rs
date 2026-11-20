@@ -405,6 +405,7 @@ fn tool_result_msg(call_id: &str, content: &str) -> Message {
         nested_calls: None,
         is_error: false,
         timestamp: 0,
+        duration_ms: None,
     })
 }
 

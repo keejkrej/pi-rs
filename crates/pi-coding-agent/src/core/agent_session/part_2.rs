@@ -10,7 +10,8 @@ use pi_ai::types::{
     UserMessageContent,
 };
 use pi_ai::{
-    AnyModel, clamp_thinking_level, get_current_system_message, get_supported_thinking_levels, models_are_equal,
+    AnyModel, clamp_thinking_level, get_current_system_message, get_current_tools, get_supported_thinking_levels,
+    models_are_equal,
 };
 use serde_json::Value;
 
@@ -18,18 +19,19 @@ use super::BoundaryKind;
 use crate::core::auth_guidance::{format_no_api_key_found_message, format_no_model_selected_message};
 use crate::core::cache_warmer::CacheWarmingStatus;
 use crate::core::defaults::DEFAULT_THINKING_LEVEL;
-use crate::core::extensions::runner::BoundaryBaseEvent;
+use crate::core::extensions::runner::{BeforeAgentStartTrigger, BoundaryBaseEvent};
 use crate::core::extensions::types::{
     CustomMessageContent, CustomMessageDraft, ExtensionError, InputDeliveryBehavior, InputSource, ModelSelectEvent,
     ModelSelectSource, ThinkingLevelSelectEvent, ToolDefinition, ToolExposure, ToolInfo, ToolLoadoutBackend,
     ToolNamespace,
 };
+use crate::core::mcp_servers::is_mcp_tool_name;
 use crate::core::messages::CustomMessage;
 use crate::core::prompt_templates::{PromptTemplate, expand_prompt_template};
 use crate::core::resource_loader::ResourceLoader;
 use crate::core::sdk::ScopedModelEntry;
 use crate::core::session_manager::SessionManager;
-use crate::core::settings_manager::{CacheWarmingMode, QueueModeSetting, SettingsManager};
+use crate::core::settings_manager::{CacheWarmingMode, QueueModeSetting, SettingsManager, apply_tool_modifiers};
 use crate::core::system_prompt::{
     BuildSystemPromptOptions, ContextFile, NormalizedBuildSystemPromptOptions, build_system_prompt_from_normalized,
     build_system_prompt_sections, diff_system_prompt_sections, normalize_build_system_prompt_options,
@@ -99,6 +101,7 @@ struct SessionToolLoadout {
     registered: Vec<AgentTool>,
     exposures: IndexMap<String, ToolExposure>,
     namespaces: IndexMap<String, ToolNamespace>,
+    prompt_guidelines: IndexMap<String, Vec<String>>,
 }
 
 impl ToolLoadoutBackend for SessionToolLoadout {
@@ -121,14 +124,10 @@ impl ToolLoadoutBackend for SessionToolLoadout {
     fn get_namespace(&self, name: &str) -> Option<ToolNamespace> {
         self.namespaces.get(name).cloned()
     }
-}
 
-pub(crate) fn is_mcp_tool_name(name: &str) -> bool {
-    name.starts_with("mcp__")
-        || matches!(
-            name,
-            "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
-        )
+    fn get_prompt_guidelines(&self, name: &str) -> Vec<String> {
+        self.prompt_guidelines.get(name).cloned().unwrap_or_default()
+    }
 }
 
 /// Glob wildcard match where `*` matches zero or more characters.
@@ -306,6 +305,7 @@ impl AgentSession {
                 description: entry.definition.description.clone(),
                 parameters: entry.definition.parameters.clone(),
                 prompt_guidelines: entry.definition.prompt_guidelines.clone(),
+                reaches_tools: entry.definition.reaches_tools(),
                 exposure: entry.definition.exposure.unwrap_or(ToolExposure::Direct),
                 namespace: entry.definition.namespace.clone(),
                 annotations: entry.definition.annotations.clone(),
@@ -369,8 +369,22 @@ impl AgentSession {
         if tool_name_matches_entries(allowed, name) {
             return true;
         }
-        let allowlist_filters_mcp = allowed.is_empty() || allowed.iter().any(|entry| entry.starts_with("mcp__"));
-        !allowlist_filters_mcp && is_mcp_tool_name(name)
+        !guard.allowlist_filters_mcp && is_mcp_tool_name(name)
+    }
+
+    pub(crate) fn _is_activatable_locked(guard: &AgentSessionState, name: &str) -> bool {
+        let Some(allowed) = guard.allowed_tool_names.as_ref() else {
+            return true;
+        };
+        if tool_name_matches_entries(allowed, name) || !is_mcp_tool_name(name) {
+            return true;
+        }
+        let exposure = guard
+            .tool_definitions
+            .get(name)
+            .and_then(|e| e.definition.exposure)
+            .unwrap_or(ToolExposure::Direct);
+        exposure != ToolExposure::Direct && guard.tool_registry.contains_key("tool_search")
     }
 
     pub(crate) fn _get_tool_exposure(&self, name: &str) -> ToolExposure {
@@ -414,12 +428,18 @@ impl AgentSession {
 
     /// Set the agent's tools for the given active tool names and return them.
     pub(crate) fn _apply_tool_loadout(&self, tool_names: &[String]) -> Vec<AgentTool> {
+        let requested: IndexSet<String> = tool_names.iter().cloned().collect();
+        let kept: Vec<String> = self
+            .get_active_tool_names()
+            .into_iter()
+            .filter(|name| requested.contains(name))
+            .collect();
         let mut unique_names = IndexSet::new();
-        for name in tool_names {
-            unique_names.insert(name.clone());
+        for name in kept.into_iter().chain(requested) {
+            unique_names.insert(name);
         }
 
-        let (tools, hooks, registered, exposures, namespaces, runner) = {
+        let (tools, hooks, registered, exposures, namespaces, prompt_guidelines, runner) = {
             let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let tools: Vec<AgentTool> = unique_names
                 .iter()
@@ -430,7 +450,7 @@ impl AgentSession {
                         .get(name)
                         .and_then(|e| e.definition.exposure)
                         .unwrap_or(ToolExposure::Direct);
-                    if exposure == ToolExposure::Hidden {
+                    if exposure == ToolExposure::Hidden || !Self::_is_activatable_locked(&guard, name) {
                         None
                     } else {
                         Some(tool.clone())
@@ -457,8 +477,26 @@ impl AgentSession {
                 .iter()
                 .filter_map(|(k, v)| v.definition.namespace.clone().map(|ns| (k.clone(), ns)))
                 .collect();
+            let prompt_guidelines: IndexMap<String, Vec<String>> = guard
+                .tool_definitions
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.definition
+                        .prompt_guidelines
+                        .clone()
+                        .map(|guidelines| (k.clone(), guidelines))
+                })
+                .collect();
             let runner = guard.extension_runner.clone();
-            (tools, hooks, registered, exposures, namespaces, runner)
+            (
+                tools,
+                hooks,
+                registered,
+                exposures,
+                namespaces,
+                prompt_guidelines,
+                runner,
+            )
         };
 
         let mut hidden = IndexSet::new();
@@ -472,6 +510,7 @@ impl AgentSession {
                 registered,
                 exposures,
                 namespaces,
+                prompt_guidelines,
             };
             let mut descriptions: IndexMap<String, String> = IndexMap::new();
             for entry in hooks {
@@ -630,12 +669,11 @@ impl AgentSession {
             .collect();
         let mut tool_snippets = IndexMap::new();
         for name in guard.tool_registry.keys() {
-            if let Some(snippet) = guard.tool_prompt_snippets.get(name)
-                && !guard.hidden_declarations.contains(name)
-            {
+            if let Some(snippet) = guard.tool_prompt_snippets.get(name) {
                 tool_snippets.insert(name.clone(), snippet.clone());
             }
         }
+        let hidden_tools: Vec<String> = guard.hidden_declarations.iter().cloned().collect();
         guard.base_system_prompt_options = normalize_build_system_prompt_options(&BuildSystemPromptOptions {
             cwd: guard.cwd.clone(),
             skills: Some(loaded_skills),
@@ -643,6 +681,7 @@ impl AgentSession {
             custom_prompt: loader_system_prompt,
             append_system_prompt: Some(append_system_prompt),
             selected_tools: Some(valid_tool_names),
+            hidden_tools: Some(hidden_tools),
             tool_snippets: Some(tool_snippets),
             tool_guidelines: Some(guard.tool_prompt_guidelines.clone()),
             ..Default::default()
@@ -658,14 +697,16 @@ impl AgentSession {
         let applied = self._apply_tool_loadout(&options.selected_tools);
         options.selected_tools = applied.into_iter().map(|t| t.name).collect();
 
-        let hidden = self
+        let hidden: Vec<String> = self
             .inner
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .hidden_declarations
-            .clone();
-        options.tool_snippets.retain(|name, _| !hidden.contains(name));
+            .iter()
+            .cloned()
+            .collect();
+        options.hidden_tools = hidden;
 
         let owned_messages;
         let messages = match messages_override {
@@ -795,7 +836,7 @@ impl AgentSession {
             })));
     }
 
-    pub(crate) fn _restore_tools_from_transcript(&self) {
+    pub(crate) fn _restore_tools_from_transcript(&self, modifiers: &[String]) {
         {
             self.inner
                 .state
@@ -804,21 +845,47 @@ impl AgentSession {
                 .pending_tool_names
                 .clear();
         }
-        let context = self.inner.session_manager.build_session_context();
-        let llm_messages: Vec<pi_ai::types::Message> = context
-            .messages
-            .iter()
-            .filter_map(|m| m.as_message().cloned())
+        let branch = self.inner.session_manager.get_branch(None);
+        let system_messages: Vec<pi_ai::types::Message> = branch
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Message(m) if m.message.role() == Some("system") => m.message.as_message().cloned(),
+                _ => None,
+            })
             .collect();
-        let Some(current) = get_current_system_message(&llm_messages) else {
+        if system_messages.is_empty() {
             return;
+        }
+        let mut mentioned = IndexSet::new();
+        for msg in &system_messages {
+            if let pi_ai::types::Message::System(sm) = msg {
+                for tool in sm.tools_added.iter().flatten() {
+                    mentioned.insert(tool.name.clone());
+                }
+                for tool in sm.tools_removed.iter().flatten() {
+                    mentioned.insert(tool.name.clone());
+                }
+            }
+        }
+        let registry_keys: Vec<String> = {
+            let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .tool_registry
+                .keys()
+                .filter(|name| !mentioned.contains(*name) && !guard.base_tool_definitions.contains_key(*name))
+                .cloned()
+                .collect()
         };
-        let names: Vec<String> = current
-            .tools_added
-            .unwrap_or_default()
+        let new_tools: Vec<String> = registry_keys
+            .into_iter()
+            .filter(|name| self._is_activated_on_registration(name))
+            .collect();
+        let mut combined: Vec<String> = get_current_tools(&system_messages)
             .into_iter()
             .map(|t| t.name)
             .collect();
+        combined.extend(new_tools);
+        let names = apply_tool_modifiers(&combined, modifiers);
         let allowed_names: IndexSet<String> = names
             .iter()
             .filter(|name| self._is_allowed_tool(name))
@@ -838,20 +905,49 @@ impl AgentSession {
     // Prompting
     // =========================================================================
 
-    pub(crate) fn _run_agent_prompt(&self, messages: PromptInput) -> BoxFuture<'_, pi_js::Result<()>> {
+    pub(crate) fn _start_run(
+        &self,
+        trigger: BeforeAgentStartTrigger,
+        on_started: Option<Box<dyn FnOnce() + Send>>,
+    ) -> BoxFuture<'_, pi_js::Result<()>> {
         Box::pin(async move {
             {
                 let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                guard.is_agent_run_active = true;
                 guard.agent_run_abort_requested = false;
+            }
+            let messages = match self._prepare_run(trigger).await {
+                Ok(msgs) => msgs,
+                Err(err) => {
+                    {
+                        self.inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_agent_run_active = false;
+                    }
+                    self._flush_pending_bash_messages();
+                    self._flush_pending_custom_messages();
+                    self._resolve_idle_wait_if_idle();
+                    return Err(err);
+                }
+            };
+            self._flush_pending_bash_messages();
+            self._flush_pending_custom_messages();
+            if let Some(cb) = on_started {
+                cb();
+            }
+
+            {
+                let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                 guard.failed_response = None;
                 guard.pending_tool_names.clear();
                 guard.message_end_replacements.clear();
-                guard.is_agent_run_active = true;
             }
             self._record_selection();
 
             let result: pi_js::Result<()> = async {
-                self.inner.agent.prompt(messages).await?;
+                self.inner.agent.prompt(PromptInput::Messages(messages)).await?;
                 loop {
                     let abort_req = self
                         .inner
@@ -915,13 +1011,106 @@ impl AgentSession {
         })
     }
 
+    async fn _prepare_run(&self, trigger: BeforeAgentStartTrigger) -> pi_js::Result<Vec<AgentMessage>> {
+        if let Some(last_assistant) = self._find_last_assistant_message() {
+            self._check_compaction(&last_assistant, false).await;
+        }
+
+        let (runner, base_opts) = {
+            let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            (guard.extension_runner.clone(), guard.base_system_prompt_options.clone())
+        };
+        let selected_tools_before = base_opts.selected_tools.clone();
+        let mut next_system_opts = base_opts.clone();
+        let mut extra_custom_messages: Vec<CustomMessageDraft> = Vec::new();
+
+        if let Some(ref runner) = runner {
+            let build_opts = BuildSystemPromptOptions {
+                custom_prompt: base_opts.custom_prompt.clone(),
+                force_system_prompt: base_opts.force_system_prompt.clone(),
+                selected_tools: Some(base_opts.selected_tools.clone()),
+                hidden_tools: Some(base_opts.hidden_tools.clone()),
+                tool_snippets: Some(base_opts.tool_snippets.clone()),
+                tool_guidelines: Some(base_opts.tool_guidelines.clone()),
+                prompt_guidelines: Some(base_opts.prompt_guidelines.clone()),
+                append_system_prompt: Some(base_opts.append_system_prompt.clone()),
+                sections: Some(base_opts.sections.clone()),
+                cwd: base_opts.cwd.clone(),
+                context_files: Some(base_opts.context_files.clone()),
+                skills: Some(base_opts.skills.clone()),
+            };
+            let before_res = runner
+                .emit_before_agent_start_trigger(trigger.clone(), build_opts)
+                .await;
+            next_system_opts = before_res.system_prompt_options;
+            extra_custom_messages = before_res.messages;
+        }
+
+        let handler_edited_tools = next_system_opts.selected_tools != selected_tools_before;
+        if !handler_edited_tools {
+            next_system_opts.selected_tools = self.get_active_tool_names();
+        }
+
+        let mut messages: Vec<AgentMessage> = Vec::new();
+        match trigger {
+            BeforeAgentStartTrigger::Custom { message } => {
+                messages.push(AgentMessage::from(message));
+            }
+            BeforeAgentStartTrigger::User { prompt, images } => {
+                let (normalized_images, hints) = self._normalize_prompt_images(images).await;
+                let user_text = if hints.is_empty() {
+                    prompt
+                } else {
+                    format!("{prompt}\n\n{}", hints.join("\n"))
+                };
+                let mut user_content = Vec::with_capacity(1 + normalized_images.len());
+                user_content.push(UserContentBlock::Text(TextContent::new(user_text)));
+                for img in normalized_images {
+                    user_content.push(UserContentBlock::Image(img));
+                }
+                messages.push(AgentMessage::from(UserMessage {
+                    content: UserMessageContent::Blocks(user_content),
+                    timestamp: pi_js::time::now_ms(),
+                }));
+            }
+        }
+
+        let next_turn = {
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut guard.pending_next_turn_messages)
+        };
+        messages.extend(next_turn);
+
+        for msg in extra_custom_messages {
+            messages.push(AgentMessage::from(CustomMessage {
+                role: "custom".to_string(),
+                custom_type: msg.custom_type,
+                content: msg.content,
+                display: msg.display,
+                details: msg.details,
+                timestamp: pi_js::time::now_ms(),
+            }));
+        }
+
+        let current_agent_msgs = self.inner.agent.state().messages;
+        let update_message = self._prepare_prompt_and_tool_loadout(&mut next_system_opts, Some(&current_agent_msgs));
+        {
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.run_system_prompt_options = Some(next_system_opts);
+        }
+        if let Some(upd) = update_message {
+            messages.insert(0, AgentMessage::from(upd));
+        }
+
+        Ok(messages)
+    }
+
     async fn _handle_post_agent_run(&self) -> bool {
         self._await_pending_extension_sends().await;
-        let (message, tool_results, abort_req) = {
+        let (message, abort_req) = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let message = guard.last_assistant_message.take();
-            let tool_results = std::mem::take(&mut guard.last_assistant_tool_results);
-            (message, tool_results, guard.agent_run_abort_requested)
+            (message, guard.agent_run_abort_requested)
         };
         if abort_req {
             self._finish_cancelled_retry();
@@ -971,8 +1160,7 @@ impl AgentSession {
             });
         }
 
-        let tr_agent_msgs: Vec<AgentMessage> = tool_results.into_iter().map(AgentMessage::from).collect();
-        if self._check_compaction(&message, true, &tr_agent_msgs).await {
+        if self._check_compaction(&message, true).await {
             return !self
                 .inner
                 .state
@@ -1151,7 +1339,7 @@ impl AgentSession {
 
             let options = options.unwrap_or_default();
             let expand_prompt_templates = options.expand_prompt_templates.unwrap_or(true);
-            let preflight_result = options.preflight_result;
+            let preflight_result = options.preflight_result.clone();
 
             if expand_prompt_templates && text.starts_with('/') {
                 if self._try_execute_extension_command(text).await {
@@ -1162,181 +1350,128 @@ impl AgentSession {
                 }
             }
 
-            if self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .compaction_abort_controller
-                .is_some()
-            {
+            let is_compacting_or_summary = {
+                let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                guard.compaction_abort_controller.is_some() || guard.branch_summary_abort_controller.is_some()
+            };
+            if is_compacting_or_summary {
                 return Err(pi_js::Error::msg(
                     "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
                 ));
             }
 
-            let Some((current_text, current_images)) = self
-                ._run_input_handlers(
-                    text,
-                    options.images,
-                    options.source.unwrap_or(InputSource::Interactive),
-                    if self.is_streaming() {
-                        options.streaming_behavior
-                    } else {
-                        None
-                    },
-                )
-                .await
-            else {
-                if let Some(ref cb) = preflight_result {
-                    cb(PromptPreflightOutcome::Handled);
+            struct PromptPreflightGuard {
+                inner: Arc<AgentSessionInner>,
+            }
+            impl Drop for PromptPreflightGuard {
+                fn drop(&mut self) {
+                    let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.prompt_preflight_count = guard.prompt_preflight_count.saturating_sub(1);
                 }
-                return Ok(());
-            };
-
-            let mut expanded_text = current_text;
-            if expand_prompt_templates {
-                expanded_text = self._expand_skill_command(&expanded_text);
-                let templates = self.prompt_templates();
-                expanded_text = expand_prompt_template(&expanded_text, &templates);
             }
-
-            if self.is_streaming() {
-                let Some(behavior) = options.streaming_behavior else {
-                    return Err(pi_js::Error::msg(
-                        "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-                    ));
-                };
-                match behavior {
-                    StreamingBehavior::FollowUp => {
-                        self._queue_follow_up(&expanded_text, current_images);
-                    }
-                    StreamingBehavior::Steer => {
-                        self._queue_steer(&expanded_text, current_images);
-                    }
-                }
-                if let Some(ref cb) = preflight_result {
-                    cb(PromptPreflightOutcome::Queued);
-                }
-                return Ok(());
-            }
-
-            self._flush_pending_bash_messages();
-            self._flush_pending_custom_messages();
-
-            let Some(model) = self.model() else {
-                return Err(pi_js::Error::msg(format_no_model_selected_message()));
-            };
-
-            let has_configured_auth = self.inner.model_runtime.has_configured_auth(&model.provider)
-                || self
-                    .inner
-                    .model_runtime
-                    .check_auth(&model.provider, None)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
-            if !has_configured_auth {
-                if self.inner.model_runtime.is_using_oauth(&model.provider) {
-                    return Err(pi_js::Error::msg(format!(
-                        "Authentication failed for \"{}\". Credentials may have expired or network is unavailable. Run '/login {}' to re-authenticate.",
-                        model.provider, model.provider
-                    )));
-                }
-                return Err(pi_js::Error::msg(format_no_api_key_found_message(&model.provider)));
-            }
-
-            if let Some(last_assistant) = self._find_last_assistant_message() {
-                self._check_compaction(&last_assistant, false, &[]).await;
-            }
-
-            let (runner, base_opts) = {
-                let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-                (guard.extension_runner.clone(), guard.base_system_prompt_options.clone())
-            };
-            let selected_tools_before = base_opts.selected_tools.clone();
-            let mut next_system_opts = base_opts.clone();
-            let mut extra_custom_messages: Vec<CustomMessageDraft> = Vec::new();
-
-            if let Some(ref runner) = runner {
-                let build_opts = BuildSystemPromptOptions {
-                    custom_prompt: base_opts.custom_prompt.clone(),
-                    force_system_prompt: base_opts.force_system_prompt.clone(),
-                    selected_tools: Some(base_opts.selected_tools.clone()),
-                    hidden_tools: Some(base_opts.hidden_tools.clone()),
-                    tool_snippets: Some(base_opts.tool_snippets.clone()),
-                    tool_guidelines: Some(base_opts.tool_guidelines.clone()),
-                    prompt_guidelines: Some(base_opts.prompt_guidelines.clone()),
-                    append_system_prompt: Some(base_opts.append_system_prompt.clone()),
-                    sections: Some(base_opts.sections.clone()),
-                    cwd: base_opts.cwd.clone(),
-                    context_files: Some(base_opts.context_files.clone()),
-                    skills: Some(base_opts.skills.clone()),
-                };
-                let before_res = runner
-                    .emit_before_agent_start(&expanded_text, current_images.clone(), build_opts)
-                    .await;
-                next_system_opts = before_res.system_prompt_options;
-                extra_custom_messages = before_res.messages;
-            }
-
-            let handler_edited_tools = next_system_opts.selected_tools != selected_tools_before;
-            if !handler_edited_tools {
-                next_system_opts.selected_tools = self.get_active_tool_names();
-            }
-
-            let (normalized_images, hints) = self._normalize_prompt_images(current_images).await;
-            let user_text = if hints.is_empty() {
-                expanded_text
-            } else {
-                format!("{expanded_text}\n\n{}", hints.join("\n"))
-            };
-
-            let mut messages: Vec<AgentMessage> = Vec::new();
-            let mut user_content = Vec::with_capacity(1 + normalized_images.len());
-            user_content.push(UserContentBlock::Text(TextContent::new(user_text)));
-            for img in normalized_images {
-                user_content.push(UserContentBlock::Image(img));
-            }
-            messages.push(AgentMessage::from(UserMessage {
-                content: UserMessageContent::Blocks(user_content),
-                timestamp: pi_js::time::now_ms(),
-            }));
-
-            let next_turn = {
-                let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-                std::mem::take(&mut guard.pending_next_turn_messages)
-            };
-            messages.extend(next_turn);
-
-            for msg in extra_custom_messages {
-                messages.push(AgentMessage::from(CustomMessage {
-                    role: "custom".to_string(),
-                    custom_type: msg.custom_type,
-                    content: msg.content,
-                    display: msg.display,
-                    details: msg.details,
-                    timestamp: pi_js::time::now_ms(),
-                }));
-            }
-
-            let current_agent_msgs = self.inner.agent.state().messages;
-            let update_message =
-                self._prepare_prompt_and_tool_loadout(&mut next_system_opts, Some(&current_agent_msgs));
             {
                 let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-                guard.run_system_prompt_options = Some(next_system_opts);
+                guard.prompt_preflight_count += 1;
             }
-            if let Some(upd) = update_message {
-                messages.insert(0, AgentMessage::from(upd));
-            }
+            let preflight_guard = PromptPreflightGuard {
+                inner: Arc::clone(&self.inner),
+            };
+            let trigger = self._prepare_prompt(text, &options, preflight_result.as_ref()).await?;
+            drop(preflight_guard);
 
-            if let Some(ref cb) = preflight_result {
-                cb(PromptPreflightOutcome::Started);
+            if let Some(trigger) = trigger {
+                let cb_opt = preflight_result;
+                let on_started: Option<Box<dyn FnOnce() + Send>> = cb_opt.map(|cb| {
+                    Box::new(move || {
+                        cb(PromptPreflightOutcome::Started);
+                    }) as Box<dyn FnOnce() + Send>
+                });
+                self._start_run(trigger, on_started).await?;
             }
-            self._run_agent_prompt(PromptInput::Messages(messages)).await
+            Ok(())
         })
+    }
+
+    async fn _prepare_prompt(
+        &self,
+        text: &str,
+        options: &PromptOptions,
+        preflight_result: Option<&PromptPreflightCallback>,
+    ) -> pi_js::Result<Option<BeforeAgentStartTrigger>> {
+        let expand_prompt_templates = options.expand_prompt_templates.unwrap_or(true);
+        let Some((current_text, current_images)) = self
+            ._run_input_handlers(
+                text,
+                options.images.clone(),
+                options.source.unwrap_or(InputSource::Interactive),
+                if self.is_streaming() {
+                    options.streaming_behavior
+                } else {
+                    None
+                },
+            )
+            .await
+        else {
+            if let Some(cb) = preflight_result {
+                cb(PromptPreflightOutcome::Handled);
+            }
+            return Ok(None);
+        };
+
+        let mut expanded_text = current_text;
+        if expand_prompt_templates {
+            expanded_text = self._expand_skill_command(&expanded_text);
+            let templates = self.prompt_templates();
+            expanded_text = expand_prompt_template(&expanded_text, &templates);
+        }
+
+        if self.is_streaming() {
+            let Some(behavior) = options.streaming_behavior else {
+                return Err(pi_js::Error::msg(
+                    "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+                ));
+            };
+            match behavior {
+                StreamingBehavior::FollowUp => {
+                    self._queue_follow_up(&expanded_text, current_images);
+                }
+                StreamingBehavior::Steer => {
+                    self._queue_steer(&expanded_text, current_images);
+                }
+            }
+            if let Some(cb) = preflight_result {
+                cb(PromptPreflightOutcome::Queued);
+            }
+            return Ok(None);
+        }
+
+        let Some(model) = self.model() else {
+            return Err(pi_js::Error::msg(format_no_model_selected_message()));
+        };
+
+        let has_configured_auth = self.inner.model_runtime.has_configured_auth(&model.provider)
+            || self
+                .inner
+                .model_runtime
+                .check_auth(&model.provider, None)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+        if !has_configured_auth {
+            if self.inner.model_runtime.is_using_oauth(&model.provider) {
+                return Err(pi_js::Error::msg(format!(
+                    "Authentication failed for \"{}\". Credentials may have expired or network is unavailable. Run '/login {}' to re-authenticate.",
+                    model.provider, model.provider
+                )));
+            }
+            return Err(pi_js::Error::msg(format_no_api_key_found_message(&model.provider)));
+        }
+
+        Ok(Some(BeforeAgentStartTrigger::User {
+            prompt: expanded_text,
+            images: current_images,
+        }))
     }
 
     async fn _try_execute_extension_command(&self, text: &str) -> bool {
@@ -1484,43 +1619,83 @@ impl AgentSession {
     }
 
     fn _queue_steer(&self, text: &str, images: Option<Vec<ImageContent>>) {
-        {
-            self.inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .steering_messages
-                .push(text.to_string());
-        }
-        self._emit_queue_update();
+        let has_images = images.as_ref().is_some_and(|v| !v.is_empty());
         let mut content = vec![UserContentBlock::Text(TextContent::new(text))];
         if let Some(imgs) = images {
             content.extend(imgs.into_iter().map(UserContentBlock::Image));
         }
-        self.inner.agent.steer(AgentMessage::from(UserMessage {
+        let message = AgentMessage::from(UserMessage {
             content: UserMessageContent::Blocks(content),
             timestamp: pi_js::time::now_ms(),
-        }));
+        });
+        {
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.steering_messages.push(text.to_string());
+            if has_images {
+                guard.queued_messages_with_images.push(message.clone());
+            }
+        }
+        self._emit_queue_update();
+        self.inner.agent.steer(message);
     }
 
     fn _queue_follow_up(&self, text: &str, images: Option<Vec<ImageContent>>) {
-        {
-            self.inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .follow_up_messages
-                .push(text.to_string());
-        }
-        self._emit_queue_update();
+        let has_images = images.as_ref().is_some_and(|v| !v.is_empty());
         let mut content = vec![UserContentBlock::Text(TextContent::new(text))];
         if let Some(imgs) = images {
             content.extend(imgs.into_iter().map(UserContentBlock::Image));
         }
-        self.inner.agent.follow_up(AgentMessage::from(UserMessage {
+        let message = AgentMessage::from(UserMessage {
             content: UserMessageContent::Blocks(content),
             timestamp: pi_js::time::now_ms(),
-        }));
+        });
+        {
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.follow_up_messages.push(text.to_string());
+            if has_images {
+                guard.queued_messages_with_images.push(message.clone());
+            }
+        }
+        self._emit_queue_update();
+        self.inner.agent.follow_up(message);
+    }
+
+    pub(crate) async fn _normalize_queued_message_images(&self, msg: &AgentMessage) -> Option<AgentMessage> {
+        let user = msg.as_user()?;
+        let UserMessageContent::Blocks(ref blocks) = user.content else {
+            return None;
+        };
+        let Some(UserContentBlock::Text(first)) = blocks.first() else {
+            return None;
+        };
+        let rest = &blocks[1..];
+        let images: Vec<ImageContent> = rest
+            .iter()
+            .filter_map(|block| match block {
+                UserContentBlock::Image(img) => Some(img.clone()),
+                _ => None,
+            })
+            .collect();
+        let (normalized_images, hints) = self._normalize_prompt_images(Some(images)).await;
+        let text = if hints.is_empty() {
+            first.text.clone()
+        } else {
+            format!("{}\n\n{}", first.text, hints.join("\n"))
+        };
+        let mut next_content = Vec::with_capacity(1 + rest.len() + normalized_images.len());
+        next_content.push(UserContentBlock::Text(TextContent::new(text)));
+        for block in rest {
+            if !matches!(block, UserContentBlock::Image(_)) {
+                next_content.push(block.clone());
+            }
+        }
+        for img in normalized_images {
+            next_content.push(UserContentBlock::Image(img));
+        }
+        Some(AgentMessage::from(UserMessage {
+            content: UserMessageContent::Blocks(next_content),
+            timestamp: user.timestamp,
+        }))
     }
 
     fn _throw_if_extension_command(&self, text: &str) -> pi_js::Result<()> {
@@ -1552,7 +1727,7 @@ impl AgentSession {
         &self,
         message: SendCustomMessageDraft,
         options: Option<SendCustomMessageOptions>,
-    ) -> Option<AgentMessage> {
+    ) -> Option<CustomMessage> {
         let opts = options.unwrap_or_default();
         let app_message = CustomMessage {
             role: "custom".to_string(),
@@ -1581,19 +1756,26 @@ impl AgentSession {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_emitting_agent_settled {
                 let weak = Arc::downgrade(&self.inner);
-                let agent_msg = AgentMessage::from(app_message);
                 guard.deferred_settled_actions.push(Box::new(move || {
                     Box::pin(async move {
                         if let Some(inner) = weak.upgrade() {
                             let _ = AgentSession { inner }
-                                ._run_agent_prompt(PromptInput::Message(agent_msg))
+                                .send_custom_message(
+                                    SendCustomMessageDraft {
+                                        custom_type: app_message.custom_type,
+                                        content: app_message.content,
+                                        display: app_message.display,
+                                        details: app_message.details,
+                                    },
+                                    Some(opts),
+                                )
                                 .await;
                         }
                     })
                 }));
                 return None;
             }
-            return Some(AgentMessage::from(app_message));
+            return Some(app_message);
         } else if self.is_streaming() {
             self.inner
                 .state
@@ -1614,7 +1796,8 @@ impl AgentSession {
         options: Option<SendCustomMessageOptions>,
     ) -> pi_js::Result<()> {
         if let Some(agent_msg) = self._try_send_custom_message_sync(message, options) {
-            self._run_agent_prompt(PromptInput::Message(agent_msg)).await?;
+            self._start_run(BeforeAgentStartTrigger::Custom { message: agent_msg }, None)
+                .await?;
         }
         Ok(())
     }
@@ -1998,6 +2181,25 @@ impl AgentSession {
         }
     }
 
+    fn get_next_cycle_index(current_index: Option<usize>, length: usize, direction: CycleDirection) -> Option<usize> {
+        if length == 0 {
+            return None;
+        }
+        let Some(idx) = current_index else {
+            return Some(match direction {
+                CycleDirection::Forward => 0,
+                CycleDirection::Backward => length - 1,
+            });
+        };
+        if length == 1 {
+            return None;
+        }
+        Some(match direction {
+            CycleDirection::Forward => (idx + 1) % length,
+            CycleDirection::Backward => (idx + length - 1) % length,
+        })
+    }
+
     async fn _cycle_scoped_model(
         &self,
         direction: CycleDirection,
@@ -2015,20 +2217,14 @@ impl AgentSession {
             .into_iter()
             .filter(|s| available_ids.contains(&(s.model.provider.clone(), s.model.id.clone())))
             .collect();
-        if scoped_models.len() <= 1 {
-            return Ok(None);
-        }
 
         let current_model = self.model();
         let current_any = current_model.as_ref().map(|m| AnyModel::Chat(m.clone()));
         let current_index = scoped_models
             .iter()
-            .position(|sm| models_are_equal(Some(&AnyModel::Chat(sm.model.clone())), current_any.as_ref()))
-            .unwrap_or(0);
-        let len = scoped_models.len();
-        let next_index = match direction {
-            CycleDirection::Forward => (current_index + 1) % len,
-            CycleDirection::Backward => (current_index + len - 1) % len,
+            .position(|sm| models_are_equal(Some(&AnyModel::Chat(sm.model.clone())), current_any.as_ref()));
+        let Some(next_index) = Self::get_next_cycle_index(current_index, scoped_models.len(), direction) else {
+            return Ok(None);
         };
         let next = &scoped_models[next_index];
         let thinking_level = self._get_thinking_level_for_model_switch(Some(&next.model), next.thinking_level);
@@ -2065,20 +2261,14 @@ impl AgentSession {
         options: ModelMutationOptions,
     ) -> pi_js::Result<Option<ModelCycleResult>> {
         let available_models = self.inner.model_runtime.get_available_snapshot();
-        if available_models.len() <= 1 {
-            return Ok(None);
-        }
 
         let current_model = self.model();
         let current_any = current_model.as_ref().map(|m| AnyModel::Chat(m.clone()));
         let current_index = available_models
             .iter()
-            .position(|m| models_are_equal(Some(&AnyModel::Chat(m.clone())), current_any.as_ref()))
-            .unwrap_or(0);
-        let len = available_models.len();
-        let next_index = match direction {
-            CycleDirection::Forward => (current_index + 1) % len,
-            CycleDirection::Backward => (current_index + len - 1) % len,
+            .position(|m| models_are_equal(Some(&AnyModel::Chat(m.clone())), current_any.as_ref()));
+        let Some(next_index) = Self::get_next_cycle_index(current_index, available_models.len(), direction) else {
+            return Ok(None);
         };
         let next_model = available_models[next_index].clone();
 
@@ -2213,7 +2403,7 @@ impl AgentSession {
             })
     }
 
-    fn _clamp_thinking_level(
+    pub(super) fn _clamp_thinking_level(
         &self,
         level: ModelThinkingLevel,
         _available_levels: &[ModelThinkingLevel],

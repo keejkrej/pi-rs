@@ -278,6 +278,7 @@ pub fn create_virtual_model(definition: &VirtualModelDescriptor) -> Model {
         max_tokens: definition.max_tokens.unwrap_or(0),
         headers: None,
         sampling_params: None,
+        sampling_params_by_thinking_level: None,
         compat: None,
     }
 }

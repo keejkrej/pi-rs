@@ -3,6 +3,7 @@
 use std::sync::{Arc, LazyLock, Mutex};
 
 use indexmap::IndexMap;
+use pi_schema::compile;
 use serde_json::Value;
 
 pub use pi_tui::keybindings::KeyIdOrList;
@@ -10,6 +11,7 @@ pub use pi_tui::{KeyId, Keybinding, KeybindingDefinition, KeybindingDefinitions,
 use pi_tui::{KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS};
 
 use crate::config::get_agent_dir;
+use crate::core::key_id_schema::keybinding_value_schema;
 use crate::utils::text::strip_bom;
 
 pub type AppKeybinding = String;
@@ -118,7 +120,11 @@ pub fn build_keybindings(platform: &str, env: Option<&IndexMap<String, String>>)
         ),
         (
             "app.clipboard.pasteImage",
-            if win_kb { one("alt+v") } else { one("ctrl+v") },
+            if win_kb {
+                many(&["alt+v", "ctrl+v"])
+            } else {
+                one("ctrl+v")
+            },
             "Paste files on macOS, images, or text from clipboard",
         ),
         ("app.session.new", many(&[]), "Start a new session"),
@@ -275,9 +281,18 @@ fn lookup_legacy_keybinding_name(key: &str) -> Option<&'static str> {
         .map(|&(_, v)| v)
 }
 
+static VALIDATE_KEYBINDING_VALUE: LazyLock<pi_schema::Validator> =
+    LazyLock::new(|| compile(keybinding_value_schema(), Default::default()).expect("valid keybinding schema"));
+
 fn to_keybindings_config(value: &serde_json::Map<String, Value>) -> KeybindingsConfig {
     let mut config = KeybindingsConfig::new();
     for (key, binding) in value {
+        if key == "$schema" {
+            continue;
+        }
+        if !VALIDATE_KEYBINDING_VALUE.check(binding) {
+            continue;
+        }
         match binding {
             Value::String(s) => {
                 config.insert(key.clone(), Some(KeyIdOrList::One(s.clone())));

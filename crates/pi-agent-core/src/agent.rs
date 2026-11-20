@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::{
-    AssistantContentBlock, FauxAssistantMessageContent, ImageContent, Message, Model, ModelCost, StopReason,
-    SystemMessage, SystemMessageContent, ThinkingBudgets, Transport, UserContentBlock, UserMessage, UserMessageContent,
-    compat, create_initial_system_message, faux_assistant_message, faux_text, get_current_system_message,
-    get_current_system_prompt, to_tool_declaration,
+    AssistantContentBlock, ClientIdentity, FauxAssistantMessageContent, ImageContent, Message, Model, ModelCost,
+    OnProviderStreamEventFn, StopReason, SystemMessage, SystemMessageContent, ThinkingBudgets, Transport,
+    UserContentBlock, UserMessage, UserMessageContent, compat, create_initial_system_message, faux_assistant_message,
+    faux_text, get_current_system_message, get_current_system_prompt, to_tool_declaration,
 };
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::time::now_ms;
@@ -20,8 +20,9 @@ use crate::agent_loop::{run_agent_loop_async, run_agent_loop_continue_async};
 use crate::stream_fn::get_default_stream_fn;
 use crate::types::{
     AfterToolCallFn, AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentState, AgentTool, BeforeToolCallFn,
-    ConvertToLlmFn, FinishTurnFn, GetApiKeyFn, OnPayloadFn, PrepareNextTurnFn, PrepareNextTurnWithContextFn,
-    PrepareRequestFn, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextFn,
+    ConvertToLlmFn, FinishTurnFn, GetApiKeyFn, OnPayloadFn, OnResponseFn, PrepareNextTurnFn,
+    PrepareNextTurnWithContextFn, PrepareRequestFn, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode,
+    TransformContextFn,
 };
 
 /// Input accepted by [`Agent::prompt`].
@@ -84,9 +85,12 @@ pub struct AgentOptions {
     pub session_id: Option<String>,
     pub get_api_key: Option<GetApiKeyFn>,
     pub on_payload: Option<OnPayloadFn>,
+    pub on_response: Option<OnResponseFn>,
+    pub on_provider_stream_event: Option<OnProviderStreamEventFn>,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub transport: Option<Transport>,
     pub max_retry_delay_ms: Option<u64>,
+    pub identity: Option<ClientIdentity>,
     pub tool_execution: Option<ToolExecutionMode>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
@@ -165,9 +169,12 @@ struct AgentInnerState {
     session_id: Option<String>,
     get_api_key: Option<GetApiKeyFn>,
     on_payload: Option<OnPayloadFn>,
+    on_response: Option<OnResponseFn>,
+    on_provider_stream_event: Option<OnProviderStreamEventFn>,
     thinking_budgets: Option<ThinkingBudgets>,
     transport: Transport,
     max_retry_delay_ms: Option<u64>,
+    identity: Option<ClientIdentity>,
     tool_execution: ToolExecutionMode,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
@@ -239,9 +246,12 @@ impl Agent {
             session_id: options.session_id,
             get_api_key: options.get_api_key,
             on_payload: options.on_payload,
+            on_response: options.on_response,
+            on_provider_stream_event: options.on_provider_stream_event,
             thinking_budgets: options.thinking_budgets,
             transport: options.transport.unwrap_or(Transport::Sse),
             max_retry_delay_ms: options.max_retry_delay_ms,
+            identity: options.identity,
             tool_execution: options.tool_execution.unwrap_or(ToolExecutionMode::Parallel),
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
@@ -330,6 +340,30 @@ impl Agent {
 
     pub fn set_on_payload(&self, value: Option<OnPayloadFn>) {
         self.lock().on_payload = value;
+    }
+
+    pub fn on_response(&self) -> Option<OnResponseFn> {
+        self.lock().on_response.clone()
+    }
+
+    pub fn set_on_response(&self, value: Option<OnResponseFn>) {
+        self.lock().on_response = value;
+    }
+
+    pub fn on_provider_stream_event(&self) -> Option<OnProviderStreamEventFn> {
+        self.lock().on_provider_stream_event.clone()
+    }
+
+    pub fn set_on_provider_stream_event(&self, value: Option<OnProviderStreamEventFn>) {
+        self.lock().on_provider_stream_event = value;
+    }
+
+    pub fn identity(&self) -> Option<ClientIdentity> {
+        self.lock().identity.clone()
+    }
+
+    pub fn set_identity(&self, value: Option<ClientIdentity>) {
+        self.lock().identity = value;
     }
 
     pub fn before_tool_call(&self) -> Option<BeforeToolCallFn> {
@@ -741,7 +775,10 @@ impl Agent {
             cfg.transport = Some(guard.transport);
             cfg.thinking_budgets = guard.thinking_budgets.clone();
             cfg.max_retry_delay_ms = guard.max_retry_delay_ms;
+            cfg.identity = guard.identity.clone();
             cfg.on_payload = guard.on_payload.clone();
+            cfg.on_response = guard.on_response.clone();
+            cfg.on_provider_stream_event = guard.on_provider_stream_event.clone();
             cfg.tool_execution = Some(guard.tool_execution);
             cfg.transform_context = guard.transform_context.clone();
             cfg.get_api_key = guard.get_api_key.clone();
@@ -942,6 +979,7 @@ fn default_fallback_model() -> Model {
         max_tokens: 0,
         headers: None,
         sampling_params: None,
+        sampling_params_by_thinking_level: None,
         compat: None,
     })
 }

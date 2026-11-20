@@ -13,6 +13,7 @@ use crate::keys::{decode_printable_key, matches_key};
 use crate::kill_ring::{KillRing, KillRingPushOptions};
 use crate::tui::{
     CURSOR_MARKER, Component, Focusable, TUI, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType,
+    render_fake_cursor,
 };
 use crate::undo_stack::UndoStack;
 use crate::utils::{
@@ -947,12 +948,13 @@ impl Editor {
                     let after_graphemes = segment_with_markers(&after, SegmentMode::Grapheme, &plan.valid_ids);
                     let first_grapheme = after_graphemes.first().map(|g| g.segment.as_str()).unwrap_or("");
                     let rest_after = utf16_slice(&after, utf16_len(first_grapheme), None);
-                    let cursor = format!("\x1b[7m{first_grapheme}\x1b[0m");
+                    let cursor = render_fake_cursor(first_grapheme);
                     display_text = format!("{before}{marker}{cursor}{rest_after}");
                     // lineVisibleWidth stays the same - we're replacing, not adding
                 } else {
                     // Cursor is at the end - add highlighted space
-                    display_text = format!("{before}{marker}\x1b[7m \x1b[0m");
+                    let cursor = render_fake_cursor(" ");
+                    display_text = format!("{before}{marker}{cursor}");
                     line_visible_width += 1;
                     // If cursor overflows content width into the padding, flag it
                     if line_visible_width > plan.content_width && plan.padding_x > 0 {
@@ -3802,6 +3804,10 @@ impl Component for Editor {
 
     fn wants_key_release(&self) -> bool {
         false
+    }
+
+    fn captures_viewport_input(&self) -> bool {
+        self.is_showing_autocomplete()
     }
 
     fn invalidate(&self) {

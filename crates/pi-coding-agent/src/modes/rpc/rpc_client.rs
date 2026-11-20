@@ -824,7 +824,7 @@ impl RpcClient {
     // =========================================================================
 
     fn is_agent_settled(event: &JsonAgentSessionEvent) -> bool {
-        matches!(event, JsonAgentSessionEvent::AgentSettled)
+        matches!(event, JsonAgentSessionEvent::AgentSettled { .. })
             || matches!(
                 event,
                 JsonAgentSessionEvent::Extra(map) if map.get("type").and_then(Value::as_str) == Some("agent_settled")

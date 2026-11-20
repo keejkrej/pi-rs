@@ -983,16 +983,14 @@ pub struct EvalComparisonReport {
     pub operational_totals: Vec<VariantTotals>,
 }
 
-/// Non-passing test case outcome mapping produced by [`classify_case_status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaseStatusOutcome {
+enum CaseStatusOutcome {
     Errored,
     Skipped,
     Pending,
 }
 
-/// Maps a report assertion status to an observation outcome when not `"passed"`.
-pub const fn classify_case_status(status: VitestJsonStatus) -> Option<CaseStatusOutcome> {
+const fn classify_case_status(status: VitestJsonStatus) -> Option<CaseStatusOutcome> {
     match status {
         VitestJsonStatus::Failed => Some(CaseStatusOutcome::Errored),
         VitestJsonStatus::Skipped | VitestJsonStatus::Todo | VitestJsonStatus::Disabled => {

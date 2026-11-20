@@ -724,3 +724,26 @@ async fn rejects_malformed_optional_fields_in_resources_without_panicking() {
     assert!(client.list_resource_templates(None).await.is_err());
     client.close().await.unwrap();
 }
+
+// #10416: MCP 2026-07-28 allows any JSON value as structured content.
+#[tokio::test]
+async fn accepts_structured_content_that_is_not_an_object() {
+    let (client, server) = connect().await;
+    for structured in [
+        json!([{ "id": 1 }, { "id": 2 }]),
+        Value::Null,
+        json!("text"),
+        json!(3),
+        json!(false),
+    ] {
+        let payload = structured.clone();
+        server.set_handler("tools/call", move |_| {
+            let p = payload.clone();
+            Box::pin(async move { Ok(json!({ "content": [], "structuredContent": p })) })
+        });
+        let result = client.call_tool("structured", None, None).await.unwrap();
+        assert_eq!(result.content, Vec::new());
+        assert_eq!(result.structured_content, Some(structured));
+    }
+    client.close().await.unwrap();
+}

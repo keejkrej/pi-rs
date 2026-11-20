@@ -11,13 +11,13 @@ use pi_js::fetch::{Headers, Response};
 use pi_js::time;
 use serde_json::{Value, json};
 
-fn openrouter_model() -> Model {
+fn openrouter_model(provider: &str) -> Model {
     Model {
         r#type: None,
         id: "openrouter/auto".to_owned(),
         name: "OpenRouter Auto".to_owned(),
         api: "openai-completions".to_owned(),
-        provider: "openrouter".to_owned(),
+        provider: provider.to_owned(),
         base_url: "https://openrouter.ai/api/v1".to_owned(),
         reasoning: false,
         thinking_level_map: None,
@@ -30,7 +30,42 @@ fn openrouter_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
+}
+
+async fn run_chunks_complete(model: &Model, chunks: Vec<Value>) -> pi_ai::types::AssistantMessage {
+    let mut sse = chunks.into_iter().map(|c| format!("data: {c}\n\n")).collect::<String>();
+    sse.push_str("data: [DONE]\n\n");
+    complete_simple(
+        model,
+        &Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Text("hi".to_owned()),
+                timestamp: time::now_ms(),
+            })],
+            tools: None,
+        },
+        Some(SimpleStreamOptions {
+            base: StreamOptions {
+                api_key: Some("test".to_owned()),
+                fetch: Some(Arc::new(move |_| {
+                    let body = sse.clone();
+                    Box::pin(async move {
+                        Ok(Response::new(
+                            200,
+                            Headers::from_pairs([("content-type", "text/event-stream")]),
+                            body,
+                        ))
+                    })
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -59,7 +94,7 @@ async fn exposes_provider_chunks_including_openrouter_metadata() {
     let se_c = seen_events.clone();
 
     let message = complete_simple(
-        &openrouter_model(),
+        &openrouter_model("openrouter"),
         &Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage {
@@ -101,4 +136,55 @@ async fn exposes_provider_chunks_including_openrouter_metadata() {
         vec![AssistantContentBlock::Text(TextContent::new("hello"))]
     );
     assert_eq!(*seen_events.lock().unwrap(), vec![first_chunk, final_chunk]);
+}
+
+// Regression test for #9980.
+#[tokio::test]
+async fn uses_openrouter_reported_total_without_double_counting_non_byok_upstream_cost() {
+    let message = run_chunks_complete(
+        &openrouter_model("openrouter-work"),
+        vec![json!({
+            "id": "chatcmpl-cost",
+            "model": "openrouter/auto",
+            "choices": [{ "index": 0, "delta": { "content": "done" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cost": 0.004,
+                "is_byok": false,
+                "cost_details": { "upstream_inference_cost": 0.003 },
+            },
+        })],
+    )
+    .await;
+
+    assert_eq!(message.usage.cost.input, 0.0);
+    assert_eq!(message.usage.cost.output, 0.0);
+    assert_eq!(message.usage.cost.cache_read, 0.0);
+    assert_eq!(message.usage.cost.cache_write, 0.0);
+    assert_eq!(message.usage.cost.total, 0.004);
+    assert_eq!(message.usage.cost.total_from_provider, Some(true));
+}
+
+#[tokio::test]
+async fn includes_upstream_inference_cost_for_openrouter_byok_requests() {
+    let message = run_chunks_complete(
+        &openrouter_model("openrouter"),
+        vec![json!({
+            "id": "chatcmpl-byok",
+            "model": "openrouter/auto",
+            "choices": [{ "index": 0, "delta": { "content": "done" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cost": 0.0002,
+                "is_byok": true,
+                "cost_details": { "upstream_inference_cost": 0.003 },
+            },
+        })],
+    )
+    .await;
+
+    assert!((message.usage.cost.total - 0.0032).abs() < 1e-10);
+    assert_eq!(message.usage.cost.total_from_provider, Some(true));
 }

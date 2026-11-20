@@ -2001,6 +2001,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2048,6 +2049,7 @@ impl Extension for OverlayQaTestsExtension {
                                             ..Default::default()
                                         })),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await?;
@@ -2146,6 +2148,7 @@ impl Extension for OverlayQaTestsExtension {
                                         overlay: Some(true),
                                         overlay_options: Some(OverlayOptionsSource::Static(opts)),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await?;
@@ -2199,6 +2202,7 @@ impl Extension for OverlayQaTestsExtension {
                                             ..Default::default()
                                         })),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await
@@ -2228,6 +2232,7 @@ impl Extension for OverlayQaTestsExtension {
                                             ..Default::default()
                                         })),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await
@@ -2257,6 +2262,7 @@ impl Extension for OverlayQaTestsExtension {
                                             ..Default::default()
                                         })),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await
@@ -2303,6 +2309,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2340,6 +2347,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2384,6 +2392,7 @@ impl Extension for OverlayQaTestsExtension {
                                             ..Default::default()
                                         })),
                                         on_handle: None,
+                                        blocked: None,
                                     }),
                                 )
                                 .await?;
@@ -2424,6 +2433,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2463,6 +2473,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2512,6 +2523,7 @@ impl Extension for OverlayQaTestsExtension {
                                     on_handle: Some(Arc::new(move |handle| {
                                         *store_for_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
                                     })),
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2549,6 +2561,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2588,6 +2601,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;
@@ -2626,6 +2640,7 @@ impl Extension for OverlayQaTestsExtension {
                                         ..Default::default()
                                     })),
                                     on_handle: None,
+                                    blocked: None,
                                 }),
                             )
                             .await?;

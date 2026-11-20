@@ -6,8 +6,8 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use pi_codemode::{
-    CodemodeJsonSchema, CodemodeTool, RenderDeclarationsOptions, SchemaToTypeOptions, mcp_structured_content_schema,
-    render_declarations, render_tool_sample, render_tool_signature, schema_to_type, to_codemode_identifier,
+    CodemodeJsonSchema, CodemodeTool, RenderDeclarationsOptions, SchemaToTypeOptions, render_declarations,
+    render_tool_sample, render_tool_signature, resolve_schema_ref, schema_to_type, to_codemode_identifier,
 };
 
 fn noop_tool(name: &str) -> CodemodeTool {
@@ -30,24 +30,6 @@ fn schema_obj(value: Value) -> CodemodeJsonSchema {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     CodemodeJsonSchema::Object(map)
-}
-
-fn mcp_result_schema(structured_content: Option<Value>) -> CodemodeJsonSchema {
-    let mut props = serde_json::Map::new();
-    props.insert(
-        "content".into(),
-        json!({ "type": "array", "items": { "type": "object" } }),
-    );
-    if let Some(sc) = structured_content {
-        props.insert("structuredContent".into(), sc);
-    }
-    props.insert("isError".into(), json!({ "type": "boolean" }));
-    props.insert("_meta".into(), json!({ "type": "object" }));
-    schema_obj(json!({
-        "type": "object",
-        "properties": Value::Object(props),
-        "required": ["content"],
-    }))
 }
 
 #[test]
@@ -179,6 +161,157 @@ fn schema_to_type_renders_objects_and_descriptions() {
     );
 }
 
+// https://github.com/earendil-works/pi/issues/10707
+#[test]
+fn puts_constraints_the_type_cannot_express_on_property_comment_lines() {
+    let schema = schema_obj(json!({
+        "type": "object",
+        "properties": {
+            "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000,
+                "default": 0,
+                "description": "Wait in milliseconds."
+            },
+            "id": { "type": "string", "pattern": "^[a-z]+$", "maxLength": 8 },
+            "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "uniqueItems": true, "deprecated": true },
+            "name": { "type": "string" }
+        },
+        "required": ["id"]
+    }));
+    assert_eq!(
+        schema_to_type(&schema, None),
+        [
+            "{",
+            "  // @maxLength 8 @pattern ^[a-z]+$",
+            "  id: string;",
+            "  name?: string;",
+            "  // @maxItems 5 @uniqueItems @deprecated",
+            "  tags?: Array<string>;",
+            "  // Wait in milliseconds.",
+            "  // @integer @minimum 0 @maximum 30000 @default 0",
+            "  timeoutMs?: number;",
+            "}",
+        ]
+        .join("\n")
+    );
+}
+
+#[test]
+fn reads_constraints_of_optional_fields_from_the_non_null_branch() {
+    let limit = schema_obj(json!({
+        "type": "object",
+        "properties": {
+            "limit": {
+                "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 100 }, { "type": "null" }],
+                "default": null,
+                "title": "Limit"
+            }
+        }
+    }));
+    assert_eq!(
+        schema_to_type(&limit, None),
+        "{\n  // @integer @minimum 1 @maximum 100\n  limit?: number | null;\n}"
+    );
+
+    let n = schema_obj(json!({
+        "type": "object",
+        "properties": {
+            "n": {
+                "anyOf": [{ "type": "integer", "minimum": 10, "maximum": 50, "format": "int32" }, { "type": "null" }],
+                "minimum": 0,
+                "maximum": 20,
+                "format": "port"
+            }
+        }
+    }));
+    assert_eq!(
+        schema_to_type(&n, None),
+        "{\n  // @integer @minimum 10 @maximum 20 @format port @format int32\n  n?: number | null;\n}"
+    );
+}
+
+#[test]
+fn reads_draft_04_boolean_exclusive_bounds() {
+    let schema = schema_obj(json!({
+        "type": "object",
+        "properties": {
+            "n": { "type": "integer", "minimum": 0, "exclusiveMinimum": true, "maximum": 10, "exclusiveMaximum": false },
+            "m": { "anyOf": [{ "type": "number", "maximum": 5, "exclusiveMaximum": true }, { "type": "null" }], "maximum": 8 }
+        }
+    }));
+    assert_eq!(
+        schema_to_type(&schema, None),
+        [
+            "{",
+            "  // @maximum 8 @exclusiveMaximum 5",
+            "  m?: number | null;",
+            "  // @integer @exclusiveMinimum 0 @maximum 10",
+            "  n?: number;",
+            "}",
+        ]
+        .join("\n")
+    );
+}
+
+#[test]
+fn leaves_out_long_tags_and_escapes_line_terminators() {
+    let long_default = "x".repeat(100);
+    let long_schema = schema_obj(json!({
+        "type": "object",
+        "properties": { "config": { "type": "object", "default": { "text": long_default } } }
+    }));
+    assert_eq!(
+        schema_to_type(&long_schema, None),
+        "{ config?: { [key: string]: unknown; }; }"
+    );
+
+    let term_schema = schema_obj(json!({
+        "type": "object",
+        "properties": {
+            "sep": {
+                "type": "string",
+                "pattern": "^[\r\n\u{2028}\u{2029}]$",
+                "default": "\u{2028}",
+                "description": "a\u{2028}b"
+            }
+        }
+    }));
+    assert_eq!(
+        schema_to_type(&term_schema, None),
+        [
+            "{",
+            "  // a",
+            "  // b",
+            r#"  // @pattern ^[\u000d\u000a\u2028\u2029]$ @default "\u2028""#,
+            "  sep?: string;",
+            "}",
+        ]
+        .join("\n")
+    );
+}
+
+#[test]
+fn drops_constraint_tags_before_rendering_over_budget_as_unknown() {
+    let schema = schema_obj(json!({
+        "type": "object",
+        "properties": { "n": { "type": "integer", "minimum": 1 } }
+    }));
+    assert_eq!(
+        schema_to_type(&schema, None),
+        "{\n  // @integer @minimum 1\n  n?: number;\n}"
+    );
+    assert_eq!(
+        schema_to_type(&schema, Some(SchemaToTypeOptions { max_chars: Some(20) })),
+        "{ n?: number; }"
+    );
+    assert_eq!(
+        schema_to_type(&schema, Some(SchemaToTypeOptions { max_chars: Some(10) })),
+        "unknown"
+    );
+}
+
 #[test]
 fn schema_to_type_resolves_refs_arrays_and_truncates_over_budget() {
     let schema = schema_obj(json!({
@@ -228,20 +361,38 @@ fn schema_to_type_resolves_refs_arrays_and_truncates_over_budget() {
     }
     let big = schema_obj(json!({ "type": "object", "properties": Value::Object(props) }));
     assert_eq!(
-        schema_to_type(
-            &big,
-            Some(SchemaToTypeOptions {
-                max_chars: Some(100),
-                ..Default::default()
-            })
-        ),
+        schema_to_type(&big, Some(SchemaToTypeOptions { max_chars: Some(100) })),
         "unknown"
     );
     assert!(schema_to_type(&big, None).contains("field49?: string;"));
 }
 
+// #11803
 #[test]
-fn tool_declarations_render_signatures_mcp_and_sample() {
+fn resolve_schema_ref_handles_escapes_and_malformed_percent_sequences() {
+    let item = json!({ "type": "string" });
+    let root = json!({
+        "$defs": {
+            "item": item,
+            "a/b": item,
+            "c~d": item,
+            "e f": item
+        }
+    });
+    let expected_item = schema_obj(item.clone());
+    assert_eq!(resolve_schema_ref("#", &root), Some(schema_obj(root.clone())));
+    assert_eq!(resolve_schema_ref("#/$defs/item", &root), Some(expected_item.clone()));
+    assert_eq!(resolve_schema_ref("#/$defs/a~1b", &root), Some(expected_item.clone()));
+    assert_eq!(resolve_schema_ref("#/$defs/c~0d", &root), Some(expected_item.clone()));
+    assert_eq!(resolve_schema_ref("#/$defs/e%20f", &root), Some(expected_item));
+
+    assert_eq!(resolve_schema_ref("other.json#/$defs/item", &root), None);
+    assert_eq!(resolve_schema_ref("#/$defs/missing", &root), None);
+    assert_eq!(resolve_schema_ref("#/$defs/%E0%A4%A", &root), None);
+}
+
+#[test]
+fn tool_declarations_render_signatures_plain_types_and_sample() {
     let mut tool = noop_tool("hidden-dynamic-tool");
     tool.input_schema = Some(schema_obj(json!({
         "type": "object",
@@ -263,42 +414,20 @@ fn tool_declarations_render_signatures_mcp_and_sample() {
         "free(args: unknown): Promise<unknown>;"
     );
 
-    let empty_input = schema_obj(json!({ "type": "object", "properties": {}, "additionalProperties": false }));
-    let mut mcp = noop_tool("mcp__sample__search");
-    mcp.input_schema = Some(empty_input.clone());
-    mcp.output_schema = Some(mcp_result_schema(Some(json!({
+    let mut plain = noop_tool("plain");
+    plain.input_schema = Some(schema_obj(json!({ "type": "object", "properties": {} })));
+    plain.output_schema = Some(schema_obj(json!({
         "type": "object",
-        "properties": { "results": { "type": "array", "items": { "$ref": "#/definitions/Result~1item~0v1" } } },
-        "required": ["results"],
-        "additionalProperties": false,
-        "definitions": {
-            "Result/item~v1": {
-                "type": "object",
-                "properties": { "id": { "type": "string" }, "score": { "type": "number" } },
-                "required": ["id", "score"],
-                "additionalProperties": false
-            }
-        }
-    }))));
+        "properties": {
+            "content": { "type": "array", "items": { "type": "object" } },
+            "isError": { "type": "boolean" },
+            "_meta": { "type": "object" }
+        },
+        "required": ["content"]
+    })));
     assert_eq!(
-        render_tool_signature(&mcp, None),
-        "mcp__sample__search(args: {}): Promise<CallToolResult<{ results: Array<{ id: string; score: number; }>; }>>;"
-    );
-
-    let mut plain_mcp = noop_tool("plain");
-    plain_mcp.input_schema = Some(empty_input);
-    plain_mcp.output_schema = Some(mcp_result_schema(None));
-    assert_eq!(
-        render_tool_signature(&plain_mcp, None),
-        "plain(args: {}): Promise<CallToolResult>;"
-    );
-
-    assert!(
-        mcp_structured_content_schema(Some(&schema_obj(json!({
-            "type": "object",
-            "properties": { "content": { "type": "array" } }
-        }))))
-        .is_none()
+        render_tool_signature(&plain, None),
+        "plain(args: { [key: string]: unknown; }): Promise<{ _meta?: { [key: string]: unknown; }; content: Array<{ [key: string]: unknown; }>; isError?: boolean; }>;"
     );
 
     let mut sample_tool = noop_tool("foo");

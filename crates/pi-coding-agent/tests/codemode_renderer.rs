@@ -24,6 +24,7 @@ fn render(result: AgentToolResult, is_error: bool, expanded: bool, width: usize)
         expanded,
         show_images: false,
         is_error,
+        ..ToolRenderContext::default()
     };
     let render_fn = codemode_render_result();
     let component = render_fn(

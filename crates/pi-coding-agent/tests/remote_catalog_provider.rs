@@ -65,6 +65,7 @@ fn chat_model(id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -144,6 +145,7 @@ async fn refresh_provider(
         allow_network,
         force: Some(force),
         signal,
+        base_url: None,
     }) {
         fut.await?;
     }
@@ -264,6 +266,7 @@ async fn overlays_image_and_classifier_models_and_drops_unknown_model_types() {
         credentials: None,
         models_store: Some(store.clone()),
         auth_context: None,
+        identity: None,
     }));
     models.set_provider(provider.clone());
 
@@ -501,6 +504,7 @@ async fn lets_newer_catalog_request_bypass_stalled_older_request_without_stale_p
         credentials: None,
         models_store: Some(store.clone()),
         auth_context: None,
+        identity: None,
     })));
     models.set_provider(provider.clone());
 

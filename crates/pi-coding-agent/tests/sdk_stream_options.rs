@@ -54,6 +54,7 @@ fn create_model(api: &str) -> Model {
         headers: Some(headers),
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn create_done_message(api: &str, prompt_tokens: i64) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 

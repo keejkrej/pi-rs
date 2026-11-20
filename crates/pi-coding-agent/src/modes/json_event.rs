@@ -99,7 +99,10 @@ pub enum JsonAgentSessionEvent {
         will_retry: bool,
     },
     #[serde(rename = "agent_settled")]
-    AgentSettled,
+    AgentSettled {
+        #[serde(default)]
+        aborted: bool,
+    },
     #[serde(rename = "turn_start")]
     TurnStart,
     #[serde(rename = "turn_end")]
@@ -304,7 +307,7 @@ pub fn to_json_event(event: &AgentSessionEvent) -> Result<JsonAgentSessionEvent>
             messages: messages.clone(),
             will_retry: *will_retry,
         }),
-        AgentSessionEvent::AgentSettled => Ok(JsonAgentSessionEvent::AgentSettled),
+        AgentSessionEvent::AgentSettled { aborted } => Ok(JsonAgentSessionEvent::AgentSettled { aborted: *aborted }),
         AgentSessionEvent::TurnStart => Ok(JsonAgentSessionEvent::TurnStart),
         AgentSessionEvent::TurnEnd { message, tool_results } => Ok(JsonAgentSessionEvent::TurnEnd {
             message: message.clone(),

@@ -1,6 +1,7 @@
 //! Port of packages/coding-agent/src/extensions/mcp/runtime.ts
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -9,15 +10,18 @@ use serde_json::Value;
 
 use crate::config::VERSION;
 use crate::core::resolve_config_value::{resolve_config_value_or_throw, resolve_headers_or_throw};
+use crate::core::tools::truncate::slice_tail;
 use crate::extensions::mcp::config::{McpServerConfig, McpServerEntry};
 use crate::extensions::mcp::log::McpServerLog;
 use crate::extensions::mcp::oauth::{
     McpAuthProvider, McpOAuthCredentialStore, McpOAuthSettings, create_mcp_auth_provider,
 };
-use crate::extensions::mcp::resources::{McpResourceServer, is_mcp_app_resource};
+use crate::extensions::mcp::resources::McpResourceServer;
 use crate::extensions::mcp::tools::McpToolCaller;
+use pi_js::abort::AbortController;
 use pi_js::{BoxFuture, Error, Result};
 use pi_mcp::client::{ClientState, McpClientRoots};
+pub use pi_mcp::oauth::McpSignInCancelledError;
 use pi_mcp::oauth::{McpOAuthAuthorizationRequiredError, OAuthChallenge};
 use pi_mcp::transports::stdio::StdioStderr;
 use pi_mcp::transports::transport::McpTransport;
@@ -71,7 +75,7 @@ impl CreatedTransport {
         if len <= STDERR_TAIL_CHARS {
             Some(trimmed.to_string())
         } else {
-            Some(pi_js::str16::slice(trimmed, -(STDERR_TAIL_CHARS as i64), None))
+            Some(slice_tail(trimmed, STDERR_TAIL_CHARS).to_string())
         }
     }
 }
@@ -199,24 +203,9 @@ async fn list_templates(client: &McpClient, options: Option<McpRequestOptions>) 
     without_templates(|| client.list_resource_templates(options), Vec::new()).await
 }
 
-async fn fetch_resources(client: &McpClient) -> (Vec<Resource>, Vec<ResourceTemplate>) {
-    let (res_out, tpl_out) = tokio::join!(client.list_resources(None), list_templates(client, None));
-    let resources = res_out
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| !is_mcp_app_resource(Some(&r.uri), r.mime_type.as_deref()))
-        .collect();
-    let templates = tpl_out
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| !is_mcp_app_resource(Some(&t.uri_template), t.mime_type.as_deref()))
-        .collect();
-    (resources, templates)
-}
-
 struct ProviderTokenAuthAdapter {
     provider: String,
-    lookup: Option<Arc<dyn Fn(&str) -> BoxFuture<Option<String>> + Send + Sync>>,
+    lookup: Option<ProviderTokenFn>,
 }
 
 #[async_trait]
@@ -256,13 +245,10 @@ struct ConnectionMutableState {
     error: Option<String>,
     tools: Vec<McpTool>,
     has_resources: bool,
-    resources: Vec<Resource>,
-    resource_templates: Vec<ResourceTemplate>,
     instructions: Option<String>,
     challenge: Option<OAuthChallenge>,
     client: Option<Arc<McpClient>>,
     opening: Option<futures::future::Shared<BoxFuture<std::result::Result<Arc<McpClient>, Arc<Error>>>>>,
-    closed: bool,
     stderr_tail: Option<String>,
 }
 
@@ -274,6 +260,7 @@ pub struct McpServerConnection {
     on_tools: Arc<dyn Fn(Arc<McpServerConnection>) + Send + Sync>,
     on_change: Option<Arc<dyn Fn(Arc<McpServerConnection>) + Send + Sync>>,
     log: Option<Arc<McpServerLog>>,
+    shutdown: AbortController,
     inner: Mutex<ConnectionMutableState>,
 }
 
@@ -343,23 +330,25 @@ impl McpServerConnection {
             on_tools: options.on_tools,
             on_change: options.on_change,
             log: options.log,
+            shutdown: AbortController::new(),
             inner: Mutex::new(ConnectionMutableState {
                 state: ServerState::Connecting,
                 error: None,
                 tools: Vec::new(),
                 has_resources: false,
-                resources: Vec::new(),
-                resource_templates: Vec::new(),
                 instructions: None,
                 challenge: None,
                 client: None,
                 opening: None,
-                closed: false,
                 stderr_tail: None,
             }),
         });
         *conn_weak.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&conn));
         conn
+    }
+
+    fn closed(&self) -> bool {
+        self.shutdown.signal().aborted()
     }
 
     pub fn name(&self) -> &str {
@@ -400,18 +389,6 @@ impl McpServerConnection {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).has_resources
     }
 
-    pub fn resources(&self) -> Vec<Resource> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).resources.clone()
-    }
-
-    pub fn resource_templates(&self) -> Vec<ResourceTemplate> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .resource_templates
-            .clone()
-    }
-
     pub fn instructions(&self) -> Option<String> {
         self.inner
             .lock()
@@ -450,10 +427,11 @@ impl McpServerConnection {
         Ok(McpOAuthSettings {
             client_id: oauth.client_id.clone(),
             client_secret,
-            callback_port: oauth.callback_port,
+            callback_port: oauth.callback_port.and_then(|p| u16::try_from(p).ok()),
             callback_url: oauth.callback_url.clone(),
             scope: oauth.scope.clone(),
             client_name: oauth.client_name.clone(),
+            client_registration: oauth.client_registration,
             auth_server_metadata_url,
         })
     }
@@ -465,10 +443,10 @@ impl McpServerConnection {
     pub async fn get_client(self: &Arc<Self>) -> Result<Arc<McpClient>> {
         use futures::FutureExt;
         let opening_fut = {
-            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if st.closed {
+            if self.closed() {
                 return Err(Error::msg(format!("MCP server \"{}\" is shut down", self.entry.name)));
             }
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref client) = st.client
                 && client.connection_state() == ClientState::Connected
             {
@@ -552,7 +530,7 @@ impl McpServerConnection {
         if let Some(c) = current {
             self.drop_client(&c).await;
         }
-        let is_closed = self.inner.lock().unwrap_or_else(|e| e.into_inner()).closed;
+        let is_closed = self.closed();
         if !is_closed {
             self.mark_needs_auth();
         }
@@ -604,15 +582,14 @@ impl McpServerConnection {
             match self.connect_once().await {
                 Ok(client) => return Ok(client),
                 Err(err) => {
-                    let is_closed = self.inner.lock().unwrap_or_else(|e| e.into_inner()).closed;
                     let delay = retries.get(attempt).copied();
-                    if is_closed || delay.is_none() || !is_transient_error(&err) {
+                    if self.closed() || delay.is_none() || !is_transient_error(&err) {
                         return Err(self.connect_failed(err));
                     }
                     if let Some(ms) = delay {
-                        pi_js::time::sleep(ms, None).await?;
+                        let _ = pi_js::time::sleep(ms, Some(&self.shutdown.signal())).await;
                     }
-                    if self.inner.lock().unwrap_or_else(|e| e.into_inner()).closed {
+                    if self.closed() {
                         return Err(self.connect_failed(err));
                     }
                     attempt += 1;
@@ -657,6 +634,19 @@ impl McpServerConnection {
             .map(|p| Arc::clone(p) as Arc<dyn AuthProvider + Send + Sync>);
         let mut created_transport: Option<CreatedTransport> = None;
 
+        let close_started = Arc::new(AtomicBool::new(false));
+        let client_for_abort = Arc::clone(&client);
+        let close_flag = Arc::clone(&close_started);
+        let _shutdown_guard = self.shutdown.signal().on_abort(move |_| {
+            if !close_flag.swap(true, Ordering::AcqRel)
+                && let Ok(handle) = tokio::runtime::Handle::try_current()
+            {
+                handle.spawn(async move {
+                    let _ = client_for_abort.close().await;
+                });
+            }
+        });
+
         let res = async {
             let created = (self.create_transport)(&self.entry, &self.cwd, auth)?;
             created_transport = Some(created.clone());
@@ -671,20 +661,6 @@ impl McpServerConnection {
                         let c = Arc::clone(&client_ref);
                         tokio::spawn(async move {
                             conn.refresh_tools(&c).await;
-                        });
-                    }
-                }),
-            );
-
-            let weak_self = Arc::downgrade(self);
-            let client_ref = Arc::clone(&client);
-            let _ = client.on_notification(
-                "notifications/resources/list_changed",
-                Arc::new(move |_| {
-                    if let Some(conn) = weak_self.upgrade() {
-                        let c = Arc::clone(&client_ref);
-                        tokio::spawn(async move {
-                            conn.refresh_resources(&c).await;
                         });
                     }
                 }),
@@ -708,14 +684,8 @@ impl McpServerConnection {
             } else {
                 Vec::new()
             };
-            let (resources, templates) = if has_resources {
-                fetch_resources(&client).await
-            } else {
-                (Vec::new(), Vec::new())
-            };
 
-            let is_closed = self.inner.lock().unwrap_or_else(|e| e.into_inner()).closed;
-            if is_closed {
+            if self.closed() {
                 return Err(Error::msg("shut down while connecting"));
             }
             if client.connection_state() != ClientState::Connected {
@@ -727,8 +697,6 @@ impl McpServerConnection {
                 st.client = Some(Arc::clone(&client));
                 st.tools = tools;
                 st.has_resources = has_resources;
-                st.resources = resources;
-                st.resource_templates = templates;
                 st.instructions = client
                     .instructions()
                     .map(|s| pi_js::str16::trim(&s).to_string())
@@ -741,9 +709,12 @@ impl McpServerConnection {
             Ok(Arc::clone(&client))
         }
         .await;
+        drop(_shutdown_guard);
 
         if res.is_err() {
-            let _ = client.close().await;
+            if !close_started.swap(true, Ordering::AcqRel) {
+                let _ = client.close().await;
+            }
             if let Some(tail) = created_transport.as_ref().and_then(CreatedTransport::stderr_tail) {
                 self.inner.lock().unwrap_or_else(|e| e.into_inner()).stderr_tail = Some(tail);
             }
@@ -752,14 +723,14 @@ impl McpServerConnection {
     }
 
     fn connect_failed(self: &Arc<Self>, error: Error) -> Error {
-        let is_closed = self.inner.lock().unwrap_or_else(|e| e.into_inner()).closed;
+        let is_closed = self.closed();
         if self.needs_sign_in(&error) && !is_closed {
             self.mark_needs_auth();
             return Error::msg(sign_in_required_message(&self.entry));
         }
         let formatted_err = {
             let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            st.state = if st.closed {
+            st.state = if is_closed {
                 ServerState::Closed
             } else {
                 ServerState::Failed
@@ -779,9 +750,10 @@ impl McpServerConnection {
     }
 
     fn handle_client_close(self: &Arc<Self>, client: &Arc<McpClient>, stderr_tail: Option<String>) {
+        let is_closed = self.closed();
         {
             let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if st.closed || !st.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client)) {
+            if is_closed || !st.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client)) {
                 return;
             }
             st.client = None;
@@ -798,9 +770,10 @@ impl McpServerConnection {
         match client.list_tools(None).await {
             Ok(tools) => {
                 let mut invoke_tools = false;
+                let is_closed = self.closed();
                 {
                     let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    if !st.closed && st.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client)) {
+                    if !is_closed && st.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client)) {
                         st.tools = tools;
                         invoke_tools = true;
                     }
@@ -817,34 +790,26 @@ impl McpServerConnection {
         self.changed();
     }
 
-    async fn refresh_resources(self: &Arc<Self>, client: &Arc<McpClient>) {
-        let (resources, templates) = fetch_resources(client).await;
-        let mut invoke_tools = false;
-        {
-            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if !st.closed && st.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client)) {
-                st.resources = resources;
-                st.resource_templates = templates;
-                invoke_tools = true;
-            }
-        }
-        if invoke_tools {
-            (self.on_tools)(Arc::clone(self));
-        }
-        self.changed();
-    }
-
+    /// Resolves once no transport of this server is open, including one that was still connecting.
     pub async fn close(self: &Arc<Self>) {
-        let client_opt = {
+        self.shutdown.abort(None);
+        let (client_opt, opening_opt) = {
             let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            st.closed = true;
             st.state = ServerState::Closed;
-            st.client.take()
+            (st.client.take(), st.opening.clone())
         };
         self.changed();
-        if let Some(client) = client_opt {
-            let _ = client.close().await;
-        }
+        let close_client = async move {
+            if let Some(client) = client_opt {
+                let _ = client.close().await;
+            }
+        };
+        let await_opening = async move {
+            if let Some(opening) = opening_opt {
+                let _ = opening.await;
+            }
+        };
+        let _ = tokio::join!(close_client, await_opening);
         if let Some(ref provider) = self.auth_provider {
             provider.settled().await;
         }

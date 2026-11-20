@@ -25,7 +25,7 @@ use crate::core::compaction::compaction::{
 use crate::core::defaults::{from_agent_thinking_level, to_agent_thinking_level};
 use crate::core::export_html::{ExportOptions, export_session_to_html};
 use crate::core::extensions::runner::{
-    DiscoveredResourcePathEntry, ExtensionRunner, ProviderActions, emit_session_shutdown_event,
+    BeforeAgentStartTrigger, DiscoveredResourcePathEntry, ExtensionRunner, ProviderActions, emit_session_shutdown_event,
 };
 use crate::core::extensions::types::{
     CompactionReason as ExtCompactionReason, ContextUsage, DeliverAs, ExtensionActions, ExtensionContextActions,
@@ -41,7 +41,7 @@ use crate::core::package_manager::PathMetadata;
 use crate::core::resource_loader::{ExtensionResourcePath, ResourceExtensionPaths};
 use crate::core::session_export::export_session_to_jsonl;
 use crate::core::session_manager::{BranchSummaryEntry, SessionEntry, get_latest_compaction_entry};
-use crate::core::settings_manager::DEFAULT_TOOL_NAMES;
+use crate::core::settings_manager::{DEFAULT_TOOL_NAMES, apply_tool_modifiers};
 use crate::core::source_info::{
     BUILTIN_PATH_PREFIX, SourceInfo, SourceOrigin, SourceScope, SyntheticSourceOptions, create_synthetic_source_info,
     is_synthetic_path,
@@ -112,6 +112,7 @@ impl RetryCallbacks for SessionSummarizationRetryCallbacks {
 
 struct BranchSummaryControllerGuard {
     inner: Arc<AgentSessionInner>,
+    controller: Arc<AbortController>,
     armed: bool,
 }
 
@@ -120,17 +121,24 @@ impl Drop for BranchSummaryControllerGuard {
         if !self.armed {
             return;
         }
+        let mut cleared = false;
         {
-            self.inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .branch_summary_abort_controller = None;
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard
+                .branch_summary_abort_controller
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, &self.controller))
+            {
+                guard.branch_summary_abort_controller = None;
+                cleared = true;
+            }
         }
-        AgentSession {
-            inner: Arc::clone(&self.inner),
+        if cleared {
+            AgentSession {
+                inner: Arc::clone(&self.inner),
+            }
+            ._resolve_idle_wait_if_idle();
         }
-        ._resolve_idle_wait_if_idle();
     }
 }
 
@@ -452,7 +460,6 @@ impl AgentSession {
         &self,
         assistant_message: &AssistantMessage,
         skip_aborted_check: bool,
-        tool_results: &[AgentMessage],
     ) -> bool {
         let model = self.model();
         let settings = resolved_compaction_settings(&self.inner.settings_manager, model.as_ref());
@@ -560,7 +567,7 @@ impl AgentSession {
                     .unwrap_or_else(|e| e.into_inner())
                     .overflow_recovery_attempted = true;
             }
-            let _ = self._omit_recovery_attempt(assistant_message, tool_results);
+            let _ = self._omit_recovery_attempt(assistant_message);
             let retry = self._run_auto_compaction(CompactionReason::Overflow, will_retry).await;
             if retry {
                 self.inner
@@ -973,7 +980,7 @@ impl AgentSession {
                         let runner = runner.clone();
                         tokio::spawn(async move {
                             if let Err(err) = session
-                                ._run_agent_prompt(pi_agent_core::agent::PromptInput::Message(agent_msg))
+                                ._start_run(BeforeAgentStartTrigger::Custom { message: agent_msg }, None)
                                 .await
                             {
                                 runner.emit_error(ExtensionError {
@@ -1306,6 +1313,7 @@ impl AgentSession {
                                 },
                                 result: pi_agent_core::types::AgentToolResult::text("Session disposed"),
                                 is_error: true,
+                                duration_ms: None,
                             };
                         };
                         let name_fallback = name.clone();
@@ -1321,6 +1329,7 @@ impl AgentSession {
                                 },
                                 result: pi_agent_core::types::AgentToolResult::text(err.to_string()),
                                 is_error: true,
+                                duration_ms: None,
                             })
                     })
                 })
@@ -1553,7 +1562,7 @@ impl AgentSession {
         )
     }
 
-    fn _is_activated_on_registration(&self, name: &str) -> bool {
+    pub(super) fn _is_activated_on_registration(&self, name: &str) -> bool {
         if !self._is_declarable(name) {
             return false;
         }
@@ -1654,9 +1663,21 @@ impl AgentSession {
     }
 
     pub async fn reload(&self, options: Option<ReloadOptions>) -> pi_js::Result<()> {
-        let (old_runner, uses_default_tools) = {
+        if self.is_streaming() {
+            return Err(pi_js::Error::msg(
+                "Wait for the current response to finish before reloading.",
+            ));
+        }
+        if self.is_compacting() {
+            return Err(pi_js::Error::msg("Wait for compaction to finish before reloading."));
+        }
+        let (old_runner, uses_default_tools, default_tool_modifiers) = {
             let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            (guard.extension_runner.clone(), guard.uses_default_tools)
+            (
+                guard.extension_runner.clone(),
+                guard.uses_default_tools,
+                guard.default_tool_modifiers.clone(),
+            )
         };
         let previous_flag_values = if let Some(ref old) = old_runner {
             let flags = old.get_flag_values();
@@ -1674,33 +1695,29 @@ impl AgentSession {
             None
         };
 
-        let previous_default_tools: IndexSet<String> = if uses_default_tools {
-            self.inner
-                .settings_manager
-                .get_default_tools()
-                .unwrap_or_else(|| DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect())
-                .into_iter()
-                .collect()
-        } else {
-            IndexSet::new()
+        let get_default_tools = || -> Vec<String> {
+            if uses_default_tools {
+                let base = self
+                    .inner
+                    .settings_manager
+                    .get_default_tools()
+                    .unwrap_or_else(|| DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect());
+                apply_tool_modifiers(&base, &default_tool_modifiers)
+            } else {
+                Vec::new()
+            }
         };
+        let previous_default_tools: IndexSet<String> = get_default_tools().into_iter().collect();
 
         self.inner.settings_manager.reload().await;
         self.sync_queue_modes_from_settings();
         register_built_in_api_providers();
         self.inner.resource_loader.reload(None).await?;
 
-        let added_default_tools: Vec<String> = if uses_default_tools {
-            self.inner
-                .settings_manager
-                .get_default_tools()
-                .unwrap_or_else(|| DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect())
-                .into_iter()
-                .filter(|name| !previous_default_tools.contains(name))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let added_default_tools: Vec<String> = get_default_tools()
+            .into_iter()
+            .filter(|name| !previous_default_tools.contains(name))
+            .collect();
 
         let current_active = self.get_active_tool_names();
         {
@@ -1823,7 +1840,7 @@ impl AgentSession {
             error_message: err_msg,
         });
 
-        let _ = self._omit_recovery_attempt(message, &[]);
+        let _ = self._omit_recovery_attempt(message);
 
         let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
@@ -2073,7 +2090,11 @@ impl AgentSession {
         target_id: &str,
         options: Option<NavigateTreeOptions>,
     ) -> pi_js::Result<NavigateTreeResult> {
-        if self.is_streaming() {
+        let is_streaming_or_preflight = {
+            let guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.is_agent_run_active || guard.prompt_preflight_count > 0
+        };
+        if is_streaming_or_preflight {
             return Err(pi_js::Error::msg(
                 "Wait for the current response to finish before navigating the session tree.",
             ));
@@ -2127,10 +2148,11 @@ impl AgentSession {
                 .state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .branch_summary_abort_controller = Some(controller);
+                .branch_summary_abort_controller = Some(Arc::clone(&controller));
         }
-        let mut controller_guard = BranchSummaryControllerGuard {
+        let controller_guard = BranchSummaryControllerGuard {
             inner: Arc::clone(&self.inner),
+            controller: Arc::clone(&controller),
             armed: true,
         };
 
@@ -2286,17 +2308,18 @@ impl AgentSession {
         }
 
         self._refresh_finalized_context();
-        self._restore_tools_from_transcript();
+        self._restore_tools_from_transcript(&[]);
 
-        controller_guard.armed = false;
         {
-            self.inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .branch_summary_abort_controller = None;
+            let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard
+                .branch_summary_abort_controller
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, &controller))
+            {
+                guard.branch_summary_abort_controller = None;
+            }
         }
-        self._resolve_idle_wait_if_idle();
 
         if let Some(ref r) = runner {
             let _ = r
@@ -2308,6 +2331,7 @@ impl AgentSession {
                 })
                 .await;
         }
+        drop(controller_guard);
 
         Ok(NavigateTreeResult {
             editor_text,
@@ -2462,13 +2486,28 @@ impl AgentSession {
             .and_then(crate::modes::interactive::theme::theme::get_theme_by_name)
             .and_then(|t| t.name().map(str::to_string))
             .or(resolved_theme);
+        let runner = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extension_runner
+            .clone();
         let session = self.clone();
         let get_tool_definition: Arc<
             dyn Fn(&str) -> Option<Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>> + Send + Sync,
         > = Arc::new(move |name| {
-            session
-                .get_tool_definition(name)
-                .map(|def| Arc::new(def) as Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>)
+            let resolved = match runner.as_ref() {
+                Some(r) => {
+                    let name_owned = name.to_string();
+                    let session_c = session.clone();
+                    r.resolve_tool_renderers(name, move || {
+                        session_c.get_tool_definition(&name_owned).map(|d| d.to_renderers())
+                    })
+                }
+                None => session.get_tool_definition(name).map(|d| d.to_renderers()),
+            };
+            resolved.map(|tr| Arc::new(tr) as Arc<dyn crate::core::export_html::tool_renderer::CustomToolRenderer>)
         });
         let tool_renderer = crate::core::export_html::tool_renderer::create_tool_html_renderer(
             crate::core::export_html::tool_renderer::ToolHtmlRendererDeps {
@@ -2590,7 +2629,7 @@ impl AgentSession {
         assistant_message: &AssistantMessage,
         skip_aborted_check: bool,
     ) -> bool {
-        self._check_compaction(assistant_message, skip_aborted_check, &[]).await
+        self._check_compaction(assistant_message, skip_aborted_check).await
     }
 
     #[doc(hidden)]

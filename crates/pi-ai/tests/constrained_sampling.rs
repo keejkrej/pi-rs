@@ -3,8 +3,8 @@
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::api::constrained_sampling::{
-    GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta, make_strict_json_schema,
-    resolve_json_schema_strict_sampling,
+    GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta, close_grammar_tool_input_json,
+    make_strict_json_schema, resolve_json_schema_strict_sampling,
 };
 use pi_ai::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ProcessResponsesStreamOptions,
@@ -39,6 +39,7 @@ fn make_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn make_output() -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1,
+        duration_ms: None,
     }
 }
 
@@ -298,6 +300,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
             namespace: None,
             arguments: bad_args,
             thought_signature: None,
+            arguments_error: None,
         };
         let ctx = normalize_context(&Context {
             system_prompt: None,
@@ -320,6 +323,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                     raw_stop_reason: None,
                     end_turn: None,
                     timestamp: 1,
+                    duration_ms: None,
                 }),
                 Message::ToolResult(ToolResultMessage {
                     tool_call_id: "call_1|ctc_1".to_string(),
@@ -333,6 +337,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                     nested_calls: None,
                     is_error: false,
                     timestamp: 2,
+                    duration_ms: None,
                 }),
             ],
         });
@@ -345,6 +350,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
         namespace: None,
         arguments: [("payload".to_string(), json!("abc"))].into_iter().collect(),
         thought_signature: None,
+        arguments_error: None,
     };
     let ok_ctx = normalize_context(&Context {
         system_prompt: None,
@@ -367,6 +373,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_1|ctc_1".to_string(),
@@ -380,6 +387,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                 nested_calls: None,
                 is_error: false,
                 timestamp: 2,
+                duration_ms: None,
             }),
         ],
     });
@@ -409,6 +417,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                     namespace: None,
                     arguments: [("payload".to_string(), json!("abc"))].into_iter().collect(),
                     thought_signature: None,
+                    arguments_error: None,
                 })],
                 api: "pi-messages".to_string(),
                 provider: "radius".into(),
@@ -425,6 +434,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_1|ctc_1".to_string(),
@@ -438,6 +448,7 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
                 nested_calls: None,
                 is_error: false,
                 timestamp: 2,
+                duration_ms: None,
             }),
         ],
     });
@@ -454,26 +465,126 @@ fn replays_grammar_calls_and_drops_foreign_item_ids() {
 #[test]
 fn keeps_grammar_input_json_deltas_append_only() {
     let mut buffer = GrammarToolInputJsonBuffer::default();
-    let first = append_grammar_tool_input_json_delta(&mut buffer, "payload", "a\"", false)
+    let first = append_grammar_tool_input_json_delta(&mut buffer, "payload", "a\"")
         .unwrap()
         .unwrap();
-    let second = append_grammar_tool_input_json_delta(&mut buffer, "payload", "a\"\nb", true)
+    let second = close_grammar_tool_input_json(&mut buffer, "payload", Some("a\"\nb"))
         .unwrap()
         .unwrap();
     let parsed: Value = serde_json::from_str(&format!("{first}{second}")).unwrap();
     assert_eq!(parsed, json!({ "payload": "a\"\nb" }));
 
     assert_eq!(
-        append_grammar_tool_input_json_delta(&mut buffer, "payload", "a\"\nb", true).unwrap(),
+        close_grammar_tool_input_json(&mut buffer, "payload", Some("a\"\nb")).unwrap(),
         None
     );
-    let err = append_grammar_tool_input_json_delta(&mut buffer, "payload", "changed", true).unwrap_err();
+    let err_close = close_grammar_tool_input_json(&mut buffer, "payload", Some("changed")).unwrap_err();
+    assert!(
+        err_close
+            .message()
+            .contains("grammar tool input for property \"payload\" changed after it was closed"),
+        "msg={}",
+        err_close.message()
+    );
+    let err_append = append_grammar_tool_input_json_delta(&mut buffer, "payload", "x").unwrap_err();
+    assert!(
+        err_append
+            .message()
+            .contains("grammar tool input for property \"payload\" changed after it was closed"),
+        "msg={}",
+        err_append.message()
+    );
+}
+
+#[test]
+fn rejects_final_grammar_input_that_does_not_continue_streamed_input() {
+    let mut buffer = GrammarToolInputJsonBuffer::default();
+    append_grammar_tool_input_json_delta(&mut buffer, "payload", "abc").unwrap();
+    let err = close_grammar_tool_input_json(&mut buffer, "payload", Some("abd")).unwrap_err();
     assert!(
         err.message()
-            .contains("grammar tool input for property \"payload\" changed after it was closed"),
+            .contains("grammar tool input for property \"payload\" changed non-monotonically"),
         "msg={}",
         err.message()
     );
+}
+
+// #9265
+#[tokio::test]
+async fn streams_custom_tool_input_linearly_in_length() {
+    let deltas: Vec<String> = (0..(256_000 / 32))
+        .map(|index| {
+            let mut chunk = format!("chunk {index} \"quoted\" \\ \n");
+            while chunk.len() < 32 {
+                chunk.push('x');
+            }
+            chunk
+        })
+        .collect();
+    let full_input: String = deltas.iter().cloned().collect();
+    let mut raw_events = Vec::with_capacity(deltas.len() + 4);
+    raw_events.push(Ok(json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": { "type": "custom_tool_call", "call_id": "call_1", "id": "ctc_1", "name": "sample_tool", "input": "" }
+    })));
+    for delta in &deltas {
+        raw_events.push(Ok(json!({
+            "type": "response.custom_tool_call_input.delta",
+            "output_index": 0,
+            "item_id": "ctc_1",
+            "delta": delta
+        })));
+    }
+    raw_events.push(Ok(json!({
+        "type": "response.custom_tool_call_input.done",
+        "output_index": 0,
+        "item_id": "ctc_1",
+        "input": full_input
+    })));
+    raw_events.push(Ok(json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": { "type": "custom_tool_call", "call_id": "call_1", "id": "ctc_1", "name": "sample_tool", "input": full_input }
+    })));
+    raw_events.push(Ok(json!({
+        "type": "response.completed",
+        "response": { "status": "completed", "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 } }
+    })));
+
+    let mut output = make_output();
+    let event_stream = AssistantMessageEventStream::new();
+    let mut grammar_props = IndexMap::new();
+    grammar_props.insert("sample_tool".to_string(), "payload".to_string());
+
+    let reader_stream = event_stream.clone();
+    let consumer = tokio::spawn(async move {
+        let mut s = reader_stream;
+        let mut json_deltas = String::new();
+        while let Some(ev) = s.next().await {
+            if let AssistantMessageEvent::ToolCallDelta { delta, .. } = ev {
+                json_deltas.push_str(&delta);
+            }
+        }
+        json_deltas
+    });
+
+    process_responses_stream(
+        Box::pin(futures::stream::iter(raw_events)),
+        &mut output,
+        &event_stream,
+        &make_model(),
+        Some(&ProcessResponsesStreamOptions {
+            grammar_tool_input_properties: Some(grammar_props),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    event_stream.end(None);
+    let json_deltas = consumer.await.unwrap();
+    let parsed: Value = serde_json::from_str(&json_deltas).unwrap();
+    assert_eq!(parsed, json!({ "payload": full_input }));
 }
 
 #[tokio::test]
@@ -560,6 +671,7 @@ async fn starts_custom_responses_tool_calls_with_initial_input() {
             namespace: None,
             arguments: [("payload".to_string(), json!("abc"))].into_iter().collect(),
             thought_signature: None,
+            arguments_error: None,
         })]
     );
     assert_eq!(

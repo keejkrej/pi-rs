@@ -55,13 +55,46 @@ pub(crate) mod wire {
     use crate::modes::interactive::components::keybinding_hints::{
         KeyTextFormatOptions, format_key_text as interactive_format_key_text,
     };
+    use crate::modes::interactive::components::login_dialog::AuthUrlComponent as InteractiveAuthUrlComponent;
     pub use crate::modes::interactive::components::visual_truncate::VisualTruncateKeep;
     use crate::modes::interactive::components::visual_truncate::{
         VisualLinePreview as InteractiveVisualLinePreview, VisualLinePreviewOptions,
     };
+    use crate::modes::interactive::theme::theme::CodeHighlighter as InteractiveCodeHighlighter;
     use pi_tui::components::select_list::{SelectListStyleFn, SelectListTheme};
     use pi_tui::keybindings::get_keybindings;
-    use pi_tui::tui::{Component, TuiMouseEvent, TuiMouseEventResult};
+    use pi_tui::tui::{Component, TUI, TuiMouseEvent, TuiMouseEventResult};
+
+    #[derive(Clone)]
+    pub struct AuthUrlComponent(InteractiveAuthUrlComponent);
+
+    impl AuthUrlComponent {
+        pub fn new(tui: Arc<dyn TUI>, url: &str) -> Self {
+            let request_render: Arc<dyn Fn() + Send + Sync> = Arc::new(move || tui.request_render(None));
+            Self(InteractiveAuthUrlComponent::with_request_render(request_render, url))
+        }
+
+        pub async fn copy(&self) {
+            self.0.copy().await;
+        }
+
+        pub(crate) async fn copy_with_override(
+            &self,
+            copy_override: Option<Arc<dyn Fn(&str) -> pi_js::BoxFuture<pi_js::Result<()>> + Send + Sync>>,
+        ) {
+            self.0.copy_with_override(copy_override).await;
+        }
+    }
+
+    impl Component for AuthUrlComponent {
+        fn render(&self, width: usize) -> Vec<String> {
+            self.0.render(width)
+        }
+
+        fn invalidate(&self) {
+            self.0.invalidate();
+        }
+    }
 
     pub struct DynamicBorder(InteractiveDynamicBorder);
 
@@ -151,6 +184,23 @@ pub(crate) mod wire {
             crate::modes::interactive::theme::theme::highlight_code(code, lang)
         } else {
             code.split('\n').map(|line| theme.fg("mdCodeBlock", line)).collect()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub struct CodeHighlighter(InteractiveCodeHighlighter);
+
+    impl CodeHighlighter {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn highlight(&self, code: &str, lang: Option<&str>, theme: &Theme) -> Vec<String> {
+            if crate::modes::interactive::theme::theme::try_theme().is_ok() {
+                self.0.highlight(code, lang).as_ref().clone()
+            } else {
+                code.split('\n').map(|line| theme.fg("mdCodeBlock", line)).collect()
+            }
         }
     }
 

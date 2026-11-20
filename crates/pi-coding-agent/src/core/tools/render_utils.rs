@@ -1,11 +1,14 @@
 //! Port of packages/coding-agent/src/core/tools/render-utils.ts
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use pi_tui::terminal_image::{get_capabilities, get_image_dimensions, hyperlink, image_fallback};
 use serde_json::Value;
 
-use crate::core::extensions::types::Theme;
+use crate::core::extensions::types::{Theme, ToolRenderContext};
 use crate::utils::ansi::strip_ansi;
-use crate::utils::paths::{PathInputOptions, resolve_path};
+use crate::utils::paths::{PathInputOptions, resolve_path, shorten_home_path};
 use crate::utils::shell::sanitize_binary_output;
 
 const COLLAPSED_ARGS_CHARS: usize = 100;
@@ -14,12 +17,7 @@ pub fn shorten_path(path: Option<&str>) -> String {
     let Some(p) = path else {
         return String::new();
     };
-    let home = pi_js::env::home_dir();
-    if let Some(rest) = p.strip_prefix(&home) {
-        format!("~{rest}")
-    } else {
-        p.to_string()
-    }
+    shorten_home_path(p, None)
 }
 
 pub fn link_path(styled_text: &str, raw_path: &str, cwd: &str) -> String {
@@ -161,15 +159,128 @@ pub fn render_tool_path(raw_path: Option<&str>, theme: &Theme, cwd: &str, empty_
     link_path(&theme.fg("accent", &shorten_path(Some(value))), value, cwd)
 }
 
+fn parse_line_number(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.parse::<f64>().ok().filter(|f| f.is_finite())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn format_num(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() <= (i64::MAX as f64) {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
 pub fn format_read_line_range(offset: Option<&Value>, limit: Option<&Value>) -> String {
-    let offset_num = offset.and_then(Value::as_i64);
-    let limit_num = limit.and_then(Value::as_i64);
-    if offset_num.is_none() && limit_num.is_none() {
+    let off_is_null = matches!(offset, None | Some(Value::Null));
+    let lim_is_null = matches!(limit, None | Some(Value::Null));
+    if off_is_null && lim_is_null {
         return String::new();
     }
-    let start = offset_num.unwrap_or(1);
-    match limit_num {
-        Some(lim) => format!(":{start}-{}", start + lim - 1),
-        None => format!(":{start}"),
+    let start = if off_is_null {
+        1.0
+    } else {
+        let Some(s) = parse_line_number(offset) else {
+            return String::new();
+        };
+        s
+    };
+    if lim_is_null {
+        return format!(":{}", format_num(start));
     }
+    let Some(count) = parse_line_number(limit) else {
+        return String::new();
+    };
+    let end = start + count - 1.0;
+    if end != 0.0 {
+        format!(":{}-{}", format_num(start), format_num(end))
+    } else {
+        format!(":{}", format_num(start))
+    }
+}
+
+/// Duration as `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`.
+pub fn format_tool_duration(ms: f64) -> String {
+    let seconds = ms.max(0.0) / 1000.0;
+    if seconds < 60.0 {
+        return format!("{seconds:.1}s");
+    }
+    let total_seconds = seconds.floor() as u64;
+    let minutes = total_seconds / 60;
+    let remainder = total_seconds % 60;
+    if minutes < 60 {
+        return format!("{minutes}m {remainder}s");
+    }
+    format!("{}h {}m {remainder}s", minutes / 60, minutes % 60)
+}
+
+/// Renderer state used by [`start_tool_timer`] and [`tool_timer_text`] inside `ToolRenderContext.state`.
+#[derive(Default)]
+pub struct ToolTimerState {
+    pub started_at_ms: Option<i64>,
+    pub ended_at_ms: Option<i64>,
+    pub timer_spawned: bool,
+    pub call_text: Option<pi_tui::Text>,
+    pub result_text: Option<pi_tui::Text>,
+    pub custom: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// Start the row's clock once execution starts. Call from `render_call`.
+pub fn start_tool_timer(context: &ToolRenderContext) {
+    if !context.execution_started {
+        return;
+    }
+    if let Ok(mut guard) = context.state.lock() {
+        let state = guard.get_or_insert_with(|| Box::new(ToolTimerState::default()));
+        if let Some(st) = state.downcast_mut::<ToolTimerState>()
+            && st.started_at_ms.is_none()
+        {
+            st.started_at_ms = Some(pi_js::time::now_ms());
+            st.ended_at_ms = None;
+        }
+    }
+}
+
+/// Format the row's timing line from `render_result`: `Elapsed 4.2s` while partial, `Took 4.2s` once final.
+pub fn tool_timer_text(context: &ToolRenderContext, is_partial: bool) -> Option<String> {
+    let mut recorded_start = None;
+    let mut recorded_end = None;
+    if let Ok(mut guard) = context.state.lock() {
+        let state = guard.get_or_insert_with(|| Box::new(ToolTimerState::default()));
+        if let Some(st) = state.downcast_mut::<ToolTimerState>() {
+            if st.started_at_ms.is_some() && is_partial && !st.timer_spawned {
+                st.timer_spawned = true;
+                let invalidate = Arc::clone(&context.invalidate);
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        invalidate();
+                    });
+                }
+            }
+            if (!is_partial || context.is_error) && st.ended_at_ms.is_none() {
+                st.ended_at_ms = Some(pi_js::time::now_ms());
+            }
+            recorded_start = st.started_at_ms;
+            recorded_end = st.ended_at_ms;
+        }
+    }
+    if !is_partial && let Some(ms) = context.duration_ms {
+        return Some(format!("Took {}", format_tool_duration(ms)));
+    }
+    let start = recorded_start?;
+    let end = recorded_end.unwrap_or_else(pi_js::time::now_ms);
+    let label = if is_partial { "Elapsed" } else { "Took" };
+    Some(format!("{label} {}", format_tool_duration((end - start).max(0) as f64)))
 }

@@ -57,8 +57,10 @@ fn get_api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
         "qwen-token-plan" => Some(&["QWEN_TOKEN_PLAN_API_KEY"]),
         "qwen-token-plan-cn" => Some(&["QWEN_TOKEN_PLAN_CN_API_KEY"]),
         "qwen-token-plan-individual" => Some(&["QWEN_TOKEN_PLAN_API_KEY"]),
+        "qwen-token-plan-individual-cn" => Some(&["QWEN_TOKEN_PLAN_CN_API_KEY"]),
         "openai" => Some(&["OPENAI_API_KEY"]),
-        "azure-openai-responses" => Some(&["AZURE_OPENAI_API_KEY"]),
+        // PORT: Keep "azure-openai-responses" alias during Stage 1 until Stage 2 ports api/azure_openai_responses.rs.
+        "azure" | "azure-openai-responses" => Some(&["AZURE_OPENAI_API_KEY"]),
         "nvidia" => Some(&["NVIDIA_API_KEY"]),
         "deepseek" => Some(&["DEEPSEEK_API_KEY"]),
         "google" => Some(&["GEMINI_API_KEY"]),

@@ -361,7 +361,7 @@ impl RpcSession for TestRpcSession {
             guard.is_streaming = false;
             guard.is_idle = true;
         }
-        self.emit(AgentSessionEvent::AgentSettled);
+        self.emit(AgentSessionEvent::AgentSettled { aborted: false });
         Ok(())
     }
 

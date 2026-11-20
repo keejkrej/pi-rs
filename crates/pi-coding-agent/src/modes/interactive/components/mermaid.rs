@@ -95,7 +95,10 @@ pub fn create_mermaid_markdown_transformer(options: MermaidTransformerOptions) -
     Arc::new(move |markdown: &str, context: MarkdownTransformContext| {
         let mode = (options.get_mode)();
         if mode == MermaidRenderingMode::Off
-            || context.message_type == MarkdownMessageType::AssistantThinking
+            || !matches!(
+                context.message_type,
+                MarkdownMessageType::User | MarkdownMessageType::Assistant | MarkdownMessageType::Summary
+            )
             || (context.is_streaming && mode != MermaidRenderingMode::Streaming)
         {
             return markdown.to_string();

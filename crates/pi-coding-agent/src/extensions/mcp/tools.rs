@@ -6,30 +6,33 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::core::extensions::types::{
     Theme, ToolAnnotations, ToolDefinition, ToolExposure, ToolNamespace, ToolRenderContext, ToolRenderResultOptions,
+    ToolRenderers,
 };
+pub use crate::core::mcp_servers::READ_MCP_RESOURCE_TOOL;
 use crate::core::tools::render_utils::{format_tool_call_with_args, get_text_output, replace_tabs};
-use crate::core::tools::truncate::{format_size, truncate_middle};
+use crate::core::tools::truncate::format_size;
 use crate::extensions::mcp::config::McpExposure;
 use crate::extensions::wire::{VisualLinePreview, VisualTruncateKeep, key_hint};
+use crate::utils::output_files::write_output_file;
 use pi_agent_core::{AgentToolResult, AgentToolUpdateCallback};
 use pi_ai::{ImageContent, TextContent, UserContentBlock};
 use pi_js::abort::AbortSignal;
 use pi_js::vendor::typebox::Schema;
 use pi_js::{BoxFuture, Result};
 use pi_mcp::protocol::content::ResourceContents;
-use pi_mcp::{CallToolResult, ContentBlock, LlmContent, McpRequestOptions, Tool as McpTool, to_llm_content};
+use pi_mcp::{
+    CallToolResult, ContentBlock, LlmContent, McpRequestOptions, Tool as McpTool, normalize_mcp_input_schema,
+    to_llm_content,
+};
+pub use pi_mcp::{MCP_OUTPUT_MAX_BYTES, McpOutputData, McpOutputSaver};
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::tui::{Component, Container};
 
-pub const MAX_TOOL_NAME_LENGTH: usize = 64;
-pub const MCP_OUTPUT_MAX_BYTES: usize = 20 * 1024;
 const OUTPUT_PREVIEW_LINES: usize = 5;
-pub const READ_MCP_RESOURCE_TOOL: &str = "read_mcp_resource";
 
 pub fn to_tool_exposure(exposure: McpExposure) -> ToolExposure {
     match exposure {
@@ -48,17 +51,12 @@ pub struct McpToolDetails {
     pub full_output_path: Option<String>,
 }
 
-pub type McpOutputSaver = Arc<dyn Fn(Vec<u8>, String) -> BoxFuture<Result<String>> + Send + Sync>;
-
-pub async fn save_to_temp_file(data: &[u8], extension: &str) -> Result<String> {
-    let name = format!("pi-mcp-{}{extension}", hex::encode(pi_js::crypto::random_bytes(8)));
-    let path = pi_js::path::join(&[&pi_js::env::tmp_dir(), &name]);
-    pi_js::fs::promises::write_file(&path, data, Some(0o600)).await?;
-    Ok(path)
+pub async fn save_to_temp_file(data: McpOutputData, extension: &str) -> Result<String> {
+    write_output_file("pi-mcp", extension, data.as_bytes()).await
 }
 
 pub fn default_output_saver() -> McpOutputSaver {
-    Arc::new(|data, ext| Box::pin(async move { save_to_temp_file(&data, &ext).await }))
+    Arc::new(|data, ext| Box::pin(async move { save_to_temp_file(data, &ext).await }))
 }
 
 #[async_trait]
@@ -71,8 +69,6 @@ pub trait McpToolCaller: Send + Sync {
     ) -> Result<CallToolResult>;
 }
 
-static SANITIZE_NAME_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"[^A-Za-z0-9_]+").expect("valid sanitize regex"));
 static TRAILING_EXT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\.[A-Za-z0-9]{1,8}$").expect("valid ext regex"));
 
@@ -80,18 +76,7 @@ pub fn create_mcp_tool_name<F>(server: &str, tool: &str, is_taken: F) -> String
 where
     F: Fn(&str) -> bool,
 {
-    let raw = format!("mcp__{server}__{tool}");
-    let sanitized = SANITIZE_NAME_RE.replace_all(&raw, |caps: &regex::Captures<'_>| "_".repeat(caps[0].len()));
-    if sanitized.len() <= MAX_TOOL_NAME_LENGTH && !is_taken(&sanitized) {
-        return sanitized.into_owned();
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{server}\0{tool}").as_bytes());
-    let digest = hex::encode(hasher.finalize());
-    let hash = &digest[..8];
-    let prefix_len = MAX_TOOL_NAME_LENGTH - hash.len() - 1;
-    let prefix: String = sanitized.chars().take(prefix_len).collect();
-    format!("{prefix}_{hash}")
+    pi_mcp::create_mcp_tool_name(server, tool, Some(&is_taken))
 }
 
 fn text_of(content: &[UserContentBlock]) -> String {
@@ -105,25 +90,94 @@ fn text_of(content: &[UserContentBlock]) -> String {
         .join("\n")
 }
 
+fn user_to_llm_block(block: UserContentBlock) -> LlmContent {
+    match block {
+        UserContentBlock::Text(t) => LlmContent::Text { text: t.text },
+        UserContentBlock::Image(i) => LlmContent::Image {
+            data: i.data,
+            mime_type: i.mime_type,
+        },
+    }
+}
+
+const SCHEMA_DATA_KEYWORDS: &[&str] = &["const", "enum", "default", "examples"];
+const SCHEMA_MAP_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "dependencies",
+    "$defs",
+    "definitions",
+];
+
+/// Rewrite local `$ref` pointers inside `schema` as subschemas under `pointer`.
+fn relocate_schema(schema: Value, pointer: &str) -> Value {
+    match schema {
+        Value::Array(items) => Value::Array(items.into_iter().map(|i| relocate_schema(i, pointer)).collect()),
+        Value::Object(obj) => {
+            let mut relocated = serde_json::Map::with_capacity(obj.len());
+            for (key, value) in obj {
+                if key == "$ref"
+                    && let Value::String(ref ref_str) = value
+                    && (ref_str == "#" || ref_str.starts_with("#/"))
+                {
+                    relocated.insert(key, Value::String(format!("{pointer}{}", &ref_str[1..])));
+                } else if SCHEMA_DATA_KEYWORDS.contains(&key.as_str()) {
+                    relocated.insert(key, value);
+                } else if SCHEMA_MAP_KEYWORDS.contains(&key.as_str())
+                    && let Value::Object(sub_map) = value
+                {
+                    let mapped = sub_map
+                        .into_iter()
+                        .map(|(n, sub)| (n, relocate_schema(sub, pointer)))
+                        .collect();
+                    relocated.insert(key, Value::Object(mapped));
+                } else {
+                    relocated.insert(key, relocate_schema(value, pointer));
+                }
+            }
+            Value::Object(relocated)
+        }
+        other => other,
+    }
+}
+
 pub fn create_mcp_result_schema(structured_content_schema: Option<&IndexMap<String, Value>>) -> Schema {
     let mut props = serde_json::Map::new();
     props.insert(
         "content".to_string(),
-        json!({ "type": "array", "items": { "type": "object" } }),
+        json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": { "enum": ["text", "image", "audio", "resource_link", "resource"] },
+                    "text": { "type": "string" },
+                    "data": { "type": "string" },
+                    "mimeType": { "type": "string" },
+                },
+                "required": ["type"],
+                "additionalProperties": true,
+            }
+        }),
     );
-    if let Some(sc) = structured_content_schema {
-        let mut sc_map = serde_json::Map::with_capacity(sc.len());
-        for (k, v) in sc {
-            sc_map.insert(k.clone(), v.clone());
+    let structured_schema = match structured_content_schema {
+        Some(sc) => {
+            let mut sc_map = serde_json::Map::with_capacity(sc.len());
+            for (k, v) in sc {
+                sc_map.insert(k.clone(), v.clone());
+            }
+            relocate_schema(Value::Object(sc_map), "#/properties/structuredContent")
         }
-        props.insert("structuredContent".to_string(), Value::Object(sc_map));
-    }
+        None => json!({}),
+    };
+    props.insert("structuredContent".to_string(), structured_schema);
     props.insert("isError".to_string(), json!({ "type": "boolean" }));
-    props.insert("_meta".to_string(), json!({ "type": "object" }));
     Schema::from(json!({
         "type": "object",
         "properties": props,
         "required": ["content"],
+        "additionalProperties": true,
     }))
 }
 
@@ -131,31 +185,11 @@ pub async fn limit_mcp_content(
     content: Vec<UserContentBlock>,
     save_output: Option<McpOutputSaver>,
 ) -> (Vec<UserContentBlock>, Option<String>) {
-    let combined = text_of(&content);
-    let truncation = truncate_middle(&combined, MCP_OUTPUT_MAX_BYTES);
-    if !truncation.truncated {
-        return (content, None);
-    }
+    let llm_content: Vec<LlmContent> = content.into_iter().map(user_to_llm_block).collect();
     let saver = save_output.unwrap_or_else(default_output_saver);
-    let (full_output_path, where_line) = match saver(combined.as_bytes().to_vec(), ".txt".to_string()).await {
-        Ok(path) => (
-            Some(path.clone()),
-            format!("[Full output: {path} (read it with offset/limit)]"),
-        ),
-        Err(err) => (None, format!("[Could not save the full output: {}]", err.message())),
-    };
-    let tokens = truncation.total_bytes.div_ceil(4);
-    let text = format!(
-        "Warning: truncated output (original token count: {tokens})\nTotal output lines: {}\n\n{}\n\n{where_line}",
-        truncation.total_lines, truncation.content
-    );
-    let mut out = vec![UserContentBlock::Text(TextContent::new(text))];
-    for block in content {
-        if matches!(block, UserContentBlock::Image(_)) {
-            out.push(block);
-        }
-    }
-    (out, full_output_path)
+    let limited = pi_mcp::limit_mcp_content(llm_content, Some(saver)).await;
+    let blocks = limited.content.into_iter().map(llm_to_user_block).collect();
+    (blocks, limited.full_output_path)
 }
 
 #[derive(Clone, Default)]
@@ -247,7 +281,7 @@ async fn block_to_content(
             format_size(data.len())
         );
         let saver = options.save_output.clone().unwrap_or_else(default_output_saver);
-        return match saver(data, extension_of(&blob_res.uri)).await {
+        return match saver(McpOutputData::Bytes(data), extension_of(&blob_res.uri)).await {
             Ok(path) => vec![UserContentBlock::Text(TextContent::new(format!(
                 "[Binary resource {} ({kind}) saved to {path}]",
                 blob_res.uri
@@ -319,15 +353,10 @@ pub async fn convert_mcp_result(
 }
 
 fn to_parameters(schema: &IndexMap<String, Value>) -> Schema {
-    let mut obj = serde_json::Map::with_capacity(schema.len() + 2);
-    for (k, v) in schema {
-        obj.insert(k.clone(), v.clone());
-    }
-    if !obj.contains_key("type") {
-        obj.insert("type".to_string(), Value::String("object".to_string()));
-    }
-    if !obj.contains_key("properties") {
-        obj.insert("properties".to_string(), Value::Object(serde_json::Map::new()));
+    let normalized = normalize_mcp_input_schema(schema);
+    let mut obj = serde_json::Map::with_capacity(normalized.len());
+    for (k, v) in normalized {
+        obj.insert(k, v);
     }
     Schema::from(Value::Object(obj))
 }
@@ -386,12 +415,12 @@ pub fn create_mcp_tool_definition(options: CreateMcpToolDefinitionOptions) -> To
         .or(title)
         .unwrap_or_else(|| format!("MCP tool {tool_name} from server {server}"));
 
-    let label_call = label.clone();
     let server_exec = server.clone();
     let tool_exec = tool_name.clone();
     let get_client = options.get_client;
     let readable_resources = options.readable_resources;
     let timeout_ms = options.timeout_ms;
+    let renderers = create_mcp_tool_renderers(&label);
 
     ToolDefinition {
         name: options.name,
@@ -457,6 +486,16 @@ pub fn create_mcp_tool_definition(options: CreateMcpToolDefinitionOptions) -> To
                 .await)
             })
         }),
+        render_call: renderers.render_call,
+        render_result: renderers.render_result,
+    }
+}
+
+/// Renderers of calls to an MCP tool, labeled `server/tool`, also used before the tool is registered.
+pub fn create_mcp_tool_renderers(label: &str) -> ToolRenderers {
+    let label_call = label.to_string();
+    ToolRenderers {
+        render_shell: None,
         render_call: Some(Arc::new(
             move |args: Value, theme: Theme, context: ToolRenderContext| {
                 let formatted = format_tool_call_with_args(&label_call, Some(&args), &theme, context.expanded);

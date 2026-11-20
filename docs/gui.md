@@ -21,7 +21,7 @@ Supported `pi-gui` flags (`crates/pi-gui/src/main.rs`):
 | `--session-dir <dir>` | Override session storage directory |
 | `--provider <id>` | Initial provider ID |
 | `--model <id>` | Initial model ID |
-| `--thinking <level>` | Initial thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `--thinking <level>` | Initial thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `--theme <mode>` | Theme override (`dark`, `light`, `system`) |
 | `--demo` | Launch with offline deterministic showcase data |
 | `--scene <id>` | Apply a named deterministic scene (see below) |

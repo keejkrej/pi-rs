@@ -40,6 +40,7 @@ fn create_model(base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn sample_usage() -> Usage {
             cache_read: 0.0,
             cache_write: 0.0,
             total: 0.3,
+            total_from_provider: None,
         },
     }
 }
@@ -149,6 +151,7 @@ async fn streams_text_and_tool_calls_and_resolves_terminal_message() {
             "reason": "toolUse",
             "usage": sample_usage_json(),
             "responseId": "resp_1",
+            "responseModel": "claude-opus-5-5",
             "providerThinkingLevel": "high"
         }),
     ];
@@ -205,6 +208,7 @@ async fn streams_text_and_tool_calls_and_resolves_terminal_message() {
     assert_eq!(message.response_id.as_deref(), Some("resp_1"));
     assert_eq!(message.provider_thinking_level.as_deref(), Some("high"));
     assert_eq!(message.model, "auto");
+    assert_eq!(message.response_model.as_deref(), Some("claude-opus-5-5"));
     assert_eq!(message.provider.as_str(), "radius");
     assert_eq!(
         message.content,
@@ -219,6 +223,7 @@ async fn streams_text_and_tool_calls_and_resolves_terminal_message() {
                 namespace: None,
                 arguments: [("path".to_string(), json!("a.txt"))].into_iter().collect(),
                 thought_signature: None,
+                arguments_error: None,
             }),
         ]
     );
@@ -292,6 +297,7 @@ async fn forwards_wire_events_debug_query_headers_and_handles_errors() {
     .await;
     assert_eq!(msg.stop_reason, StopReason::Stop);
     assert_eq!(msg.response_id.as_deref(), Some("resp_1"));
+    assert_eq!(msg.response_model, None);
     assert_eq!(*received.lock().unwrap(), wire_events);
 
     // debug=1 and onResponse headers
@@ -383,7 +389,13 @@ async fn forwards_wire_events_debug_query_headers_and_handles_errors() {
     let (sse_err_fetch, _) = sse_fetch(
         vec![
             json!({ "type": "start" }),
-            json!({ "type": "error", "reason": "error", "usage": sample_usage_json(), "errorMessage": "Upstream failed" }),
+            json!({
+                "type": "error",
+                "reason": "error",
+                "usage": sample_usage_json(),
+                "errorMessage": "Upstream failed",
+                "responseModel": "claude-opus-5-5"
+            }),
         ],
         Vec::new(),
     );
@@ -406,6 +418,7 @@ async fn forwards_wire_events_debug_query_headers_and_handles_errors() {
     .await;
     assert_eq!(sse_err_msg.stop_reason, StopReason::Error);
     assert_eq!(sse_err_msg.error_message.as_deref(), Some("Upstream failed"));
+    assert_eq!(sse_err_msg.response_model.as_deref(), Some("claude-opus-5-5"));
 
     // No API key
     let no_key_msg = stream(&model, &normalize_context(&sample_context()), None)
@@ -460,4 +473,62 @@ async fn forwards_wire_events_debug_query_headers_and_handles_errors() {
 fn is_registered_as_builtin_api_provider() {
     register_built_in_api_providers();
     assert!(get_api_provider("pi-messages").is_some());
+}
+
+#[tokio::test]
+async fn rejects_content_indexes_that_are_not_the_next_or_an_existing_block() {
+    let cases = vec![
+        (
+            vec![json!({ "type": "text_start", "contentIndex": 4_294_967_000_u64 })],
+            false,
+        ),
+        (vec![json!({ "type": "text_start", "contentIndex": "__proto__" })], true),
+        (
+            vec![
+                json!({ "type": "text_start", "contentIndex": 0 }),
+                json!({
+                    "type": "toolcall_end",
+                    "contentIndex": "__proto__",
+                    "toolCall": { "polluted": true }
+                }),
+            ],
+            true,
+        ),
+        (
+            vec![json!({ "type": "text_delta", "contentIndex": 0, "delta": "x" })],
+            false,
+        ),
+    ];
+    for (events, non_numeric_index) in cases {
+        let mut wire = vec![json!({ "type": "start" })];
+        wire.extend(events);
+        wire.push(json!({ "type": "done", "reason": "stop", "usage": sample_usage_json() }));
+        let (fetch, _) = sse_fetch(wire, Vec::new());
+        let model = create_model("http://127.0.0.1:9999/v1");
+        let msg = stream(
+            &model,
+            &normalize_context(&sample_context()),
+            Some(
+                PiMessagesOptions {
+                    base: StreamOptions {
+                        api_key: Some("test-key".to_string()),
+                        fetch: Some(fetch),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            ),
+        )
+        .result()
+        .await;
+        assert_eq!(msg.stop_reason, StopReason::Error);
+        let err = msg.error_message.as_deref().unwrap_or("");
+        if non_numeric_index {
+            assert!(err.contains("Invalid pi-messages SSE event"), "{err}");
+        } else {
+            assert!(err.contains("Invalid contentIndex"), "{err}");
+        }
+        assert!(msg.content.len() <= 1);
+    }
 }

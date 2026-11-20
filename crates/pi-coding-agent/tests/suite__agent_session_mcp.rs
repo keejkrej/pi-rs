@@ -404,6 +404,7 @@ async fn setup_mcp(exposure: McpExposure, opts: McpSetupOptions) -> McpSetup {
         }),
         source: "test".to_string(),
         scope: None,
+        override_path: None,
     };
     let auto_enable = opts.auto_enable_codemode;
     let calls_c = Arc::clone(&calls);
@@ -439,6 +440,7 @@ async fn setup_mcp(exposure: McpExposure, opts: McpSetupOptions) -> McpSetup {
             servers: vec![entry.clone()],
             auto_enable_codemode: auto_enable,
             errors: vec![],
+            project_config: None,
         })),
         create_transport: Some(transport_factory),
         ..Default::default()
@@ -576,15 +578,26 @@ async fn exposes_codemode_only_mcp_tools_through_codemode_and_hides_them_from_th
 
     let result = tool_result(&st.harness, "codemode");
     assert!(!result.is_error);
-    assert_eq!(result.content.len(), 3);
+    assert_eq!(result.content.len(), 4);
+    let saved_label = match &result.content[1] {
+        pi_ai::types::UserContentBlock::Text(t) => &t.text,
+        _ => panic!("expected saved image label block"),
+    };
+    let saved_path = saved_label
+        .strip_prefix("[Image saved to ")
+        .and_then(|s| s.split(" (image/png,").next())
+        .expect("saved image label");
+    let saved_bytes = std::fs::read(saved_path).expect("saved image file");
+    assert_eq!(pi_js::b64::encode(&saved_bytes), TINY_PNG_BASE64);
+    let _ = std::fs::remove_file(saved_path);
     assert_eq!(
-        result.content[1],
+        result.content[2],
         pi_ai::types::UserContentBlock::Image(pi_ai::ImageContent {
             data: TINY_PNG_BASE64.to_string(),
             mime_type: "image/png".to_string(),
         })
     );
-    let txt = match &result.content[2] {
+    let txt = match &result.content[3] {
         pi_ai::types::UserContentBlock::Text(t) => &t.text,
         _ => panic!("expected text block"),
     };
@@ -1369,6 +1382,7 @@ async fn setup_slow(
         }),
         source: "test".to_string(),
         scope: None,
+        override_path: None,
     };
 
     let calls_c = Arc::clone(&calls);
@@ -1400,6 +1414,7 @@ async fn setup_slow(
                     servers: vec![entry.clone()],
                     auto_enable_codemode: None,
                     errors: vec![],
+                    project_config: None,
                 })),
                 create_transport: Some(transport_factory),
                 startup_wait_ms,
@@ -1958,6 +1973,7 @@ async fn setup_registered(
             servers: configured.clone(),
             auto_enable_codemode: None,
             errors: vec![],
+            project_config: None,
         })),
         create_transport: Some(Arc::new(move |entry, _url, _auth| {
             conn_c
@@ -2089,6 +2105,7 @@ async fn run_prefers_mcp_json_server(ext_name: &str) {
         }),
         source: "mcp.json".to_string(),
         scope: None,
+        override_path: None,
     };
     let name = ext_name.to_string();
     let ext = InlineExtension::Factory(Arc::new(move |pi: ExtensionApi| {
@@ -2202,6 +2219,7 @@ async fn setup_resume_reload(
         }),
         source: "test".to_string(),
         scope: None,
+        override_path: None,
     };
 
     let mut factories = extra_factories;
@@ -2211,6 +2229,7 @@ async fn setup_resume_reload(
             servers: vec![server_entry.clone()],
             auto_enable_codemode: None,
             errors: vec![],
+            project_config: None,
         })),
         create_transport: Some(Arc::new(move |entry, _url, _auth| {
             conn_c

@@ -9,3 +9,5 @@ pub mod openai_provider_docs_eval;
 pub mod smoke_eval;
 pub mod tui_docs_eval;
 // @generated-mods end
+
+pub mod prompt_templates_docs_eval;

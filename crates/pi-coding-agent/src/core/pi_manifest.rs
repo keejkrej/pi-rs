@@ -10,6 +10,7 @@ pub struct PiManifest {
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,
     pub themes: Option<Vec<String>>,
+    pub changelog_path: Option<String>,
 }
 
 fn read_string_array(obj: &serde_json::Map<String, Value>, key: &str) -> Option<Vec<String>> {
@@ -26,11 +27,16 @@ pub fn read_pi_manifest(package_json_path: &str) -> Option<PiManifest> {
     let parsed = pi_js::json::parse(strip_bom(&content)).ok()?;
     let pkg = parsed.as_object()?;
     let pi_obj = pkg.get("pi")?.as_object()?;
+    let changelog_path = pi_obj
+        .get("changelogPath")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
 
     Some(PiManifest {
         extensions: read_string_array(pi_obj, "extensions"),
         skills: read_string_array(pi_obj, "skills"),
         prompts: read_string_array(pi_obj, "prompts"),
         themes: read_string_array(pi_obj, "themes"),
+        changelog_path,
     })
 }

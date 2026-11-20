@@ -116,9 +116,19 @@ static WHITESPACE_RE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| regex::R
 static PLAN_HEADER_RE: LazyLock<Option<regex::Regex>> =
     LazyLock::new(|| regex::Regex::new(r"(?i)\*{0,2}Plan:\*{0,2}\s*\n").ok());
 static NUMBERED_STEP_RE: LazyLock<Option<regex::Regex>> =
-    LazyLock::new(|| regex::Regex::new(r"(?m)^\s*(\d+)[.)]\s+\*{0,2}([^*\n]+)").ok());
+    LazyLock::new(|| regex::Regex::new(r"(?m)^\s*(\d+)[.)]\s+(.+)$").ok());
 static TRAILING_STARS_RE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| regex::Regex::new(r"\*{1,2}$").ok());
-static DONE_TAG_RE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| regex::Regex::new(r"(?i)\[DONE:(\d+)\]").ok());
+static DONE_TAG_RE: LazyLock<Option<regex::Regex>> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\[DONE\s*:?\s*(\d+)\]").ok());
+static DONE_COLON_RE: LazyLock<Option<regex::Regex>> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\bDone\s*:\s*(\d+)\b").ok());
+static STEP_DONE_RE: LazyLock<Option<regex::Regex>> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\bStep\s*(\d+)\s+(?:is\s+)?(?:done|complete|completed|finished)\b").ok());
+static ALL_STEPS_DONE_RE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)(?:all|every)\s+steps?\s+(?:are|is\s+)?(?:done|complete|completed|finished)").ok()
+});
+static PLAN_COMPLETE_RE: LazyLock<Option<regex::Regex>> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\b(?:the\s+)?plan\s+(?:is\s+)?(?:complete|completed|done)\b").ok());
 
 pub fn is_safe_command(command: &str) -> bool {
     let is_destructive = DESTRUCTIVE_PATTERNS
@@ -155,10 +165,6 @@ pub fn clean_step_text(text: &str) -> String {
     if let Some(first) = chars.next() {
         cleaned = format!("{}{}", first.to_uppercase(), chars.as_str());
     }
-    if cleaned.chars().count() > 50 {
-        let prefix: String = cleaned.chars().take(47).collect();
-        cleaned = format!("{prefix}...");
-    }
     cleaned
 }
 
@@ -167,7 +173,7 @@ pub fn extract_todo_items(message: &str) -> Vec<TodoItem> {
     let Some(header_re) = PLAN_HEADER_RE.as_ref() else {
         return items;
     };
-    let Some(header_match) = header_re.find(message) else {
+    let Some(header_match) = header_re.find_iter(message).last() else {
         return items;
     };
 
@@ -184,7 +190,7 @@ pub fn extract_todo_items(message: &str) -> Vec<TodoItem> {
         if let Some(stars_re) = TRAILING_STARS_RE.as_ref() {
             text = stars_re.replace(&text, "").trim().to_string();
         }
-        if text.chars().count() > 5 && !text.starts_with('`') && !text.starts_with('/') && !text.starts_with('-') {
+        if text.chars().count() > 5 && !text.starts_with('/') && !text.starts_with('-') {
             let cleaned = clean_step_text(&text);
             if cleaned.chars().count() > 3 {
                 items.push(TodoItem {
@@ -200,14 +206,17 @@ pub fn extract_todo_items(message: &str) -> Vec<TodoItem> {
 
 pub fn extract_done_steps(message: &str) -> Vec<usize> {
     let mut steps = Vec::new();
-    let Some(re) = DONE_TAG_RE.as_ref() else {
-        return steps;
-    };
-    for caps in re.captures_iter(message) {
-        if let Some(m) = caps.get(1)
-            && let Ok(step) = m.as_str().parse::<usize>()
-        {
-            steps.push(step);
+    for re_opt in [DONE_TAG_RE.as_ref(), DONE_COLON_RE.as_ref(), STEP_DONE_RE.as_ref()] {
+        let Some(re) = re_opt else {
+            continue;
+        };
+        for caps in re.captures_iter(message) {
+            if let Some(m) = caps.get(1)
+                && let Ok(step) = m.as_str().parse::<usize>()
+                && !steps.contains(&step)
+            {
+                steps.push(step);
+            }
         }
     }
     steps
@@ -215,10 +224,17 @@ pub fn extract_done_steps(message: &str) -> Vec<usize> {
 
 pub fn mark_completed_steps(text: &str, items: &mut [TodoItem]) -> usize {
     let done_steps = extract_done_steps(text);
+    let mut marked = 0usize;
     for step in &done_steps {
-        if let Some(item) = items.iter_mut().find(|t| t.step == *step) {
+        if let Some(item) = items.iter_mut().find(|t| t.step == *step && !t.completed) {
             item.completed = true;
+            marked += 1;
         }
     }
-    done_steps.len()
+    marked
+}
+
+pub fn all_steps_complete(message: &str) -> bool {
+    ALL_STEPS_DONE_RE.as_ref().is_some_and(|re| re.is_match(message))
+        || PLAN_COMPLETE_RE.as_ref().is_some_and(|re| re.is_match(message))
 }

@@ -25,26 +25,27 @@ use serde_json::Value;
 use super::types::{
     AfterProviderResponseEvent, AgentActivityOutcome, AgentBeforeSettleEvent, AgentEndEvent, AgentSettledEvent,
     AgentStartEvent, AutocompleteProviderFactory, BashResult, BeforeAgentStartEvent, BeforeAgentStartEventResult,
-    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, BoundaryContextPreview, BoundaryResult,
-    BuildSystemPromptOptions, CacheWarmingAction, CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult,
-    CancelledResult, CompactOptions, ContextEvent, ContextEventResult, ContextUsage, ContextWithSystemEvent,
-    CustomMessageContent, CustomMessageDraft, CustomUiFactory, EditorFactory, EntryRenderer, EventBusHandler,
-    ExecuteToolOptions, ExtensionActions, ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext,
-    ExtensionContextActions, ExtensionContextBackend, ExtensionError, ExtensionFlag, ExtensionMode, ExtensionRuntime,
-    ExtensionShortcut, ExtensionToolContext, ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions,
-    FlagValue, FooterFactory, ForkOptions, HeaderFactory, InputDeliveryBehavior, InputEvent, InputEventResult,
-    InputSource, LoadExtensionsResult, LoadedExtension, MarkdownTransformer, McpServersChangeEvent, MessageEndEvent,
-    MessageEndEventResult, MessageRenderer, ModelRegistry, ModelSelectEvent, NavigateTreeOptions, NewSessionOptions,
-    NormalizedBuildSystemPromptOptions, NotifyType, ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision,
-    ProjectTrustEventResult, ProviderConfig, ProviderStreamEvent, RegisteredCommand, RegisteredEventHandler,
-    RegisteredTool, ResolvedCommand, ResourceDiagnostic, ResourceDiagnosticType, ResourcesDiscoverEvent,
-    ResourcesDiscoverReason, ResourcesDiscoverResult, ScopedModel, SendMessageOptions, SendUserMessageOptions,
-    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult,
-    SessionBeforeSwitchEvent, SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult,
-    SessionBoundaryDraft, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent, SessionManager,
-    SessionShutdownEvent, SessionStartEvent, SessionTreeEvent, SetThemeResult, SwitchSessionOptions,
-    TerminalInputHandler, Theme, ThemeInfo, ThinkingLevelSelectEvent, ToolCallEvent, ToolCallEventResult,
-    ToolDefinition, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultContentBlock,
+    BeforeAgentStartMessageType, BeforeProviderHeadersEvent, BeforeProviderRequestEvent, BoundaryContextPreview,
+    BoundaryResult, BuildSystemPromptOptions, CacheWarmingAction, CacheWarmingDecisionEvent,
+    CacheWarmingDecisionEventResult, CancelledResult, CompactOptions, ContextEvent, ContextEventResult, ContextUsage,
+    ContextWithSystemEvent, CustomMessage, CustomMessageContent, CustomMessageDraft, CustomUiFactory, EditorFactory,
+    EntryRenderer, EventBusHandler, ExecuteToolOptions, ExtensionActions, ExtensionCommandContext,
+    ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionContextBackend, ExtensionError,
+    ExtensionFlag, ExtensionMode, ExtensionRuntime, ExtensionShortcut, ExtensionToolContext, ExtensionUIContext,
+    ExtensionUIDialogOptions, ExtensionWidgetOptions, FlagValue, FooterFactory, ForkOptions, HeaderFactory,
+    InputDeliveryBehavior, InputEvent, InputEventResult, InputSource, LoadExtensionsResult, LoadedExtension,
+    MarkdownTransformer, McpServersChangeEvent, MessageEndEvent, MessageEndEventResult, MessageRenderer, ModelRegistry,
+    ModelSelectEvent, NavigateTreeOptions, NewSessionOptions, NormalizedBuildSystemPromptOptions, NotifyType,
+    ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision, ProjectTrustEventResult, ProviderConfig,
+    ProviderStreamEvent, RegisteredCommand, RegisteredEventHandler, RegisteredTool, ResolvedCommand,
+    ResourceDiagnostic, ResourceDiagnosticType, ResourcesDiscoverEvent, ResourcesDiscoverReason,
+    ResourcesDiscoverResult, ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionBeforeCompactEvent,
+    SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
+    SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionBoundaryDraft,
+    SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent, SessionManager, SessionShutdownEvent,
+    SessionStartEvent, SessionTreeEvent, SetThemeResult, SwitchSessionOptions, TerminalInputHandler, Theme, ThemeInfo,
+    ThinkingLevelSelectEvent, ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolExecutionEndEvent,
+    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolRendererResolver, ToolRenderers, ToolResultContentBlock,
     ToolResultEvent, ToolResultEventResult, TurnEndEvent, TurnStartEvent, UIPromptEndEvent, UIPromptKind,
     UIPromptStartEvent, UserBashEvent, UserBashEventResult, VirtualModelDefinition, WidgetFactory,
     WorkingIndicatorOptions, build_system_prompt_from_normalized, normalize_build_system_prompt_options,
@@ -176,6 +177,18 @@ pub fn validate_user_bash_json_result(value: &Value) -> std::result::Result<User
             full_output_path,
         },
     })
+}
+
+/// The message that starts a run (`before_agent_start` user or custom trigger).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BeforeAgentStartTrigger {
+    User {
+        prompt: String,
+        images: Option<Vec<ImageContent>>,
+    },
+    Custom {
+        message: CustomMessage,
+    },
 }
 
 /// Combined result from all `before_agent_start` handlers.
@@ -1517,15 +1530,54 @@ impl ExtensionRunner {
         None
     }
 
+    /// Markdown transformers in extension load order; each one leaves Markdown of unregistered surfaces unchanged.
     pub fn get_markdown_transformers(&self) -> Vec<MarkdownTransformer> {
-        let mut out = Vec::new();
+        let mut out: Vec<MarkdownTransformer> = Vec::new();
         for ext in &self.inner.extensions {
             let guard = ext.markdown_transformer.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(t) = guard.as_ref() {
-                out.push(Arc::clone(t));
+            if let Some(reg) = guard.as_ref() {
+                let transformer = Arc::clone(&reg.transformer);
+                let message_types = reg.message_types.clone();
+                out.push(Arc::new(
+                    move |markdown: &str, context: crate::core::extensions::types::MarkdownTransformContext| {
+                        if message_types.contains(&context.message_type) {
+                            transformer(markdown, context)
+                        } else {
+                            markdown.to_string()
+                        }
+                    },
+                ));
             }
         }
         out
+    }
+
+    /// Resolve renderers for calls to `tool_name`: extension resolvers in load order, then `base`.
+    pub fn resolve_tool_renderers<F>(&self, tool_name: &str, base: F) -> Option<ToolRenderers>
+    where
+        F: FnOnce() -> Option<ToolRenderers> + Send + 'static,
+    {
+        let mut resolvers: Vec<ToolRendererResolver> = Vec::new();
+        for ext in &self.inner.extensions {
+            let guard = ext.tool_renderers.lock().unwrap_or_else(|e| e.into_inner());
+            resolvers.extend(guard.iter().cloned());
+        }
+        fn resolve_at(
+            tool_name: &str,
+            resolvers: Vec<ToolRendererResolver>,
+            index: usize,
+            base: Box<dyn FnOnce() -> Option<ToolRenderers> + Send>,
+        ) -> Option<ToolRenderers> {
+            if index < resolvers.len() {
+                let resolver = Arc::clone(&resolvers[index]);
+                let name = tool_name.to_string();
+                let next = Box::new(move || resolve_at(&name, resolvers, index + 1, base));
+                resolver(tool_name, next)
+            } else {
+                base()
+            }
+        }
+        resolve_at(tool_name, resolvers, 0, Box::new(base))
     }
 
     pub fn get_entry_renderer(&self, custom_type: &str) -> Option<EntryRenderer> {
@@ -2369,6 +2421,21 @@ impl ExtensionRunner {
         images: Option<Vec<ImageContent>>,
         system_prompt_options: BuildSystemPromptOptions,
     ) -> BeforeAgentStartCombinedResult {
+        self.emit_before_agent_start_trigger(
+            BeforeAgentStartTrigger::User {
+                prompt: prompt.to_string(),
+                images,
+            },
+            system_prompt_options,
+        )
+        .await
+    }
+
+    pub async fn emit_before_agent_start_trigger(
+        &self,
+        trigger: BeforeAgentStartTrigger,
+        system_prompt_options: BuildSystemPromptOptions,
+    ) -> BeforeAgentStartCombinedResult {
         let shared_options = Arc::new(Mutex::new(normalize_build_system_prompt_options(
             &system_prompt_options,
         )));
@@ -2385,11 +2452,24 @@ impl ExtensionRunner {
                     let guard = shared_options.lock().unwrap_or_else(|e| e.into_inner());
                     build_system_prompt_from_normalized(&guard).unwrap_or_default()
                 };
+                let (message_type, prompt, images, message) = match &trigger {
+                    BeforeAgentStartTrigger::User { prompt, images } => {
+                        (BeforeAgentStartMessageType::User, prompt.clone(), images.clone(), None)
+                    }
+                    BeforeAgentStartTrigger::Custom { message } => (
+                        BeforeAgentStartMessageType::Custom,
+                        String::new(),
+                        None,
+                        Some(message.clone()),
+                    ),
+                };
                 match handler {
                     RegisteredEventHandler::Boxed(f) => {
                         let ev = BeforeAgentStartEvent {
-                            prompt: prompt.to_string(),
-                            images: images.clone(),
+                            message_type,
+                            prompt,
+                            images,
+                            message,
                             system_prompt: current_prompt_str,
                             system_prompt_options: Arc::clone(&shared_options),
                         };
@@ -2421,8 +2501,10 @@ impl ExtensionRunner {
                     }
                     RegisteredEventHandler::Raw(f) => {
                         let ev = BeforeAgentStartEvent {
-                            prompt: prompt.to_string(),
-                            images: images.clone(),
+                            message_type,
+                            prompt,
+                            images,
+                            message,
                             system_prompt: current_prompt_str,
                             system_prompt_options: Arc::clone(&shared_options),
                         };
@@ -3088,6 +3170,7 @@ impl ExtensionContextBackend for RunnerContextBackend {
                     },
                     result: AgentToolResult::text("Nested tool calls are not available in this context"),
                     is_error: true,
+                    duration_ms: None,
                 }
             })
         }

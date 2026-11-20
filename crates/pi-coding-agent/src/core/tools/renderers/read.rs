@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::core::extensions::types::{RenderCallFn, RenderResultFn, ToolRenderContext};
 use crate::core::tools::read::ReadToolDetails;
-use crate::core::tools::render_utils::{shorten_path, str_val};
+use crate::core::tools::render_utils::{format_read_line_range, shorten_path, str_val};
 use crate::core::tools::renderers::w3b_wire::{get_language_from_path, highlight_code, key_hint};
 use crate::core::tools::renderers::{
     extract_text_output, format_preview_lines, reuse_or_init_call_text, reuse_or_init_result_text,
@@ -30,13 +30,7 @@ pub fn render_call() -> RenderCallFn {
             shorten_path(Some(&rel))
         };
 
-        let offset = args.get("offset").and_then(Value::as_u64);
-        let limit = args.get("limit").and_then(Value::as_u64);
-        let range_suffix = match (offset, limit) {
-            (Some(off), Some(lim)) => format!(":{}-{}", off, off.saturating_add(lim).saturating_sub(1)),
-            (Some(off), None) => format!(":{off}"),
-            _ => String::new(),
-        };
+        let range_suffix = format_read_line_range(args.get("offset"), args.get("limit"));
 
         let mut text = format!(
             "{} {}",

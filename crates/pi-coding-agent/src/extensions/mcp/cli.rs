@@ -8,22 +8,24 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use crate::config::{APP_NAME, CONFIG_DIR_NAME};
+use crate::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use crate::core::trust_manager::ProjectTrustStore;
 use crate::extensions::mcp::config::{
-    LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry, add_mcp_server_config,
-    get_mcp_tool_exposure, load_mcp_config, remove_mcp_server_config, validate_mcp_server_config,
+    LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpScope, McpServerConfig, McpServerEntry,
+    add_mcp_server_config, get_mcp_tool_exposure, load_mcp_config, remove_mcp_server_config,
+    validate_mcp_server_config,
 };
 use crate::extensions::mcp::log::McpServerLog;
 use crate::extensions::mcp::oauth::{
     McpOAuthCredentialStore, McpSignInCancelledError, McpSignInPrompt, SignInMcpServerOptions, sign_in_mcp_server,
 };
 use crate::extensions::mcp::runtime::{
-    McpServerConnection, McpServerConnectionOptions, ServerState, create_default_transport,
+    McpServerConnection, McpServerConnectionOptions, ProviderTokenFn, ServerState, create_default_transport,
 };
 use crate::utils::open_browser::open_browser;
+use crate::utils::terminal_question::question_terminal;
 use pi_js::Result;
 use pi_js::abort::AbortSignal;
 
@@ -33,7 +35,7 @@ fn help_text() -> String {
     let app = *APP_NAME;
     let cfg = *CONFIG_DIR_NAME;
     format!(
-        "\x1b[1mUsage:\x1b[22m\n  {app} mcp add <server> [options] -- <command> [args...]\n  {app} mcp add <server> [options] --url <url>\n  {app} mcp remove <server> [-l]\n  {app} mcp list [--json]\n  {app} mcp login <server> [--timeout <seconds>]\n  {app} mcp logout <server>\n\nConfigure and check MCP servers and sign in to OAuth servers without starting a session.\nReads ~/{cfg}/agent/mcp.json and, in trusted projects, {cfg}/mcp.json.\n\nCommands:\n  add <server>            Add or replace a server in mcp.json\n  remove <server>         Remove a server from mcp.json\n  list                    Show state, tools, and errors (exits 1 on failure)\n  login <server>          Sign in through the browser\n  logout <server>         Delete the stored OAuth credentials\n\nOptions for add and remove:\n  -l, --local             Use {cfg}/mcp.json in the current project instead of the global file\n\nOptions for add:\n  --url <url>             Streamable HTTP server URL (instead of a command)\n  --env <KEY=VALUE>       Environment variable for a stdio server (repeatable)\n  --cwd <dir>             Working directory for a stdio server\n  --header <KEY=VALUE>    HTTP header (repeatable)\n  --bearer-token-env-var <NAME>\n                          Send \"Authorization: Bearer ${{NAME}}\"\n  --oauth-client-id <id>  Pre-registered OAuth client id\n  --oauth-client-secret <secret>\n                          OAuth client secret (may be ${{NAME}} or !command)\n  --oauth-callback-port <port>\n                          Fixed OAuth callback port\n  --oauth-client-name <name>\n                          Client name sent when registering with the OAuth server\n  --exposure <mode>       codemode (default), deferred, direct, or hidden\n  --description <text>    What the server offers, shown in the system prompt\n\nOther options:\n  --json                  Print the list as JSON\n  --timeout <seconds>     How long login waits for the browser (default: 300)"
+        "\x1b[1mUsage:\x1b[22m\n  {app} mcp add <server> [options] -- <command> [args...]\n  {app} mcp add <server> [options] --url <url>\n  {app} mcp remove <server> [-l]\n  {app} mcp list [--json]\n  {app} mcp login <server> [-l] [--timeout <seconds>]\n  {app} mcp logout <server> [-l]\n\nConfigure and check MCP servers and sign in to OAuth servers without starting a session.\nReads ~/{cfg}/agent/mcp.json and, in trusted projects, {cfg}/mcp.json.\n\nCommands:\n  add <server>            Add or replace a server in mcp.json\n  remove <server>         Remove a server from mcp.json\n  list                    Show state, tools, and errors (exits 1 on failure)\n  login <server>          Sign in through the browser\n  logout <server>         Delete the stored OAuth credentials\n\nOptions for add, remove, login, and logout:\n  -l, --local             Use {cfg}/mcp.json in the current project instead of the global file\n\nOptions for add:\n  --url <url>             Streamable HTTP server URL (instead of a command)\n  --env <KEY=VALUE>       Environment variable for a stdio server (repeatable)\n  --cwd <dir>             Working directory for a stdio server\n  --header <KEY=VALUE>    HTTP header (repeatable)\n  --bearer-token-env-var <NAME>\n                          Send \"Authorization: Bearer ${{NAME}}\"\n  --oauth-client-id <id>  Pre-registered OAuth client id\n  --oauth-client-secret <secret>\n                          OAuth client secret (may be ${{NAME}} or !command)\n  --oauth-callback-port <port>\n                          Fixed OAuth callback port\n  --oauth-client-name <name>\n                          Client name sent when registering with the OAuth server\n  --oauth-client-registration <mode>\n                          auto (default), cimd, or dcr\n  --exposure <mode>       codemode (default), deferred, direct, or hidden\n  --description <text>    What the server offers, shown in the system prompt\n\nOther options:\n  --json                  Print the list as JSON\n  --timeout <seconds>     Time limit for the whole sign-in (default: 300)"
     )
 }
 
@@ -48,6 +50,8 @@ pub struct McpCommandOptions {
     pub cwd: String,
     pub agent_dir: String,
     pub credentials: Option<McpOAuthCredentialStore>,
+    /// Token of a pi provider, for servers with `auth.provider`. Defaults to the agent directory's `auth.json`.
+    pub provider_token: Option<ProviderTokenFn>,
     pub open_url: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     pub log: Option<LogFn>,
     pub error: Option<LogFn>,
@@ -59,17 +63,19 @@ struct ServerReport {
     name: String,
     scope: String,
     source: String,
+    #[serde(rename = "override", skip_serializing_if = "Option::is_none")]
+    override_path: Option<String>,
     enabled: bool,
     exposure: String,
     transport: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_provider: Option<String>,
     state: String,
     tools: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_exposure: Option<IndexMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resources: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resource_templates: Option<usize>,
+    resources: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -111,6 +117,7 @@ fn create_connection(
     entry: McpServerEntry,
     options: &McpCommandOptions,
     credentials: &McpOAuthCredentialStore,
+    provider_token: ProviderTokenFn,
 ) -> Arc<McpServerConnection> {
     let log_path = pi_js::path::join(&[&options.agent_dir, "mcp.log"]);
     McpServerConnection::new(McpServerConnectionOptions {
@@ -118,11 +125,60 @@ fn create_connection(
         cwd: options.cwd.clone(),
         create_transport: Arc::new(create_default_transport),
         credentials: credentials.clone(),
-        provider_token: None,
+        provider_token: Some(provider_token),
         on_tools: Arc::new(|_| {}),
         on_change: None,
         log: Some(Arc::new(McpServerLog::new(log_path))),
     })
+}
+
+fn create_provider_token_reader(agent_dir: &str) -> ProviderTokenFn {
+    let runtime_cell = Arc::new(tokio::sync::OnceCell::<Option<ModelRuntime>>::new());
+    let agent_dir = agent_dir.to_string();
+    Arc::new(move |provider: &str| {
+        let cell = Arc::clone(&runtime_cell);
+        let dir = agent_dir.clone();
+        let provider = provider.to_string();
+        Box::pin(async move {
+            let rt_opt = cell
+                .get_or_init(|| async {
+                    ModelRuntime::create(CreateModelRuntimeOptions {
+                        auth_path: Some(pi_js::path::join(&[&dir, "auth.json"])),
+                        models_path: Some(Some(pi_js::path::join(&[&dir, "models.json"]))),
+                        refresh_on_create: Some(false),
+                        ..Default::default()
+                    })
+                    .await
+                    .ok()
+                })
+                .await;
+            let Some(rt) = rt_opt else {
+                return None;
+            };
+            rt.get_auth_provider_id(&provider, None)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|res| res.auth.api_key)
+        })
+    })
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b_chars.len()).collect();
+    for (i, &ca) in a_chars.iter().enumerate() {
+        let mut current = vec![0usize; b_chars.len() + 1];
+        current[0] = i + 1;
+        for (j, &cb) in b_chars.iter().enumerate() {
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + usize::from(ca != cb));
+        }
+        previous = current;
+    }
+    previous[b_chars.len()]
 }
 
 #[derive(Clone, Copy)]
@@ -163,7 +219,7 @@ fn parse_options(
         }
         let name = &arg[2..];
         let Some(&kind) = known.get(name) else {
-            error(&format!("Unknown option {arg}.\n{}", help_hint()));
+            error(&format!("Unknown option {raw}.\n{}", help_hint()));
             return None;
         };
         match kind {
@@ -228,6 +284,7 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
     known.insert("oauth-client-secret", OptKind::Value);
     known.insert("oauth-callback-port", OptKind::Value);
     known.insert("oauth-client-name", OptKind::Value);
+    known.insert("oauth-client-registration", OptKind::Value);
     known.insert("exposure", OptKind::Value);
     known.insert("description", OptKind::Value);
 
@@ -250,6 +307,7 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         "oauth-client-secret",
         "oauth-callback-port",
         "oauth-client-name",
+        "oauth-client-registration",
     ];
     let stdio_only = ["env", "cwd"];
     let check_set: &[&str] = if url.is_none() { &http_only } else { &stdio_only };
@@ -294,6 +352,9 @@ fn add(args: &[String], project_config: &str, options: &McpCommandOptions, log: 
         }
         if let Some(cname) = get_val("oauth-client-name") {
             oauth.insert("clientName".to_string(), Value::String(cname.to_string()));
+        }
+        if let Some(creg) = get_val("oauth-client-registration") {
+            oauth.insert("clientRegistration".to_string(), Value::String(creg.to_string()));
         }
         cfg_obj.insert("url".to_string(), Value::String(url_str.to_string()));
         if !headers.is_empty() {
@@ -437,6 +498,7 @@ async fn list(
     untrusted_note: Option<&str>,
     options: &McpCommandOptions,
     credentials: &McpOAuthCredentialStore,
+    provider_token: &ProviderTokenFn,
     log: &LogFn,
 ) -> i32 {
     let futs: Vec<_> = loaded
@@ -446,6 +508,7 @@ async fn list(
             let entry = entry.clone();
             let options = options.clone();
             let credentials = credentials.clone();
+            let provider_token = Arc::clone(provider_token);
             async move {
                 let exposure_val = match &entry.config {
                     McpServerConfig::Stdio(s) => s.exposure,
@@ -456,6 +519,7 @@ async fn list(
                     McpServerConfig::Stdio(s) => s.enabled,
                     McpServerConfig::Http(h) => h.enabled,
                 } != Some(false);
+                let auth_provider = entry.auth_provider().map(String::from);
                 let mut report = ServerReport {
                     name: entry.name.clone(),
                     scope: entry
@@ -463,20 +527,21 @@ async fn list(
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_else(|| "global".to_string()),
                     source: entry.source.clone(),
+                    override_path: entry.override_path.clone(),
                     enabled,
                     exposure: exposure_str(exposure_val).to_string(),
                     transport: describe_transport(&entry),
+                    auth_provider,
                     state: "disabled".to_string(),
                     tools: Vec::new(),
                     tool_exposure: None,
                     resources: None,
-                    resource_templates: None,
                     error: None,
                 };
                 if !enabled {
                     return report;
                 }
-                let conn = create_connection(entry.clone(), &options, &credentials);
+                let conn = create_connection(entry.clone(), &options, &credentials, provider_token);
                 let _ = conn.get_client().await;
                 let st = conn.state();
                 report.state = state_str(st).to_string();
@@ -493,8 +558,7 @@ async fn list(
                     report.tool_exposure = Some(overrides);
                 }
                 if conn.has_resources() {
-                    report.resources = Some(conn.resources().len());
-                    report.resource_templates = Some(conn.resource_templates().len());
+                    report.resources = Some(true);
                 }
                 if st != ServerState::Connected {
                     report.error = conn.error();
@@ -543,8 +607,15 @@ async fn list(
             report.name, report.exposure, report.scope
         ));
         log(&format!("  {}", report.transport));
+        if let Some(ref ovr) = report.override_path {
+            log(&format!("  project override: {ovr}"));
+        }
         if report.state == "needs-auth" {
-            log(&format!("  sign in with: {} mcp login {}", *APP_NAME, report.name));
+            if let Some(ref auth_prov) = report.auth_provider {
+                log(&format!("  sign in with: /login {auth_prov} in {}", *APP_NAME));
+            } else {
+                log(&format!("  sign in with: {} mcp login {}", *APP_NAME, report.name));
+            }
         }
         if !report.tools.is_empty() {
             let tools: Vec<String> = report
@@ -560,11 +631,8 @@ async fn list(
                 .collect();
             log(&format!("  tools: {}", tools.join(", ")));
         }
-        if let Some(res_count) = report.resources {
-            log(&format!(
-                "  resources: {res_count}, URI templates: {}",
-                report.resource_templates.unwrap_or(0)
-            ));
+        if report.resources == Some(true) {
+            log("  offers resources");
         }
         if let Some(ref err) = report.error {
             let indented = err.split('\n').collect::<Vec<_>>().join("\n  ");
@@ -582,7 +650,6 @@ async fn list(
 
 struct CliSignInPrompt {
     server_name: String,
-    timeout_ms: u64,
     interactive: bool,
     open_url: Arc<dyn Fn(&str) + Send + Sync>,
     log: LogFn,
@@ -600,30 +667,26 @@ impl McpSignInPrompt for CliSignInPrompt {
     }
 
     async fn prompt_for_redirect_url(&self, signal: AbortSignal) -> Result<Option<String>> {
-        wait_for_redirect_url(signal, self.timeout_ms, self.interactive).await
+        wait_for_redirect_url(signal, self.interactive).await
     }
 }
 
-async fn wait_for_redirect_url(signal: AbortSignal, timeout_ms: u64, interactive: bool) -> Result<Option<String>> {
-    let token = signal.token();
+async fn wait_for_redirect_url(signal: AbortSignal, interactive: bool) -> Result<Option<String>> {
     if !interactive {
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), token.cancelled()).await;
+        if !signal.aborted() {
+            signal.cancelled().await;
+        }
         return Ok(None);
     }
-    let mut stderr = tokio::io::stderr();
-    let _ = stderr
-        .write_all(b"If the browser cannot reach this machine, paste the URL it was redirected to: ")
-        .await;
-    let _ = stderr.flush().await;
-    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
-    tokio::select! {
-        _ = token.cancelled() => Ok(None),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => Ok(None),
-        res = reader.read_line(&mut line) => match res {
-            Ok(0) | Err(_) => Ok(None),
-            Ok(_) => Ok(Some(line)),
-        }
+    match question_terminal(
+        "If the browser cannot reach this machine, paste the URL it was redirected to: ",
+        Some(&signal),
+        None,
+    )
+    .await
+    {
+        Ok(line) => Ok(Some(line)),
+        Err(_) => Ok(None),
     }
 }
 
@@ -681,11 +744,11 @@ async fn login(
         challenge: connection.challenge(),
         prompt: Arc::new(CliSignInPrompt {
             server_name: name.clone(),
-            timeout_ms,
             interactive,
             open_url,
             log: Arc::clone(log),
         }),
+        signal: Some(AbortSignal::timeout(timeout_ms)),
     })
     .await;
 
@@ -762,6 +825,10 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
         .credentials
         .clone()
         .unwrap_or_else(|| McpOAuthCredentialStore::new(None, None));
+    let provider_token = options
+        .provider_token
+        .clone()
+        .unwrap_or_else(|| create_provider_token_reader(&options.agent_dir));
 
     match command {
         "list" => {
@@ -780,12 +847,14 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
                 untrusted_note.as_deref(),
                 &options,
                 &credentials,
+                &provider_token,
                 &log,
             )
             .await)
         }
         "login" | "logout" => {
             let mut known = IndexMap::new();
+            known.insert("local", OptKind::Flag);
             if command == "login" {
                 known.insert("timeout", OptKind::Value);
             }
@@ -793,11 +862,17 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
                 return Ok(1);
             };
             if parsed.positional.len() != 1 {
-                error(&format!("Usage: {app} mcp {command} <server>\n{}", help_hint()));
+                error(&format!("Usage: {app} mcp {command} <server> [-l]\n{}", help_hint()));
                 return Ok(1);
             }
             let name = &parsed.positional[0];
             let Some(entry) = loaded.servers.iter().find(|s| s.name == *name) else {
+                let suggestion = loaded
+                    .servers
+                    .iter()
+                    .find(|candidate| edit_distance(&candidate.name, name) <= 2)
+                    .map(|candidate| format!(" Did you mean \"{}\"?", candidate.name))
+                    .unwrap_or_default();
                 let note = untrusted_note.as_deref().map(|n| format!(" {n}")).unwrap_or_default();
                 let configured = if loaded.servers.is_empty() {
                     "none".to_string()
@@ -810,11 +885,24 @@ pub async fn run_mcp_command(args: &[String], options: McpCommandOptions) -> Res
                         .join(", ")
                 };
                 error(&format!(
-                    "No MCP server named \"{name}\".{note} Configured: {configured}."
+                    "No MCP server named \"{name}\".{suggestion}{note} Configured: {configured}."
                 ));
                 return Ok(1);
             };
-            let connection = create_connection(entry.clone(), &options, &credentials);
+            if parsed.values.contains_key("local") && entry.scope != Some(McpScope::Project) {
+                error(&format!(
+                    "MCP server \"{name}\" is defined in {}, not in the project; omit --local.",
+                    entry.source
+                ));
+                return Ok(1);
+            }
+            if let Some(auth_prov) = entry.auth_provider() {
+                error(&format!(
+                    "MCP server \"{name}\" uses the credentials of provider \"{auth_prov}\". Run \"{app} auth {command} {auth_prov}\"."
+                ));
+                return Ok(1);
+            }
+            let connection = create_connection(entry.clone(), &options, &credentials, provider_token);
             let Some(url) = connection.oauth_url().map(String::from) else {
                 error(&format!(
                     "MCP server \"{name}\" does not use OAuth. Only HTTP servers without an Authorization header do."

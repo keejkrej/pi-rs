@@ -99,7 +99,7 @@ async fn capture_client_base_url(base_url: &str) -> String {
     let _guard = AzureEnvGuard::clear_all();
     env::set_var("AZURE_OPENAI_BASE_URL", base_url);
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -123,7 +123,7 @@ async fn capture_client_base_url(base_url: &str) -> String {
 async fn capture_client_headers(headers: Option<ProviderHeaders>) -> Headers {
     let _guard = AzureEnvGuard::clear_all();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -240,7 +240,7 @@ async fn preserves_query_params_on_non_azure_proxy_urls() {
 async fn errors_on_invalid_urls() {
     let _guard = AzureEnvGuard::clear_all();
     env::set_var("AZURE_OPENAI_BASE_URL", "not-a-url");
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     let result = stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -269,7 +269,7 @@ async fn errors_on_invalid_urls() {
 async fn clamps_prompt_cache_key_to_openais_64_character_limit() {
     let _guard = AzureEnvGuard::clear_all();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -301,7 +301,7 @@ async fn clamps_prompt_cache_key_to_openais_64_character_limit() {
 async fn disables_server_side_response_storage() {
     let _guard = AzureEnvGuard::clear_all();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -328,7 +328,7 @@ async fn disables_server_side_response_storage() {
 #[serial]
 async fn honors_supports_strict_mode_false() {
     let _guard = AzureEnvGuard::clear_all();
-    let mut model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let mut model = get_model("azure", "gpt-4o-mini").unwrap();
     let mut compat = match model.compat {
         Some(ModelCompat::OpenAIResponses(c)) => c,
         _ => OpenAIResponsesCompat::default(),
@@ -383,7 +383,7 @@ async fn builds_correct_default_url_from_azure_openai_resource_name() {
     let _guard = AzureEnvGuard::clear_all();
     env::set_var("AZURE_OPENAI_RESOURCE_NAME", "my-resource");
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
     stream_azure_openai_responses(
         &model,
         &sample_context(),
@@ -428,7 +428,7 @@ async fn forwards_parsed_events_in_order_before_normalizing_the_response() {
     let event_models = Arc::new(Mutex::new(Vec::new()));
     let rec_c = received.clone();
     let em_c = event_models.clone();
-    let model = get_model("azure-openai-responses", "gpt-4o-mini").unwrap();
+    let model = get_model("azure", "gpt-4o-mini").unwrap();
 
     let result = stream_azure_openai_responses(
         &model,
@@ -468,7 +468,7 @@ async fn forwards_parsed_events_in_order_before_normalizing_the_response() {
 #[tokio::test]
 #[serial]
 async fn uses_pis_user_agent_by_default_and_lets_explicit_headers_override() {
-    let expected_ua = format!("pi ({} {}; {})", env::platform(), env::os_release(), env::arch());
+    let expected_ua = pi_ai::utils::identity::format_user_agent(None);
     let default_headers = capture_client_headers(None).await;
     assert_eq!(default_headers.get("User-Agent").as_deref(), Some(expected_ua.as_str()));
 

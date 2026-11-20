@@ -15,7 +15,7 @@ const COPILOT_RAW_TOOL_CALL_ID: &str = "call_4VnzVawQXPB9MgYib7CiQFEY|I9b95oN1wD
 
 #[test]
 fn hashes_foreign_responses_item_ids_that_exceed_64_characters() {
-    let model = get_model("openai-codex", "gpt-5.5").unwrap();
+    let model = get_model("openai-codex", "gpt-6.1-sol").unwrap();
     let now = time::now_ms();
 
     let mut args = IndexMap::new();
@@ -29,7 +29,7 @@ fn hashes_foreign_responses_item_ids_that_exceed_64_characters() {
         ))],
         api: "openai-responses".to_owned(),
         provider: "github-copilot".to_owned(),
-        model: "gpt-5.5".to_owned(),
+        model: "gpt-6.1-sol".to_owned(),
         response_model: None,
         response_id: None,
         provider_thinking_level: None,
@@ -42,6 +42,7 @@ fn hashes_foreign_responses_item_ids_that_exceed_64_characters() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now - 1000,
+        duration_ms: None,
     };
 
     let context = normalize_context(&Context {

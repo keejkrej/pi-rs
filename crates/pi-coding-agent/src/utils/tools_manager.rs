@@ -6,9 +6,10 @@ use indexmap::IndexMap;
 use pi_js::fetch::{Headers, Request};
 use pi_js::{Error, Result};
 
-use crate::config::{APP_NAME, get_bin_dir};
+use crate::config::{VERSION, get_bin_dir};
 use crate::utils::child_process::{SpawnProcessOptions, spawn_process_sync};
 use crate::utils::management_http::{FetchRetryOptions, extract_error_cause_chain, fetch_with_retry};
+use crate::utils::pi_user_agent::get_pi_user_agent;
 
 const NETWORK_TIMEOUT_MS: u64 = 10_000;
 const DOWNLOAD_TIMEOUT_MS: u64 = 120_000;
@@ -66,16 +67,27 @@ fn tool_config(tool: ManagedTool) -> ToolConfig {
     }
 }
 
-fn get_asset_name(tool: ManagedTool, version: &str, plat: &str, arch: &str) -> Option<String> {
-    let arch_str = if arch == "arm64" { "aarch64" } else { "x86_64" };
-    match (tool, plat) {
-        (ManagedTool::Fd, "darwin") => Some(format!("fd-v{version}-{arch_str}-apple-darwin.tar.gz")),
-        (ManagedTool::Fd, "linux") => Some(format!("fd-v{version}-{arch_str}-unknown-linux-musl.tar.gz")),
-        (ManagedTool::Fd, "win32") => Some(format!("fd-v{version}-{arch_str}-pc-windows-msvc.zip")),
-        (ManagedTool::Rg, "darwin") => Some(format!("ripgrep-{version}-{arch_str}-apple-darwin.tar.gz")),
-        (ManagedTool::Rg, "linux") => Some(format!("ripgrep-{version}-{arch_str}-unknown-linux-musl.tar.gz")),
-        (ManagedTool::Rg, "win32") => Some(format!("ripgrep-{version}-{arch_str}-pc-windows-msvc.zip")),
+// Map platform/arch to the release target suffix shared by fd and ripgrep.
+// Only x64 and arm64 are mapped (#11209).
+fn get_release_target(plat: &str, arch: &str) -> Option<String> {
+    let arch_str = match arch {
+        "arm64" => "aarch64",
+        "x64" => "x86_64",
+        _ => return None,
+    };
+    match plat {
+        "darwin" => Some(format!("{arch_str}-apple-darwin.tar.gz")),
+        "linux" => Some(format!("{arch_str}-unknown-linux-musl.tar.gz")),
+        "win32" => Some(format!("{arch_str}-pc-windows-msvc.zip")),
         _ => None,
+    }
+}
+
+fn get_asset_name(tool: ManagedTool, version: &str, plat: &str, arch: &str) -> Option<String> {
+    let target = get_release_target(plat, arch)?;
+    match tool {
+        ManagedTool::Fd => Some(format!("fd-v{version}-{target}")),
+        ManagedTool::Rg => Some(format!("ripgrep-{version}-{target}")),
     }
 }
 
@@ -113,7 +125,7 @@ pub fn get_tool_path(tool: ManagedTool) -> Option<String> {
 pub async fn get_latest_version(repo: &str) -> Result<String> {
     let url = format!("https://github.com/{repo}/releases/latest");
     let mut headers = Headers::new();
-    headers.set("User-Agent", &format!("{}-coding-agent", *APP_NAME));
+    headers.set("User-Agent", &get_pi_user_agent(*VERSION));
     let req = Request {
         method: "GET".to_owned(),
         url,
@@ -235,7 +247,7 @@ fn extract_tar_gz_archive(archive_path: &str, extract_dir: &str, asset_name: &st
 }
 
 fn get_windows_tar_command() -> String {
-    let sys_root = pi_js::env::var("SystemRoot").or_else(|| pi_js::env::var("WINDIR"));
+    let sys_root = pi_js::env::var("SystemRoot").filter(|s| !s.is_empty());
     if let Some(root) = sys_root {
         let candidate = pi_js::path::join(&[&root, "System32", "tar.exe"]);
         if pi_js::fs::exists(&candidate) {
@@ -415,6 +427,21 @@ where
             cb(ToolStatus {
                 r#type: ToolStatusKind::Warning,
                 message: format!("{} not found. Install with: pkg install {pkg_name}", config.name),
+            });
+        }
+        return None;
+    }
+
+    let plat = pi_js::env::platform();
+    let arch = pi_js::env::arch();
+    if get_release_target(&plat, &arch).is_none() {
+        if let Some(cb) = on_status.as_mut() {
+            cb(ToolStatus {
+                r#type: ToolStatusKind::Warning,
+                message: format!(
+                    "{} not found. Automatic download is not supported on {plat}/{arch}. Install {} with your system package manager.",
+                    config.name, config.name
+                ),
             });
         }
         return None;

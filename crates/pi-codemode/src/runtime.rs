@@ -4,3 +4,8 @@ pub mod prelude_source;
 pub mod protocol;
 pub mod worker;
 // @generated-mods end
+
+pub mod execution;
+pub mod inline;
+pub mod remote;
+pub mod vm;

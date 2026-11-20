@@ -11,6 +11,7 @@ use pi_js::{Error, Result};
 use crate::auth::oauth::callback_server::{OAuthCallbackServerOptions, start_oauth_callback_server};
 use crate::auth::oauth::device_code::{OAuthDeviceCodePollResult, poll_oauth_device_code_flow};
 use crate::auth::oauth::pkce::generate_pkce;
+use crate::auth::oauth::trusted_url::trusted_http_url;
 use crate::auth::types::{
     AuthEvent, AuthPrompt, AuthSelectOption, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential,
     ProviderAuthInteraction,
@@ -92,10 +93,14 @@ async fn load_radius_oauth_discovery(gateway: &str, signal: &AbortSignal) -> Res
     }
 
     let discovery: Value = response.json().await?;
-    let Some(endpoint) = discovery.get("authorizationEndpoint").and_then(Value::as_str) else {
+    let Some(endpoint) = discovery
+        .get("authorizationEndpoint")
+        .and_then(Value::as_str)
+        .and_then(trusted_http_url)
+    else {
         return Err(Error::msg(format!("Invalid Radius OAuth config from {gateway}")));
     };
-    Ok(endpoint.to_owned())
+    Ok(endpoint)
 }
 
 async fn request_oauth_token(
@@ -309,11 +314,16 @@ async fn request_device_authorization(gateway: &str, signal: &AbortSignal) -> Re
             "Radius OAuth device authorization response is missing required fields",
         ));
     };
+    let Some(trusted_uri) = trusted_http_url(verification_uri) else {
+        return Err(Error::msg(
+            "Untrusted verification_uri in Radius OAuth device authorization response",
+        ));
+    };
 
     Ok(DeviceAuthorizationResponse {
         device_code: device_code.to_owned(),
         user_code: user_code.to_owned(),
-        verification_uri: verification_uri.to_owned(),
+        verification_uri: trusted_uri,
         expires_in,
         interval,
     })
@@ -324,6 +334,8 @@ async fn login_with_device_code(gateway: &str, interaction: &ProviderAuthInterac
     interaction.notify(AuthEvent::DeviceCode {
         user_code: device.user_code.clone(),
         verification_uri: device.verification_uri.clone(),
+        open_browser_on_confirm: None,
+        copy_code_on_confirm: None,
         interval_seconds: device.interval,
         expires_in_seconds: Some(device.expires_in),
     });

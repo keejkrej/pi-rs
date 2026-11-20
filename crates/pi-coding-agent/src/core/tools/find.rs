@@ -223,10 +223,27 @@ impl FindOperations for LocalFindOperations {
                 "--glob".to_string(),
                 "--color=never".to_string(),
                 "--hidden".to_string(),
-                "--no-require-git".to_string(),
-                "--max-results".to_string(),
-                limit_str,
             ];
+            let mut inside_git_repo = false;
+            let mut current = std::path::PathBuf::from(&search_path);
+            loop {
+                if current.join(".git").exists() {
+                    inside_git_repo = true;
+                    break;
+                }
+                let Some(parent) = current.parent() else {
+                    break;
+                };
+                if parent == current {
+                    break;
+                }
+                current = parent.to_path_buf();
+            }
+            if !inside_git_repo {
+                args.push("--no-require-git".to_string());
+            }
+            args.push("--max-results".to_string());
+            args.push(limit_str);
 
             for ig in &options.ignore {
                 args.push("--exclude".to_string());
@@ -417,6 +434,9 @@ pub fn create_find_tool_definition(cwd: &str, options: Option<FindToolOptions>) 
 
                 if !ops.exists(&search_dir).await {
                     return Err(pi_js::Error::msg(format!("Path not found: {search_dir}")));
+                }
+                if signal.as_ref().is_some_and(|s| s.aborted()) {
+                    return Err(pi_js::Error::msg("Operation aborted"));
                 }
 
                 let requested_limit = effective_limit.saturating_add(1);

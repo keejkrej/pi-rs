@@ -3,12 +3,52 @@
 use indexmap::{IndexMap, IndexSet};
 
 use crate::types::{
-    AssistantContentBlock, AssistantMessage, Message, Model, ModelInput, StopReason, TextContent, ToolCall,
-    ToolResultMessage, UserContentBlock, UserMessageContent,
+    AssistantContentBlock, AssistantMessage, ImageContent, Message, Model, ModelInput, StopReason, TextContent,
+    ToolCall, ToolResultMessage, UserContentBlock, UserMessageContent,
 };
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
+const ERROR_TOOL_IMAGE_PLACEHOLDER: &str = "(image attached after the tool results)";
+
+/// An error tool result split into a text-only result and the images to send after the tool results.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitErrorToolResult {
+    /// The result content with each run of images replaced by a note.
+    pub content: Vec<UserContentBlock>,
+    /// Text naming the tool call, to send before `images`.
+    pub caption: String,
+    pub images: Vec<ImageContent>,
+}
+
+/// Split the images out of an error tool result, for APIs that reject images in error results
+/// (Anthropic, and Claude on Bedrock). Send the returned content as the tool result and the caption and
+/// images after all tool results of the turn, in the same user message. Returns `None` for results
+/// that need no split (#10794).
+pub fn split_error_tool_result_images(msg: &ToolResultMessage) -> Option<SplitErrorToolResult> {
+    if !msg.is_error {
+        return None;
+    }
+    let images: Vec<ImageContent> = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            UserContentBlock::Image(image) => Some(image.clone()),
+            _ => None,
+        })
+        .collect();
+    if images.is_empty() {
+        return None;
+    }
+    Some(SplitErrorToolResult {
+        content: replace_images_with_placeholder(&msg.content, ERROR_TOOL_IMAGE_PLACEHOLDER),
+        caption: format!(
+            "Images from the error result of tool call {} ({}):",
+            msg.tool_call_id, msg.tool_name
+        ),
+        images,
+    })
+}
 
 fn replace_images_with_placeholder(content: &[UserContentBlock], placeholder: &str) -> Vec<UserContentBlock> {
     let mut result = Vec::new();
@@ -95,24 +135,24 @@ pub fn transform_messages(
                 for block in &assistant_msg.content {
                     match block {
                         AssistantContentBlock::Thinking(t) => {
-                            if t.redacted == Some(true) {
-                                if is_same_model {
-                                    transformed_content.push(block.clone());
-                                }
+                            // Thinking from another model is dropped. Signatures and encrypted reasoning are
+                            // only valid for the model that produced them, and sending readable thinking as
+                            // plain text makes the new model treat it as part of the visible reply.
+                            if !is_same_model {
                                 continue;
                             }
-                            if is_same_model && t.thinking_signature.as_deref().is_some_and(|s| !s.is_empty()) {
+                            // Keep redacted and signed blocks even if the thinking text is empty
+                            // (OpenAI encrypted reasoning); they are needed for replay.
+                            if t.redacted == Some(true)
+                                || t.thinking_signature.as_deref().is_some_and(|s| !s.is_empty())
+                            {
                                 transformed_content.push(block.clone());
                                 continue;
                             }
                             if t.thinking.trim().is_empty() {
                                 continue;
                             }
-                            if is_same_model {
-                                transformed_content.push(block.clone());
-                            } else {
-                                transformed_content.push(AssistantContentBlock::Text(TextContent::new(&t.thinking)));
-                            }
+                            transformed_content.push(block.clone());
                         }
                         AssistantContentBlock::Text(t) => {
                             if is_same_model {
@@ -169,6 +209,7 @@ pub fn transform_messages(
                         nested_calls: None,
                         is_error: true,
                         timestamp: pi_js::time::now_ms(),
+                        duration_ms: None,
                     }));
                 }
             }

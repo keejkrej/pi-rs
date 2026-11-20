@@ -9,7 +9,7 @@ use pi_coding_agent::core::extensions::types::{
     DoneFn, Extension, ExtensionApi, ExtensionCustomOptions, ExtensionFactory, InlineExtension, NotifyType,
     RegisteredCommandOptions, Theme,
 };
-use pi_tui::{CURSOR_MARKER, Component, Focusable, Key, matches_key, visible_width};
+use pi_tui::{CURSOR_MARKER, Component, Focusable, Key, matches_key, render_fake_cursor, visible_width};
 use serde_json::{Value, json};
 
 struct MenuItem {
@@ -219,7 +219,7 @@ impl Component for OverlayTestComponent {
                         String::new()
                     };
                     let marker = if is_focused { CURSOR_MARKER } else { "" };
-                    format!("{before}{marker}\x1b[7m{cursor_ch}\x1b[27m{after}")
+                    format!("{before}{marker}{}{after}", render_fake_cursor(&cursor_ch.to_string()))
                 } else {
                     item.text.iter().collect()
                 };

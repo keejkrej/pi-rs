@@ -5,14 +5,14 @@ use pi_ai::{
     Context, Message, ModelCostRates, ModelModality, ModelsSimpleStreamOptions, SimpleStreamOptions, StreamOptions,
     UserMessage, UserMessageContent,
 };
-use pi_coding_agent::core::model_runtime::ModelRuntime;
+use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use pi_evals::evals::acme_server::{
     AcmeServer, AcmeServerMode, OPENAI_MODEL_ID, OPENAI_PROBE_PROMPT, OPENAI_PROBE_RESPONSE, OPENAI_PROVIDER_ID,
     create_acme_server,
 };
 use pi_evals::evals::configured_runtime::{
     AddedModelOutput, AddedModelResult, ModelFields, ProbeResponseFields, ProviderRuntimeOutput, ProviderRuntimeResult,
-    ProviderScenario, inspect_added_model, inspect_provider, load_configured_model_runtime,
+    ProviderScenario, inspect_added_model, inspect_provider,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -49,6 +49,17 @@ async fn agent_dir_with(models_json: &Value) -> (TempDir, String) {
     .await
     .unwrap();
     (dir, dir_path)
+}
+
+async fn load_configured_model_runtime(agent_dir: &str) -> pi_js::Result<ModelRuntime> {
+    ModelRuntime::create(CreateModelRuntimeOptions {
+        models_path: Some(Some(pi_js::path::join(&[agent_dir, "models.json"]))),
+        auth_path: Some(pi_js::path::join(&[agent_dir, "auth.json"])),
+        models_store_path: Some(pi_js::path::join(&[agent_dir, "models-store.json"])),
+        allow_model_network: Some(false),
+        ..Default::default()
+    })
+    .await
 }
 
 async fn runtime_with(models_json: &Value) -> (TempDir, ModelRuntime) {

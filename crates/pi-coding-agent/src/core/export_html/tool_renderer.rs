@@ -79,6 +79,10 @@ impl From<&ToolRenderContext> for crate::core::extensions::types::ToolRenderCont
             expanded: ctx.expanded,
             show_images: ctx.show_images,
             is_error: ctx.is_error,
+            duration_ms: None,
+            output_pad: ctx.output_pad as i64,
+            key_text: crate::core::extensions::types::default_key_text_fn(),
+            key_hint: crate::core::extensions::types::default_key_hint_fn(),
         }
     }
 }
@@ -146,6 +150,36 @@ pub trait CustomToolRenderer: Send + Sync {
 }
 
 impl CustomToolRenderer for crate::core::extensions::types::ToolDefinition {
+    fn render_call(&self, args: &Value, theme: &HtmlTheme, context: &ToolRenderContext) -> Option<Arc<dyn Component>> {
+        let render_fn = self.render_call.as_ref()?;
+        let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));
+        Some(render_fn(args.clone(), ext_theme, context.into()))
+    }
+
+    fn render_result(
+        &self,
+        content: &[UserContentBlock],
+        details: Option<&Value>,
+        is_error: bool,
+        options: ToolResultRenderOptions,
+        theme: &HtmlTheme,
+        context: &ToolRenderContext,
+    ) -> Option<Arc<dyn Component>> {
+        let render_fn = self.render_result.as_ref()?;
+        let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));
+        let mut result = pi_agent_core::AgentToolResult::text("");
+        result.content = content.to_vec();
+        result.details = details.cloned();
+        result.is_error = Some(is_error);
+        let opts = crate::core::extensions::types::ToolRenderResultOptions {
+            expanded: options.expanded,
+            is_partial: options.is_partial,
+        };
+        Some(render_fn(result, opts, ext_theme, context.into()))
+    }
+}
+
+impl CustomToolRenderer for crate::core::extensions::types::ToolRenderers {
     fn render_call(&self, args: &Value, theme: &HtmlTheme, context: &ToolRenderContext) -> Option<Arc<dyn Component>> {
         let render_fn = self.render_call.as_ref()?;
         let ext_theme = crate::core::extensions::types::Theme::new(Arc::new(theme.clone()));

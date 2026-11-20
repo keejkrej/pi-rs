@@ -178,6 +178,10 @@ impl Component for UserMessageList {
     fn has_handle_input(&self) -> bool {
         true
     }
+
+    fn captures_viewport_input(&self) -> bool {
+        true
+    }
 }
 
 struct UserMessageSelectorInner {

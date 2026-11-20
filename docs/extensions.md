@@ -31,7 +31,7 @@ fn main() -> ExitCode {
 }
 ```
 
-`ExtensionApi` (`crates/pi-coding-agent/src/core/extensions/types.rs`) exposes tool registration (`register_tool`), custom commands (`register_command`), CLI flags (`register_flag`), event hooks (`on(...)`), shortcuts, message renderers, and UI context prompts (`ExtensionUiContext`).
+`ExtensionApi` (`crates/pi-coding-agent/src/core/extensions/types.rs`) exposes tool registration (`register_tool`, using `pi_schema::Schema` parameters and `ToolReachScope` / `reaches_tools`), custom commands (`register_command`), CLI flags (`register_flag`), event hooks (`on(...)`), shortcuts, message renderers, and UI context prompts (`ExtensionUIContext`).
 
 See `crates/pi-coding-agent/examples/extensions__*.rs` for runnable native examples (custom providers, commands, compaction, dynamic tools, plan mode, doom overlay, sandbox, subagent, and bash hooks).
 
@@ -42,4 +42,4 @@ See `crates/pi-coding-agent/examples/extensions__*.rs` for runnable native examp
 - **`llama`** (`src/extensions/llama.rs`) — local `llama.cpp` model lifecycle and provider wiring
 - **`codemode`** (`src/extensions/codemode.rs`) — sandboxed QuickJS WASM code-execution tool powered by `pi-codemode`
 - **`tool_search`** (`src/extensions/tool_search.rs`) — semantic/keyword tool discovery across large tool sets
-- **`mcp`** (`src/extensions/mcp.rs`) — MCP server integration and tool/resource bridging via `pi-mcp`
+- **`mcp`** (`src/extensions/mcp.rs`) — MCP server integration and tool/resource bridging via `pi-mcp` (disabled when `--no-mcp` is set)

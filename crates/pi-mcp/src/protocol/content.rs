@@ -170,14 +170,27 @@ pub enum ContentBlock {
     Unknown(Value),
 }
 
+/// Deserializes any present JSON field, preserving explicit `null` as `Some(Value::Null)`.
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     /// Omitted `content` becomes `[]`. Servers that only return `structuredContent` leave it out.
     #[serde(default)]
     pub content: Vec<ContentBlock>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_content: Option<IndexMap<String, Value>>,
+    /// Any JSON value, including arrays and `null` (MCP 2026-07-28; earlier revisions allowed only objects).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub structured_content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]

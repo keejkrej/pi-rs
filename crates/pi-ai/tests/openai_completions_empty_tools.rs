@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 use pi_ai::compat::{get_model, stream_simple};
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, Context, Message, Model, ProviderEnv, SimpleStreamOptions, StopReason,
-    StreamOptions, TextContent, ThinkingLevel, ToolCall, ToolResultMessage, Usage, UserContentBlock, UserMessage,
-    UserMessageContent,
+    AssistantContentBlock, AssistantMessage, Context, Message, Model, ModelCompat, OpenAICompletionsCompat,
+    ProviderEnv, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingLevel, ToolCall,
+    ToolResultMessage, Usage, UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_js::fetch::{Headers, Request, Response};
 use pi_js::time;
@@ -210,7 +210,7 @@ async fn sends_default_and_explicit_max_tokens_and_clamps_to_remaining_context()
     )
     .await;
     assert!(p3.get("max_tokens").is_none());
-    assert_eq!(p3.get("max_completion_tokens"), Some(&json!(3904)));
+    assert_eq!(p3.get("max_completion_tokens"), Some(&json!(3618)));
 
     // Clamp explicit maxTokens to remaining context
     let (p4, _, _) = run_and_capture(
@@ -234,7 +234,7 @@ async fn sends_default_and_explicit_max_tokens_and_clamps_to_remaining_context()
     )
     .await;
     assert!(p4.get("max_tokens").is_none());
-    assert_eq!(p4.get("max_completion_tokens"), Some(&json!(3904)));
+    assert_eq!(p4.get("max_completion_tokens"), Some(&json!(3618)));
 }
 
 #[tokio::test]
@@ -355,53 +355,58 @@ async fn handles_cloudflare_ai_gateway_compat_url_auth_and_session_affinity() {
 }
 
 #[tokio::test]
-async fn still_emits_empty_tools_array_when_conversation_has_tool_history() {
-    let model = openai_completions_gpt4o_mini();
+async fn omits_or_emits_empty_tools_when_conversation_has_tool_history_per_compat() {
+    let base_model = openai_completions_gpt4o_mini();
     let now = time::now_ms();
-    let (params, _, _) = run_and_capture(
-        &model,
-        Context {
-            system_prompt: None,
-            messages: vec![
-                Message::User(UserMessage {
-                    content: UserMessageContent::Text("use the tool".to_owned()),
-                    timestamp: now,
-                }),
-                Message::Assistant(AssistantMessage {
-                    content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
-                        "t1",
-                        "noop",
-                        IndexMap::new(),
-                    ))],
-                    api: "openai-completions".to_owned(),
-                    provider: "openai".to_owned(),
-                    model: "gpt-4o-mini".to_owned(),
-                    response_model: None,
-                    response_id: None,
-                    provider_thinking_level: None,
-                    thinking_level: None,
-                    diagnostics: None,
-                    usage: Usage::default(),
-                    stop_reason: StopReason::ToolUse,
-                    deferred: None,
-                    error_message: None,
-                    raw_stop_reason: None,
-                    end_turn: None,
-                    timestamp: now,
-                }),
-                Message::ToolResult(ToolResultMessage {
-                    tool_call_id: "t1".to_owned(),
-                    tool_name: "noop".to_owned(),
-                    content: vec![UserContentBlock::Text(TextContent::new("done"))],
-                    details: None,
-                    is_error: false,
-                    nested_calls: None,
-                    usage: None,
-                    timestamp: now,
-                }),
-            ],
-            tools: Some(Vec::new()),
-        },
+    let context = Context {
+        system_prompt: None,
+        messages: vec![
+            Message::User(UserMessage {
+                content: UserMessageContent::Text("use the tool".to_owned()),
+                timestamp: now,
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                    "t1",
+                    "noop",
+                    IndexMap::new(),
+                ))],
+                api: "openai-completions".to_owned(),
+                provider: "openai".to_owned(),
+                model: "gpt-4o-mini".to_owned(),
+                response_model: None,
+                response_id: None,
+                provider_thinking_level: None,
+                thinking_level: None,
+                diagnostics: None,
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                deferred: None,
+                error_message: None,
+                raw_stop_reason: None,
+                end_turn: None,
+                timestamp: now,
+                duration_ms: None,
+            }),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "t1".to_owned(),
+                tool_name: "noop".to_owned(),
+                content: vec![UserContentBlock::Text(TextContent::new("done"))],
+                details: None,
+                is_error: false,
+                nested_calls: None,
+                usage: None,
+                timestamp: now,
+                duration_ms: None,
+            }),
+        ],
+        tools: Some(Vec::new()),
+    };
+
+    // #11843: omits tools by default even with tool history.
+    let (params_default, _, _) = run_and_capture(
+        &base_model,
+        context.clone(),
         SimpleStreamOptions {
             base: StreamOptions {
                 api_key: Some("test".to_owned()),
@@ -411,6 +416,27 @@ async fn still_emits_empty_tools_array_when_conversation_has_tool_history() {
         },
     )
     .await;
+    assert!(params_default.get("tools").is_none());
 
-    assert_eq!(params.get("tools"), Some(&json!([])));
+    // Sends tools: [] when compat.requires_tools_with_tool_history is true.
+    let opt_in_model = Model {
+        compat: Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            requires_tools_with_tool_history: Some(true),
+            ..Default::default()
+        })),
+        ..base_model
+    };
+    let (params_opt_in, _, _) = run_and_capture(
+        &opt_in_model,
+        context,
+        SimpleStreamOptions {
+            base: StreamOptions {
+                api_key: Some("test".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(params_opt_in.get("tools"), Some(&json!([])));
 }

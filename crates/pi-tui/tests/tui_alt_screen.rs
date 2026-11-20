@@ -16,6 +16,11 @@ use pi_tui::alt_screen_search::{
     AltScreenSearchComponent, AltScreenSearchIndex, AltScreenSearchMatch, AltScreenSearchSegment,
     find_alt_screen_search_matches,
 };
+use pi_tui::autocomplete::{
+    ApplyCompletionResult, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, GetSuggestionsOptions,
+};
+use pi_tui::components::box_::TuiBox;
+use pi_tui::components::editor::Editor;
 use pi_tui::components::h_stack::HStack;
 use pi_tui::components::image::{Image, ImageTheme};
 use pi_tui::components::mouse_region::MouseRegion;
@@ -31,13 +36,17 @@ use pi_tui::terminal_image::{
     EncodeKittyOptions, ImageDimensions, ImageProtocol, KittyImageMetadata, TerminalCapabilities, encode_kitty,
     hyperlink, register_kitty_image_metadata, reset_capabilities_cache, set_capabilities,
 };
-use pi_tui::tui::{Component, Focusable, OverlayOptions, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType};
+use pi_tui::tui::{
+    CURSOR_MARKER, Component, Focusable, OverlayAnchor, OverlayOptions, SizeValue, TUI, TuiMouseEvent,
+    TuiMouseEventResult, TuiMouseEventType, render_fake_cursor,
+};
 use pi_tui::tui_alt_screen::{CopySelectionResult, TuiAltScreen, TuiAltScreenOptions};
 use pi_tui::utils::{strip_terminal_sequences, visible_width};
 use pi_tui::wheel_scroll::WheelScrollLines;
 use regex::Regex;
 use serial_test::serial;
 
+use support::test_themes::default_editor_theme;
 use support::virtual_terminal::VirtualTerminal;
 
 const OSC133_ZONE_START: &str = "\x1b]133;A\x07";
@@ -1284,7 +1293,7 @@ async fn supports_configurable_keyboard_viewport_navigation_with_four_rows_of_pa
         ]
     );
 
-    terminal.send_input("\x1bOH");
+    terminal.send_input("\x1b[7^");
     terminal.wait_for_render().await;
     assert_eq!(
         trimmed_viewport(&terminal),
@@ -1293,7 +1302,7 @@ async fn supports_configurable_keyboard_viewport_navigation_with_four_rows_of_pa
         ]
     );
 
-    terminal.send_input("\x1bOF");
+    terminal.send_input("\x1b[8^");
     terminal.wait_for_render().await;
     assert_eq!(
         trimmed_viewport(&terminal),
@@ -1805,30 +1814,36 @@ async fn routes_ctrl_modified_viewport_navigation_to_the_focused_component() {
     tui.start();
     terminal.wait_for_render().await;
 
-    terminal.send_input("\x1bOH");
-    terminal.wait_for_render().await;
-    assert_eq!(transcript.scroll_top(), 0);
-    assert!(editor.inputs().is_empty());
+    let bottom = transcript.scroll_top();
+    assert!(bottom > 0);
 
-    let modified_inputs = vec![
-        "\x1b[1;5H".to_string(),
-        "\x1b[1;5F".to_string(),
-        "\x1b[5;5~".to_string(),
-        "\x1b[6;5~".to_string(),
-        "\x1b[57423;5u".to_string(),
-    ];
-    for input in &modified_inputs {
+    // #10314: unmodified Home/End belong to the editor in every UI mode.
+    let editor_keys = ["\x1bOH", "\x1b[F", "\x1b[57423u", "\x1b[5;5~", "\x1b[6;5~"];
+    for input in &editor_keys {
         terminal.send_input(input);
     }
+    terminal.wait_for_render().await;
+    assert_eq!(transcript.scroll_top(), bottom);
+    assert_eq!(editor.inputs(), editor_keys);
+
+    terminal.send_input("\x1b[1;5H");
+    terminal.wait_for_render().await;
+    assert_eq!(transcript.scroll_top(), 0);
+
+    terminal.send_input("\x1b[1;5F");
+    terminal.wait_for_render().await;
+    assert_eq!(transcript.scroll_top(), bottom);
+    assert!(transcript.is_following_end());
+
+    terminal.send_input("\x1b[57423;5u");
     terminal.send_input("\x1b[57423;5:3u");
     terminal.wait_for_render().await;
     assert_eq!(transcript.scroll_top(), 0);
-    assert_eq!(editor.inputs(), modified_inputs);
 
     terminal.send_input("\x1b[6~");
     terminal.wait_for_render().await;
     assert_eq!(transcript.scroll_top(), 1);
-    assert_eq!(editor.inputs(), modified_inputs);
+    assert_eq!(editor.inputs(), editor_keys);
 
     tui.stop(None);
 }
@@ -2614,6 +2629,9 @@ async fn coalesces_slash_and_hyphen_separated_segments_for_double_click_word_sel
     for (line, needle) in [
         ("extensions/starline/fixed-editor/compositor.ts", "starline"),
         ("earendil-works/pi-tui", "works"),
+        ("~/.pi/agent/settings.json", "agent"),
+        ("~\\Documents\\pi", "Documents"),
+        ("foo+bar", "bar"),
     ] {
         let copied: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let copied_ref = Arc::clone(&copied);
@@ -3223,7 +3241,7 @@ async fn restores_keyboard_state_before_leaving_alt_mode_and_prints_the_full_doc
 
 #[tokio::test]
 #[serial]
-async fn gives_wheel_and_viewport_keys_to_a_focused_overlay() {
+async fn gives_viewport_keys_to_a_focused_overlay() {
     let terminal = VirtualTerminal::new(20, 6);
     let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
     let _guard = StopGuard::new(tui.clone());
@@ -3236,13 +3254,11 @@ async fn gives_wheel_and_viewport_keys_to_a_focused_overlay() {
     terminal.wait_for_render().await;
     assert!(overlay.focused());
 
-    let wheel = "\x1b[<64;10;3M";
     let keys = vec![
         "\x1b[5~".to_string(),
         "\x1b[6~".to_string(),
         "\x1bOH".to_string(),
         "\x1bOF".to_string(),
-        wheel.to_string(),
     ];
     for key in &keys {
         terminal.send_input(key);
@@ -3358,5 +3374,425 @@ async fn resets_text_selection_and_multi_click_history_through_tui_trait() {
     tui.render_now(Some(true));
     assert!(!tui.has_active_selection());
 
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn does_not_leak_cursor_markers_while_selecting_after_the_caret() {
+    let terminal = RecordingTerminal::new(20, 4);
+    let tui = TuiAltScreen::new(
+        Arc::new(terminal.clone()),
+        None,
+        None,
+        Some(TuiAltScreenOptions {
+            copy_on_select: Some(false),
+            ..default_tui_options()
+        }),
+    );
+    let _guard = StopGuard::new(tui.clone());
+    // Regression for #9257 and #9332: selection slicing must not duplicate cursor markers.
+    tui.add_child(Arc::new(RenderClosureComponent::new(move |_| {
+        vec![format!("ab{CURSOR_MARKER}cdefghij")]
+    })));
+
+    tui.start();
+    terminal.wait_for_render().await;
+    let event_count = terminal.event_count();
+
+    terminal.send_input("\x1b[<0;5;1M");
+    terminal.send_input("\x1b[<32;7;1M");
+    terminal.wait_for_render().await;
+
+    let output = terminal.writes_since(event_count);
+    assert!(output.contains("\x1b[7m"), "dragged text should be highlighted");
+    assert!(
+        !output.contains(CURSOR_MARKER),
+        "internal cursor markers must not reach the terminal"
+    );
+    terminal.send_input("\x1b[<0;7;1m");
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn crops_a_kitty_image_in_a_padded_colored_box_whose_first_line_is_above_the_viewport() {
+    let terminal = RecordingTerminal::new(20, 3);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    let image_id = 11271;
+    let image_line = encode_kitty(
+        "AAAA",
+        Some(EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(3),
+            image_id: Some(image_id),
+            move_cursor: Some(false),
+        }),
+    );
+    register_kitty_image_metadata(KittyImageMetadata {
+        image_id,
+        columns: 2,
+        rows: 3,
+        width_px: 100,
+        height_px: 100,
+    });
+    let box_comp = TuiBox::new(
+        Some(1),
+        Some(0),
+        Some(Arc::new(|text| format!("\x1b[44m{text}\x1b[49m"))),
+    );
+    let img_line_clone = image_line;
+    box_comp.add_child(Arc::new(RenderClosureComponent::new(move |_| {
+        vec![img_line_clone.clone(), String::new(), String::new()]
+    })));
+    tui.add_child(Arc::new(RenderClosureComponent::new(|_| vec!["before".to_string()])));
+    tui.add_child(Arc::new(box_comp));
+    tui.add_child(Arc::new(RenderClosureComponent::new(|_| {
+        vec!["after".to_string(), "end".to_string()]
+    })));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    assert_eq!(tui.viewport_top(), 3);
+    assert!(
+        terminal
+            .writes()
+            .iter()
+            .any(|data| data.contains("i=11271") && data.contains("y=66,h=34,r=1"))
+    );
+
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn crops_a_kitty_image_whose_placeholder_rows_contain_text_when_its_first_line_is_above_the_viewport() {
+    // Regression test for #11271: borders or side-by-side text on placeholder rows stopped the search.
+    let terminal = RecordingTerminal::new(20, 3);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    let image_id = 11272;
+    let image_line = encode_kitty(
+        "AAAA",
+        Some(EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(3),
+            image_id: Some(image_id),
+            move_cursor: Some(false),
+        }),
+    );
+    register_kitty_image_metadata(KittyImageMetadata {
+        image_id,
+        columns: 2,
+        rows: 3,
+        width_px: 100,
+        height_px: 100,
+    });
+    tui.add_child(Arc::new(RenderClosureComponent::new(move |_| {
+        vec![
+            "before".to_string(),
+            image_line.clone(),
+            "   | side".to_string(),
+            "   | side".to_string(),
+        ]
+    })));
+    tui.add_child(Arc::new(RenderClosureComponent::new(|_| {
+        vec!["after".to_string(), "end".to_string()]
+    })));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    assert_eq!(tui.viewport_top(), 3);
+    assert!(
+        terminal
+            .writes()
+            .iter()
+            .any(|data| data.contains("i=11272") && data.contains("y=66,h=34,r=1"))
+    );
+
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn redraws_kitty_images_after_writes_to_covered_rows() {
+    // Regression test for #10319: in WezTerm, a scrollbar update below an unchanged image anchor erased its cells.
+    let _caps = CapsGuard::set(TerminalCapabilities {
+        images: Some(ImageProtocol::Kitty),
+        true_color: true,
+        hyperlinks: true,
+    });
+    let terminal = RecordingTerminal::new(20, 4);
+    let image_id = 10319;
+    let image_line = encode_kitty(
+        "AAAA",
+        Some(EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(3),
+            image_id: Some(image_id),
+            move_cursor: Some(false),
+        }),
+    );
+    register_kitty_image_metadata(KittyImageMetadata {
+        image_id,
+        columns: 2,
+        rows: 3,
+        width_px: 100,
+        height_px: 100,
+    });
+    let covered_line = Arc::new(Mutex::new(String::new()));
+    let covered_ref = Arc::clone(&covered_line);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    tui.set_layout_root(Some(Arc::new(RenderClosureComponent::new(move |_| {
+        vec![
+            image_line.clone(),
+            covered_ref.lock().unwrap().clone(),
+            String::new(),
+            "after".to_string(),
+        ]
+    }))));
+    tui.start();
+    terminal.wait_for_render().await;
+    let event_count = terminal.event_count();
+
+    *covered_line.lock().unwrap() = "changed".to_string();
+    tui.request_render(None);
+    terminal.wait_for_render().await;
+    let redraw_writes = terminal.writes_since(event_count);
+    let placement_index = redraw_writes.find("\x1b_Ga=p,q=2").expect("placement rewrite");
+    assert!(redraw_writes.contains("\x1b_Ga=d,d=a,q=2\x1b\\"));
+    assert!(placement_index > redraw_writes.find("changed").expect("changed row write"));
+    assert!(!redraw_writes.contains("\x1b_Ga=T"));
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn draws_kitty_images_after_clearing_the_rows_they_cover() {
+    // Regression test for #11835: Orca's xterm.js image addon stores images in cells, so clearing
+    // the covered rows after the placement erased all but the first image row.
+    let _caps = CapsGuard::set(TerminalCapabilities {
+        images: Some(ImageProtocol::Kitty),
+        true_color: true,
+        hyperlinks: true,
+    });
+    let terminal = RecordingTerminal::new(20, 5);
+    let image_id = 11835;
+    let image_line = encode_kitty(
+        "AAAA",
+        Some(EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(3),
+            image_id: Some(image_id),
+            move_cursor: Some(false),
+        }),
+    );
+    register_kitty_image_metadata(KittyImageMetadata {
+        image_id,
+        columns: 2,
+        rows: 3,
+        width_px: 100,
+        height_px: 100,
+    });
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    tui.set_layout_root(Some(Arc::new(RenderClosureComponent::new(move |_| {
+        vec![
+            "before".to_string(),
+            image_line.clone(),
+            String::new(),
+            String::new(),
+            "after".to_string(),
+        ]
+    }))));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    let writes = terminal.all_writes_joined();
+    let transmit_index = writes.find("\x1b_Ga=T").expect("transmit sequence");
+    assert!(transmit_index > writes.rfind("\x1b[4;1H\x1b[2K").expect("clear row 4"));
+    assert!(transmit_index > writes.find("after").expect("after text"));
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn keeps_the_selection_highlight_after_a_fake_cursor_cell() {
+    let terminal = RecordingTerminal::new(20, 4);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    let text = format!("> {}bcd", render_fake_cursor("a"));
+    tui.add_child(Arc::new(Text::new(Some(&text), Some(0), Some(0), None)));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    terminal.send_input("\x1b[<0;1;1M");
+    terminal.send_input("\x1b[<32;6;1M");
+    terminal.send_input("\x1b[<3;6;1m");
+    terminal.wait_for_render().await;
+
+    assert!(
+        terminal.writes().iter().any(|data| data.contains("\x1b[27m\x1b[7mbcd")),
+        "selection inverse must be reapplied after the fake cursor ends"
+    );
+
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn scrolls_the_transcript_on_wheel_input_a_focused_overlay_does_not_handle() {
+    // #10769
+    let terminal = VirtualTerminal::new(20, 6);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    tui.add_child(Arc::new(Text::new(Some(&line_items(12)), Some(0), Some(0), None)));
+    let overlay = Arc::new(InputOverlay::new());
+    tui.start();
+    terminal.wait_for_render().await;
+    let top_before = tui.viewport_top();
+    tui.show_overlay(
+        Arc::clone(&overlay) as Arc<dyn Component>,
+        Some(OverlayOptions {
+            anchor: Some(OverlayAnchor::TopLeft),
+            width: Some(SizeValue::Absolute(10.0)),
+            ..Default::default()
+        }),
+    );
+    terminal.wait_for_render().await;
+    assert!(overlay.focused());
+
+    terminal.send_input("\x1b[<64;3;1M");
+    terminal.wait_for_render().await;
+    assert!(tui.viewport_top() < top_before);
+    assert!(overlay.inputs().is_empty());
+    tui.stop(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn defers_viewport_keys_to_a_focused_list_instead_of_scrolling_the_transcript() {
+    // Regression test for #7629.
+    let terminal = VirtualTerminal::new(20, 6);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    let items: Vec<SelectItem> = (0..12)
+        .map(|index| SelectItem {
+            value: format!("item-{index}"),
+            label: format!("item-{index}"),
+            description: None,
+        })
+        .collect();
+    let list = Arc::new(SelectList::new(items, 3, identity_select_list_theme(), None));
+    tui.add_child(Arc::new(Text::new(Some(&line_items(12)), Some(0), Some(0), None)));
+    tui.add_child(list.clone());
+    tui.set_focus(Some(list.clone()));
+    tui.start();
+    terminal.wait_for_render().await;
+    let top_before = tui.viewport_top();
+
+    terminal.send_input("\x1b[6~"); // PageDown
+    terminal.send_input("\x1b[1;5H"); // Ctrl+Home
+    terminal.wait_for_render().await;
+    assert_eq!(
+        list.get_selected_item().map(|item| item.value),
+        Some("item-3".to_string())
+    );
+    assert_eq!(tui.viewport_top(), top_before);
+    tui.stop(None);
+}
+
+struct MockSlashAutocompleteProvider;
+
+#[async_trait]
+impl AutocompleteProvider for MockSlashAutocompleteProvider {
+    async fn get_suggestions(
+        &self,
+        _lines: &[String],
+        _cursor_line: i64,
+        _cursor_col: i64,
+        _options: GetSuggestionsOptions,
+    ) -> Option<AutocompleteSuggestions> {
+        Some(AutocompleteSuggestions {
+            items: (0..12)
+                .map(|index| AutocompleteItem {
+                    value: format!("/command-{index}"),
+                    label: format!("command-{index}"),
+                    description: None,
+                })
+                .collect(),
+            prefix: "/".to_string(),
+        })
+    }
+
+    fn apply_completion(
+        &self,
+        lines: &[String],
+        cursor_line: i64,
+        _cursor_col: i64,
+        item: &AutocompleteItem,
+        _prefix: &str,
+    ) -> ApplyCompletionResult {
+        ApplyCompletionResult {
+            lines: lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    if index as i64 == cursor_line {
+                        item.value.clone()
+                    } else {
+                        line.clone()
+                    }
+                })
+                .collect(),
+            cursor_line,
+            cursor_col: item.value.len() as i64,
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn gives_viewport_keys_back_to_the_transcript_when_editor_autocomplete_closes() {
+    // Regression test for #7629.
+    let terminal = VirtualTerminal::new(40, 8);
+    let tui = TuiAltScreen::new(Arc::new(terminal.clone()), None, None, None);
+    let _guard = StopGuard::new(tui.clone());
+    let editor = Arc::new(Editor::new(
+        Arc::new(tui.clone()) as Arc<dyn TUI>,
+        default_editor_theme(),
+        None,
+    ));
+    let submitted: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let submitted_ref = Arc::clone(&submitted);
+    editor.set_on_submit(Some(Arc::new(move |text| {
+        *submitted_ref.lock().unwrap() = text.to_string();
+    })));
+    editor.set_autocomplete_provider(Arc::new(MockSlashAutocompleteProvider));
+    tui.add_child(Arc::new(Text::new(Some(&line_items(30)), Some(0), Some(0), None)));
+    tui.add_child(editor.clone());
+    tui.set_focus(Some(editor.clone()));
+    tui.start();
+    terminal.wait_for_render().await;
+
+    terminal.send_input("/");
+    tokio::task::yield_now().await;
+    terminal.wait_for_render().await;
+    assert!(editor.is_showing_autocomplete());
+    let top_with_menu = tui.viewport_top();
+    terminal.send_input("\x1b[6~"); // PageDown pages the menu
+    terminal.wait_for_render().await;
+    assert_eq!(tui.viewport_top(), top_with_menu);
+
+    terminal.send_input("\r");
+    terminal.wait_for_render().await;
+    assert_eq!(*submitted.lock().unwrap(), "/command-5");
+    assert!(!editor.is_showing_autocomplete());
+    let top_without_menu = tui.viewport_top();
+    terminal.send_input("\x1b[5~"); // PageUp scrolls the transcript again
+    terminal.wait_for_render().await;
+    assert!(tui.viewport_top() < top_without_menu);
     tui.stop(None);
 }

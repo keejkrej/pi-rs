@@ -44,7 +44,7 @@ fn make_echo_tool() -> AgentTool {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back.\n\nSecond paragraph.".to_string(),
-        parameters: t::object([("text", t::string().with("description", "Text to echo"))]),
+        parameters: t::object([("text", t::string().with("description", "Text to echo"))]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -68,7 +68,7 @@ fn make_stats_tool() -> AgentTool {
         name: "stats".to_string(),
         label: "Stats".to_string(),
         description: "Return structured stats".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         output_schema: Some(t::object([("files", t::number()), ("names", t::array(t::string()))]).to_value()),
         constrained_sampling: None,
         execution_mode: None,
@@ -92,7 +92,7 @@ fn make_screenshot_tool() -> AgentTool {
         name: "screenshot".to_string(),
         label: "Screenshot".to_string(),
         description: "Return a screenshot".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -122,7 +122,7 @@ fn agent_tool_to_definition(tool: AgentTool) -> ToolDefinition {
         name: tool.name,
         label: tool.label,
         description: tool.description,
-        parameters: tool.parameters,
+        parameters: tool.parameters.into(),
         prompt_snippet: None,
         prompt_guidelines: None,
         exposure: None,
@@ -156,6 +156,7 @@ fn usage(input: i64, cost: f64) -> Usage {
             cache_read: 0.0,
             cache_write: 0.0,
             total: cost,
+            total_from_provider: None,
         },
     }
 }
@@ -361,7 +362,7 @@ async fn runs_nested_calls_in_parallel_and_returns_only_the_script_result() {
     assert!(!result.is_error);
     assert_eq!(
         result_text(&result),
-        "files 2\necho,stats,screenshot\n{\"a\":\"echo: one\",\"b\":\"echo: two\",\"names\":[\"a\",\"b\"]}"
+        "==> text 1/2 <==\necho,stats,screenshot\n==> text 2/2 <==\n{\"a\":\"echo: one\",\"b\":\"echo: two\",\"names\":[\"a\",\"b\"]}\n<console_output>\nfiles 2\n</console_output>"
     );
     let details = parse_details(&result);
     let statuses: Vec<(&str, &str)> = details
@@ -458,7 +459,7 @@ async fn adds_the_usage_of_nested_results_to_the_codemode_result() {
         name: "billed".to_string(),
         label: "Billed".to_string(),
         description: "Run a model".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -550,10 +551,26 @@ async fn keeps_structured_content_that_tool_result_handlers_replace_along_with_t
 async fn attaches_only_the_images_the_script_passes_to_image_in_output_order() {
     let harness = setup_codemode_tools(Vec::new()).await;
     let code = format!(
-        "const shot = await tools.screenshot({{}});\ntext(shot);\nimage(\"data:image/png;base64,{TINY_PNG_BASE64}\");\ntext(\"after\");"
+        "const shot = await tools.screenshot({{}});\ntext(shot);\nimage(\"data:image/png;base64,{TINY_PNG_BASE64}\");\nimage(\"data:image/png;base64,{TINY_PNG_BASE64}\");\ntext(\"after\");"
     );
     let result = run_codemode(&harness, &code).await;
-    assert_eq!(result_text(&result), "captured\n<image>\nafter");
+    let rendered = result_text(&result);
+    let lines: Vec<&str> = rendered.split('\n').collect();
+    assert_eq!(lines.len(), 8, "rendered={rendered}");
+    assert_eq!(lines[0], "==> text 1/2 <==");
+    assert_eq!(lines[1], "captured");
+    assert_eq!(lines[3], "<image>");
+    assert_eq!(lines[4], lines[2]);
+    assert_eq!(lines[5], "<image>");
+    assert_eq!(lines[6], "==> text 2/2 <==");
+    assert_eq!(lines[7], "after");
+    let saved_path = lines[2]
+        .strip_prefix("[Image saved to ")
+        .and_then(|s| s.split(" (image/png,").next())
+        .expect("saved image label");
+    let saved_bytes = std::fs::read(saved_path).expect("saved image file");
+    assert_eq!(pi_js::b64::encode(&saved_bytes), TINY_PNG_BASE64);
+    let _ = std::fs::remove_file(saved_path);
     assert_eq!(
         result.content.get(2),
         Some(&UserContentBlock::Image(pi_ai::ImageContent {
@@ -622,7 +639,7 @@ async fn limits_script_memory_so_runaway_allocations_fail_inside_the_script() {
 async fn truncates_output_to_the_token_budget_and_spills_the_full_text() {
     let harness = setup_store_harness().await;
     let code = format!(
-        "// @options: {{\"max_output_tokens\": 10}}\nfor (let i = 0; i < 100; i++) text(\"row \" + i);\nimage(\"data:image/png;base64,{TINY_PNG_BASE64}\");"
+        "// @options: {{\"max_output_tokens\": 30}}\nfor (let i = 0; i < 100; i++) text(\"row \" + i);\nimage(\"data:image/png;base64,{TINY_PNG_BASE64}\");"
     );
     let result = run_codemode(&harness, &code).await;
     let details = parse_details(&result);
@@ -641,7 +658,10 @@ async fn truncates_output_to_the_token_budget_and_spills_the_full_text() {
             mime_type: "image/png".to_string(),
         }))
     );
-    let expected_spilled = (0..100).map(|i| format!("row {i}")).collect::<Vec<_>>().join("\n");
+    let expected_spilled = (0..100)
+        .map(|i| format!("==> text {}/100 <==\nrow {i}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_eq!(pi_js::fs::read_to_string(&path).unwrap(), expected_spilled);
     let _ = pi_js::fs::rm(&path, false, true);
 
@@ -947,6 +967,7 @@ async fn setup_codemode_models_harness(active: Arc<AtomicUsize>, max_active: Arc
                             cost: ModelCost::default(),
                             headers: Some(headers),
                             context_window: 1_000,
+                            compat: None,
                         }),
                         ProviderModelConfig::Image(ProviderImageModelConfig {
                             id: "painter".to_string(),

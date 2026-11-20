@@ -10,7 +10,6 @@ use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, MessageEndEvent, NotifyType, ProviderStreamEvent,
     RegisteredCommandOptions, TurnEndEvent, TurnStartEvent,
 };
-use pi_coding_agent::modes::interactive::components::keybinding_hints::key_hint;
 use pi_tui::{Box as TuiBox, Component, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,7 +69,7 @@ impl Extension for DebugProviderExtension {
                 let expand_hint = if opts.expanded {
                     String::new()
                 } else {
-                    format!(" ({})", key_hint(&"app.tools.expand".to_string(), "to view events"))
+                    format!(" ({})", opts.key_hint("app.tools.expand", "to view events"))
                 };
                 tui_box.add_child(Arc::new(Text::new(
                     Some(&format!(

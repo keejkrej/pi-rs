@@ -11,7 +11,9 @@ use crate::modes::interactive::components::extension_editor::{ExtensionEditorCom
 use crate::modes::interactive::components::extension_input::{ExtensionInputComponent, ExtensionInputOptions};
 use crate::modes::interactive::components::extension_selector::{ExtensionSelectorComponent, ExtensionSelectorOptions};
 use crate::modes::interactive::components::keybinding_hints::{KeyTextFormatOptions, format_key_text, key_text};
-use crate::modes::interactive::components::markdown_transform::MarkdownTransformer;
+use crate::modes::interactive::components::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic_with_meta,
+};
 use crate::modes::interactive::components::settings_selector::{QuietStartup, TuiMode as SettingsTuiMode};
 use crate::modes::interactive::components::status_indicator::StatusIndicator;
 use crate::modes::interactive::components::themed_text::ThemedText;
@@ -22,8 +24,9 @@ use crate::modes::interactive::theme::theme::{
 };
 use crate::modes::interactive::theme::theme_controller::ThemeResult;
 
+use crate::core::source_info::{SourcePackageIdentity, SourceScope, get_source_package_key};
 use crate::utils::changelog::{
-    get_changelog_path, get_new_entries, normalize_changelog_links_for_entry, parse_changelog,
+    get_changelog_path, get_new_entries, normalize_changelog_links_for_entry, parse_changelog, parse_new_entries,
 };
 use crate::utils::paths::shorten_home_path;
 use crate::utils::pi_user_agent::get_pi_user_agent;
@@ -479,7 +482,7 @@ impl InteractiveMode {
         None
     }
 
-    pub(crate) fn get_extension_changelog_updates(&self) -> Vec<ExtensionChangelogUpdate> {
+    pub fn get_extension_changelog_updates(&self) -> Vec<ExtensionChangelogUpdate> {
         if !self.session().messages().is_empty() {
             return Vec::new();
         }
@@ -499,7 +502,15 @@ impl InteractiveMode {
             let Some(ref changelog_path) = info.changelog_path else {
                 continue;
             };
-            let key = format!("{}:{}", info.scope, info.source);
+            let scope = match info.scope.as_str() {
+                "project" => SourceScope::Project,
+                "temporary" => SourceScope::Temporary,
+                _ => SourceScope::User,
+            };
+            let key = get_source_package_key(&SourcePackageIdentity {
+                source: info.source.clone(),
+                scope,
+            });
             if !seen_keys.insert(key.clone()) {
                 continue;
             }
@@ -510,7 +521,10 @@ impl InteractiveMode {
                 settings.set_extension_changelog_version(&key, &version);
                 continue;
             };
-            let new_entries = get_new_entries(&parse_changelog(changelog_path), &last_version);
+            let Some(new_entries) = parse_new_entries(&parse_changelog(changelog_path), &last_version) else {
+                settings.set_extension_changelog_version(&key, &version);
+                continue;
+            };
             if !new_entries.is_empty() {
                 settings.set_extension_changelog_version(&key, &version);
                 let name = pkg_name.unwrap_or_else(|| info.source.clone());
@@ -649,7 +663,7 @@ impl InteractiveMode {
         ))
     }
 
-    pub(crate) fn show_fullscreen_model_scope_notice(&self) {
+    pub fn show_fullscreen_model_scope_notice(&self) {
         if self.get_model_scope_notice().is_none() {
             return;
         }
@@ -1658,13 +1672,23 @@ impl InteractiveMode {
         padding_y: i64,
         default_text_style: Option<pi_tui::DefaultTextStyle>,
     ) -> Arc<dyn Component> {
+        let transform = create_markdown_transform_dynamic_with_meta(
+            MarkdownMessageType::Changelog,
+            Arc::new(|| false),
+            self.get_markdown_transformers(),
+            None,
+            None,
+        );
         Arc::new(Markdown::new(
             markdown,
             padding_x,
             padding_y,
             self.get_markdown_theme_with_settings(),
             default_text_style,
-            None,
+            Some(pi_tui::components::markdown::MarkdownOptions {
+                transform: Some(transform),
+                ..Default::default()
+            }),
         ))
     }
 

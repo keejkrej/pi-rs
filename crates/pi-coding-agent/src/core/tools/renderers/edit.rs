@@ -30,20 +30,20 @@ pub fn render_call() -> RenderCallFn {
             theme.fg("toolTitle", &theme.bold("edit")),
             theme.fg("accent", &display_path)
         );
-        reuse_or_init_call_text(&context, &text, 0, 0)
+        reuse_or_init_call_text(&context, &text, context.output_pad, 0)
     })
 }
 
 pub fn render_result() -> RenderResultFn {
     Arc::new(|result, options, theme, context: ToolRenderContext| {
         if options.is_partial {
-            return reuse_or_init_result_text(&context, "", 0, 0);
+            return reuse_or_init_result_text(&context, "", context.output_pad, 0);
         }
 
         if context.is_error {
             let msg = extract_text_output(&result.content, context.show_images);
             let formatted = format!("\n{}", theme.fg("error", &msg));
-            return reuse_or_init_result_text(&context, &formatted, 0, 0);
+            return reuse_or_init_result_text(&context, &formatted, context.output_pad, 0);
         }
 
         if let Some(details_val) = &result.details
@@ -51,7 +51,7 @@ pub fn render_result() -> RenderResultFn {
             && !details.diff.is_empty()
         {
             let diff_view = format!("\n{}", render_diff(&details.diff, Some(&theme)));
-            return reuse_or_init_result_text(&context, &diff_view, 0, 0);
+            return reuse_or_init_result_text(&context, &diff_view, context.output_pad, 0);
         }
 
         let text = extract_text_output(&result.content, context.show_images);
@@ -60,6 +60,6 @@ pub fn render_result() -> RenderResultFn {
         } else {
             format!("\n{}", theme.fg("toolOutput", &text))
         };
-        reuse_or_init_result_text(&context, &formatted, 0, 0)
+        reuse_or_init_result_text(&context, &formatted, context.output_pad, 0)
     })
 }

@@ -117,6 +117,7 @@ async fn registers_a_user_owned_client_and_stores_its_issued_id_and_granted_scop
             interaction,
             Some(LoginOptions {
                 get_device_id: Some(Arc::new(|| DEVICE_ID.to_owned())),
+                agent_name: None,
             }),
         )
         .await
@@ -180,6 +181,7 @@ async fn rejects_registration_without_an_issued_client_id() {
             interaction,
             Some(LoginOptions {
                 get_device_id: Some(Arc::new(|| DEVICE_ID.to_owned())),
+                agent_name: None,
             }),
         )
         .await
@@ -214,6 +216,7 @@ async fn rejects_a_token_response_that_did_not_grant_direct_token_use() {
             interaction,
             Some(LoginOptions {
                 get_device_id: Some(Arc::new(|| DEVICE_ID.to_owned())),
+                agent_name: None,
             }),
         )
         .await
@@ -250,6 +253,7 @@ async fn requires_a_device_id_before_starting_authorization() {
             interaction2,
             Some(LoginOptions {
                 get_device_id: Some(Arc::new(|| "not-a-uuid".to_owned())),
+                agent_name: None,
             }),
         )
         .await
@@ -318,4 +322,34 @@ async fn refreshes_with_the_credentials_issued_client_id_and_stores_replacement_
         credential.extra.get("scopes"),
         Some(&json!(REQUIRED_SCOPE.split_whitespace().collect::<Vec<_>>()))
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn uses_the_apps_agent_name_as_the_name_hint() {
+    let authorize_url = Arc::new(Mutex::new(None::<url::Url>));
+    let _guard = mock_fetch(move |req| {
+        assert_eq!(req.url, TOKEN_URL);
+        Box::pin(async move { Ok(json_resp(&token_response(REQUIRED_SCOPE))) })
+    });
+    let interaction = ProviderAuthInteraction::new(
+        Arc::new(LoginTestInteraction {
+            callback_client_id: Some("oaiapp_issued".to_owned()),
+            authorize_url: authorize_url.clone(),
+        }),
+        AbortController::new().signal(),
+    );
+    openai_chatgpt_oauth()
+        .login(
+            interaction,
+            Some(LoginOptions {
+                get_device_id: Some(Arc::new(|| DEVICE_ID.to_owned())),
+                agent_name: Some("my-app".to_owned()),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let url = authorize_url.lock().unwrap().clone().unwrap();
+    assert_eq!(query_param(&url, "agent_name_hint").as_deref(), Some("my-app"));
 }

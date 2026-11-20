@@ -1,10 +1,7 @@
 //! Port of packages/evals/test/report.test.ts
 
 use pi_evals::plan::{DocumentationVariant, EvalTask};
-use pi_evals::report::{
-    CaseStatusOutcome, EvalObservation, EvalOutcome, PI_SESSION_SNAPSHOT_ARTIFACT, VitestJsonStatus,
-    classify_case_status, read_task_observation,
-};
+use pi_evals::report::{EvalObservation, EvalOutcome, PI_SESSION_SNAPSHOT_ARTIFACT, read_task_observation};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -126,29 +123,6 @@ async fn read_observation(spec: ReportAssertionSpec) -> (TempDir, String, EvalOb
     (dir, dir_path, observation)
 }
 
-mod classify_case_status_tests {
-    use super::*;
-
-    #[test]
-    fn maps_skipped_todo_disabled_to_skipped() {
-        for status in [
-            VitestJsonStatus::Skipped,
-            VitestJsonStatus::Todo,
-            VitestJsonStatus::Disabled,
-        ] {
-            assert_eq!(classify_case_status(status), Some(CaseStatusOutcome::Skipped));
-        }
-    }
-
-    #[test]
-    fn maps_failed_infrastructure_to_errored() {
-        assert_eq!(
-            classify_case_status(VitestJsonStatus::Failed),
-            Some(CaseStatusOutcome::Errored)
-        );
-    }
-}
-
 mod read_task_observation_tests {
     use super::*;
 
@@ -179,12 +153,7 @@ mod read_task_observation_tests {
         let task = sample_task();
         let (_dir, dir_path, observation) = read_observation(ReportAssertionSpec {
             status: "failed",
-            meta: scored_meta(
-                None,
-                None,
-                Some(json!([{ "message": "Prompt verification failed" }])),
-                None,
-            ),
+            meta: scored_meta(None, None, None, None),
             ..Default::default()
         })
         .await;

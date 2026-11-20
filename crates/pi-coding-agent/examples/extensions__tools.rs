@@ -58,6 +58,10 @@ impl Component for ToolsModal {
     fn invalidate(&self) {
         self.container.invalidate();
     }
+
+    fn captures_viewport_input(&self) -> bool {
+        self.settings_list.captures_viewport_input()
+    }
 }
 
 struct SharedState {

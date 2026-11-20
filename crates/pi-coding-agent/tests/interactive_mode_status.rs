@@ -1116,6 +1116,7 @@ fn make_model(provider: &str, id: &str, name: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -1481,7 +1482,7 @@ async fn settling_the_agent_run_moves_user_bash_output_to_the_chat() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    session.emit(AgentSessionEvent::AgentSettled).await;
+    session.emit(AgentSessionEvent::AgentSettled { aborted: false }).await;
 
     assert!(mode.pending_messages_container().children().is_empty());
     let chat_out = render_all(mode.chat_container(), 200);

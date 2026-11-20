@@ -19,7 +19,7 @@ pub fn wrap_tool_definition(definition: ToolDefinition, ctx_factory: Option<Tool
         name: definition.name,
         label: definition.label,
         description: definition.description,
-        parameters: definition.parameters,
+        parameters: definition.parameters.into(),
         output_schema: definition.output_schema.map(|s| s.to_value()),
         constrained_sampling: match definition.constrained_sampling {
             Some(crate::core::extensions::types::ConstrainedSamplingOption::Config(cfg)) => Some(cfg),
@@ -358,6 +358,7 @@ impl crate::core::extensions::types::ExtensionContextBackend for NoopStandaloneB
                 },
                 result: Default::default(),
                 is_error: true,
+                duration_ms: None,
             }
         })
     }
@@ -429,7 +430,7 @@ pub fn create_tool_definition_from_agent_tool(tool: AgentTool) -> ToolDefinition
         description: tool.description,
         prompt_snippet: None,
         prompt_guidelines: None,
-        parameters: tool.parameters,
+        parameters: tool.parameters.into(),
         constrained_sampling: tool
             .constrained_sampling
             .map(crate::core::extensions::types::ConstrainedSamplingOption::Config),

@@ -10,3 +10,5 @@ pub mod session_share;
 pub mod theme;
 pub mod tui_renderer;
 // @generated-mods end
+
+pub mod program_status_reporter;

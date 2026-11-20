@@ -55,6 +55,7 @@ fn include_files_touched_by_nested_calls_recorded_on_tool_results() {
         }),
         is_error: false,
         timestamp: 0,
+        duration_ms: None,
     }));
 
     let mut file_ops = create_file_ops();

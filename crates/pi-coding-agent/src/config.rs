@@ -40,8 +40,14 @@ struct PackageMetadata {
     env_session_dir: String,
 }
 
+static STARTUP_PACKAGE_JSON_PATH: LazyLock<Option<String>> = LazyLock::new(|| {
+    let p = get_package_json_path();
+    pi_js::fs::exists(&p).then_some(p)
+});
+
 fn load_package_metadata() -> PackageMetadata {
-    let raw = pi_js::fs::read_to_string(&get_package_json_path())
+    let path = STARTUP_PACKAGE_JSON_PATH.clone().unwrap_or_else(get_package_json_path);
+    let raw = pi_js::fs::read_to_string(&path)
         .ok()
         .unwrap_or_else(|| FALLBACK_PACKAGE_JSON.to_owned());
     let pkg: PackageJson = pi_js::json::parse_as(strip_bom(&raw)).unwrap_or_default();
@@ -588,6 +594,71 @@ pub fn get_self_update_command(
     Some(cmd)
 }
 
+/// The self-update command configured by the user: `PI_SELF_UPDATE_COMMAND` (whitespace-separated
+/// argv, no quoting), else the global `selfUpdateCommand` setting. Overrides install-method detection.
+pub fn get_configured_self_update_argv(setting: Option<&[String]>) -> Option<Vec<String>> {
+    if let Some(raw) = pi_js::env::var("PI_SELF_UPDATE_COMMAND") {
+        let from_env: Vec<String> = pi_js::str16::trim(&raw)
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !from_env.is_empty() {
+            return Some(from_env);
+        }
+    }
+    setting.filter(|s| !s.is_empty()).map(|s| s.to_vec())
+}
+
+/// Fill the `{packageName}`, `{version}`, and `{installSpec}` placeholders of a configured self-update command.
+pub fn make_configured_self_update_command(argv: &[String], package_name: &str, version: &str) -> SelfUpdateCommand {
+    let install_spec = format!("{package_name}@{version}");
+    let expanded: Vec<String> = argv
+        .iter()
+        .map(|arg| {
+            arg.replace("{packageName}", package_name)
+                .replace("{version}", version)
+                .replace("{installSpec}", &install_spec)
+        })
+        .collect();
+    let (command, rest) = match expanded.split_first() {
+        Some((first, tail)) => (first.as_str(), tail.to_vec()),
+        None => ("", Vec::new()),
+    };
+    make_self_update_command(make_self_update_command_step(command, rest), None)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallChange {
+    Updated(String),
+    Removed,
+}
+
+/// Detect whether the package on disk changed since startup (e.g. after `pi update` in another terminal).
+pub fn detect_install_change(package_json_path: Option<&str>) -> Option<InstallChange> {
+    if IS_BUN_BINARY {
+        return None;
+    }
+    let path = package_json_path.or_else(|| STARTUP_PACKAGE_JSON_PATH.as_deref())?;
+    let raw = match pi_js::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(err) => {
+            return if err.code() == Some("ENOENT") {
+                Some(InstallChange::Removed)
+            } else {
+                None
+            };
+        }
+    };
+    let installed: PackageJson = pi_js::json::parse_as(strip_bom(&raw)).ok()?;
+    let ver = installed.version.filter(|s| !s.is_empty())?;
+    if ver != *VERSION {
+        Some(InstallChange::Updated(ver))
+    } else {
+        None
+    }
+}
+
 pub fn get_self_update_unavailable_instruction(
     package_name: &str,
     npm_command: Option<&[String]>,
@@ -598,23 +669,23 @@ pub fn get_self_update_unavailable_instruction(
     if method == InstallMethod::BunBinary {
         return "Download from: https://github.com/earendil-works/pi/releases/latest".to_owned();
     }
-    if let Some(command) = get_self_update_command_for_method(method, package_name, &target, npm_command) {
-        let m_str = match method {
-            InstallMethod::BunBinary => "bun-binary",
-            InstallMethod::Npm => "npm",
-            InstallMethod::Pnpm => "pnpm",
-            InstallMethod::Yarn => "yarn",
-            InstallMethod::Bun => "bun",
-            InstallMethod::Unknown => "unknown",
-        };
-        if is_managed_by_global_package_manager(method, npm_command) && !is_self_update_path_writable() {
-            return format!(
-                "This installation is managed by a global {m_str} install, but the install path is not writable. Update it yourself with: {}",
-                command.display
-            );
-        }
+    let m_str = match method {
+        InstallMethod::BunBinary => "bun-binary",
+        InstallMethod::Npm => "npm",
+        InstallMethod::Pnpm => "pnpm",
+        InstallMethod::Yarn => "yarn",
+        InstallMethod::Bun => "bun",
+        InstallMethod::Unknown => "unknown",
+    };
+    // Path-based detection also matches installs that only live under a package manager's directory,
+    // such as a wrapper under PNPM_HOME, so name the package manager only when it owns the install.
+    if let Some(command) = get_self_update_command_for_method(method, package_name, &target, npm_command)
+        && is_managed_by_global_package_manager(method, npm_command)
+        && !is_self_update_path_writable()
+    {
         return format!(
-            "This installation is not managed by a global {m_str} install. Update it with the package manager, wrapper, or source checkout that provides it."
+            "This installation is managed by a global {m_str} install, but the install path is not writable. Update it yourself with: {}",
+            command.display
         );
     }
     format!(

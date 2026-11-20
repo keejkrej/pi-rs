@@ -86,6 +86,7 @@ fn extension_paths(package_root: &str, source: &str, scope: SourceScope, names: 
         skills: Vec::new(),
         prompts: Vec::new(),
         themes: Vec::new(),
+        install_failures: None,
     }
 }
 

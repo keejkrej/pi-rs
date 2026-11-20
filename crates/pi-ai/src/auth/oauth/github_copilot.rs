@@ -10,6 +10,7 @@ use pi_js::fetch::{Body, Headers, Request, Response, fetch};
 use pi_js::{Error, Result};
 
 use crate::auth::oauth::device_code::{OAuthDeviceCodePollResult, poll_oauth_device_code_flow};
+use crate::auth::oauth::trusted_url::trusted_http_url;
 use crate::auth::types::{
     AuthEvent, AuthPrompt, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential, ProviderAuthInteraction,
 };
@@ -324,16 +325,14 @@ async fn start_device_flow(domain: &str, signal: &AbortSignal) -> Result<DeviceC
         return Err(Error::msg("Invalid device code response fields"));
     };
 
-    let parsed_uri = url::Url::parse(verification_uri)
-        .map_err(|_| Error::msg("Untrusted verification_uri in device code response"))?;
-    if parsed_uri.scheme() != "https" && parsed_uri.scheme() != "http" {
+    let Some(trusted_verification_uri) = trusted_http_url(verification_uri) else {
         return Err(Error::msg("Untrusted verification_uri in device code response"));
-    }
+    };
 
     Ok(DeviceCodeResponse {
         device_code: device_code.to_owned(),
         user_code: user_code.to_owned(),
-        verification_uri: parsed_uri.to_string(),
+        verification_uri: trusted_verification_uri,
         interval,
         expires_in,
     })
@@ -547,6 +546,8 @@ async fn login_github_copilot(interaction: ProviderAuthInteraction) -> Result<OA
     interaction.notify(AuthEvent::DeviceCode {
         user_code: device.user_code.clone(),
         verification_uri: device.verification_uri.clone(),
+        open_browser_on_confirm: None,
+        copy_code_on_confirm: None,
         interval_seconds: device.interval,
         expires_in_seconds: Some(device.expires_in),
     });

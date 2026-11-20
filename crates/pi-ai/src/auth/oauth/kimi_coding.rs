@@ -10,6 +10,7 @@ use pi_js::fetch::{Body, Headers, Request, Response, fetch};
 use pi_js::{Error, Result};
 
 use crate::auth::oauth::device_code::{OAuthDeviceCodePollResult, poll_oauth_device_code_flow};
+use crate::auth::oauth::trusted_url::trusted_http_url;
 use crate::auth::types::{AuthEvent, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential, ProviderAuthInteraction};
 use crate::utils::provider_env::get_provider_env_value;
 
@@ -55,18 +56,6 @@ async fn read_json_object(response: Response) -> Option<Map<String, Value>> {
     }
 }
 
-fn trusted_http_url(value: Option<&Value>) -> Option<String> {
-    let s = value.and_then(Value::as_str)?;
-    if s.is_empty() {
-        return None;
-    }
-    let url = url::Url::parse(s).ok()?;
-    if url.scheme() != "https" && url.scheme() != "http" {
-        return None;
-    }
-    Some(url.to_string())
-}
-
 async fn start_device_authorization(oauth_host: &str, signal: &AbortSignal) -> Result<DeviceAuthorization> {
     let mut headers = Headers::new();
     headers.set("Content-Type", "application/x-www-form-urlencoded");
@@ -95,8 +84,14 @@ async fn start_device_authorization(oauth_host: &str, signal: &AbortSignal) -> R
     let obj_ref = json.as_ref();
     let device_code = obj_ref.and_then(|j| j.get("device_code")).and_then(Value::as_str);
     let user_code = obj_ref.and_then(|j| j.get("user_code")).and_then(Value::as_str);
-    let verification_uri = trusted_http_url(obj_ref.and_then(|j| j.get("verification_uri")));
-    let verification_uri_complete = trusted_http_url(obj_ref.and_then(|j| j.get("verification_uri_complete")));
+    let verification_uri = obj_ref
+        .and_then(|j| j.get("verification_uri"))
+        .and_then(Value::as_str)
+        .and_then(trusted_http_url);
+    let verification_uri_complete = obj_ref
+        .and_then(|j| j.get("verification_uri_complete"))
+        .and_then(Value::as_str)
+        .and_then(trusted_http_url);
 
     let (Some(device_code), Some(user_code), Some(_verification_uri), Some(verification_uri_complete)) =
         (device_code, user_code, verification_uri, verification_uri_complete)
@@ -328,6 +323,8 @@ async fn login_kimi_coding(interaction: ProviderAuthInteraction) -> Result<OAuth
     interaction.notify(AuthEvent::DeviceCode {
         user_code: device.user_code.clone(),
         verification_uri: device.verification_uri_complete.clone(),
+        open_browser_on_confirm: None,
+        copy_code_on_confirm: None,
         interval_seconds: Some(device.interval_seconds),
         expires_in_seconds: Some(device.expires_in_seconds),
     });

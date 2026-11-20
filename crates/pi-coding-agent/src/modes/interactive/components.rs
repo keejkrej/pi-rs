@@ -2,8 +2,6 @@
 
 // @generated-mods begin (scaffold-owned, do not edit)
 pub mod armin;
-pub mod armin_3d;
-pub mod armin_3d_lazy;
 pub mod assistant_message;
 pub mod bash_execution;
 pub mod bordered_loader;
@@ -14,7 +12,6 @@ pub mod countdown_timer;
 pub mod custom_editor;
 pub mod custom_entry;
 pub mod custom_message;
-pub mod daxnuts;
 pub mod diff;
 pub mod dynamic_border;
 pub mod earendil_announcement;
@@ -49,3 +46,8 @@ pub mod user_message;
 pub mod user_message_selector;
 pub mod visual_truncate;
 // @generated-mods end
+
+pub mod auth_url;
+pub mod easter_egg_3d;
+pub mod easter_egg_3d_lazy;
+pub mod provider_brand;

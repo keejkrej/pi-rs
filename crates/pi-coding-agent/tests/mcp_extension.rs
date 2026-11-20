@@ -495,7 +495,7 @@ async fn converts_results_and_flags_errors() {
         "t",
         CallToolResult {
             content: blocks,
-            structured_content: Some(structured),
+            structured_content: Some(Value::Object(structured.into_iter().collect())),
             is_error: None,
             meta: Some(meta),
         },
@@ -529,7 +529,7 @@ async fn converts_results_and_flags_errors() {
         "t",
         CallToolResult {
             content: Vec::new(),
-            structured_content: Some(sc2),
+            structured_content: Some(Value::Object(sc2.into_iter().collect())),
             is_error: None,
             meta: None,
         },
@@ -594,7 +594,7 @@ async fn points_resource_links_to_read_mcp_resource_and_saves_binary_resources()
             saved_clone
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((data, ext.clone()));
+                .push((data.as_bytes().to_vec(), ext.clone()));
             Ok(format!("/tmp/saved{ext}"))
         })
     });
@@ -678,7 +678,10 @@ async fn cuts_middle_of_model_facing_text_over_20kb_and_keeps_full_result_for_sc
     let saver: McpOutputSaver = Arc::new(move |data, _| {
         let saved_clone = Arc::clone(&saved_clone);
         Box::pin(async move {
-            saved_clone.lock().unwrap_or_else(|e| e.into_inner()).push(data);
+            saved_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(data.as_bytes().to_vec());
             Ok("/tmp/full.txt".to_string())
         })
     });
@@ -915,6 +918,7 @@ async fn starts_new_session_and_retries_once_when_session_expired() {
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t1, t2],
         None,
@@ -969,6 +973,7 @@ done
             }),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         create_transport: Arc::new(create_default_transport),
@@ -1001,6 +1006,7 @@ async fn connects_to_servers_without_tools_capability_without_listing_tools() {
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t],
         None,
@@ -1026,6 +1032,7 @@ async fn marks_dropped_connection_and_reconnects_on_next_call() {
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t1, t2],
         None,
@@ -1075,6 +1082,7 @@ async fn retries_http_connections_that_fail_with_transient_error() {
             }),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t1, t2],
         None,
@@ -1107,6 +1115,7 @@ async fn retries_http_connections_that_fail_with_transient_error() {
             }),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t_bad],
         None,
@@ -1152,6 +1161,7 @@ async fn retries_resource_reads_but_not_tool_calls_after_transient_http_error() 
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t],
         None,
@@ -1192,6 +1202,7 @@ async fn asks_oauth_servers_that_keep_rejecting_requests_for_new_sign_in() {
             config: McpServerConfig::Http(http_cfg("http://unused.invalid")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t],
         None,
@@ -1255,6 +1266,7 @@ async fn sends_provider_token_and_asks_for_provider_login_when_rejected() {
             }),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         cwd: pi_js::env::cwd(),
         create_transport: Arc::new(create_default_transport),
@@ -1300,6 +1312,7 @@ async fn appends_server_log_messages_to_log_file() {
             config: McpServerConfig::Stdio(stdio_cfg("unused")),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t],
         Some(log),
@@ -1365,6 +1378,7 @@ async fn resolves_oauth_client_secret_lazily() {
             }),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         vec![t],
         None,
@@ -1386,6 +1400,7 @@ fn listing(name: &str, desc: Option<&str>, exposure: Option<McpExposure>) -> Mcp
             config: McpServerConfig::Stdio(cfg),
             source: "test".to_string(),
             scope: None,
+            override_path: None,
         },
         connection: None,
     }

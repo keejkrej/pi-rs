@@ -5,6 +5,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::api::anthropic_messages_lazy::anthropic_messages_api;
+use crate::api::google_generative_ai_lazy::google_generative_ai_api;
 use crate::api::openai_completions_lazy::openai_completions_api;
 use crate::api::openai_responses_lazy::openai_responses_api;
 use crate::auth::helpers::env_api_key_auth;
@@ -20,6 +21,10 @@ pub fn opencode_go_provider() -> Arc<dyn Provider + Send + Sync> {
     apis.insert(
         "anthropic-messages".to_owned(),
         with_open_code_session_header(anthropic_messages_api()),
+    );
+    apis.insert(
+        "google-generative-ai".to_owned(),
+        with_open_code_session_header(google_generative_ai_api()),
     );
     apis.insert(
         "openai-completions".to_owned(),

@@ -28,6 +28,7 @@ fn make_gemini3_model(api: &str, provider: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn make_context(api: &str, provider: &str, model_id: &str, thought_signature: Op
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: now,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_1".to_owned(),
@@ -80,6 +82,7 @@ fn make_context(api: &str, provider: &str, model_id: &str, thought_signature: Op
                 nested_calls: None,
                 is_error: false,
                 timestamp: now,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_2".to_owned(),
@@ -90,6 +93,7 @@ fn make_context(api: &str, provider: &str, model_id: &str, thought_signature: Op
                 nested_calls: None,
                 is_error: false,
                 timestamp: now,
+                duration_ms: None,
             }),
         ],
         tools: None,

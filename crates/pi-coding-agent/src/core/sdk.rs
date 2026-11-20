@@ -7,28 +7,31 @@ use pi_agent_core::stream_fn::set_default_stream_fn;
 use pi_agent_core::types::{AgentMessage, OnPayloadFn, QueueMode, StreamFn, TransformContextFn};
 use pi_ai::compat::stream_simple;
 use pi_ai::types::{
-    Message, Model, ModelThinkingLevel, OnProviderStreamEventFn, OnResponseFn, ProviderHeaders, TextContent,
-    ThinkingBudgets, UserContentBlock, UserMessageContent,
+    Message, Model, ModelThinkingLevel, OnProviderStreamEventFn, OnResponseFn, TextContent, ThinkingBudgets,
+    UserContentBlock, UserMessageContent,
 };
 use pi_ai::{ModelsSimpleStreamOptions, clamp_thinking_level};
 
 use crate::config::get_agent_dir;
-use crate::core::agent_session::{AgentSession, AgentSessionConfig, ExtensionRunnerRef};
+use crate::core::agent_session::{AgentSession, AgentSessionConfig, ExtensionRunnerRef, mark_runtime_stream_function};
 use crate::core::auth_guidance::format_no_models_available_message;
 use crate::core::cache_warmer::{CacheWarmRequest, CacheWarmer, CacheWarmingAction, CacheWarmingDecider};
+use crate::core::client_identity::get_client_identity;
 use crate::core::defaults::{DEFAULT_THINKING_LEVEL, to_agent_thinking_level};
 use crate::core::extensions::types::{
     AfterProviderResponseEvent, CacheWarmingDecisionEvent, LoadExtensionsResult, ProviderStreamEvent,
     SessionStartEvent, ToolDefinition,
 };
 use crate::core::http_dispatcher::DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+use crate::core::mcp_servers::create_tool_name_matcher;
 use crate::core::messages::convert_to_llm;
 use crate::core::model_resolver::{FindInitialModelOptions, find_initial_model, parse_valid_thinking_level};
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeCreateOptions};
-use crate::core::provider_attribution::merge_provider_attribution_headers;
 use crate::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceLoader};
 use crate::core::session_manager::{SessionEntry, SessionManager, get_default_session_dir};
-use crate::core::settings_manager::{DEFAULT_TOOL_NAMES, QueueModeSetting, SettingsManager};
+use crate::core::settings_manager::{
+    DEFAULT_TOOL_NAMES, QueueModeSetting, SettingsManager, apply_tool_modifiers, get_tool_list_error, is_tool_modifier,
+};
 use crate::core::timings::{TimingNamespaceKind, time};
 use crate::core::virtual_models::get_branch_selection;
 use crate::utils::paths::{PathInputOptions, resolve_path};
@@ -283,8 +286,6 @@ pub async fn create_agent_session(
         let default_model_id = settings_manager.get_default_model();
         let model_thinking_levels = settings_manager.get_all_model_thinking_levels();
         let initial_result = find_initial_model(FindInitialModelOptions {
-            cli_provider: None,
-            cli_model: None,
             scoped_models: &[],
             is_continuing: has_existing_session,
             default_provider: default_provider.as_deref(),
@@ -328,31 +329,47 @@ pub async fn create_agent_session(
         Some(m) => clamp_thinking_level(m, resolved_thinking),
     };
 
-    let configured_default_tool_names = settings_manager.get_default_tools();
-    let allowed_tool_names = if let Some(ref tools) = options.tools {
-        Some(tools.clone())
+    if let Some(ref tools) = options.tools
+        && let Some(err) = get_tool_list_error(tools)
+    {
+        return Err(pi_js::Error::msg(format!("Invalid tools option: {err}")));
+    }
+
+    let default_tool_names: Vec<String> = if options.no_tools.is_some() {
+        Vec::new()
+    } else {
+        settings_manager
+            .get_default_tools()
+            .unwrap_or_else(|| DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect())
+    };
+    let tool_modifiers = options
+        .tools
+        .as_ref()
+        .filter(|tools| tools.iter().any(|t| is_tool_modifier(t)))
+        .cloned();
+    let selected_tool_names = match &tool_modifiers {
+        Some(mods) => Some(apply_tool_modifiers(&default_tool_names, mods)),
+        None => options.tools.clone(),
+    };
+    let allowed_tool_names = if tool_modifiers.is_some() {
+        if options.no_tools == Some(NoToolsMode::All) {
+            selected_tool_names.clone()
+        } else {
+            None
+        }
+    } else if options.tools.is_some() {
+        options.tools.clone()
     } else if options.no_tools == Some(NoToolsMode::All) {
         Some(Vec::new())
     } else {
         None
     };
     let excluded_tool_names = options.exclude_tools.clone();
-    let base_initial_tools: Vec<String> = if let Some(ref tools) = options.tools {
-        tools.clone()
-    } else if options.no_tools.is_some() {
-        Vec::new()
-    } else if let Some(defaults) = configured_default_tool_names {
-        defaults
-    } else {
-        DEFAULT_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect()
-    };
-    let initial_active_tool_names: Vec<String> = base_initial_tools
+    let excluded_matcher = excluded_tool_names.as_deref().map(create_tool_name_matcher);
+    let initial_active_tool_names: Vec<String> = selected_tool_names
+        .unwrap_or(default_tool_names)
         .into_iter()
-        .filter(|name| {
-            !excluded_tool_names
-                .as_ref()
-                .is_some_and(|excluded| crate::core::agent_session::tool_name_matches_entries(excluded, name))
-        })
+        .filter(|name| !excluded_matcher.as_ref().is_some_and(|m| m(name)))
         .collect();
 
     let settings_for_llm = settings_manager.clone();
@@ -537,31 +554,19 @@ pub async fn create_agent_session(
             if base.base.on_provider_stream_event.is_none() {
                 base.base.on_provider_stream_event = Some(on_provider_stream_event);
             }
+            base.base.identity = Some(get_client_identity(&settings));
 
-            let session_id_opt = base.base.session_id.clone();
-            let req_model_for_headers = req_model.clone();
-            let settings_for_headers = settings.clone();
             let runner_ref_for_headers = Arc::clone(&runner_ref);
             let transform_headers: pi_ai::models::TransformHeaders = Arc::new(move |request_headers| {
-                let req_model = req_model_for_headers.clone();
-                let settings = settings_for_headers.clone();
-                let session_id = session_id_opt.clone();
                 let runner_ref = Arc::clone(&runner_ref_for_headers);
                 Box::pin(async move {
-                    let headers: ProviderHeaders = merge_provider_attribution_headers(
-                        &req_model,
-                        &settings,
-                        session_id.as_deref(),
-                        &[Some(&request_headers)],
-                    )
-                    .unwrap_or(request_headers);
                     let runner_opt = runner_ref.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     if let Some(runner) = runner_opt
                         && runner.has_handlers("before_provider_headers")
                     {
-                        Ok(runner.emit_before_provider_headers(headers).await)
+                        Ok(runner.emit_before_provider_headers(request_headers).await)
                     } else {
-                        Ok(headers)
+                        Ok(request_headers)
                     }
                 })
             });
@@ -629,6 +634,9 @@ pub async fn create_agent_session(
         max_retry_delay_ms: u64::try_from(settings_manager.get_provider_retry_settings().max_retry_delay_ms).ok(),
         ..Default::default()
     });
+    if let Some(ref stream_fn) = agent.stream_fn() {
+        mark_runtime_stream_function(stream_fn, &model_runtime);
+    }
     *agent_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent.clone());
 
     // Restore missing settings metadata for older sessions.
@@ -654,7 +662,8 @@ pub async fn create_agent_session(
         model_runtime,
         cache_warmer: Some(cache_warmer),
         initial_active_tool_names: Some(initial_active_tool_names),
-        uses_default_tools: Some(options.tools.is_none() && options.no_tools.is_none()),
+        uses_default_tools: Some((options.tools.is_none() || tool_modifiers.is_some()) && options.no_tools.is_none()),
+        default_tool_modifiers: tool_modifiers,
         allowed_tool_names,
         excluded_tool_names,
         base_tools_override: None,

@@ -10,7 +10,7 @@ use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Request as FetchRequest, Response as FetchResponse};
 use pi_js::vendor::typebox::Schema as TSchema;
 use pi_js::{BoxFuture, Result};
-use pi_telemetry::TelemetryContext as TelemetryContextTrait;
+use pi_telemetry::{TelemetryContext as TelemetryContextTrait, TelemetrySpan as TelemetrySpanTrait};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::utils::diagnostics::AssistantMessageDiagnostic;
 use crate::utils::event_stream::AssistantMessageEventStream;
+use crate::utils::identity::ClientIdentity;
 
 // ============================================================================
 // JSON Types
@@ -128,6 +129,8 @@ pub enum KnownClassifierApi {
     CloudflareWorkersAiSystemOne,
     #[serde(rename = "llama-cpp-classify")]
     LlamaCppClassify,
+    #[serde(rename = "openai-decisions")]
+    OpenAIDecisions,
 }
 
 impl KnownClassifierApi {
@@ -136,6 +139,7 @@ impl KnownClassifierApi {
             Self::TypesafeSystemOne => "typesafe-system-one",
             Self::CloudflareWorkersAiSystemOne => "cloudflare-workers-ai-system-one",
             Self::LlamaCppClassify => "llama-cpp-classify",
+            Self::OpenAIDecisions => "openai-decisions",
         }
     }
 }
@@ -163,7 +167,7 @@ pub enum KnownProvider {
     Google,
     GoogleVertex,
     Openai,
-    AzureOpenaiResponses,
+    Azure,
     OpenaiCodex,
     Radius,
     Typesafe,
@@ -195,6 +199,7 @@ pub enum KnownProvider {
     QwenTokenPlan,
     QwenTokenPlanCn,
     QwenTokenPlanIndividual,
+    QwenTokenPlanIndividualCn,
     Xiaomi,
     XiaomiTokenPlanCn,
     XiaomiTokenPlanAms,
@@ -210,7 +215,7 @@ impl KnownProvider {
             Self::Google => "google",
             Self::GoogleVertex => "google-vertex",
             Self::Openai => "openai",
-            Self::AzureOpenaiResponses => "azure-openai-responses",
+            Self::Azure => "azure",
             Self::OpenaiCodex => "openai-codex",
             Self::Radius => "radius",
             Self::Typesafe => "typesafe",
@@ -242,6 +247,7 @@ impl KnownProvider {
             Self::QwenTokenPlan => "qwen-token-plan",
             Self::QwenTokenPlanCn => "qwen-token-plan-cn",
             Self::QwenTokenPlanIndividual => "qwen-token-plan-individual",
+            Self::QwenTokenPlanIndividualCn => "qwen-token-plan-individual-cn",
             Self::Xiaomi => "xiaomi",
             Self::XiaomiTokenPlanCn => "xiaomi-token-plan-cn",
             Self::XiaomiTokenPlanAms => "xiaomi-token-plan-ams",
@@ -383,6 +389,8 @@ impl From<ThinkingLevel> for ModelThinkingLevel {
     }
 }
 
+pub type SamplingParams = JsonObject;
+pub type SamplingParamsByThinkingLevel = IndexMap<ModelThinkingLevel, SamplingParams>;
 pub type ThinkingLevelMap = IndexMap<ModelThinkingLevel, Option<String>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -489,6 +497,7 @@ pub type ProviderEnv = IndexMap<String, String>;
 pub type ProviderHeaders = IndexMap<String, Option<String>>;
 pub type FetchFunction = Arc<dyn Fn(FetchRequest) -> BoxFuture<Result<FetchResponse>> + Send + Sync>;
 pub type TelemetryContextHandle = Arc<dyn TelemetryContextTrait + Send + Sync>;
+pub type TelemetrySpanHandle = Arc<dyn TelemetrySpanTrait + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionAffinityFormat {
@@ -513,13 +522,17 @@ pub type OnProviderStreamEventFn = Arc<dyn Fn(&JsonValue, &Model) -> BoxFuture<R
 /// Authentication, HTTP transport, and lifecycle callbacks shared by provider requests.
 pub struct ProviderRequestOptions<TModel = Model> {
     pub signal: Option<AbortSignal>,
+    /// Legacy v1.0.0 telemetry context handle preserved for additive compatibility until Stage 2 migrates `src/api/*`.
     pub telemetry_context: Option<TelemetryContextHandle>,
+    /// Explicit parent span for telemetry produced by this logical request (`v1.5.2`).
+    pub telemetry: Option<TelemetrySpanHandle>,
     pub api_key: Option<String>,
     pub fetch: Option<FetchFunction>,
     pub env: Option<ProviderEnv>,
     pub on_payload: Option<OnPayloadFn<TModel>>,
     pub on_response: Option<OnResponseFn<TModel>>,
     pub headers: Option<ProviderHeaders>,
+    pub identity: Option<ClientIdentity>,
     pub timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
@@ -530,12 +543,14 @@ impl<TModel> Clone for ProviderRequestOptions<TModel> {
         Self {
             signal: self.signal.clone(),
             telemetry_context: self.telemetry_context.clone(),
+            telemetry: self.telemetry.clone(),
             api_key: self.api_key.clone(),
             fetch: self.fetch.clone(),
             env: self.env.clone(),
             on_payload: self.on_payload.clone(),
             on_response: self.on_response.clone(),
             headers: self.headers.clone(),
+            identity: self.identity.clone(),
             timeout_ms: self.timeout_ms,
             max_retries: self.max_retries,
             max_retry_delay_ms: self.max_retry_delay_ms,
@@ -548,12 +563,14 @@ impl<TModel> Default for ProviderRequestOptions<TModel> {
         Self {
             signal: None,
             telemetry_context: None,
+            telemetry: None,
             api_key: None,
             fetch: None,
             env: None,
             on_payload: None,
             on_response: None,
             headers: None,
+            identity: None,
             timeout_ms: None,
             max_retries: None,
             max_retry_delay_ms: None,
@@ -566,12 +583,14 @@ impl<TModel> fmt::Debug for ProviderRequestOptions<TModel> {
         f.debug_struct("ProviderRequestOptions")
             .field("signal", &self.signal.as_ref().map(|s| s.aborted()))
             .field("telemetry_context", &self.telemetry_context.is_some())
+            .field("telemetry", &self.telemetry.is_some())
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("fetch", &self.fetch.is_some())
             .field("env", &self.env)
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
             .field("headers", &self.headers)
+            .field("identity", &self.identity)
             .field("timeout_ms", &self.timeout_ms)
             .field("max_retries", &self.max_retries)
             .field("max_retry_delay_ms", &self.max_retry_delay_ms)
@@ -582,23 +601,28 @@ impl<TModel> fmt::Debug for ProviderRequestOptions<TModel> {
 #[derive(Clone, Default)]
 pub struct StreamOptions {
     pub signal: Option<AbortSignal>,
+    /// Legacy v1.0.0 telemetry context handle preserved for additive compatibility until Stage 2 migrates `src/api/*`.
     pub telemetry_context: Option<TelemetryContextHandle>,
+    /// Explicit parent span for telemetry produced by this logical request (`v1.5.2`).
+    pub telemetry: Option<TelemetrySpanHandle>,
     pub api_key: Option<String>,
     pub fetch: Option<FetchFunction>,
     pub env: Option<ProviderEnv>,
     pub on_payload: Option<OnPayloadFn<Model>>,
     pub on_response: Option<OnResponseFn<Model>>,
     pub headers: Option<ProviderHeaders>,
+    pub identity: Option<ClientIdentity>,
     pub timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
     pub on_provider_stream_event: Option<OnProviderStreamEventFn>,
     pub temperature: Option<f64>,
-    pub sampling_params: Option<JsonObject>,
+    pub sampling_params: Option<SamplingParams>,
     pub max_tokens: Option<i64>,
     pub transport: Option<Transport>,
     pub cache_retention: Option<CacheRetention>,
     pub session_id: Option<String>,
+    pub disable_continuation: Option<bool>,
     pub websocket_connect_timeout_ms: Option<u64>,
     pub metadata: Option<JsonObject>,
 }
@@ -608,12 +632,14 @@ impl StreamOptions {
         ProviderRequestOptions {
             signal: self.signal.clone(),
             telemetry_context: self.telemetry_context.clone(),
+            telemetry: self.telemetry.clone(),
             api_key: self.api_key.clone(),
             fetch: self.fetch.clone(),
             env: self.env.clone(),
             on_payload: self.on_payload.clone(),
             on_response: self.on_response.clone(),
             headers: self.headers.clone(),
+            identity: self.identity.clone(),
             timeout_ms: self.timeout_ms,
             max_retries: self.max_retries,
             max_retry_delay_ms: self.max_retry_delay_ms,
@@ -626,12 +652,14 @@ impl From<ProviderRequestOptions<Model>> for StreamOptions {
         Self {
             signal: req.signal,
             telemetry_context: req.telemetry_context,
+            telemetry: req.telemetry,
             api_key: req.api_key,
             fetch: req.fetch,
             env: req.env,
             on_payload: req.on_payload,
             on_response: req.on_response,
             headers: req.headers,
+            identity: req.identity,
             timeout_ms: req.timeout_ms,
             max_retries: req.max_retries,
             max_retry_delay_ms: req.max_retry_delay_ms,
@@ -645,12 +673,14 @@ impl fmt::Debug for StreamOptions {
         f.debug_struct("StreamOptions")
             .field("signal", &self.signal.as_ref().map(|s| s.aborted()))
             .field("telemetry_context", &self.telemetry_context.is_some())
+            .field("telemetry", &self.telemetry.is_some())
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("fetch", &self.fetch.is_some())
             .field("env", &self.env)
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
             .field("headers", &self.headers)
+            .field("identity", &self.identity)
             .field("timeout_ms", &self.timeout_ms)
             .field("max_retries", &self.max_retries)
             .field("max_retry_delay_ms", &self.max_retry_delay_ms)
@@ -661,6 +691,7 @@ impl fmt::Debug for StreamOptions {
             .field("transport", &self.transport)
             .field("cache_retention", &self.cache_retention)
             .field("session_id", &self.session_id)
+            .field("disable_continuation", &self.disable_continuation)
             .field("websocket_connect_timeout_ms", &self.websocket_connect_timeout_ms)
             .field("metadata", &self.metadata)
             .finish()
@@ -1220,13 +1251,14 @@ impl<'de> Deserialize<'de> for ImageContent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: JsonObject,
     pub thought_signature: Option<String>,
     pub namespace: Option<String>,
+    pub arguments_error: Option<String>,
 }
 
 impl ToolCall {
@@ -1237,13 +1269,17 @@ impl ToolCall {
             arguments,
             thought_signature: None,
             namespace: None,
+            arguments_error: None,
         }
     }
 }
 
 impl Serialize for ToolCall {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let len = 4 + usize::from(self.thought_signature.is_some()) + usize::from(self.namespace.is_some());
+        let len = 4
+            + usize::from(self.thought_signature.is_some())
+            + usize::from(self.namespace.is_some())
+            + usize::from(self.arguments_error.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("type", "toolCall")?;
         map.serialize_entry("id", &self.id)?;
@@ -1254,6 +1290,9 @@ impl Serialize for ToolCall {
         }
         if let Some(ns) = &self.namespace {
             map.serialize_entry("namespace", ns)?;
+        }
+        if let Some(err) = &self.arguments_error {
+            map.serialize_entry("argumentsError", err)?;
         }
         map.end()
     }
@@ -1273,6 +1312,8 @@ impl<'de> Deserialize<'de> for ToolCall {
             thought_signature: Option<String>,
             #[serde(default)]
             namespace: Option<String>,
+            #[serde(default)]
+            arguments_error: Option<String>,
         }
         let raw = Raw::deserialize(deserializer)?;
         if let Some(kind) = raw.kind.as_deref() {
@@ -1288,6 +1329,7 @@ impl<'de> Deserialize<'de> for ToolCall {
             arguments: raw.arguments,
             thought_signature: raw.thought_signature,
             namespace: raw.namespace,
+            arguments_error: raw.arguments_error,
         })
     }
 }
@@ -1403,6 +1445,8 @@ pub struct UsageCost {
     pub cache_read: f64,
     pub cache_write: f64,
     pub total: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_from_provider: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1677,6 +1721,7 @@ pub struct AssistantMessage {
     pub raw_stop_reason: Option<String>,
     pub end_turn: Option<bool>,
     pub timestamp: i64,
+    pub duration_ms: Option<i64>,
 }
 
 impl Serialize for AssistantMessage {
@@ -1690,7 +1735,8 @@ impl Serialize for AssistantMessage {
             + usize::from(self.deferred.is_some())
             + usize::from(self.error_message.is_some())
             + usize::from(self.raw_stop_reason.is_some())
-            + usize::from(self.end_turn.is_some());
+            + usize::from(self.end_turn.is_some())
+            + usize::from(self.duration_ms.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("role", "assistant")?;
         map.serialize_entry("content", &self.content)?;
@@ -1727,6 +1773,9 @@ impl Serialize for AssistantMessage {
             map.serialize_entry("endTurn", &v)?;
         }
         map.serialize_entry("timestamp", &self.timestamp)?;
+        if let Some(v) = self.duration_ms {
+            map.serialize_entry("durationMs", &v)?;
+        }
         map.end()
     }
 }
@@ -1763,6 +1812,8 @@ impl<'de> Deserialize<'de> for AssistantMessage {
             #[serde(default)]
             end_turn: Option<bool>,
             timestamp: i64,
+            #[serde(default)]
+            duration_ms: Option<i64>,
         }
         let raw = Raw::deserialize(deserializer)?;
         if let Some(role) = raw.role.as_deref() {
@@ -1789,6 +1840,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
             raw_stop_reason: raw.raw_stop_reason,
             end_turn: raw.end_turn,
             timestamp: raw.timestamp,
+            duration_ms: raw.duration_ms,
         })
     }
 }
@@ -1834,6 +1886,7 @@ pub struct ToolResultMessage {
     pub nested_calls: Option<NestedToolCalls>,
     pub is_error: bool,
     pub timestamp: i64,
+    pub duration_ms: Option<i64>,
 }
 
 impl Serialize for ToolResultMessage {
@@ -1841,7 +1894,8 @@ impl Serialize for ToolResultMessage {
         let len = 6
             + usize::from(self.details.is_some())
             + usize::from(self.usage.is_some())
-            + usize::from(self.nested_calls.is_some());
+            + usize::from(self.nested_calls.is_some())
+            + usize::from(self.duration_ms.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("role", "toolResult")?;
         map.serialize_entry("toolCallId", &self.tool_call_id)?;
@@ -1858,6 +1912,9 @@ impl Serialize for ToolResultMessage {
         }
         map.serialize_entry("isError", &self.is_error)?;
         map.serialize_entry("timestamp", &self.timestamp)?;
+        if let Some(duration_ms) = self.duration_ms {
+            map.serialize_entry("durationMs", &duration_ms)?;
+        }
         map.end()
     }
 }
@@ -1880,6 +1937,8 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             nested_calls: Option<NestedToolCalls>,
             is_error: bool,
             timestamp: i64,
+            #[serde(default)]
+            duration_ms: Option<i64>,
         }
         let raw = Raw::deserialize(deserializer)?;
         if let Some(role) = raw.role.as_deref() {
@@ -1898,6 +1957,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             nested_calls: raw.nested_calls,
             is_error: raw.is_error,
             timestamp: raw.timestamp,
+            duration_ms: raw.duration_ms,
         })
     }
 }
@@ -2058,6 +2118,8 @@ pub enum ClassifierQuestion {
 pub struct ClassifierContext {
     pub state: JsonObject,
     pub questions: IndexMap<String, ClassifierQuestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageContent>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2438,6 +2500,24 @@ pub struct VercelGatewayRouting {
     pub order: Option<Vec<String>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCacheKeyMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SystemOneImageInput {
+    #[serde(rename = "assets")]
+    Assets,
+    #[serde(rename = "images")]
+    Images,
+    #[serde(rename = "state-image-urls")]
+    StateImageUrls,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAICompletionsCompat {
@@ -2457,6 +2537,10 @@ pub struct OpenAICompletionsCompat {
     pub requires_tool_result_name: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_assistant_after_tool_result: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_non_null_assistant_content: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_tools_with_tool_history: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_thinking_as_text: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2496,6 +2580,8 @@ pub struct OpenAICompletionsCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_affinity_format: Option<SessionAffinityFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key_mode: Option<PromptCacheKeyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vllm_priority: Option<i64>,
@@ -2510,6 +2596,8 @@ pub struct OpenAIResponsesCompat {
     pub supports_mid_convo_system_messages: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_affinity_format: Option<SessionAffinityFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key_mode: Option<PromptCacheKeyMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2526,6 +2614,8 @@ pub struct OpenAIResponsesCompat {
     pub supports_tool_search: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_explicit_prompt_cache_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mid_convo_effort: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_max_output_tokens: Option<bool>,
 }
@@ -2558,6 +2648,8 @@ pub struct AnthropicMessagesCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_mid_convo_tool_changes: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_message_threads: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_fallback_models: Option<Vec<AnthropicAllowedFallbackModel>>,
 }
 
@@ -2575,6 +2667,15 @@ pub struct MistralConversationsCompat {
     pub supports_mid_convo_system_messages: Option<bool>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOneCompat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<SystemOneImageInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_image_opt_in_header: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ModelCompat {
@@ -2583,6 +2684,7 @@ pub enum ModelCompat {
     AnthropicMessages(AnthropicMessagesCompat),
     Bedrock(BedrockCompat),
     MistralConversations(MistralConversationsCompat),
+    SystemOne(SystemOneCompat),
     Other(JsonValue),
 }
 
@@ -2622,6 +2724,13 @@ impl ModelCompat {
         }
     }
 
+    pub fn as_system_one(&self) -> Option<&SystemOneCompat> {
+        match self {
+            Self::SystemOne(c) => Some(c),
+            _ => None,
+        }
+    }
+
     pub fn deserialize_for_api(api: &str, value: JsonValue) -> std::result::Result<Self, String> {
         match api {
             "openai-completions" => serde_json::from_value(value)
@@ -2639,8 +2748,17 @@ impl ModelCompat {
             "mistral-conversations" => serde_json::from_value(value)
                 .map(Self::MistralConversations)
                 .map_err(|e| e.to_string()),
+            "typesafe-system-one" | "cloudflare-workers-ai-system-one" => serde_json::from_value(value)
+                .map(Self::SystemOne)
+                .map_err(|e| e.to_string()),
             _ => Ok(Self::Other(value)),
         }
+    }
+}
+
+impl From<SystemOneCompat> for ModelCompat {
+    fn from(value: SystemOneCompat) -> Self {
+        Self::SystemOne(value)
     }
 }
 
@@ -2843,7 +2961,9 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sampling_params: Option<JsonObject>,
+    pub sampling_params: Option<SamplingParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ModelCompat>,
 }
@@ -2874,7 +2994,9 @@ impl<'de> Deserialize<'de> for Model {
             #[serde(default)]
             headers: Option<IndexMap<String, String>>,
             #[serde(default)]
-            sampling_params: Option<JsonObject>,
+            sampling_params: Option<SamplingParams>,
+            #[serde(default)]
+            sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
             #[serde(default)]
             compat: Option<JsonValue>,
         }
@@ -2902,6 +3024,7 @@ impl<'de> Deserialize<'de> for Model {
             max_tokens: raw.max_tokens,
             headers: raw.headers,
             sampling_params: raw.sampling_params,
+            sampling_params_by_thinking_level: raw.sampling_params_by_thinking_level,
             compat,
         })
     }
@@ -2999,11 +3122,15 @@ pub struct ClassifierModel {
     pub context_window: i64,
     pub cost: ModelCost,
     pub headers: Option<IndexMap<String, String>>,
+    pub compat: Option<SystemOneCompat>,
 }
 
 impl Serialize for ClassifierModel {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let len = 9 + usize::from(self.input_limits.is_some()) + usize::from(self.headers.is_some());
+        let len = 9
+            + usize::from(self.input_limits.is_some())
+            + usize::from(self.headers.is_some())
+            + usize::from(self.compat.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("type", "classifier")?;
         map.serialize_entry("id", &self.id)?;
@@ -3019,6 +3146,9 @@ impl Serialize for ClassifierModel {
         map.serialize_entry("cost", &self.cost)?;
         if let Some(headers) = &self.headers {
             map.serialize_entry("headers", headers)?;
+        }
+        if let Some(compat) = &self.compat {
+            map.serialize_entry("compat", compat)?;
         }
         map.end()
     }
@@ -3043,6 +3173,8 @@ impl<'de> Deserialize<'de> for ClassifierModel {
             cost: ModelCost,
             #[serde(default)]
             headers: Option<IndexMap<String, String>>,
+            #[serde(default)]
+            compat: Option<SystemOneCompat>,
         }
         let raw = Raw::deserialize(deserializer)?;
         if let Some(kind) = raw.r#type.as_deref() {
@@ -3063,6 +3195,7 @@ impl<'de> Deserialize<'de> for ClassifierModel {
             context_window: raw.context_window,
             cost: raw.cost,
             headers: raw.headers,
+            compat: raw.compat,
         })
     }
 }

@@ -43,6 +43,7 @@ fn reuse_or_init_slot_text(
         if let Some(slots) = guard.as_mut().and_then(|any| any.downcast_mut::<RendererTextSlots>()) {
             let slot = if is_result { &mut slots.result } else { &mut slots.call };
             if let Some(existing) = slot.as_ref() {
+                existing.set_padding_x(padding_x);
                 existing.set_text(content);
                 return Arc::new(existing.clone());
             }
@@ -115,6 +116,8 @@ pub(crate) mod w3b_wire {
     pub fn highlight_code(code: &str, lang: Option<&str>) -> Vec<String> {
         crate::modes::interactive::theme::theme::highlight_code(code, lang)
     }
+
+    pub use crate::modes::interactive::theme::theme::CodeHighlighter;
 
     /// Render a unified diff string with theme colors.
     pub fn render_diff(diff_text: &str, _theme: Option<&Theme>) -> String {

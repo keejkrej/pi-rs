@@ -154,6 +154,12 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
 ///
 /// Tool results are truncated to keep the summarization request within
 /// reasonable token budgets. Full content is not needed for summarization.
+///
+/// Thinking is omitted. Providers return summaries of the real reasoning, and
+/// replayed thinking is often not part of the model's live context: for example,
+/// a block that does not match its request is dropped. Including it can make the
+/// summarization request larger than the context it summarizes. Visible text,
+/// tool calls, and tool results record what happened.
 pub fn serialize_conversation(messages: &[Message]) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -166,30 +172,20 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
                 }
             }
             Message::Assistant(assistant) => {
-                let mut thinking_parts: Vec<&str> = Vec::new();
                 let mut tool_calls: Vec<String> = Vec::new();
 
                 for block in &assistant.content {
-                    match block {
-                        AssistantContentBlock::Thinking(thinking) => {
-                            thinking_parts.push(&thinking.thinking);
-                        }
-                        AssistantContentBlock::ToolCall(tc) => {
-                            let args_str = tc
-                                .arguments
-                                .iter()
-                                .map(|(k, v)| format!("{k}={}", pi_js::json::stringify(v)))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            tool_calls.push(format!("{}({args_str})", tc.name));
-                        }
-                        AssistantContentBlock::Text(_) => {}
+                    if let AssistantContentBlock::ToolCall(tc) = block {
+                        let args_str = tc
+                            .arguments
+                            .iter()
+                            .map(|(k, v)| format!("{k}={}", pi_js::json::stringify(v)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        tool_calls.push(format!("{}({args_str})", tc.name));
                     }
                 }
 
-                if !thinking_parts.is_empty() {
-                    parts.push(format!("[Assistant thinking]: {}", thinking_parts.join("\n")));
-                }
                 if assistant
                     .content
                     .iter()

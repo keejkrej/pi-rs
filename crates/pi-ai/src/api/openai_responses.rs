@@ -15,21 +15,29 @@ use crate::api::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ProcessResponsesStreamOptions,
     convert_responses_messages, convert_responses_tools, create_pending_assistant_message,
-    enrich_chatgpt_usage_limit_error, process_responses_stream, resolve_responses_cache_retention,
-    response_to_sse_json_stream,
+    enrich_chatgpt_usage_limit_error, get_responses_tool_support, process_responses_stream,
+    resolve_responses_cache_retention, response_to_sse_json_stream,
 };
-use crate::api::simple_options::{build_base_options, clamp_reasoning};
+use crate::api::simple_options::{build_base_options, clamp_reasoning, resolve_sampling_params};
 use crate::env_api_keys::get_env_api_key;
 use crate::types::{
-    ApiStreamOptions, CacheRetention, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders, ProviderStreams,
-    SessionAffinityFormat, SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice, TranscriptContext,
+    ApiStreamOptions, CacheRetention, Model, ModelThinkingLevel, PromptCacheKeyMode, ProviderEnv, ProviderHeaders,
+    ProviderStreams, SessionAffinityFormat, SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice,
+    TranscriptContext,
 };
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::diagnostics::{append_assistant_message_diagnostic, create_assistant_message_diagnostic};
 use crate::utils::error_body::{format_provider_error, normalize_provider_error, truncate_error_text};
 use crate::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
-use crate::utils::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools};
+use crate::utils::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools_with_support};
+
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: i64 = 16;
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+const CHATGPT_WORKSPACE_LIMIT_HINT: &str = "You've reached your ChatGPT workspace's usage limit. Ask your workspace admin to increase it at admin.openai.com → Workspace → Usage limits.";
+// Fixed reasoning.effort while configuration_update items carry the thinking level.
+const CONFIGURATION_UPDATE_REQUEST_EFFORT: &str = "medium";
 
 /// OpenAI Responses reasoning effort values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,6 +49,7 @@ pub enum OpenAIReasoningEffort {
     Medium,
     High,
     XHigh,
+    Max,
 }
 
 impl OpenAIReasoningEffort {
@@ -52,6 +61,7 @@ impl OpenAIReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -63,6 +73,7 @@ impl OpenAIReasoningEffort {
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -75,6 +86,7 @@ impl OpenAIReasoningEffort {
             Self::Medium => ModelThinkingLevel::Medium,
             Self::High => ModelThinkingLevel::High,
             Self::XHigh => ModelThinkingLevel::XHigh,
+            Self::Max => ModelThinkingLevel::Max,
         }
     }
 }
@@ -183,6 +195,8 @@ struct ResolvedOpenAIResponsesCompat {
     supports_tool_search: bool,
     supports_long_cache_retention: bool,
     supports_explicit_prompt_cache_mode: bool,
+    prompt_cache_key_mode: PromptCacheKeyMode,
+    supports_mid_convo_effort: bool,
     session_affinity_format: Option<SessionAffinityFormat>,
 }
 
@@ -204,8 +218,33 @@ fn resolve_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
         supports_tool_search: rc.and_then(|c| c.supports_tool_search).unwrap_or(false),
         supports_long_cache_retention: rc.and_then(|c| c.supports_long_cache_retention).unwrap_or(true),
         supports_explicit_prompt_cache_mode: rc.and_then(|c| c.supports_explicit_prompt_cache_mode).unwrap_or(false),
+        prompt_cache_key_mode: rc
+            .and_then(|c| c.prompt_cache_key_mode)
+            .unwrap_or(PromptCacheKeyMode::Auto),
+        supports_mid_convo_effort: rc.and_then(|c| c.supports_mid_convo_effort).unwrap_or(false),
         session_affinity_format: rc.and_then(|c| c.session_affinity_format).or(default_affinity),
     }
+}
+
+fn is_chatgpt_signin(model: &Model, api_key: Option<&str>) -> bool {
+    model.provider == "openai"
+        && model.base_url == "https://api.openai.com/v1"
+        && api_key.is_some_and(|key| !key.is_empty() && !key.starts_with("sk-"))
+}
+
+/// Effort to send in `configuration_update` items, or `None` to send it as `reasoning.effort`.
+fn get_configuration_update_effort(
+    model: &Model,
+    options: &OpenAIResponsesOptions,
+    compat: &ResolvedOpenAIResponsesCompat,
+) -> Option<String> {
+    if !compat.supports_mid_convo_effort
+        || options.reasoning_effort.is_none()
+        || is_chatgpt_signin(model, options.base.api_key.as_deref())
+    {
+        return None;
+    }
+    resolve_effort_for_model(model, options.reasoning_effort)
 }
 
 fn allowed_tool_call_providers() -> IndexSet<String> {
@@ -261,11 +300,21 @@ fn build_headers(
     session_id: Option<&str>,
     copilot_dynamic: Option<&IndexMap<String, String>>,
     options_headers: Option<&ProviderHeaders>,
+    identity: Option<&ClientIdentity>,
 ) -> Headers {
     let mut headers = Headers::new();
     headers.set("accept", "text/event-stream");
     headers.set("content-type", "application/json");
     headers.set("authorization", &format!("Bearer {api_key}"));
+
+    let identity_headers = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        identity,
+    );
+    apply_raw_header_layer(&mut headers, &identity_headers);
 
     if let Some(mh) = &model.headers {
         apply_raw_header_layer(&mut headers, mh);
@@ -277,7 +326,7 @@ fn build_headers(
                 if let Some(fmt) = compat.session_affinity_format {
                     match fmt {
                         SessionAffinityFormat::OpenAI => {
-                            headers.set("session_id", sid);
+                            headers.set("session-id", sid);
                             headers.set("x-client-request-id", sid);
                         }
                         SessionAffinityFormat::OpenAINosession => {
@@ -288,7 +337,7 @@ fn build_headers(
                         }
                     }
                 } else {
-                    headers.set("session_id", sid);
+                    headers.set("session-id", sid);
                     headers.set("x-client-request-id", sid);
                 }
             }
@@ -310,13 +359,16 @@ fn build_params(
     options: &OpenAIResponsesOptions,
     compat: &ResolvedOpenAIResponsesCompat,
     cache_retention: CacheRetention,
+    configuration_update_effort: Option<&str>,
 ) -> Result<(Value, IndexMap<String, String>)> {
     let providers = allowed_tool_call_providers();
     let declared_tools = get_declared_tools(&context.messages);
-    let transcript_tools = resolve_transcript_tools(
-        &context.messages,
-        compat.supports_additional_tools || compat.supports_tool_search,
+    let tool_support = get_responses_tool_support(
+        compat.supports_mid_convo_system_messages == Some(true),
+        compat.supports_additional_tools,
+        compat.supports_tool_search,
     );
+    let transcript_tools = resolve_transcript_tools_with_support(&context.messages, tool_support);
     let grammar_props =
         create_grammar_tool_input_properties(Some(&declared_tools), compat.supports_openai_grammar_tools)?;
 
@@ -337,6 +389,7 @@ fn build_params(
         supports_additional_tools: compat.supports_additional_tools,
         supports_tool_search: compat.supports_tool_search,
         tool_options: Some(tool_opts.clone()),
+        configuration_update_effort: configuration_update_effort.map(str::to_string),
     };
     let messages = convert_responses_messages(model, context, &providers, Some(&msg_opts));
 
@@ -349,15 +402,11 @@ fn build_params(
         params.insert("store".to_string(), Value::Bool(false));
     }
 
-    let omit_unsupported_fields = model.provider == "openai"
-        && model.base_url == "https://api.openai.com/v1"
-        && options
-            .base
-            .api_key
-            .as_deref()
-            .is_some_and(|key| !key.starts_with("sk-"));
+    let send_prompt_cache_key =
+        cache_retention != CacheRetention::None && compat.prompt_cache_key_mode != PromptCacheKeyMode::Disabled;
+    let omit_unsupported_fields = is_chatgpt_signin(model, options.base.api_key.as_deref());
 
-    if cache_retention != CacheRetention::None {
+    if send_prompt_cache_key {
         if let Some(cache_key) = clamp_openai_prompt_cache_key(options.base.session_id.as_deref()) {
             if !cache_key.is_empty() {
                 params.insert("prompt_cache_key".to_string(), Value::String(cache_key));
@@ -385,7 +434,10 @@ fn build_params(
 
         if compat.supports_max_output_tokens {
             if let Some(max_tokens) = options.base.max_tokens {
-                params.insert("max_output_tokens".to_string(), Value::from(max_tokens));
+                params.insert(
+                    "max_output_tokens".to_string(),
+                    Value::from(max_tokens.max(OPENAI_RESPONSES_MIN_OUTPUT_TOKENS)),
+                );
             }
         }
         if let Some(temp) = options.base.temperature {
@@ -407,22 +459,60 @@ fn build_params(
         params.insert("tool_choice".to_string(), tc_val.clone());
     }
 
+    let reasoning_effort = options.reasoning_effort.or_else(|| {
+        options
+            .reasoning_summary
+            .as_ref()
+            .map(|_| OpenAIReasoningEffort::Medium)
+    });
     if model.reasoning {
-        let resolved_effort = resolve_effort_for_model(model, options.reasoning_effort);
-        let summary_opt = options.reasoning_summary.as_deref().filter(|s| *s != "off");
+        if let Some(req_effort) = reasoning_effort {
+            let requested_effort = if options.reasoning_effort.is_some() {
+                resolve_effort_for_model(model, options.reasoning_effort)
+            } else {
+                Some(req_effort.as_str().to_string())
+            };
+            let effort = if configuration_update_effort.is_some() {
+                Some(CONFIGURATION_UPDATE_REQUEST_EFFORT.to_string())
+            } else {
+                requested_effort
+            };
+            let summary_opt = options.reasoning_summary.as_deref().filter(|s| *s != "off");
 
-        if resolved_effort.is_some() || summary_opt.is_some() {
-            let mut reasoning_obj = Map::new();
-            if let Some(ref effort_str) = resolved_effort {
-                reasoning_obj.insert("effort".to_string(), Value::String(effort_str.clone()));
+            if effort.is_some() || summary_opt.is_some() {
+                let mut reasoning_obj = Map::new();
+                if let Some(ref effort_str) = effort {
+                    reasoning_obj.insert("effort".to_string(), Value::String(effort_str.clone()));
+                }
+                if let Some(summary) = summary_opt {
+                    reasoning_obj.insert("summary".to_string(), Value::String(summary.to_string()));
+                }
+                params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
             }
-            if let Some(summary) = summary_opt {
-                reasoning_obj.insert("summary".to_string(), Value::String(summary.to_string()));
+            params.insert(
+                "include".to_string(),
+                Value::Array(vec![Value::String("reasoning.encrypted_content".to_string())]),
+            );
+        } else if model.provider != "github-copilot" {
+            let off_entry = model
+                .thinking_level_map
+                .as_ref()
+                .and_then(|m| m.get(&ModelThinkingLevel::Off));
+            match off_entry {
+                Some(None) => {}
+                Some(Some(val)) => {
+                    let mut reasoning_obj = Map::new();
+                    reasoning_obj.insert("effort".to_string(), Value::String(val.clone()));
+                    params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
+                }
+                None => {
+                    let mut reasoning_obj = Map::new();
+                    reasoning_obj.insert("effort".to_string(), Value::String("none".to_string()));
+                    params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
+                }
             }
-            params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
         }
-
-        if resolved_effort.as_deref().is_some_and(|e| e != "none") {
+        if model.provider == "xai" {
             params.insert(
                 "include".to_string(),
                 Value::Array(vec![Value::String("reasoning.encrypted_content".to_string())]),
@@ -430,14 +520,13 @@ fn build_params(
         }
     }
 
-    if let Some(model_sp) = &model.sampling_params {
-        for (k, v) in model_sp {
-            params.insert(k.clone(), v.clone());
-        }
-    }
-    if let Some(opt_sp) = &options.base.sampling_params {
-        for (k, v) in opt_sp {
-            params.insert(k.clone(), v.clone());
+    let sampling_level = reasoning_effort
+        .map(OpenAIReasoningEffort::to_model_thinking_level)
+        .unwrap_or(ModelThinkingLevel::Off);
+    if let Some(sampling_params) = resolve_sampling_params(model, sampling_level, options.base.sampling_params.as_ref())
+    {
+        for (k, v) in sampling_params {
+            params.insert(k, v);
         }
     }
 
@@ -527,12 +616,17 @@ async fn execute_request(
 async fn run_openai_responses_stream(
     model: Model,
     context: TranscriptContext,
-    options: OpenAIResponsesOptions,
+    mut options: OpenAIResponsesOptions,
     output: &mut crate::types::AssistantMessage,
     event_stream: &AssistantMessageEventStream,
 ) -> Result<()> {
     let api_key = resolve_api_key(&model, &options)?;
+    options.base.api_key = Some(api_key.clone());
     let compat = resolve_compat(&model);
+    let configuration_update_effort = get_configuration_update_effort(&model, &options, &compat);
+    if let Some(ref effort) = configuration_update_effort {
+        output.provider_thinking_level = Some(effort.clone());
+    }
     let cache_retention = resolve_responses_cache_retention(options.base.cache_retention, options.base.env.as_ref());
 
     let copilot_dynamic = if model.provider == "github-copilot" {
@@ -550,11 +644,19 @@ async fn run_openai_responses_stream(
         options.base.session_id.as_deref(),
         copilot_dynamic.as_ref(),
         options.base.headers.as_ref(),
+        options.base.identity.as_ref(),
     );
 
     let resolved_context = resolve_transcript(&context, compat.supports_mid_convo_system_messages);
 
-    let (mut params, grammar_props) = build_params(&model, &resolved_context, &options, &compat, cache_retention)?;
+    let (mut params, grammar_props) = build_params(
+        &model,
+        &resolved_context,
+        &options,
+        &compat,
+        cache_retention,
+        configuration_update_effort.as_deref(),
+    )?;
 
     if let Some(on_payload) = &options.base.on_payload {
         if let Some(next_params) = on_payload(params.clone(), &model).await? {
@@ -593,7 +695,17 @@ fn format_openai_error(err: &Error, output: &mut crate::types::AssistantMessage)
         format!("{} API error", output.provider)
     };
     let formatted = format_provider_error(&norm, Some(&prefix));
-    let enriched = enrich_chatgpt_usage_limit_error(&formatted);
+    let enriched = if formatted.contains("subscription_sharing_usage_limit_exceeded") {
+        if formatted.contains(CHATGPT_USAGE_URL) {
+            formatted
+        } else {
+            format!("{formatted}\nCheck your ChatGPT usage: {CHATGPT_USAGE_URL}")
+        }
+    } else if formatted.contains("subscription_sharing_workplace_individual_usage_limit_exceeded") {
+        format!("{formatted}\n{CHATGPT_WORKSPACE_LIMIT_HINT}")
+    } else {
+        enrich_chatgpt_usage_limit_error(&formatted)
+    };
     let truncated = truncate_error_text(&enriched, 4000);
     append_assistant_message_diagnostic(output, create_assistant_message_diagnostic("provider_error", err, None));
     truncated

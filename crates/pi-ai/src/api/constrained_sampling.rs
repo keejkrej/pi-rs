@@ -256,6 +256,16 @@ pub fn make_strict_json_schema(
     Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 
+/// Returns true for a tool that asks for strict JSON-schema sampling only when possible (`strict: "prefer"`).
+pub fn prefers_json_schema_strict_sampling(tool: &Tool) -> bool {
+    matches!(
+        &tool.constrained_sampling,
+        Some(ConstrainedSampling::Config(ConstrainedSamplingConfig::JsonSchema {
+            strict: JsonSchemaStrict::Prefer
+        }))
+    )
+}
+
 pub fn get_json_schema_tool_parameters(tool: &Tool, strict: Option<bool>) -> Result<TSchema> {
     if strict == Some(true) {
         let strict_obj = make_strict_json_schema(&tool.parameters, None)?;
@@ -297,55 +307,83 @@ pub fn get_grammar_tool_input(tool_name: &str, arguments: &JsonObject, input_pro
     }
 }
 
+fn json_string_inner(value: &str) -> String {
+    let encoded = pi_js::json::stringify(&Value::String(value.to_string()));
+    encoded
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(&encoded)
+        .to_owned()
+}
+
+fn grammar_tool_input_json_start(buffer: &mut GrammarToolInputJsonBuffer, input_property: &str) -> String {
+    if buffer.started {
+        return String::new();
+    }
+    buffer.started = true;
+    let prop_json = pi_js::json::stringify(&Value::String(input_property.to_string()));
+    format!("{{{prop_json}:\"")
+}
+
+/// Append `input_delta` to a streaming grammar tool input and return the matching piece of its JSON arguments text,
+/// or `None` for an empty delta. Costs time linear in the delta, never in the input so far.
 pub fn append_grammar_tool_input_json_delta(
     buffer: &mut GrammarToolInputJsonBuffer,
     input_property: &str,
-    next_input: &str,
-    close: bool,
+    input_delta: &str,
 ) -> Result<Option<String>> {
     if buffer.closed {
-        if close && next_input == buffer.input {
+        return Err(Error::msg(format!(
+            "grammar tool input for property \"{input_property}\" changed after it was closed"
+        )));
+    }
+    if input_delta.is_empty() {
+        return Ok(None);
+    }
+    buffer.input.push_str(input_delta);
+    Ok(Some(format!(
+        "{}{}",
+        grammar_tool_input_json_start(buffer, input_property),
+        json_string_inner(input_delta)
+    )))
+}
+
+/// Close a streaming grammar tool input and return the rest of its JSON arguments text. `final_input` is the complete
+/// input when the provider sends one; it must continue the input streamed so far. Closing again with the same input
+/// returns `None`.
+pub fn close_grammar_tool_input_json(
+    buffer: &mut GrammarToolInputJsonBuffer,
+    input_property: &str,
+    final_input: Option<&str>,
+) -> Result<Option<String>> {
+    if buffer.closed {
+        if final_input.is_none() || final_input == Some(buffer.input.as_str()) {
             return Ok(None);
         }
         return Err(Error::msg(format!(
             "grammar tool input for property \"{input_property}\" changed after it was closed"
         )));
     }
-    if !next_input.starts_with(&buffer.input) {
-        return Err(Error::msg(format!(
-            "grammar tool input for property \"{input_property}\" changed non-monotonically"
-        )));
-    }
-
-    let input_delta = &next_input[buffer.input.len()..];
-    if !close && input_delta.is_empty() {
-        return Ok(None);
-    }
-
-    let mut delta = String::new();
-    if !buffer.started {
-        let prop_json = pi_js::json::stringify(&Value::String(input_property.to_string()));
-        delta.push('{');
-        delta.push_str(&prop_json);
-        delta.push_str(":\"");
-        buffer.started = true;
-    }
-
-    let delta_json = pi_js::json::stringify(&Value::String(input_delta.to_string()));
-    let inner = delta_json
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(&delta_json);
-    delta.push_str(inner);
-    buffer.input.clear();
-    buffer.input.push_str(next_input);
-
-    if close {
-        delta.push_str("\"}");
-        buffer.closed = true;
-    }
-
-    Ok(Some(delta))
+    let rest = match final_input {
+        Some(final_val) => {
+            let Some(suffix) = final_val.strip_prefix(&buffer.input) else {
+                return Err(Error::msg(format!(
+                    "grammar tool input for property \"{input_property}\" changed non-monotonically"
+                )));
+            };
+            let rest = suffix.to_owned();
+            buffer.input.clear();
+            buffer.input.push_str(final_val);
+            rest
+        }
+        None => String::new(),
+    };
+    buffer.closed = true;
+    Ok(Some(format!(
+        "{}{}\"}}",
+        grammar_tool_input_json_start(buffer, input_property),
+        json_string_inner(&rest)
+    )))
 }
 
 fn infer_grammar_input_property(tool: &Tool) -> Result<String> {

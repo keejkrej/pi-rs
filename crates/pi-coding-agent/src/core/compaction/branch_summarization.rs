@@ -396,18 +396,11 @@ pub async fn generate_branch_summary(
         tools: None,
     };
 
-    let max_tokens = if options.model.max_tokens > 0 {
-        4096.min(options.model.max_tokens)
-    } else {
-        4096
-    };
-
     let mut request_options = SimpleStreamOptions::default();
     request_options.base.api_key = options.api_key;
     request_options.base.headers = options.headers;
     request_options.base.env = options.env;
     request_options.base.signal = options.signal;
-    request_options.base.max_tokens = Some(max_tokens);
     if options.model.reasoning
         && let Some(level) = options.thinking_level
     {

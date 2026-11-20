@@ -161,6 +161,8 @@ async fn uses_device_grant_delays_polling_and_handles_pending_and_slow_down() {
             verification_uri: "https://accounts.x.ai/oauth2/device".to_owned(),
             interval_seconds: Some(5.0),
             expires_in_seconds: Some(900.0),
+            copy_code_on_confirm: None,
+            open_browser_on_confirm: None,
         }]
     );
     assert!(poll_times.lock().unwrap().is_empty());
@@ -254,6 +256,8 @@ async fn prefers_verification_uri_complete_and_rejects_untrusted_uris() {
             verification_uri: "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234".to_owned(),
             interval_seconds: Some(5.0),
             expires_in_seconds: Some(900.0),
+            copy_code_on_confirm: None,
+            open_browser_on_confirm: None,
         }]
     );
 

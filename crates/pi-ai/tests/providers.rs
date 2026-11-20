@@ -380,7 +380,7 @@ fn enables_mid_conversation_system_messages_only_for_verified_models() {
         ("openai", "gpt-5.4"),
         ("openai", "gpt-5.5"),
         ("openai", "gpt-6-astra"),
-        ("openai-codex", "gpt-5.5"),
+        ("openai-codex", "gpt-5.6-sol"),
         ("anthropic", "claude-opus-5"),
         ("opencode", "gpt-5.4"),
         ("opencode", "gpt-5.6-terra"),
@@ -397,7 +397,7 @@ fn enables_mid_conversation_system_messages_only_for_verified_models() {
         ("openrouter", "openai/gpt-5.6-terra"),
     ];
     let unsupported = [
-        ("fireworks", "accounts/fireworks/models/nemotron-3-ultra-nvfp4"),
+        ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
         ("openai", "gpt-4.1"),
         ("openai", "gpt-5.2"),
         ("anthropic", "claude-sonnet-4-5"),
@@ -569,6 +569,7 @@ async fn resolves_anthropic_bearer_auth_from_env_with_auth_token_precedence() {
             ],
             &[],
         )),
+        identity: None,
     }));
     models.set_provider(anthropic_provider().expect("anthropic_provider ok"));
 
@@ -600,6 +601,7 @@ async fn preserves_anthropic_oauth_token_precedence_over_the_api_key() {
             &[("ANTHROPIC_API_KEY", "key"), ("ANTHROPIC_OAUTH_TOKEN", "oauth-token")],
             &[],
         )),
+        identity: None,
     }));
     models.set_provider(anthropic_provider().expect("anthropic_provider ok"));
 
@@ -684,6 +686,7 @@ async fn reports_bedrock_as_configured_from_ambient_aws_credentials_without_an_a
         credentials: None,
         models_store: None,
         auth_context: Some(FakeAuthContext::new(&[("AWS_PROFILE", "dev")], &[])),
+        identity: None,
     }));
     models.set_provider(amazon_bedrock_provider());
     let model = &models.get_models(Some("amazon-bedrock"))[0];
@@ -700,6 +703,7 @@ async fn reports_bedrock_as_configured_from_ambient_aws_credentials_without_an_a
         credentials: None,
         models_store: None,
         auth_context: Some(FakeAuthContext::new(&[], &[])),
+        identity: None,
     }));
     unconfigured.set_provider(amazon_bedrock_provider());
     assert!(
@@ -717,6 +721,7 @@ async fn requires_cloudflare_workers_ai_account_config_and_returns_scoped_env() 
         credentials: None,
         models_store: None,
         auth_context: Some(FakeAuthContext::new(&[("CLOUDFLARE_API_KEY", "cf-key")], &[])),
+        identity: None,
     }));
     missing_account.set_provider(cloudflare_workers_ai_provider());
     let model = &missing_account.get_models(Some("cloudflare-workers-ai"))[0];
@@ -738,6 +743,7 @@ async fn requires_cloudflare_workers_ai_account_config_and_returns_scoped_env() 
             ],
             &[],
         )),
+        identity: None,
     }));
     configured.set_provider(cloudflare_workers_ai_provider());
     let result = configured
@@ -768,6 +774,7 @@ async fn requires_cloudflare_ai_gateway_account_and_gateway_config_and_returns_s
             ],
             &[],
         )),
+        identity: None,
     }));
     missing_gateway.set_provider(cloudflare_ai_gateway_provider());
     let model = &missing_gateway.get_models(Some("cloudflare-ai-gateway"))[0];
@@ -790,6 +797,7 @@ async fn requires_cloudflare_ai_gateway_account_and_gateway_config_and_returns_s
             ],
             &[],
         )),
+        identity: None,
     }));
     configured.set_provider(cloudflare_ai_gateway_provider());
     let result = configured
@@ -903,6 +911,7 @@ async fn resolves_vertex_via_adc_file_plus_project_and_location() {
             ],
             &[adc],
         )),
+        identity: None,
     }));
     configured.set_provider(google_vertex_provider());
     let model = &configured.get_models(Some("google-vertex"))[0];
@@ -927,6 +936,7 @@ async fn resolves_vertex_via_adc_file_plus_project_and_location() {
         credentials: None,
         models_store: None,
         auth_context: Some(FakeAuthContext::new(&[("GOOGLE_CLOUD_PROJECT", "proj")], &[adc])),
+        identity: None,
     }));
     partial.set_provider(google_vertex_provider());
     assert!(
@@ -942,6 +952,7 @@ async fn resolves_vertex_via_adc_file_plus_project_and_location() {
         credentials: None,
         models_store: None,
         auth_context: Some(FakeAuthContext::new(&[("GOOGLE_CLOUD_API_KEY", "vertex-key")], &[])),
+        identity: None,
     }));
     keyed.set_provider(google_vertex_provider());
     let keyed_result = keyed
@@ -1117,6 +1128,7 @@ fn test_model(api: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -1405,6 +1417,8 @@ async fn applies_resolved_request_options_to_deferred_fetch_and_cancellation() {
                         timeout_ms: Some(100),
                         max_retries: None,
                         max_retry_delay_ms: None,
+                        identity: None,
+                        telemetry: None,
                     },
                     wait: Some(50),
                 },
@@ -1586,6 +1600,7 @@ async fn lets_a_newer_dynamic_refresh_bypass_and_supersede_older_network_work() 
         credentials: None,
         models_store: Some(store.clone()),
         auth_context: None,
+        identity: None,
     }));
     models.set_provider(provider.clone());
     assert!(provider.get_models().is_empty());

@@ -24,8 +24,10 @@ use crate::utils::diagnostics::{
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::{headers_to_record, provider_headers_to_record};
-use crate::utils::json_parse::parse_streaming_json;
+use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_env::get_provider_env_value;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
+use crate::utils::text::owned_slice;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PiMessagesToolChoice {
@@ -254,6 +256,8 @@ pub enum PiMessagesEvent {
         usage: Usage,
         #[serde(rename = "responseId", default, skip_serializing_if = "Option::is_none")]
         response_id: Option<String>,
+        #[serde(rename = "responseModel", default, skip_serializing_if = "Option::is_none")]
+        response_model: Option<String>,
         #[serde(rename = "providerThinkingLevel", default, skip_serializing_if = "Option::is_none")]
         provider_thinking_level: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,6 +271,8 @@ pub enum PiMessagesEvent {
         error_message: Option<String>,
         #[serde(rename = "responseId", default, skip_serializing_if = "Option::is_none")]
         response_id: Option<String>,
+        #[serde(rename = "responseModel", default, skip_serializing_if = "Option::is_none")]
+        response_model: Option<String>,
         #[serde(rename = "providerThinkingLevel", default, skip_serializing_if = "Option::is_none")]
         provider_thinking_level: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,7 +329,7 @@ fn parse_pi_messages_error_body(body: &str) -> Option<(JsonObject, PiMessagesErr
 fn truncate_diagnostic_string(value: &str) -> String {
     const MAX_LENGTH: usize = 8192;
     if pi_js::str16::len(value) > MAX_LENGTH {
-        format!("{}…", pi_js::str16::slice(value, 0, Some(MAX_LENGTH as i64)))
+        format!("{}…", owned_slice(value, 0, Some(MAX_LENGTH)))
     } else {
         value.to_string()
     }
@@ -400,7 +406,7 @@ fn append_rewrite_diagnostic(message: &mut AssistantMessage, rewrite: Option<&Pi
 
 struct EventConverter {
     partial: AssistantMessage,
-    tool_json: IndexMap<usize, String>,
+    tool_arguments: IndexMap<usize, ToolCallArgumentsStream>,
 }
 
 impl EventConverter {
@@ -423,20 +429,30 @@ impl EventConverter {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: pi_js::time::now_ms(),
+                duration_ms: None,
             },
-            tool_json: IndexMap::new(),
+            tool_arguments: IndexMap::new(),
         }
+    }
+
+    fn validate_content_index(&self, index: usize, is_start: bool, event_type: &str) -> Result<()> {
+        let valid = if is_start {
+            index <= self.partial.content.len()
+        } else {
+            index < self.partial.content.len()
+        };
+        if !valid {
+            return Err(Error::msg(format!(
+                "Invalid contentIndex {index} in pi-messages {event_type} event"
+            )));
+        }
+        Ok(())
     }
 
     fn set_slot(&mut self, index: usize, block: AssistantContentBlock) {
         if index < self.partial.content.len() {
             self.partial.content[index] = block;
         } else {
-            while self.partial.content.len() < index {
-                self.partial
-                    .content
-                    .push(AssistantContentBlock::Text(TextContent::new("")));
-            }
             self.partial.content.push(block);
         }
     }
@@ -447,12 +463,16 @@ impl EventConverter {
                 reason,
                 usage,
                 response_id,
+                response_model,
                 provider_thinking_level,
                 rewrite,
             } => {
                 self.partial.stop_reason = reason;
                 self.partial.usage = usage;
                 self.partial.response_id = response_id;
+                if let Some(rm) = response_model {
+                    self.partial.response_model = Some(rm);
+                }
                 if let Some(level) = provider_thinking_level {
                     self.partial.provider_thinking_level = Some(level);
                 }
@@ -467,6 +487,7 @@ impl EventConverter {
                 usage,
                 error_message,
                 response_id,
+                response_model,
                 provider_thinking_level,
                 rewrite,
             } => {
@@ -474,6 +495,9 @@ impl EventConverter {
                 self.partial.usage = usage;
                 self.partial.error_message = error_message;
                 self.partial.response_id = response_id;
+                if let Some(rm) = response_model {
+                    self.partial.response_model = Some(rm);
+                }
                 if let Some(level) = provider_thinking_level {
                     self.partial.provider_thinking_level = Some(level);
                 }
@@ -487,6 +511,7 @@ impl EventConverter {
                 partial: self.partial.clone(),
             }),
             PiMessagesEvent::TextStart { content_index } => {
+                self.validate_content_index(content_index, true, "text_start")?;
                 self.set_slot(content_index, AssistantContentBlock::Text(TextContent::new("")));
                 Ok(AssistantMessageEvent::TextStart {
                     content_index,
@@ -494,6 +519,7 @@ impl EventConverter {
                 })
             }
             PiMessagesEvent::TextDelta { content_index, delta } => {
+                self.validate_content_index(content_index, false, "text_delta")?;
                 let Some(AssistantContentBlock::Text(t)) = self.partial.content.get_mut(content_index) else {
                     return Err(Error::msg(format!(
                         "Unexpected text_delta at contentIndex {content_index}"
@@ -511,6 +537,7 @@ impl EventConverter {
                 content,
                 content_signature,
             } => {
+                self.validate_content_index(content_index, false, "text_end")?;
                 let Some(AssistantContentBlock::Text(t)) = self.partial.content.get_mut(content_index) else {
                     return Err(Error::msg(format!(
                         "Unexpected text_end at contentIndex {content_index}"
@@ -525,6 +552,7 @@ impl EventConverter {
                 })
             }
             PiMessagesEvent::ThinkingStart { content_index } => {
+                self.validate_content_index(content_index, true, "thinking_start")?;
                 self.set_slot(content_index, AssistantContentBlock::Thinking(ThinkingContent::new("")));
                 Ok(AssistantMessageEvent::ThinkingStart {
                     content_index,
@@ -532,6 +560,7 @@ impl EventConverter {
                 })
             }
             PiMessagesEvent::ThinkingDelta { content_index, delta } => {
+                self.validate_content_index(content_index, false, "thinking_delta")?;
                 let Some(AssistantContentBlock::Thinking(t)) = self.partial.content.get_mut(content_index) else {
                     return Err(Error::msg(format!(
                         "Unexpected thinking_delta at contentIndex {content_index}"
@@ -550,6 +579,7 @@ impl EventConverter {
                 content_signature,
                 redacted,
             } => {
+                self.validate_content_index(content_index, false, "thinking_end")?;
                 let Some(AssistantContentBlock::Thinking(t)) = self.partial.content.get_mut(content_index) else {
                     return Err(Error::msg(format!(
                         "Unexpected thinking_end at contentIndex {content_index}"
@@ -569,26 +599,29 @@ impl EventConverter {
                 id,
                 tool_name,
             } => {
+                self.validate_content_index(content_index, true, "toolcall_start")?;
                 self.set_slot(
                     content_index,
                     AssistantContentBlock::ToolCall(ToolCall::new(id, tool_name, JsonObject::new())),
                 );
-                self.tool_json.insert(content_index, String::new());
+                self.tool_arguments
+                    .insert(content_index, ToolCallArgumentsStream::new());
                 Ok(AssistantMessageEvent::ToolCallStart {
                     content_index,
                     partial: self.partial.clone(),
                 })
             }
             PiMessagesEvent::ToolCallDelta { content_index, delta } => {
-                let json_buf = self.tool_json.entry(content_index).or_default();
-                json_buf.push_str(&delta);
-                let parsed = parse_streaming_json(Some(json_buf));
-                let Some(AssistantContentBlock::ToolCall(tc)) = self.partial.content.get_mut(content_index) else {
-                    return Err(Error::msg(format!(
-                        "Unexpected toolcall_delta at contentIndex {content_index}"
-                    )));
-                };
-                tc.arguments = parsed;
+                self.validate_content_index(content_index, false, "toolcall_delta")?;
+                if let Some(args) = self.tool_arguments.get_mut(&content_index) {
+                    let parsed = args.append(&delta);
+                    let Some(AssistantContentBlock::ToolCall(tc)) = self.partial.content.get_mut(content_index) else {
+                        return Err(Error::msg(format!(
+                            "Unexpected toolcall_delta at contentIndex {content_index}"
+                        )));
+                    };
+                    tc.arguments = parsed;
+                }
                 Ok(AssistantMessageEvent::ToolCallDelta {
                     content_index,
                     delta,
@@ -599,13 +632,14 @@ impl EventConverter {
                 content_index,
                 tool_call,
             } => {
+                self.validate_content_index(content_index, false, "toolcall_end")?;
                 let Some(slot) = self.partial.content.get_mut(content_index) else {
                     return Err(Error::msg(format!(
                         "Unexpected toolcall_end at contentIndex {content_index}"
                     )));
                 };
                 *slot = AssistantContentBlock::ToolCall(tool_call.clone());
-                self.tool_json.shift_remove(&content_index);
+                self.tool_arguments.shift_remove(&content_index);
                 Ok(AssistantMessageEvent::ToolCallEnd {
                     content_index,
                     tool_call,
@@ -639,6 +673,7 @@ fn create_error_event(model: &Model, error: &Error, aborted: bool) -> AssistantM
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     };
 
     if !aborted {
@@ -729,12 +764,28 @@ async fn run_pi_messages_stream(
         }
     }
 
+    let identity_headers: crate::types::ProviderHeaders = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        options.base.identity.as_ref(),
+    )
+    .into_iter()
+    .map(|(k, v)| (k, Some(v)))
+    .collect();
+    let mut base_headers = crate::types::ProviderHeaders::new();
+    base_headers.insert("authorization".to_owned(), Some(format!("Bearer {api_key}")));
+    base_headers.insert("accept".to_owned(), Some("text/event-stream".to_owned()));
+    base_headers.insert("content-type".to_owned(), Some("application/json".to_owned()));
+
     let mut headers = Headers::new();
-    headers.set("authorization", &format!("Bearer {api_key}"));
-    headers.set("accept", "text/event-stream");
-    headers.set("content-type", "application/json");
-    if let Some(extra_headers) = provider_headers_to_record([options.base.headers.as_ref()]) {
-        for (name, value) in extra_headers {
+    if let Some(merged_headers) = provider_headers_to_record([
+        Some(&identity_headers),
+        Some(&base_headers),
+        options.base.headers.as_ref(),
+    ]) {
+        for (name, value) in merged_headers {
             headers.set(&name, &value);
         }
     }

@@ -1,12 +1,13 @@
 //! Port of packages/coding-agent/src/core/tools/output-accumulator.ts
 
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+
+use pi_js::fs::File;
 
 use crate::core::tools::truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncationOptions, TruncationResult, truncate_tail,
 };
+use crate::utils::output_files::create_output_file_stream;
 
 /// Bounded rolling output buffer for shell tools (`bash` / `powershell`).
 ///
@@ -75,19 +76,16 @@ impl OutputAccumulator {
         self.total_bytes += chunk.len();
 
         // Start spilling full output to a temp file as soon as output crosses `spill_threshold_bytes`
-        if self.temp_file.is_none() && self.total_bytes > self.spill_threshold_bytes {
-            let temp_dir = pi_js::env::tmp_dir();
-            let suffix = pi_js::crypto::random_bytes(8);
-            let hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-            let path = pi_js::path::join(&[&temp_dir, &format!("{}-{hex}.log", self.temp_file_prefix)]);
-            if let Ok(mut file) = OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
-                for existing in &self.chunks {
-                    let _ = file.write_all(existing.as_bytes());
-                }
-                let _ = file.write_all(chunk.as_bytes());
-                self.temp_file_path = Some(path);
-                self.temp_file = Some(file);
+        if self.temp_file.is_none()
+            && self.total_bytes > self.spill_threshold_bytes
+            && let Ok((path, mut file)) = create_output_file_stream(&self.temp_file_prefix, ".log")
+        {
+            for existing in &self.chunks {
+                let _ = file.write_all(existing.as_bytes());
             }
+            let _ = file.write_all(chunk.as_bytes());
+            self.temp_file_path = Some(path);
+            self.temp_file = Some(file);
         } else if let Some(file) = self.temp_file.as_mut() {
             let _ = file.write_all(chunk.as_bytes());
         }
@@ -115,7 +113,7 @@ impl OutputAccumulator {
 
     pub fn flush(&mut self) {
         if let Some(file) = self.temp_file.as_mut() {
-            let _ = file.flush();
+            let _ = file.sync();
         }
     }
 
@@ -126,15 +124,11 @@ impl OutputAccumulator {
             self.flush();
             return Some(path);
         }
-        let temp_dir = pi_js::env::tmp_dir();
-        let suffix = pi_js::crypto::random_bytes(8);
-        let hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-        let path = pi_js::path::join(&[&temp_dir, &format!("{}-{hex}.log", self.temp_file_prefix)]);
-        if let Ok(mut file) = OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+        if let Ok((path, mut file)) = create_output_file_stream(&self.temp_file_prefix, ".log") {
             for existing in &self.chunks {
                 let _ = file.write_all(existing.as_bytes());
             }
-            let _ = file.flush();
+            let _ = file.sync();
             self.temp_file_path = Some(path.clone());
             self.temp_file = Some(file);
             return Some(path);

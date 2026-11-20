@@ -28,6 +28,7 @@ fn make_model(api: &str, provider: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn make_context(model: &Model) -> Context {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: now,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_a".to_owned(),
@@ -77,6 +79,7 @@ fn make_context(model: &Model) -> Context {
                 nested_calls: None,
                 is_error: false,
                 timestamp: now,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_img".to_owned(),
@@ -87,6 +90,7 @@ fn make_context(model: &Model) -> Context {
                 nested_calls: None,
                 is_error: false,
                 timestamp: now,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call_b".to_owned(),
@@ -97,6 +101,7 @@ fn make_context(model: &Model) -> Context {
                 nested_calls: None,
                 is_error: false,
                 timestamp: now,
+                duration_ms: None,
             }),
         ],
         tools: None,
@@ -133,4 +138,36 @@ fn nests_image_tool_results_for_gemini_3_google_api_models() {
         .expect("Gemini 3 should nest image parts in functionResponse");
     assert_eq!(nested.len(), 1);
     assert!(nested[0].inline_data.is_some());
+}
+
+// https://github.com/earendil-works/pi/issues/8720
+#[test]
+fn treats_whitespace_only_tool_result_text_as_no_text() {
+    let model = make_model("google-generative-ai", "google", "gemini-3-pro-preview");
+    let mut context = make_context(&model);
+    for message in &mut context.messages {
+        let Message::ToolResult(tr) = message else {
+            continue;
+        };
+        if tr.tool_call_id == "call_a" {
+            tr.content = vec![UserContentBlock::Text(TextContent::new("\r\n"))];
+        }
+        if tr.tool_call_id == "call_img" {
+            tr.content.insert(0, UserContentBlock::Text(TextContent::new(" \n")));
+        }
+    }
+    let contents = convert_messages(&model, &normalize_context(&context));
+    let outputs: Vec<Option<&serde_json::Value>> = contents[2]
+        .parts
+        .iter()
+        .map(|part| part.function_response.as_ref().and_then(|r| r.response.get("output")))
+        .collect();
+    assert_eq!(
+        outputs,
+        vec![
+            Some(&json!("")),
+            Some(&json!("(see attached image)")),
+            Some(&json!("beta text"))
+        ]
+    );
 }

@@ -26,7 +26,7 @@ use crate::types::{
 use crate::utils::error_body::{SdkErrorInfo, format_provider_error, normalize_provider_error};
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::provider_headers_to_record;
-use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 use crate::utils::text::get_system_message_text;
@@ -380,6 +380,11 @@ fn gemini3_thinking_regex() -> Option<&'static Regex> {
         .as_ref()
 }
 
+fn gemini4_thinking_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"gemini-(?:[4-9]|[1-9]\d)").ok()).as_ref()
+}
+
 fn gemma4_thinking_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"gemma-?4").ok()).as_ref()
@@ -396,6 +401,8 @@ fn gemini_major_regex() -> Option<&'static Regex> {
 pub fn uses_google_thinking_level(model: &Model) -> bool {
     let id = model.id.to_ascii_lowercase();
     gemini3_thinking_regex().is_some_and(|re| re.is_match(&id))
+        // Match Gemini 4 and later, such as gemini-4-argon (#10890).
+        || gemini4_thinking_regex().is_some_and(|re| re.is_match(&id))
         || id == "gemini-flash-latest"
         || id == "gemini-flash-lite-latest"
         || gemma4_thinking_regex().is_some_and(|re| re.is_match(&id))
@@ -673,7 +680,7 @@ pub fn convert_messages(model: &Model, context: &TranscriptContext) -> Vec<Googl
                     Vec::new()
                 };
 
-                let has_text = !text_result.is_empty();
+                let has_text = !text_result.trim().is_empty();
                 let has_images = !image_content.is_empty();
                 let response_value = if has_text {
                     sanitize_surrogates(&text_result)
@@ -776,10 +783,75 @@ fn sanitize_for_open_api(schema: &JsonValue) -> JsonValue {
     }
 }
 
+/// Schema keywords whose values map names to subschemas, so their keys are not schema keywords.
+const JSON_SCHEMA_NAME_MAPS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
+
+/// Keywords containing a subschema or an array of subschemas, not literal data.
+const JSON_SCHEMA_SUBSCHEMAS: &[&str] = &[
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "items",
+    "prefixItems",
+    "additionalItems",
+    "unevaluatedItems",
+    "contains",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+];
+
+/// Rewrite string and number `const` values to single-value `enum`s.
+/// Gemini ignores `const` in `parametersJsonSchema` but honors `enum`.
+fn rewrite_const_as_enum(schema: &JsonValue, is_name_map: bool) -> JsonValue {
+    match schema {
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.iter().map(|item| rewrite_const_as_enum(item, false)).collect())
+        }
+        JsonValue::Object(map) => {
+            let mut result = Map::new();
+            for (key, value) in map {
+                let next_val = if is_name_map || JSON_SCHEMA_SUBSCHEMAS.contains(&key.as_str()) {
+                    rewrite_const_as_enum(value, false)
+                } else if JSON_SCHEMA_NAME_MAPS.contains(&key.as_str()) {
+                    rewrite_const_as_enum(value, true)
+                } else {
+                    value.clone()
+                };
+                result.insert(key.clone(), next_val);
+            }
+            if !is_name_map
+                && !result.contains_key("enum")
+                && let Some(const_val) = result.get("const").cloned()
+                && (const_val.is_string() || const_val.is_number())
+            {
+                result.remove("const");
+                result.insert("enum".to_owned(), JsonValue::Array(vec![const_val]));
+            }
+            JsonValue::Object(result)
+        }
+        other => other.clone(),
+    }
+}
+
 /// Convert tools to Gemini function declarations format.
 ///
-/// By default uses `parametersJsonSchema` which supports full JSON Schema. Set
-/// `use_parameters` to `true` to use the legacy OpenAPI 3.03 `parameters` field.
+/// By default uses `parametersJsonSchema` which supports full JSON Schema (including
+/// anyOf, oneOf, etc.). Gemini ignores `const` there, so string and number `const`
+/// values are sent as single-value `enum`s. Set `use_parameters` to `true` to use the
+/// legacy OpenAPI 3.03 `parameters` field.
 pub fn convert_tools(
     tools: &[Tool],
     use_parameters: bool,
@@ -806,7 +878,7 @@ pub fn convert_tools(
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 parameters: None,
-                parameters_json_schema: Some(param_value),
+                parameters_json_schema: Some(rewrite_const_as_enum(&param_value, false)),
             });
         }
     }
@@ -932,16 +1004,27 @@ pub(crate) fn to_json_value<T: Serialize + ?Sized>(value: &T) -> JsonValue {
 }
 
 pub(crate) fn build_google_headers(
-    model_headers: Option<&IndexMap<String, String>>,
+    model: &Model,
     options_headers: Option<&ProviderHeaders>,
+    identity: Option<&ClientIdentity>,
 ) -> Option<IndexMap<String, String>> {
-    let mut ua = ProviderHeaders::new();
-    ua.insert("User-Agent".to_owned(), Some(get_pi_user_agent()));
+    let identity_headers: ProviderHeaders = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        identity,
+    )
+    .into_iter()
+    .map(|(k, v)| (k, Some(v)))
+    .collect();
 
-    let model_ph: Option<ProviderHeaders> =
-        model_headers.map(|hdrs| hdrs.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect());
+    let model_ph: Option<ProviderHeaders> = model
+        .headers
+        .as_ref()
+        .map(|hdrs| hdrs.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect());
 
-    provider_headers_to_record([Some(&ua), model_ph.as_ref(), options_headers])
+    provider_headers_to_record([Some(&identity_headers), model_ph.as_ref(), options_headers])
 }
 
 pub(crate) struct GoogleParamsInput<'a> {
@@ -1535,6 +1618,7 @@ async fn run_google_sse_inner(
                     cache_read: 0.0,
                     cache_write: 0.0,
                     total: 0.0,
+                    total_from_provider: None,
                 },
             };
             calculate_cost(&AnyModel::Chat(model.clone()), &mut output.usage);
@@ -1596,6 +1680,7 @@ where
             raw_stop_reason: None,
             end_turn: None,
             timestamp: pi_js::time::now_ms(),
+            duration_ms: None,
         };
 
         let result: Result<()> = async {

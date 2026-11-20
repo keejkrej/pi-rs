@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use pi_ai::api::typesafe_system_one::classify;
 use pi_ai::types::{
     ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
-    ClassifierQuestion, ClassifierStopReason, FetchFunction, ModelCost, ModelModality, ProviderHeaders,
+    ClassifierQuestion, ClassifierStopReason, FetchFunction, ImageContent, ModelCost, ModelModality, ProviderHeaders,
+    SystemOneCompat, SystemOneImageInput,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Response};
@@ -33,6 +34,7 @@ fn base_model() -> ClassifierModel {
             tiers: None,
         },
         headers: None,
+        compat: None,
     }
 }
 
@@ -73,7 +75,11 @@ fn sample_context() -> ClassifierContext {
         },
     );
 
-    ClassifierContext { state, questions }
+    ClassifierContext {
+        state,
+        questions,
+        images: None,
+    }
 }
 
 fn wire_answers() -> Value {
@@ -316,6 +322,7 @@ async fn preserves_prototype_sensitive_question_ids_in_answers() {
     let proto_ctx = ClassifierContext {
         state: IndexMap::new(),
         questions: prototype_questions,
+        images: None,
     };
 
     let fetch_fn: FetchFunction = Arc::new(move |_req| {
@@ -491,4 +498,201 @@ async fn ignores_malformed_usage() {
     assert_eq!(usage.total_tokens, 3);
     assert_eq!(without_tokens.stop_reason, ClassifierStopReason::Stop);
     assert!(without_tokens.usage.is_none());
+}
+
+#[tokio::test]
+async fn rejects_image_input_for_text_only_models_before_sending() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = Arc::clone(&calls);
+    let fetch_fn: FetchFunction = Arc::new(move |_req| {
+        calls_ref.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(Response::new(
+                200,
+                Headers::new(),
+                pi_js::json::stringify(&json!({ "answers": wire_answers() })),
+            ))
+        })
+    });
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![ImageContent::new("aW1hZ2U=", "image/png")]);
+    let result = classify(&base_model(), &ctx, Some(opts_with_fetch("secret", fetch_fn))).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(result.stop_reason, ClassifierStopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some("System One API does not support image input for jev-latest")
+    );
+}
+
+#[tokio::test]
+async fn sends_images_to_typesafe_as_assets_with_the_opt_in_header() {
+    let captured = Arc::new(Mutex::new(Vec::<(Value, Headers)>::new()));
+    let cap_ref = Arc::clone(&captured);
+    let fetch_fn: FetchFunction = Arc::new(move |req| {
+        let cap_ref = Arc::clone(&cap_ref);
+        Box::pin(async move {
+            cap_ref
+                .lock()
+                .unwrap()
+                .push((req.body_json().unwrap_or(Value::Null), req.headers));
+            Ok(Response::new(
+                200,
+                Headers::from_pairs([("content-type", "application/json")]),
+                pi_js::json::stringify(&json!({ "answers": wire_answers() })),
+            ))
+        })
+    });
+    let mut image_model = base_model();
+    image_model.input = vec![ModelModality::Text, ModelModality::Image];
+    let base_ctx = sample_context();
+    let mut with_images = base_ctx.clone();
+    with_images.images = Some(vec![
+        ImageContent::new("cG5n", "image/png"),
+        ImageContent::new("anBlZw==", "image/jpeg"),
+    ]);
+
+    let result = classify(
+        &image_model,
+        &with_images,
+        Some(opts_with_fetch("secret", Arc::clone(&fetch_fn))),
+    )
+    .await;
+    let without_images = classify(&image_model, &base_ctx, Some(opts_with_fetch("secret", fetch_fn))).await;
+
+    assert_eq!(result.stop_reason, ClassifierStopReason::Stop);
+    assert_eq!(without_images.stop_reason, ClassifierStopReason::Stop);
+    let guard = captured.lock().unwrap();
+    assert_eq!(guard[0].0["state"], json!(["<image-1>", "<image-2>", base_ctx.state]));
+    assert_eq!(
+        guard[0].0["assets"],
+        json!({
+            "<image-1>": { "type": "image", "format": "png", "data_base64": "cG5n" },
+            "<image-2>": { "type": "image", "format": "jpeg", "data_base64": "anBlZw==" },
+        })
+    );
+    assert_eq!(guard[0].1.get("typesafe-danger-zone-images").as_deref(), Some("true"));
+    assert_eq!(guard[1].0["state"], json!(base_ctx.state));
+    assert!(guard[1].0.get("assets").is_none());
+    assert!(guard[1].1.get("typesafe-danger-zone-images").is_none());
+}
+
+#[tokio::test]
+async fn rejects_image_formats_typesafe_does_not_accept_before_sending() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = Arc::clone(&calls);
+    let fetch_fn: FetchFunction = Arc::new(move |_req| {
+        calls_ref.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(Response::new(
+                200,
+                Headers::new(),
+                pi_js::json::stringify(&json!({ "answers": wire_answers() })),
+            ))
+        })
+    });
+    let mut image_model = base_model();
+    image_model.input = vec![ModelModality::Text, ModelModality::Image];
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![ImageContent::new("d2VicA==", "image/webp")]);
+
+    let result = classify(&image_model, &ctx, Some(opts_with_fetch("secret", fetch_fn))).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(result.stop_reason, ClassifierStopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some("System One API accepts PNG and JPEG images for jev-latest, got image/webp")
+    );
+}
+
+#[tokio::test]
+async fn sends_images_to_openrouter_as_image_url_parts_and_supports_proxy_overrides() {
+    let base_ctx = sample_context();
+    let cases = [
+        ("openrouter", "https://openrouter.ai/api/v1", None),
+        ("openrouter", "https://proxy.example.com/v1", None),
+        ("custom", "https://us.openrouter.ai/api/v1", None),
+        (
+            "custom",
+            "https://proxy.example.com/v1",
+            Some(SystemOneCompat {
+                image_input: Some(SystemOneImageInput::StateImageUrls),
+                send_image_opt_in_header: Some(false),
+            }),
+        ),
+    ];
+
+    for (provider, base_url, compat) in cases {
+        let captured = Arc::new(Mutex::new(Vec::<(Value, Headers)>::new()));
+        let cap_ref = Arc::clone(&captured);
+        let fetch_fn: FetchFunction = Arc::new(move |req| {
+            let cap_ref = Arc::clone(&cap_ref);
+            Box::pin(async move {
+                cap_ref
+                    .lock()
+                    .unwrap()
+                    .push((req.body_json().unwrap_or(Value::Null), req.headers));
+                Ok(Response::new(
+                    200,
+                    Headers::from_pairs([("content-type", "application/json")]),
+                    pi_js::json::stringify(&json!({ "answers": wire_answers() })),
+                ))
+            })
+        });
+        let mut m = base_model();
+        m.id = "typesafe/jev-1.14".to_owned();
+        m.provider = provider.to_owned();
+        m.base_url = base_url.to_owned();
+        m.input = vec![ModelModality::Text, ModelModality::Image];
+        m.compat = compat;
+        let mut ctx = base_ctx.clone();
+        ctx.images = Some(vec![ImageContent::new("cG5n", "image/png")]);
+
+        let result = classify(&m, &ctx, Some(opts_with_fetch("secret", fetch_fn))).await;
+
+        assert_eq!(result.stop_reason, ClassifierStopReason::Stop);
+        let guard = captured.lock().unwrap();
+        assert_eq!(
+            guard[0].0["state"],
+            json!([{ "type": "image_url", "image_url": { "url": "data:image/png;base64,cG5n" } }, base_ctx.state])
+        );
+        assert!(guard[0].0.get("assets").is_none());
+        assert!(guard[0].1.get("typesafe-danger-zone-images").is_none());
+    }
+}
+
+#[tokio::test]
+async fn lets_compat_override_detected_image_settings_per_field() {
+    let captured = Arc::new(Mutex::new(Vec::<(Value, Headers)>::new()));
+    let cap_ref = Arc::clone(&captured);
+    let fetch_fn: FetchFunction = Arc::new(move |req| {
+        let cap_ref = Arc::clone(&cap_ref);
+        Box::pin(async move {
+            cap_ref
+                .lock()
+                .unwrap()
+                .push((req.body_json().unwrap_or(Value::Null), req.headers));
+            Ok(Response::new(
+                200,
+                Headers::from_pairs([("content-type", "application/json")]),
+                pi_js::json::stringify(&json!({ "answers": wire_answers() })),
+            ))
+        })
+    });
+    let mut m = base_model();
+    m.input = vec![ModelModality::Text, ModelModality::Image];
+    m.compat = Some(SystemOneCompat {
+        image_input: None,
+        send_image_opt_in_header: Some(false),
+    });
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![ImageContent::new("cG5n", "image/png")]);
+
+    classify(&m, &ctx, Some(opts_with_fetch("secret", fetch_fn))).await;
+
+    let guard = captured.lock().unwrap();
+    assert!(guard[0].0.get("assets").is_some());
+    assert!(guard[0].1.get("typesafe-danger-zone-images").is_none());
 }

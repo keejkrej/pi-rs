@@ -48,6 +48,8 @@ fn transform_mermaid(markdown: &str, options: TransformOptions) -> String {
             message_type: options.message_type,
             is_streaming: options.is_streaming,
             available_width: options.max_width as i64,
+            message_id: None,
+            timestamp: None,
         },
     )
 }
@@ -211,6 +213,46 @@ mod mermaid_rendering {
                 markdown,
                 TransformOptions {
                     message_type: MessageType::AssistantThinking,
+                    ..Default::default()
+                }
+            ),
+            markdown
+        );
+        assert!(
+            !transform_mermaid(
+                markdown,
+                TransformOptions {
+                    message_type: MessageType::User,
+                    ..Default::default()
+                }
+            )
+            .contains("```mermaid")
+        );
+        assert!(
+            !transform_mermaid(
+                markdown,
+                TransformOptions {
+                    message_type: MessageType::Summary,
+                    ..Default::default()
+                }
+            )
+            .contains("```mermaid")
+        );
+        assert_eq!(
+            transform_mermaid(
+                markdown,
+                TransformOptions {
+                    message_type: MessageType::Custom,
+                    ..Default::default()
+                }
+            ),
+            markdown
+        );
+        assert_eq!(
+            transform_mermaid(
+                markdown,
+                TransformOptions {
+                    message_type: MessageType::Changelog,
                     ..Default::default()
                 }
             ),

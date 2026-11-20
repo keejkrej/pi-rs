@@ -332,6 +332,10 @@ pub enum AuthEvent {
         user_code: String,
         verification_uri: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        open_browser_on_confirm: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        copy_code_on_confirm: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         interval_seconds: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_in_seconds: Option<f64>,
@@ -416,6 +420,9 @@ pub type GetDeviceIdFn = Arc<dyn Fn() -> String + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct LoginOptions {
     pub get_device_id: Option<GetDeviceIdFn>,
+    /// Name this app introduces itself with during login, e.g. OpenAI's agent name hint and
+    /// Codex originator. Defaults to pi's own name.
+    pub agent_name: Option<String>,
 }
 
 /// OAuth auth. The `refresh`/`to_auth` split lets `Models` own the locked

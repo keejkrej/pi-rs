@@ -21,6 +21,9 @@ use crate::cli::auth_command::{
     AuthCommandKind, get_auth_command_name, get_auth_command_usage, is_auth_command_help, parse_auth_command,
     print_auth_command_help, validate_auth_command_args,
 };
+use crate::cli::auth_login::{AuthLoginOptions, run_auth_login};
+use crate::cli::auth_logout::{AuthLogoutOptions, run_auth_logout};
+use crate::cli::auth_terminal::{ProcessAuthOutput, create_process_login_terminal};
 use crate::cli::config_selector::{ConfigSelectorOptions, select_config};
 use crate::cli::credential_print::resolve_credential_for_print;
 use crate::cli::file_processor::{ProcessFileOptions, process_file_arguments};
@@ -59,7 +62,8 @@ use crate::core::resource_loader::{
 };
 use crate::core::sdk::{CreateAgentSessionOptions, NoToolsMode, ScopedModelEntry};
 use crate::core::session_cwd::{
-    MissingSessionCwdError, format_missing_session_cwd_prompt, get_missing_session_cwd_issue,
+    MissingSessionCwdChoice, MissingSessionCwdError, format_missing_session_cwd_prompt, get_missing_session_cwd_issue,
+    get_missing_session_cwd_options,
 };
 use crate::core::session_manager::{NewSessionOptions, SessionManager, assert_valid_session_id};
 use crate::core::settings_diagnostics::{collect_settings_diagnostics, deduplicate_diagnostics};
@@ -137,9 +141,103 @@ fn is_plain_runtime_metadata_command(parsed: &Args) -> bool {
     parsed.print != Some(true) && parsed.mode.is_none() && (parsed.help == Some(true) || parsed.list_models.is_some())
 }
 
+async fn run_auth_login_command(args: &[String]) -> pi_js::Result<i32> {
+    let cwd = pi_js::env::cwd();
+    let agent_dir = get_agent_dir();
+    let settings_manager = SettingsManager::create(
+        &cwd,
+        Some(&agent_dir),
+        Some(SettingsManagerCreateOptions {
+            project_trusted: Some(false),
+        }),
+    );
+    apply_http_proxy_settings(settings_manager.get_global_settings().http_proxy.as_deref());
+    let _ = configure_http_dispatcher(settings_manager.get_http_idle_timeout_ms().ok());
+    let init_sig = pi_js::abort::AbortSignal::timeout(15_000);
+    let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
+        allow_model_network: Some(false),
+        signal: Some(init_sig),
+        ..Default::default()
+    })
+    .await?;
+
+    let controller = Arc::new(AbortController::new());
+    let interrupt_ctrl = Arc::clone(&controller);
+    let interrupt: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        interrupt_ctrl.abort(None);
+    });
+    let sigint_ctrl = Arc::clone(&controller);
+    let sigint_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            sigint_ctrl.abort(None);
+        }
+    });
+
+    let sm_for_device = settings_manager.clone();
+    let code = run_auth_login(
+        args,
+        AuthLoginOptions {
+            model_runtime: &model_runtime,
+            terminal: Arc::new(create_process_login_terminal(interrupt)),
+            agent_dir: &agent_dir,
+            cwd: &cwd,
+            get_device_id: Arc::new(move || sm_for_device.get_or_create_device_id()),
+            signal: controller.signal(),
+        },
+    )
+    .await;
+    sigint_task.abort();
+    Ok(code)
+}
+
+async fn run_auth_logout_command(args: &[String]) -> pi_js::Result<i32> {
+    let signal = pi_js::abort::AbortSignal::timeout(15_000);
+    let model_runtime = ModelRuntime::create(ModelRuntimeCreateOptions {
+        allow_model_network: Some(false),
+        signal: Some(signal.clone()),
+        ..Default::default()
+    })
+    .await?;
+    let terminal = ProcessAuthOutput;
+    Ok(run_auth_logout(
+        args,
+        AuthLogoutOptions {
+            model_runtime: &model_runtime,
+            terminal: &terminal,
+            signal,
+        },
+    )
+    .await)
+}
+
 async fn run_auth_command(args: &[String]) -> pi_js::Result<bool> {
     if is_auth_command_help(args) {
         print_auth_command_help();
+        return Ok(true);
+    }
+
+    if args.first().map(String::as_str) == Some("auth") && args.get(1).map(String::as_str) == Some("login") {
+        let filtered: Vec<String> = args[2..]
+            .iter()
+            .filter(|a| a.as_str() != "--offline")
+            .cloned()
+            .collect();
+        let code = run_auth_login_command(&filtered).await?;
+        if code != 0 {
+            return Err(pi_js::Error::Exit(code));
+        }
+        return Ok(true);
+    }
+    if args.first().map(String::as_str) == Some("auth") && args.get(1).map(String::as_str) == Some("logout") {
+        let filtered: Vec<String> = args[2..]
+            .iter()
+            .filter(|a| a.as_str() != "--offline")
+            .cloned()
+            .collect();
+        let code = run_auth_logout_command(&filtered).await?;
+        if code != 0 {
+            return Err(pi_js::Error::Exit(code));
+        }
         return Ok(true);
     }
 
@@ -612,6 +710,7 @@ fn build_session_options(
             cli_provider: parsed.provider.as_deref(),
             cli_model: Some(cli_model.as_str()),
             cli_thinking: parsed.thinking,
+            inline_api_key: Some(parsed.api_key.is_some()),
             model_runtime,
         });
         if let Some(warning) = resolved.warning {
@@ -709,22 +808,6 @@ fn resolve_cli_paths(cwd: &str, paths: Option<&[String]>) -> Option<Vec<String>>
     })
 }
 
-async fn prompt_for_missing_session_cwd(
-    issue: &crate::core::session_cwd::SessionCwdIssue,
-    settings_manager: &SettingsManager,
-) -> Option<String> {
-    let prompt = format_missing_session_cwd_prompt(issue);
-    let options = vec![
-        ("Continue".to_string(), Some(issue.fallback_cwd.clone())),
-        ("Cancel".to_string(), None),
-    ];
-    show_startup_selector(settings_manager, &prompt, &options)
-        .await
-        .ok()
-        .flatten()
-        .flatten()
-}
-
 fn convert_unknown_flags(flags: &IndexMap<String, UnknownFlagValue>) -> IndexMap<String, FlagValue> {
     flags
         .iter()
@@ -739,6 +822,10 @@ fn convert_unknown_flags(flags: &IndexMap<String, UnknownFlagValue>) -> IndexMap
 }
 
 pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Result<()> {
+    // Commands and startup selectors can load user-authored themes before runtime creation.
+    crate::modes::interactive::theme::theme::set_theme_json_validator(Some(Arc::new(|label, json| {
+        crate::modes::interactive::theme::theme_schema::validate_theme_json(label, json)
+    })));
     if let Some(role) = consume_internal_process_role()? {
         return match role {
             InternalProcessRole::Coordinator => run_coordinator_process(args).await,
@@ -777,7 +864,16 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     }
     cleanup_managed_install();
 
-    let cwd = pi_js::env::cwd();
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir.to_string_lossy().into_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            pi_js::console::error(&chalk().red().apply(
+                "Error: The current working directory no longer exists. Change to an existing directory and try again.",
+            ));
+            return Err(pi_js::Error::Exit(1));
+        }
+        Err(err) => return Err(pi_js::Error::msg(err.to_string())),
+    };
     let agent_dir = get_agent_dir();
     let bootstrap_settings = SettingsManager::create(
         &cwd,
@@ -832,6 +928,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                 cwd,
                 agent_dir,
                 credentials: None,
+                provider_token: None,
                 open_url: None,
                 log: None,
                 error: None,
@@ -946,14 +1043,30 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     let mut session_manager = create_session_manager(&parsed, &cwd, session_dir.as_deref(), &startup_settings).await?;
     if let Some(issue) = get_missing_session_cwd_issue(&session_manager, &cwd) {
         if app_mode == AppMode::Interactive {
-            let Some(selected_cwd) = prompt_for_missing_session_cwd(&issue, &startup_settings).await else {
-                return Ok(());
-            };
             let sf = issue
                 .session_file
                 .as_deref()
                 .ok_or_else(|| pi_js::Error::msg("Missing session file for missing cwd recovery"))?;
-            session_manager = SessionManager::open(sf, session_dir.as_deref(), Some(&selected_cwd))?;
+            let prompt = format_missing_session_cwd_prompt(&issue);
+            let options: Vec<(String, Option<MissingSessionCwdChoice>)> = get_missing_session_cwd_options(&issue)
+                .into_iter()
+                .map(|o| (o.label, o.value))
+                .collect();
+            let choice = show_startup_selector(&startup_settings, &prompt, &options)
+                .await
+                .ok()
+                .flatten()
+                .flatten();
+            match choice {
+                Some(MissingSessionCwdChoice::Continue) => {
+                    session_manager = SessionManager::open(sf, session_dir.as_deref(), Some(&cwd))?;
+                }
+                // Fork like `--session <id>` from another project, so the choice sticks without rewriting history.
+                Some(MissingSessionCwdChoice::Fork) => {
+                    session_manager = fork_session_or_exit(sf, &cwd, session_dir.as_deref(), None)?;
+                }
+                None => return Ok(()),
+            }
         } else {
             pi_js::console::error(&chalk().red().apply(&MissingSessionCwdError::new(issue).to_string()));
             return Err(pi_js::Error::Exit(1));
@@ -1030,10 +1143,8 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
             let saved_trust =
                 if should_resolve_trust || cached_trust.is_some() || parsed.project_trust_override.is_some() {
                     None
-                } else if !has_trust_resources {
-                    Some(true)
                 } else {
-                    Some(trust_store.get(&cwd).ok().flatten() == Some(true))
+                    trust_store.get(&cwd).ok().flatten()
                 };
             let project_trusted = if should_resolve_trust {
                 false
@@ -1041,7 +1152,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                 cached_trust
                     .or(parsed.project_trust_override)
                     .or(saved_trust)
-                    .unwrap_or(false)
+                    .unwrap_or(!has_trust_resources)
             };
 
             let runtime_settings = SettingsManager::create(
@@ -1140,6 +1251,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
                     additional_prompt_template_paths: resolved_prompt_paths.unwrap_or_default(),
                     additional_theme_paths: resolved_theme_paths.unwrap_or_default(),
                     no_extensions: parsed.no_extensions.unwrap_or(false),
+                    disabled_builtin_extensions: parsed.no_mcp.filter(|&v| v).map(|_| vec!["mcp".to_string()]),
                     no_skills: parsed.no_skills.unwrap_or(false),
                     no_prompt_templates: parsed.no_prompt_templates.unwrap_or(false),
                     no_themes: parsed.no_themes.unwrap_or(false),
@@ -1272,8 +1384,16 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
         .unwrap_or(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
     let _ = configure_http_dispatcher(Some(idle_timeout_ms));
 
+    let mut combined_diags = startup_settings_diagnostics;
+    combined_diags.extend(runtime.diagnostics());
+    let startup_diagnostics = deduplicate_diagnostics(&combined_diags);
+    let has_runtime_errors = runtime
+        .diagnostics()
+        .iter()
+        .any(|d| d.r#type == AgentSessionRuntimeDiagnosticType::Error);
+
     if parsed.help == Some(true) {
-        report_diagnostics(&startup_settings_diagnostics);
+        report_diagnostics(&startup_diagnostics);
         let extension_flags: Vec<_> = services
             .resource_loader
             .get_core_extensions()
@@ -1293,7 +1413,7 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     }
 
     if let Some(ref list_opt) = parsed.list_models {
-        report_diagnostics(&startup_settings_diagnostics);
+        report_diagnostics(&startup_diagnostics);
         let search_pattern = match list_opt {
             ListModelsOption::All => None,
             ListModelsOption::Pattern(p) => Some(p.as_str()),
@@ -1317,9 +1437,6 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     let (initial_message, initial_images) = prepare_initial_message(&mut parsed, stdin_content.as_deref()).await?;
     time("prepareInitialMessage", TimingNamespaceKind::Main);
 
-    crate::modes::interactive::theme::theme::set_theme_json_validator(Some(Arc::new(|label, json| {
-        crate::modes::interactive::theme::theme_json::validate_theme_json(label, json)
-    })));
     crate::modes::interactive::theme::theme::init_theme(
         services.settings_manager.get_theme().as_deref(),
         Some(app_mode == AppMode::Interactive),
@@ -1331,14 +1448,6 @@ pub async fn main(args: &[String], options: Option<MainOptions>) -> pi_js::Resul
     }
 
     time("resolveModelScope", TimingNamespaceKind::Main);
-    let mut combined_diags = startup_settings_diagnostics;
-    combined_diags.extend(runtime.diagnostics());
-    let startup_diagnostics = deduplicate_diagnostics(&combined_diags);
-    let has_runtime_errors = runtime
-        .diagnostics()
-        .iter()
-        .any(|d| d.r#type == AgentSessionRuntimeDiagnosticType::Error);
-
     if app_mode != AppMode::Interactive || has_runtime_errors {
         report_diagnostics(&startup_diagnostics);
     }

@@ -20,6 +20,7 @@ use crate::utils::abort::race_with_abort_signal;
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::error_body::{SdkErrorInfo, format_provider_error, normalize_provider_error};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record};
+use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
 
 const LABEL: &str = "llama.cpp";
@@ -291,8 +292,19 @@ async fn post(request: &RequestContext<'_>, path: &str, body: Value, observe: bo
     {
         defaults.insert("authorization".to_owned(), Some(format!("Bearer {api_key}")));
     }
+    let identity_headers: ProviderHeaders = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        options.and_then(|o| o.base.identity.as_ref()),
+    )
+    .into_iter()
+    .map(|(k, v)| (k, Some(v)))
+    .collect();
     let model_hdrs = model_headers_to_provider_headers(model.headers.as_ref());
     let hdr_map = match provider_headers_to_record([
+        Some(&identity_headers),
         Some(&defaults),
         model_hdrs.as_ref(),
         options.and_then(|o| o.base.headers.as_ref()),
@@ -709,6 +721,11 @@ pub async fn classify(
     let run: Result<IndexMap<String, ClassifierAnswer>> = async {
         if model.api != "llama-cpp-classify" {
             return Err(Error::msg(format!("Unsupported classifier API: {}", model.api)));
+        }
+        if context.images.as_deref().is_some_and(|images| !images.is_empty()) {
+            return Err(Error::msg(format!(
+                "{LABEL} classification does not support image input"
+            )));
         }
         let temperature = match options.as_ref().and_then(|o| o.temperature) {
             Some(t) => t,

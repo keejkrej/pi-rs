@@ -143,6 +143,7 @@ async fn applies_anthropic_style_cache_markers_when_model_compat_enables_them() 
             cache_control_format: Some(CacheControlFormat::Anthropic),
             ..Default::default()
         })),
+        sampling_params_by_thinking_level: None,
     };
 
     let params = capture_payload(&model, None, None).await;
@@ -186,6 +187,7 @@ async fn moves_the_conversation_cache_marker_to_a_tool_result() {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: ts,
+            duration_ms: None,
         }),
         Message::ToolResult(ToolResultMessage {
             tool_call_id: "call_1".to_owned(),
@@ -196,6 +198,7 @@ async fn moves_the_conversation_cache_marker_to_a_tool_result() {
             nested_calls: None,
             usage: None,
             timestamp: ts,
+            duration_ms: None,
         }),
     ];
 
@@ -236,6 +239,7 @@ async fn omits_anthropic_style_cache_markers_when_cache_retention_is_none() {
             cache_control_format: Some(CacheControlFormat::Anthropic),
             ..Default::default()
         })),
+        sampling_params_by_thinking_level: None,
     };
 
     let params = capture_payload(&model, Some(CacheRetention::None), None).await;

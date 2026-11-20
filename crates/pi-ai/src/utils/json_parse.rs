@@ -6,7 +6,7 @@ use crate::types::{JsonObject, JsonValue};
 use crate::vendor::partial_json::{allow, parse as partial_parse};
 
 fn is_valid_json_escape(c: char) -> bool {
-    matches!(c, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u')
+    matches!(c, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't')
 }
 
 fn is_control_character(c: char) -> bool {
@@ -132,6 +132,38 @@ pub fn parse_streaming_json_value(partial_json: Option<&str>) -> JsonValue {
     }
 
     JsonValue::Object(serde_json::Map::new())
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParsedToolCallArguments {
+    pub arguments: JsonObject,
+    pub arguments_error: Option<String>,
+}
+
+/// Parses the model's complete arguments text of a finished tool call.
+///
+/// Unlike [`parse_streaming_json`], never keeps a partially parsed prefix: malformed text returns empty
+/// arguments and `arguments_error` so tool validation can report it back to the model.
+pub fn parse_tool_call_arguments(json: Option<&str>) -> ParsedToolCallArguments {
+    let Some(raw) = json.filter(|s| !pi_js::str16::trim(s).is_empty()) else {
+        return ParsedToolCallArguments::default();
+    };
+    match parse_json_with_repair(raw) {
+        Ok(JsonValue::Object(map)) => ParsedToolCallArguments {
+            arguments: map.into_iter().collect(),
+            arguments_error: None,
+        },
+        Ok(_) => ParsedToolCallArguments {
+            arguments: JsonObject::new(),
+            arguments_error: Some(format!(
+                "Tool arguments must be a JSON object\n\nReceived arguments:\n{raw}"
+            )),
+        },
+        Err(err) => ParsedToolCallArguments {
+            arguments: JsonObject::new(),
+            arguments_error: Some(format!("{err}\n\nReceived arguments:\n{raw}")),
+        },
+    }
 }
 
 /// Attempts to parse potentially incomplete JSON during streaming into a tool-arguments object.

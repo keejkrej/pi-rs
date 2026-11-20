@@ -60,6 +60,7 @@ fn assistant_message(text: &str, calls: &[&str], stop_reason: Option<StopReason>
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn tool_result_message(id: &str) -> ToolResultMessage {
         nested_calls: None,
         is_error: false,
         timestamp: 3,
+        duration_ms: None,
     }
 }
 

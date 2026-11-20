@@ -194,6 +194,7 @@ fn clone_start_message(message: &AssistantMessage) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: message.timestamp,
+        duration_ms: None,
     }
 }
 

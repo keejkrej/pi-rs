@@ -71,6 +71,10 @@ impl Component for PresetSelectorModal {
     fn invalidate(&self) {
         self.container.invalidate();
     }
+
+    fn captures_viewport_input(&self) -> bool {
+        self.select_list.captures_viewport_input()
+    }
 }
 
 fn parse_thinking_level(raw: &str) -> Option<ThinkingLevel> {

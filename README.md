@@ -1,6 +1,6 @@
 # pi-rs
 
-A pure-Rust implementation of the [Pi](https://github.com/earendil-works/pi) coding agent harness, pairing CLI/wire/session parity with embedded QuickJS WASM extensions and a native GPU desktop client (`pi-gui`).
+A pure-Rust implementation of the [Pi](https://github.com/earendil-works/pi) v1.5.2 coding agent harness, pairing CLI/wire/session parity with embedded QuickJS WASM extensions and a native GPU desktop client (`pi-gui`).
 
 ## Overview
 
@@ -51,6 +51,7 @@ Binaries are written to `target/release/`:
 | Crate | Path | Responsibility |
 |---|---|---|
 | `pi-js` | [`crates/pi-js`](crates/pi-js) | JS/Node compatibility runtime (JSON, UTF-16, Intl, fetch, fs, path, TypeBox, jsdiff) |
+| `pi-schema` | [`crates/pi-schema`](crates/pi-schema) | Eval-free JSON Schema (Draft 2020-12 / Draft-07) validator, coercer, and type builders |
 | `pi-telemetry` | [`crates/pi-telemetry`](crates/pi-telemetry) | Telemetry contracts, schemas, and in-memory test adapter |
 | `pi-chord` | [`crates/pi-chord`](crates/pi-chord) | Chord object runtime (contracts, store, documents, links, HTTP/WS) |
 | `pi-tui` | [`crates/pi-tui`](crates/pi-tui) | Differential terminal UI, markdown/mermaid rendering, image protocols |

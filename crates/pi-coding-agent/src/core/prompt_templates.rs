@@ -39,29 +39,55 @@ static COMMAND_EXPAND_REGEX: LazyLock<Regex> =
 
 /// Parse command arguments respecting quoted strings (bash-style).
 pub fn parse_command_args(args_string: &str) -> Vec<String> {
+    let chars: Vec<char> = args_string.chars().collect();
     let mut args = Vec::new();
     let mut current = String::new();
+    // Tracks whether a token has started, so quoted empty strings ("" or '') are kept as arguments.
+    let mut has_token = false;
     let mut in_quote: Option<char> = None;
+    // Where the open quote started, so an unclosed quote can be re-read as literal text.
+    let mut quote_start: usize = 0;
 
-    for ch in args_string.chars() {
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+
         if let Some(q) = in_quote {
-            if ch == q {
+            if ch == '\\' && chars.get(i + 1).copied() == Some(q) {
+                // A backslash before the open quote's character keeps it as text.
+                current.push(q);
+                i += 1;
+            } else if ch == q {
                 in_quote = None;
             } else {
                 current.push(ch);
             }
-        } else if ch == '"' || ch == '\'' {
+        } else if (ch == '"' || ch == '\'') && !has_token {
+            // Quotes only open at the start of an argument, so apostrophes inside words stay literal.
             in_quote = Some(ch);
+            quote_start = i;
+            has_token = true;
         } else if pi_js::str16::is_js_whitespace(ch) {
-            if !current.is_empty() {
+            if has_token {
                 args.push(std::mem::take(&mut current));
+                has_token = false;
             }
         } else {
             current.push(ch);
+            has_token = true;
         }
+
+        if in_quote.is_some() && i + 1 == chars.len() {
+            // Unclosed quote: keep the quote character as text and parse the rest normally.
+            in_quote = None;
+            current = chars[quote_start].to_string();
+            i = quote_start;
+        }
+
+        i += 1;
     }
 
-    if !current.is_empty() {
+    if has_token {
         args.push(current);
     }
 

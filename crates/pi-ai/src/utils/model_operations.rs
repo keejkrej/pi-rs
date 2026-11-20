@@ -3,8 +3,8 @@
 use indexmap::IndexMap;
 
 use crate::types::{
-    AnyModel, AssistantImages, ClassifierModel, ClassifierResult, ClassifierStopReason, ImageModel, ImagesStopReason,
-    Model, ModelType,
+    AnyModel, AssistantImages, ClassifierContext, ClassifierModel, ClassifierResult, ClassifierStopReason, ImageModel,
+    ImagesStopReason, Model, ModelModality, ModelType,
 };
 use crate::utils::diagnostics::format_thrown_value;
 use crate::utils::models_error::{ModelsError, ModelsErrorCode};
@@ -56,6 +56,18 @@ pub fn assert_classifier_model(model: &AnyModel) -> pi_js::Result<&ClassifierMod
         format!("Model {}/{} is not a classifier model", model.provider(), model.id()),
     )
     .into())
+}
+
+/// Rejects classifier images for models whose catalog entry does not accept image input.
+pub fn assert_classifier_input_supported(model: &ClassifierModel, context: &ClassifierContext) -> pi_js::Result<()> {
+    if context.images.as_ref().is_some_and(|imgs| !imgs.is_empty()) && !model.input.contains(&ModelModality::Image) {
+        return Err(ModelsError::new(
+            ModelsErrorCode::Provider,
+            format!("Model {}/{} does not accept image input", model.provider, model.id),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub fn image_error_result(model: &ImageModel, error: &pi_js::Error, aborted: bool) -> AssistantImages {

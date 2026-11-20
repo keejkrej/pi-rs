@@ -44,6 +44,7 @@ fn dynamic_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -766,6 +767,7 @@ async fn complete_provider_authentication_warns_when_refresh_times_out() {
         prompt_cache: None,
         sampling_params: None,
         r#type: None,
+        sampling_params_by_thinking_level: None,
     };
     let created = create_agent_session(Some(CreateAgentSessionOptions {
         cwd: Some(cwd.clone()),
@@ -803,6 +805,7 @@ async fn complete_provider_authentication_warns_when_refresh_times_out() {
         prompt_cache: None,
         sampling_params: None,
         r#type: None,
+        sampling_params_by_thinking_level: None,
     };
     let rt = Arc::new(HangingRefreshRuntime {
         models: Mutex::new(vec![sonnet]),

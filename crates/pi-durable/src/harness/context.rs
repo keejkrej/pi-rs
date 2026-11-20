@@ -265,5 +265,6 @@ fn missing_result(call: &ToolCall, timestamp: i64) -> Message {
         nested_calls: None,
         is_error: true,
         timestamp,
+        duration_ms: None,
     })
 }

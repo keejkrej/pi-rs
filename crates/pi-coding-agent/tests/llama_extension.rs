@@ -424,6 +424,7 @@ async fn discovers_chat_template_thinking_support_for_loaded_models() {
             allow_network: true,
             force: None,
             signal: ctrl.signal(),
+            base_url: None,
         })
         .expect("refresh fut")
         .await
@@ -511,6 +512,7 @@ async fn persists_and_restores_selectable_models_for_cache_only_startup_refreshe
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -552,6 +554,7 @@ async fn persists_and_restores_selectable_models_for_cache_only_startup_refreshe
             allow_network: false,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -674,6 +677,7 @@ async fn preserves_cached_llama_cpp_context_for_unloaded_autoload_presets() {
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -692,6 +696,7 @@ async fn preserves_cached_llama_cpp_context_for_unloaded_autoload_presets() {
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -714,6 +719,7 @@ async fn preserves_cached_llama_cpp_context_for_unloaded_autoload_presets() {
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -774,6 +780,7 @@ async fn exposes_unloaded_presets_only_when_router_autoload_is_enabled() {
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await
@@ -869,7 +876,11 @@ async fn classifies_with_selectable_models_through_llama_server() {
         .provider
         .classify(
             &classifier,
-            &ClassifierContext { state, questions },
+            &ClassifierContext {
+                state,
+                questions,
+                images: None,
+            },
             Some(ClassifierOptions {
                 base: ProviderRequestOptions {
                     api_key: Some("local".to_string()),
@@ -937,6 +948,7 @@ async fn hides_unloaded_presets_when_router_autoload_is_disabled() {
             allow_network: true,
             force: None,
             signal: AbortController::new().signal(),
+            base_url: None,
         })
         .expect("refresh")
         .await

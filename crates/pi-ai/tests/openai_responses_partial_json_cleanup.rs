@@ -98,6 +98,7 @@ async fn drops_partial_json_from_completed_tool_calls_before_emitting_toolcall_e
         arguments: expected_args,
         thought_signature: None,
         namespace: None,
+        arguments_error: None,
     };
 
     assert_eq!(output.content, vec![AssistantContentBlock::ToolCall(expected.clone())]);
@@ -105,4 +106,81 @@ async fn drops_partial_json_from_completed_tool_calls_before_emitting_toolcall_e
 
     let serialized_block = serde_json::to_value(&output.content[0]).unwrap();
     assert!(serialized_block.get("partialJson").is_none());
+}
+
+// #10897
+#[tokio::test]
+async fn marks_malformed_final_arguments_instead_of_keeping_the_parsed_prefix() {
+    let model = get_model("openai", "gpt-5-mini").unwrap();
+    let mut output = create_pending_assistant_message(&model);
+    let event_stream = create_assistant_message_event_stream();
+    let arguments_json = r#"{"path":"README.md","content":"updated","mode":.5}"#;
+
+    let events = vec![
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_edit",
+                "call_id": "call_edit",
+                "name": "edit",
+                "arguments": "",
+            },
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": "{\"path\":\"README.md\"",
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": ",\"content\":\"updated\",\"mode\":.5}",
+        }),
+        json!({
+            "type": "response.function_call_arguments.done",
+            "output_index": 0,
+            "arguments": arguments_json,
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_edit",
+                "call_id": "call_edit",
+                "name": "edit",
+                "arguments": arguments_json,
+            },
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                },
+            },
+        }),
+    ];
+
+    let json_stream: ResponsesEventJsonStream = Box::pin(futures::stream::iter(events.into_iter().map(Ok)));
+    process_responses_stream(json_stream, &mut output, &event_stream, &model, None)
+        .await
+        .unwrap();
+
+    let Some(AssistantContentBlock::ToolCall(tc)) = output.content.first() else {
+        panic!("Expected toolCall block");
+    };
+    assert!(tc.arguments.is_empty());
+    let err = tc.arguments_error.as_deref().expect("argumentsError");
+    assert!(
+        err.ends_with(&format!("Received arguments:\n{arguments_json}")),
+        "{err}"
+    );
 }

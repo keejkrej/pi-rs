@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`pi-rs` is a pure-Rust implementation of the [Pi](https://github.com/earendil-works/pi) v1.0.0 coding agent harness across 14 parity crates plus `pi-gui` (a native GPU desktop client built with [Rune](https://github.com/anomalyco/rune)) and QuickJS WASM extension hosting (`pi-codemode`).
+`pi-rs` is a pure-Rust implementation of the [Pi](https://github.com/earendil-works/pi) v1.5.2 coding agent harness across 15 parity crates plus `pi-gui` (a native GPU desktop client built with [Rune](https://github.com/anomalyco/rune)) and QuickJS WASM extension hosting (`pi-codemode`).
 
 This file states repository layout, invariants, commands, and git rules. Detailed guides live under [`docs/README.md`](docs/README.md).
 
@@ -23,6 +23,7 @@ docs/
   porting/                          Historical v1.0.0 TS-to-Rust porting archive (PORTING.md, port-map.json, HANDOFF.md)
 crates/
   pi-js/                            Rust foundation providing Node/JS semantics (JSON, UTF-16, Intl, fetch, fs, path, time, env, TypeBox, jsdiff)
+  pi-schema/                        Eval-free JSON Schema (Draft 2020-12 / Draft-07) validator, coercer, and type builders
   pi-telemetry/                     Telemetry contracts, reference in-memory adapter, and schemas
   pi-chord/                         Chord object runtime (contracts, store, documents, links, HTTP/WS)
   pi-tui/                           Differential terminal UI library, markdown renderer, image protocols, native modifiers FFI
@@ -42,7 +43,7 @@ crates/
 
 ## Invariants
 
-- **On-disk, wire, and CLI parity**: Keep `~/.pi/agent` layout (`settings.json`, `auth.json`, `models.json`, session `.jsonl`, lockfiles), RPC JSONL events, Chord CBOR frames, and CLI output byte-compatible with upstream Pi v1.0.0.
+- **On-disk, wire, and CLI parity**: Keep `~/.pi/agent` layout (`settings.json`, `auth.json`, `models.json`, session `.jsonl`, lockfiles), RPC JSONL events, Chord CBOR frames, and CLI output byte-compatible with upstream Pi v1.5.2.
 - **`pi-js` runtime discipline** (enforced across ported crates; see [`docs/architecture.md`](docs/architecture.md)):
   - Use `indexmap::{IndexMap, IndexSet}` instead of `std::collections::{HashMap, HashSet}` to preserve JS insertion order.
   - Use `pi_js::json` instead of `serde_json::to_string*` / `to_vec*` / `to_writer*` outside `crates/pi-js`.

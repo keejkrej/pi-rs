@@ -36,6 +36,7 @@ fn assistant_msg(text: &str) -> AgentMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     }))
 }
 
@@ -75,6 +76,7 @@ fn sample_usage() -> Usage {
             cache_read: 0.3,
             cache_write: 0.4,
             total: 1.0,
+            total_from_provider: None,
         },
     }
 }
@@ -250,6 +252,7 @@ fn create_branched_session_cases_and_usage_roundtrip() {
             nested_calls: None,
             usage: Some(usage.clone()),
             timestamp: 3,
+            duration_ms: None,
         })))
         .unwrap();
     roundtrip

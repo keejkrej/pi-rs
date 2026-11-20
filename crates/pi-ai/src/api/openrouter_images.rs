@@ -18,6 +18,7 @@ use crate::utils::abort::race_with_abort_signal;
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::error_body::{SdkErrorInfo, format_provider_error, normalize_provider_error};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record};
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 
@@ -128,6 +129,7 @@ fn parse_usage(raw_usage: &Value, model: &ImageModel) -> Usage {
             cache_read: cache_read_cost,
             cache_write: cache_write_cost,
             total: input_cost + output_cost + cache_read_cost + cache_write_cost,
+            total_from_provider: Some(false),
         },
     }
 }
@@ -137,6 +139,7 @@ fn build_request_headers(
     api_key: &str,
     options_headers: Option<&ProviderHeaders>,
     timeout_ms: Option<u64>,
+    identity: Option<&ClientIdentity>,
 ) -> IndexMap<String, String> {
     let mut sdk_defaults = ProviderHeaders::new();
     sdk_defaults.insert("accept".to_owned(), Some("application/json".to_owned()));
@@ -159,8 +162,23 @@ fn build_request_headers(
     sdk_defaults.insert("x-stainless-runtime-version".to_owned(), Some("v24.21.0".to_owned()));
     sdk_defaults.insert("authorization".to_owned(), Some(format!("Bearer {api_key}")));
 
+    let identity_headers: ProviderHeaders = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        identity,
+    )
+    .into_iter()
+    .map(|(k, v)| (k, Some(v)))
+    .collect();
     let model_hdrs = model_headers_to_provider_headers(model.headers.as_ref());
-    match provider_headers_to_record([Some(&sdk_defaults), model_hdrs.as_ref(), options_headers]) {
+    match provider_headers_to_record([
+        Some(&sdk_defaults),
+        Some(&identity_headers),
+        model_hdrs.as_ref(),
+        options_headers,
+    ]) {
         Some(map) => map,
         None => IndexMap::new(),
     }
@@ -251,6 +269,7 @@ pub async fn generate_images(
             api_key,
             options.as_ref().and_then(|o| o.base.headers.as_ref()),
             timeout_ms,
+            options.as_ref().and_then(|o| o.base.identity.as_ref()),
         );
         let body_text = pi_js::json::stringify(&params);
         let max_retries = options.as_ref().and_then(|o| o.base.max_retries);

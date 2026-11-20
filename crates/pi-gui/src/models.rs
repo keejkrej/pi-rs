@@ -439,8 +439,12 @@ pub fn convert_agent_messages(messages: &[AgentMessage]) -> Vec<MessageViewModel
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 arguments_preview: truncate_preview(&args_str, 120),
-                                output_preview: None,
-                                status: ToolCallStatus::Pending,
+                                output_preview: tc.arguments_error.as_deref().map(|err| truncate_preview(err, 480)),
+                                status: if tc.arguments_error.is_some() {
+                                    ToolCallStatus::Error
+                                } else {
+                                    ToolCallStatus::Pending
+                                },
                                 duration_ms: None,
                                 expanded: false,
                             }));
@@ -464,12 +468,15 @@ pub fn convert_agent_messages(messages: &[AgentMessage]) -> Vec<MessageViewModel
                 if let Some(&(mp, bp)) = tool_index.get(&tr.tool_call_id)
                     && let Some(ContentBlockView::ToolCall(tc)) = out.get_mut(mp).and_then(|m| m.blocks.get_mut(bp))
                 {
-                    tc.output_preview = (!preview.is_empty()).then_some(preview);
+                    if !preview.is_empty() {
+                        tc.output_preview = Some(preview);
+                    }
                     tc.status = if tr.is_error {
                         ToolCallStatus::Error
                     } else {
                         ToolCallStatus::Success
                     };
+                    tc.duration_ms = tr.duration_ms;
                     continue;
                 }
                 out.push(mk_msg(
@@ -771,5 +778,81 @@ mod tests {
         assert_eq!(vm[0].blocks, vec![ContentBlockView::Text("hello".into())]);
         assert_eq!(infer_language_from_path("src/main.rs"), Some("rust"));
         assert_eq!(infer_language_from_path("ext.ts"), Some("typescript"));
+    }
+
+    #[test]
+    fn converts_tool_call_duration_and_arguments_error() {
+        let mut ok_call = pi_ai::types::ToolCall::new("tc-ok", "read", IndexMap::new());
+        ok_call
+            .arguments
+            .insert("path".into(), serde_json::Value::String("README.md".into()));
+        let mut bad_call = pi_ai::types::ToolCall::new("tc-bad", "edit", IndexMap::new());
+        bad_call.arguments_error = Some("Unexpected token at line 1".into());
+
+        let assistant = pi_ai::types::AssistantMessage {
+            content: vec![
+                AssistantContentBlock::ToolCall(ok_call),
+                AssistantContentBlock::ToolCall(bad_call),
+            ],
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-5".into(),
+            response_model: None,
+            response_id: None,
+            provider_thinking_level: None,
+            thinking_level: None,
+            diagnostics: None,
+            usage: pi_ai::types::Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            deferred: None,
+            error_message: None,
+            raw_stop_reason: None,
+            end_turn: None,
+            timestamp: 20,
+            duration_ms: Some(150),
+        };
+        let tool_res = pi_ai::types::ToolResultMessage {
+            tool_call_id: "tc-ok".into(),
+            tool_name: "read".into(),
+            content: vec![UserContentBlock::Text(pi_ai::types::TextContent {
+                text: "file body".into(),
+                text_signature: None,
+            })],
+            details: None,
+            usage: None,
+            nested_calls: None,
+            is_error: false,
+            timestamp: 25,
+            duration_ms: Some(42),
+        };
+
+        let vm = convert_agent_messages(&[
+            AgentMessage::Message(Message::Assistant(assistant)),
+            AgentMessage::Message(Message::ToolResult(tool_res)),
+        ]);
+        assert_eq!(vm.len(), 1);
+        assert_eq!(
+            vm[0].blocks,
+            vec![
+                ContentBlockView::ToolCall(ToolCallViewModel {
+                    id: "tc-ok".into(),
+                    name: "read".into(),
+                    arguments_preview: r#"{"path":"README.md"}"#.into(),
+                    output_preview: Some("file body".into()),
+                    status: ToolCallStatus::Success,
+                    duration_ms: Some(42),
+                    expanded: false,
+                }),
+                ContentBlockView::ToolCall(ToolCallViewModel {
+                    id: "tc-bad".into(),
+                    name: "edit".into(),
+                    arguments_preview: "{}".into(),
+                    output_preview: Some("Unexpected token at line 1".into()),
+                    status: ToolCallStatus::Error,
+                    duration_ms: None,
+                    expanded: false,
+                }),
+            ]
+        );
     }
 }

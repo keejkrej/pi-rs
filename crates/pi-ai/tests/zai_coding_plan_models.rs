@@ -14,7 +14,7 @@ fn exposes_glm_4_6v_on_china_coding_plan_catalog() {
     assert_eq!(model.input, vec![ModelInput::Text, ModelInput::Image]);
     assert_eq!(model.cost.input, 0.3);
     assert_eq!(model.cost.output, 0.9);
-    assert_eq!(model.cost.cache_read, 0.0);
+    assert_eq!(model.cost.cache_read, 0.05);
     assert_eq!(model.cost.cache_write, 0.0);
     assert_eq!(model.context_window, 128_000);
     assert_eq!(model.max_tokens, 32_768);

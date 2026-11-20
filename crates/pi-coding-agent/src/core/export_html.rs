@@ -14,7 +14,7 @@ use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::{AgentMessage, AgentState};
 use pi_ai::{AssistantContentBlock, Message};
 use pi_js::error::{Error, Result};
-use pi_js::vendor::typebox::Schema;
+use pi_schema::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -31,6 +31,7 @@ const TEMPLATE_HTML: &str = include_str!("export_html/template.html");
 const TEMPLATE_CSS: &str = include_str!("export_html/template.css");
 const TEMPLATE_JS: &str = include_str!("export_html/template.js");
 const MARKED_JS: &str = include_str!("export_html/vendor/marked.min.js");
+const MARKED_CJK_FRIENDLY_JS: &str = include_str!("export_html/vendor/marked-cjk-friendly.min.js");
 const HIGHLIGHT_JS: &str = include_str!("export_html/vendor/highlight.min.js");
 
 /// Explicit export page/card/info background overrides from a theme.
@@ -224,6 +225,7 @@ fn generate_html(session_data: &SessionData, options: &ExportOptions) -> Result<
         .replacen("{{JS}}", TEMPLATE_JS, 1)
         .replacen("{{SESSION_DATA}}", &session_data_base64, 1)
         .replacen("{{MARKED_JS}}", MARKED_JS, 1)
+        .replacen("{{MARKED_CJK_FRIENDLY_JS}}", MARKED_CJK_FRIENDLY_JS, 1)
         .replacen("{{HIGHLIGHT_JS}}", HIGHLIGHT_JS, 1))
 }
 

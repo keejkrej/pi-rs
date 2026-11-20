@@ -16,6 +16,7 @@ use crate::types::{
     ThinkingContent, ToolCall, ToolResultMessage, TranscriptContext, Usage, UserContentBlock, UserMessageContent,
 };
 use crate::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::get_system_message_text;
 
 const DEFAULT_API: &str = "faux";
@@ -181,7 +182,7 @@ struct FauxCoreInner {
     min_token_size: i64,
     max_token_size: i64,
     tokens_per_second: Option<f64>,
-    prompt_cache: Mutex<IndexMap<String, String>>,
+    prompt_cache: Mutex<IndexMap<String, Vec<String>>>,
     deferred_responses: Mutex<IndexMap<String, FauxDeferredEntry>>,
     pending_fetches: i64,
     poll_after_ms: Option<i64>,
@@ -750,6 +751,7 @@ pub fn faux_assistant_message(
         raw_stop_reason: None,
         end_turn: None,
         timestamp: opts.timestamp.unwrap_or_else(pi_js::time::now_ms),
+        duration_ms: None,
     }
 }
 
@@ -810,6 +812,7 @@ pub fn create_faux_core(options: RegisterFauxProviderOptions) -> FauxCore {
                 max_tokens: def.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
                 headers: None,
                 sampling_params: None,
+                sampling_params_by_thinking_level: None,
                 compat: None,
             }
         })
@@ -1126,13 +1129,13 @@ fn message_to_text(message: &Message) -> String {
     }
 }
 
-fn serialize_context(context: &TranscriptContext) -> String {
-    context
-        .messages
-        .iter()
-        .map(|m| format!("{}:{}", m.role(), message_to_text(m)))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+/// Length of the prompt text that joins `messages` with blank lines.
+fn joined_length(messages: &[String], count: usize) -> usize {
+    let mut length = if count > 0 { (count - 1) * 2 } else { 0 };
+    for msg in &messages[..count] {
+        length += pi_js::str16::len(msg);
+    }
+    length
 }
 
 fn common_prefix_byte_len(a: &str, b: &str) -> usize {
@@ -1143,20 +1146,42 @@ fn common_prefix_byte_len(a: &str, b: &str) -> usize {
         .sum()
 }
 
-fn common_prefix_length(a: &str, b: &str) -> i64 {
-    let prefix_bytes = common_prefix_byte_len(a, b);
-    pi_js::str16::len(&a[..prefix_bytes]) as i64
+/// Length of the common prefix of the two joined prompts. Equal messages are compared whole; characters
+/// are compared only from the first message that differs.
+fn common_prompt_prefix_length(previous: &[String], current: &[String]) -> usize {
+    let mut index = 0;
+    while index < previous.len() && index < current.len() && previous[index] == current[index] {
+        index += 1;
+    }
+    let rest = |messages: &[String]| -> String {
+        if index == messages.len() {
+            String::new()
+        } else if index > 0 {
+            format!("\n\n{}", messages[index..].join("\n\n"))
+        } else {
+            messages[index..].join("\n\n")
+        }
+    };
+    let rest_prev = rest(previous);
+    let rest_curr = rest(current);
+    let rest_bytes = common_prefix_byte_len(&rest_prev, &rest_curr);
+    joined_length(previous, index) + pi_js::str16::len(&rest_prev[..rest_bytes])
 }
 
 fn with_usage_estimate(
     mut message: AssistantMessage,
     context: &TranscriptContext,
     options: Option<&StreamOptions>,
-    prompt_cache: &mut IndexMap<String, String>,
+    prompt_cache: &mut IndexMap<String, Vec<String>>,
 ) -> AssistantMessage {
-    let _ = common_prefix_length;
-    let prompt_text = serialize_context(context);
-    let prompt_tokens = estimate_tokens(&prompt_text);
+    // One text per message; the whole prompt joins them with blank lines.
+    let prompt: Vec<String> = context
+        .messages
+        .iter()
+        .map(|m| format!("{}:{}", m.role(), message_to_text(m)))
+        .collect();
+    let prompt_length = joined_length(&prompt, prompt.len());
+    let prompt_tokens = ((prompt_length + 3) / 4) as i64;
     let output_tokens = estimate_tokens(&assistant_content_to_text(&assistant_blocks_to_faux_blocks(
         &message.content,
     )));
@@ -1170,15 +1195,15 @@ fn with_usage_estimate(
             .is_some_and(|r| matches!(r, crate::types::CacheRetention::None));
         if !no_cache {
             if let Some(previous_prompt) = prompt_cache.get(session_id) {
-                let prefix_bytes = common_prefix_byte_len(previous_prompt, &prompt_text);
-                cache_read = estimate_tokens(&previous_prompt[..prefix_bytes]);
+                let cached_chars = common_prompt_prefix_length(previous_prompt, &prompt);
+                cache_read = ((cached_chars + 3) / 4) as i64;
                 cache_write = (prompt_tokens - cache_read).max(0);
             } else {
                 cache_write = prompt_tokens;
             }
             // Every prompt token is either read from or written to the simulated cache.
             input = 0;
-            prompt_cache.insert(session_id.clone(), prompt_text);
+            prompt_cache.insert(session_id.clone(), prompt);
         }
     }
 
@@ -1250,6 +1275,7 @@ fn create_deferred_message(model: &Model, handle: &DeferredHandle) -> AssistantM
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -1271,6 +1297,7 @@ fn create_error_message(error: &Error, api: &str, provider: &str, model_id: &str
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -1446,6 +1473,8 @@ async fn stream_with_deltas(
                     partial: partial.clone(),
                 });
                 let serialized_args = pi_js::json::stringify(&tc_block.arguments);
+                // Partial arguments come from the same parser real providers use, so consumers see them grow.
+                let mut tool_arguments = ToolCallArgumentsStream::new();
                 for chunk in split_string_by_token_size(&serialized_args, min_token_size, max_token_size) {
                     schedule_chunk(&chunk, tokens_per_second, signal).await;
                     if signal.is_some_and(|s| s.aborted()) {
@@ -1456,6 +1485,9 @@ async fn stream_with_deltas(
                         });
                         stream.end(Some(aborted));
                         return Ok(());
+                    }
+                    if let Some(AssistantContentBlock::ToolCall(tc)) = partial.content.get_mut(index) {
+                        tc.arguments = tool_arguments.append(&chunk);
                     }
                     stream.push(AssistantMessageEvent::ToolCallDelta {
                         content_index: index,

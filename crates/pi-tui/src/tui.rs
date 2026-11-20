@@ -26,7 +26,77 @@ const TERMINAL_COLOR_QUERY: &str = "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?\x07\x1b
 /// PORT: JS `\d` is `[0-9]`.
 static DEVICE_ATTRIBUTES_RESPONSE_PATTERN: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("^\x1b\\[\\?[0-9;]*c$").expect("DEVICE_ATTRIBUTES_RESPONSE_PATTERN"));
+// CURSOR_MARKER + FAKE_CURSOR_START + text + FAKE_CURSOR_END. Truncating the line right after the cursor cell drops the end.
+static FOCUSED_FAKE_CURSOR: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new("(?s)(\x1b_pi:c\x07)\x1b_pi:fc\x07(.*?)(?:\x1b_pi:/fc\x07|\\z)").expect("FOCUSED_FAKE_CURSOR")
+});
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
+
+static EXIT_RESTORE_ONCE: std::sync::Once = std::sync::Once::new();
+static EXIT_RESTORE_REGISTRY: LazyLock<Mutex<Vec<(usize, Weak<TuiBaseInner>)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn run_exit_restore_handlers() {
+    let snapshot = {
+        let mut reg = EXIT_RESTORE_REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut upgraded = Vec::with_capacity(reg.len());
+        reg.retain(|(_, weak)| {
+            if let Some(inner) = weak.upgrade() {
+                upgraded.push(inner);
+                true
+            } else {
+                false
+            }
+        });
+        upgraded
+    };
+    for inner in snapshot {
+        let base = TuiBase { inner };
+        if base
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stopped
+        {
+            continue;
+        }
+        let prefix = base.exit_restore_prefix();
+        let suffix = base.exit_restore_suffix();
+        base.inner.terminal.restore_on_exit(&prefix, &suffix);
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn exit_restore_atexit_handler() {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_exit_restore_handlers));
+}
+
+fn ensure_exit_restore_registered() {
+    #[cfg(unix)]
+    EXIT_RESTORE_ONCE.call_once(|| {
+        // SAFETY: `exit_restore_atexit_handler` is a `C`-ABI function with no captures or shared state.
+        unsafe {
+            libc::atexit(exit_restore_atexit_handler);
+        }
+    });
+}
+
+fn register_tui_exit_restore(inner: &Arc<TuiBaseInner>) {
+    ensure_exit_restore_registered();
+    let key = Arc::as_ptr(inner) as usize;
+    let mut reg = EXIT_RESTORE_REGISTRY.lock().unwrap();
+    reg.retain(|(k, w)| *k != key && w.strong_count() > 0);
+    reg.push((key, Arc::downgrade(inner)));
+}
+
+fn unregister_tui_exit_restore(inner: &Arc<TuiBaseInner>) {
+    let key = Arc::as_ptr(inner) as usize;
+    let mut reg = EXIT_RESTORE_REGISTRY.lock().unwrap();
+    reg.retain(|(k, w)| *k != key && w.strong_count() > 0);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TuiMouseEventType {
@@ -257,6 +327,12 @@ pub trait Component: Send + Sync {
         false
     }
 
+    /// If true while focused, fullscreen viewport keys (`tui.altScreen.*` scrolling and prompt jumps) go to this
+    /// component instead of scrolling the transcript, as they do for a focused overlay. Default is false.
+    fn captures_viewport_input(&self) -> bool {
+        false
+    }
+
     /// Invalidate any cached rendering state.
     /// Called when theme changes or when component needs to re-render from scratch.
     fn invalidate(&self);
@@ -304,6 +380,15 @@ pub fn is_focusable(component: Option<&dyn Component>) -> bool {
 /// Components emit this at the cursor position when focused.
 /// TUI finds and strips this marker, then positions the hardware cursor there.
 pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
+
+/// Fake cursor markers - zero-width APC sequences around the text drawn as the cursor. See `resolve_fake_cursors`.
+pub const FAKE_CURSOR_START: &str = "\x1b_pi:fc\x07";
+pub const FAKE_CURSOR_END: &str = "\x1b_pi:/fc\x07";
+
+/// Wrap text in fake cursor markers.
+pub fn render_fake_cursor(text: &str) -> String {
+    format!("{FAKE_CURSOR_START}{text}{FAKE_CURSOR_END}")
+}
 
 /// Anchor position for overlays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1054,6 +1139,12 @@ pub(crate) trait TuiBaseOverrides: Send + Sync {
     fn after_terminal_start(&self) {}
     fn before_terminal_stop(&self, options: &TuiStopOptions) {}
     fn after_terminal_stop(&self, options: &TuiStopOptions) {}
+    fn get_exit_restore_prefix(&self, base: &TuiBase) -> String {
+        base.default_exit_restore_prefix()
+    }
+    fn get_exit_restore_suffix(&self) -> String {
+        String::new()
+    }
     fn get_mounted_roots(&self, base: &TuiBase) -> Vec<Arc<dyn Component>> {
         base.children()
     }
@@ -1673,6 +1764,7 @@ impl TuiBase {
 
     pub fn start(&self) {
         self.lock().stopped = false;
+        register_tui_exit_restore(&self.inner);
         self.before_terminal_start();
         let this_input = self.clone();
         let this_resize = self.clone();
@@ -1760,6 +1852,7 @@ impl TuiBase {
             state.stopped = true;
             state.terminal_color_scheme_notifications_enabled
         };
+        unregister_tui_exit_restore(&self.inner);
         self.cancel_render_timer();
         if notifications_enabled {
             self.inner.terminal.write("\x1b[?2031l");
@@ -2351,7 +2444,7 @@ impl TuiBase {
             };
             let initial = self.resolve_overlay_layout(options.as_ref(), 0, term_width, term_height);
             let render_width = usize::try_from(initial.width.max(0)).unwrap_or(0);
-            let mut overlay_lines = component.render(render_width);
+            let mut overlay_lines = self.resolve_fake_cursors(component.render(render_width));
             if let Some(mh) = initial.max_height {
                 let mh_usize = usize::try_from(mh.max(0)).unwrap_or(0);
                 if overlay_lines.len() > mh_usize {
@@ -2446,6 +2539,51 @@ impl TuiBase {
             }
         }
         None
+    }
+
+    /// Resolve fake cursor markers to reverse video. When the hardware cursor is shown, a fake cursor
+    /// directly after `CURSOR_MARKER` is dropped because the terminal cursor is drawn there. Fake cursors
+    /// of components without focus have no `CURSOR_MARKER` and stay visible.
+    pub(crate) fn resolve_fake_cursors(&self, lines: Vec<String>) -> Vec<String> {
+        let show_hw = self.get_show_hardware_cursor();
+        lines
+            .into_iter()
+            .map(|line| {
+                if !line.contains(FAKE_CURSOR_START) {
+                    return line;
+                }
+                let resolved = if show_hw {
+                    FOCUSED_FAKE_CURSOR.replace(&line, "$1$2").into_owned()
+                } else {
+                    line
+                };
+                resolved
+                    .replace(FAKE_CURSOR_START, "\x1b[7m")
+                    .replace(FAKE_CURSOR_END, "\x1b[27m")
+            })
+            .collect()
+    }
+
+    /// Mode resets written before the terminal's own resets when the process exits without `stop()`.
+    pub(crate) fn default_exit_restore_prefix(&self) -> String {
+        let notifications = if self.lock().terminal_color_scheme_notifications_enabled {
+            "\x1b[?2031l"
+        } else {
+            ""
+        };
+        format!("{notifications}\x1b[?25h")
+    }
+
+    fn exit_restore_prefix(&self) -> String {
+        self.overrides().map_or_else(
+            || self.default_exit_restore_prefix(),
+            |o| o.get_exit_restore_prefix(self),
+        )
+    }
+
+    fn exit_restore_suffix(&self) -> String {
+        self.overrides()
+            .map_or_else(String::new, |o| o.get_exit_restore_suffix())
     }
 
     pub async fn query_terminal_colors(&self, options: QueryTerminalColorsOptions) -> TerminalColors {

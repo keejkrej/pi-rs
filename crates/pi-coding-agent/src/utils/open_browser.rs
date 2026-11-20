@@ -16,8 +16,12 @@ pub fn open_browser(target: &str) {
     };
 
     let mut command = std::process::Command::new(cmd);
+    // On WSL, xdg-open launches explorer.exe, which fails when the cwd's
+    // \\wsl.localhost\... path exceeds MAX_PATH (#11592). The target is a URL,
+    // so no launcher needs pi's cwd.
     command
         .args(args)
+        .current_dir("/")
         .env_clear()
         .envs(pi_js::env::vars())
         .stdin(std::process::Stdio::null())

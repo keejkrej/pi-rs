@@ -1,7 +1,8 @@
 //! Port of packages/codemode/test/source.test.ts
 
 use pi_codemode::{
-    CODEMODE_SOURCE_GRAMMAR, CodemodeSourceError, CodemodeSourceOptions, ParsedCodemodeSource, parse_codemode_source,
+    CODEMODE_OPTIONS_PREFIX, CODEMODE_SOURCE_GRAMMAR, CodemodeSourceError, CodemodeSourceOptions, ParsedCodemodeSource,
+    parse_codemode_source,
 };
 
 #[test]
@@ -54,20 +55,49 @@ fn parses_the_options_line_and_keeps_line_numbers() {
 
 #[test]
 fn only_treats_the_first_line_as_an_options_line() {
-    let input = "text(1)\n// @options: {\"timeout_ms\": 1}";
-    assert_eq!(
-        parse_codemode_source(input).expect("second line ignored"),
-        ParsedCodemodeSource {
-            code: input.to_string(),
-            options: CodemodeSourceOptions::default(),
-        }
-    );
     assert_eq!(
         parse_codemode_source("// @optionsx {}\ntext(1)")
             .expect("non-prefix")
             .options,
         CodemodeSourceOptions::default()
     );
+    assert_eq!(
+        parse_codemode_source("text(\"// @options: {}\")")
+            .expect("inside string literal")
+            .options,
+        CodemodeSourceOptions::default()
+    );
+}
+
+// #10631: an options line after the first line used to be ignored, so its timeout never applied.
+#[test]
+fn rejects_an_options_line_that_is_not_the_first_line() {
+    let cases = [
+        (
+            "// count things\n// @options: {\"timeout_ms\": 1000}\nwhile (true) {}",
+            2,
+        ),
+        ("\n  // @options: {\"timeout_ms\": 1000}\nwhile (true) {}", 2),
+        ("text(1)\r\n// @options: {\"timeout_ms\": 1}", 2),
+        (
+            "// @options: {\"timeout_ms\": 1}\ntext(1)\n// @options: {\"timeout_ms\": 2}",
+            3,
+        ),
+    ];
+    for (input, line) in cases {
+        let err = parse_codemode_source(input).expect_err(&format!("expected error for: {input:?}"));
+        assert!(
+            err.downcast_ref::<CodemodeSourceError>().is_some(),
+            "expected CodemodeSourceError for {input:?}, got: {err}"
+        );
+        let expected =
+            format!("The {CODEMODE_OPTIONS_PREFIX} line must be the first line of the input; found one on line {line}");
+        assert!(
+            err.message().contains(&expected),
+            "for {input:?}: expected message containing {expected:?}, got {:?}",
+            err.message()
+        );
+    }
 }
 
 #[test]

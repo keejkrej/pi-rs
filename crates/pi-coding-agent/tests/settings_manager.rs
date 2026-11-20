@@ -583,28 +583,16 @@ mod cache_warming {
     use super::*;
 
     #[test]
-    fn defaults_to_streaming_and_ignores_project_settings() {
+    fn defaults_to_idle_and_ignores_project_settings() {
         let (_temp, agent_dir, project_dir) = setup_dirs();
-        // PORT: Rust `SettingsManager::get_cache_warming_mode()` defaults to `CacheWarmingMode::Streaming`
-        // (matching `settings_manager.rs:1515`), whereas newer TS changed the default to `"idle"`.
         assert_eq!(
             SettingsManager::create(&project_dir, Some(&agent_dir), None).get_cache_warming_mode(),
-            CacheWarmingMode::Streaming
+            CacheWarmingMode::Idle
         );
 
         std::fs::write(
             format!("{project_dir}/.pi/settings.json"),
-            pi_js::json::stringify(&json!({ "cacheWarming": "idle" })),
-        )
-        .unwrap();
-        assert_eq!(
-            SettingsManager::create(&project_dir, Some(&agent_dir), None).get_cache_warming_mode(),
-            CacheWarmingMode::Streaming
-        );
-
-        std::fs::write(
-            format!("{agent_dir}/settings.json"),
-            pi_js::json::stringify(&json!({ "cacheWarming": "idle" })),
+            pi_js::json::stringify(&json!({ "cacheWarming": "streaming" })),
         )
         .unwrap();
         assert_eq!(
@@ -614,12 +602,22 @@ mod cache_warming {
 
         std::fs::write(
             format!("{agent_dir}/settings.json"),
-            pi_js::json::stringify(&json!({ "cacheWarming": "bogus" })),
+            pi_js::json::stringify(&json!({ "cacheWarming": "streaming" })),
         )
         .unwrap();
         assert_eq!(
             SettingsManager::create(&project_dir, Some(&agent_dir), None).get_cache_warming_mode(),
             CacheWarmingMode::Streaming
+        );
+
+        std::fs::write(
+            format!("{agent_dir}/settings.json"),
+            pi_js::json::stringify(&json!({ "cacheWarming": "bogus" })),
+        )
+        .unwrap();
+        assert_eq!(
+            SettingsManager::create(&project_dir, Some(&agent_dir), None).get_cache_warming_mode(),
+            CacheWarmingMode::Idle
         );
     }
 

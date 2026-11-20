@@ -2,5 +2,7 @@
 pub mod system_theme;
 pub mod theme;
 pub mod theme_controller;
-pub mod theme_json;
 // @generated-mods end
+
+pub mod theme_schema;
+pub mod theme_tokens;

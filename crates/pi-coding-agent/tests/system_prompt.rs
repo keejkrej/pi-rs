@@ -60,7 +60,7 @@ fn prompt_structure_and_sections() {
     })
     .unwrap();
 
-    assert!(default_prompt.starts_with("You are an expert coding assistant operating inside pi"));
+    assert!(default_prompt.starts_with("You are a coding assistant running inside pi, a coding agent harness."));
     assert!(custom_prompt.starts_with("You are Exact.\n\n<cwd>"));
 
     let forced = build_system_prompt(&BuildSystemPromptOptions {
@@ -117,6 +117,9 @@ fn default_tools_and_docs() {
         "- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory"
     ));
     assert!(prompt.contains("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)"));
+    assert!(prompt.contains(
+        "Before implementing harness changes, read the relevant docs and examples in full, following related cross-references."
+    ));
 
     let ps_only = build_system_prompt(&BuildSystemPromptOptions {
         selected_tools: Some(vec!["powershell".to_owned()]),

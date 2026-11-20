@@ -9,7 +9,10 @@ pub mod tool;
 
 use std::sync::Arc;
 
+use indexmap::IndexMap;
+
 use crate::core::extensions::types::{CodemodeMode, ExtensionApi, ExtensionFactory};
+use crate::core::settings_defaults::DEFAULT_CODEMODE_MODE;
 use crate::extensions::codemode::tool::{CodemodeModelRuntime, CodemodeToolOptions, create_codemode_tool_definition};
 
 #[derive(Clone, Default)]
@@ -25,11 +28,13 @@ pub struct CodemodeExtensionOptions {
 }
 
 fn read_mode(pi: &ExtensionApi) -> CodemodeMode {
-    pi.get_settings()
-        .ok()
-        .and_then(|s| s.codemode)
-        .and_then(|c| c.mode)
-        .unwrap_or(CodemodeMode::On)
+    if pi.get_settings().ok().and_then(|s| s.codemode).and_then(|c| c.mode) == Some(CodemodeMode::Only) {
+        CodemodeMode::Only
+    } else if DEFAULT_CODEMODE_MODE == "only" {
+        CodemodeMode::Only
+    } else {
+        CodemodeMode::On
+    }
 }
 
 fn read_inline_budget(pi: &ExtensionApi) -> Option<usize> {
@@ -47,6 +52,7 @@ pub fn create_codemode_extension(options: CodemodeExtensionOptions) -> Extension
         Box::pin(async move {
             let pi_append = pi.clone();
             let pi_ns = pi.clone();
+            let pi_guidelines = pi.clone();
             let pi_mode = pi.clone();
             let pi_budget = pi.clone();
             let explicit_mode = options.mode;
@@ -64,6 +70,15 @@ pub fn create_codemode_extension(options: CodemodeExtensionOptions) -> Extension
                         .ok()
                         .and_then(|tools| tools.into_iter().find(|t| t.name == name))
                         .and_then(|t| t.namespace)
+                })),
+                get_tool_guidelines: Some(Arc::new(move || {
+                    let mut map = IndexMap::new();
+                    if let Ok(tools) = pi_guidelines.get_all_tools() {
+                        for t in tools {
+                            map.insert(t.name, t.prompt_guidelines.unwrap_or_default());
+                        }
+                    }
+                    map
                 })),
                 get_mode: Some(Arc::new(move || explicit_mode.unwrap_or_else(|| read_mode(&pi_mode)))),
                 get_inline_budget: Some(Arc::new(move || {

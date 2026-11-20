@@ -642,7 +642,6 @@ pub fn get_summarization_failure(response: &AssistantMessage, label: &str) -> Op
 
 fn create_summarization_options(
     model: &Model,
-    max_tokens: i64,
     api_key: Option<String>,
     headers: Option<ProviderHeaders>,
     env: Option<ProviderEnv>,
@@ -651,7 +650,6 @@ fn create_summarization_options(
     session_id: Option<String>,
 ) -> SimpleStreamOptions {
     let mut options = SimpleStreamOptions::default();
-    options.base.max_tokens = Some(max_tokens);
     options.base.signal = signal;
     options.base.api_key = api_key;
     options.base.headers = headers;
@@ -753,14 +751,6 @@ pub struct SummaryOutput {
     pub usage: Usage,
 }
 
-fn clamp_summary_max_tokens(budget: i64, model_max_tokens: i64) -> i64 {
-    if model_max_tokens > 0 {
-        budget.min(model_max_tokens)
-    } else {
-        budget
-    }
-}
-
 /// Build the provider context for a standalone summary request.
 fn build_summarization_context(prompt_text: String) -> Context {
     Context {
@@ -778,11 +768,12 @@ fn build_summarization_context(prompt_text: String) -> Context {
 pub async fn generate_summary(
     current_messages: &[AgentMessage],
     model: &Model,
-    reserve_tokens: i64,
+    // Unused. Kept for existing callers; summaries use the model's output limit (#9512).
+    _reserve_tokens: i64,
     options: Option<GenerateSummaryOptions>,
 ) -> Result<String> {
     Ok(
-        generate_summary_with_usage(current_messages, model, reserve_tokens, options)
+        generate_summary_with_usage(current_messages, model, _reserve_tokens, options)
             .await?
             .text,
     )
@@ -792,11 +783,11 @@ pub async fn generate_summary(
 pub async fn generate_summary_with_usage(
     current_messages: &[AgentMessage],
     model: &Model,
-    reserve_tokens: i64,
+    // Unused. Kept for existing callers; summaries use the model's output limit (#9512).
+    _reserve_tokens: i64,
     options: Option<GenerateSummaryOptions>,
 ) -> Result<SummaryOutput> {
     let opts = options.unwrap_or_default();
-    let max_tokens = clamp_summary_max_tokens(((0.8 * reserve_tokens as f64).floor()) as i64, model.max_tokens);
 
     let mut base_prompt = if opts.previous_summary.is_some() {
         update_summarization_prompt()
@@ -823,7 +814,6 @@ pub async fn generate_summary_with_usage(
 
     let completion_options = create_summarization_options(
         model,
-        max_tokens,
         opts.api_key,
         opts.headers,
         opts.env,
@@ -1180,7 +1170,6 @@ pub async fn compact(
         let turn_prefix_result = generate_turn_prefix_summary(
             &preparation.turn_prefix_messages,
             model,
-            preparation.settings.reserve_tokens,
             opts.api_key,
             opts.headers,
             opts.env,
@@ -1251,7 +1240,6 @@ pub async fn compact(
 async fn generate_turn_prefix_summary(
     messages: &[AgentMessage],
     model: &Model,
-    reserve_tokens: i64,
     api_key: Option<String>,
     headers: Option<ProviderHeaders>,
     env: Option<ProviderEnv>,
@@ -1263,7 +1251,6 @@ async fn generate_turn_prefix_summary(
     session_id: Option<String>,
     custom_instructions: Option<String>,
 ) -> Result<SummaryOutput> {
-    let max_tokens = clamp_summary_max_tokens(((0.5 * reserve_tokens as f64).floor()) as i64, model.max_tokens);
     let llm_messages = convert_to_llm(messages);
     let conversation_text = serialize_conversation(&llm_messages);
     let mut prompt_text =
@@ -1275,16 +1262,7 @@ async fn generate_turn_prefix_summary(
         prompt_text.push_str(custom);
     }
 
-    let options = create_summarization_options(
-        model,
-        max_tokens,
-        api_key,
-        headers,
-        env,
-        signal,
-        thinking_level,
-        session_id,
-    );
+    let options = create_summarization_options(model, api_key, headers, env, signal, thinking_level, session_id);
     let ctx = build_summarization_context(prompt_text);
     let response = complete_summarization(
         model,

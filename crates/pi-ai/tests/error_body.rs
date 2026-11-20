@@ -2,6 +2,7 @@
 
 use pi_ai::utils::error_body::{
     MAX_PROVIDER_ERROR_BODY_CHARS, SdkErrorInfo, format_provider_error, normalize_provider_error, normalize_sdk_error,
+    truncate_error_text, with_cause_detail,
 };
 use serde_json::json;
 
@@ -167,4 +168,41 @@ fn format_provider_error_surfaces_status_and_body() {
 
     let bare_norm = normalize_provider_error(&pi_js::Error::msg(r#"{"reason":"boom"}"#));
     assert_eq!(format_provider_error(&bare_norm, None), r#"{"reason":"boom"}"#);
+}
+
+// #9265
+#[test]
+fn truncate_error_text_keeps_independent_excerpt_without_retaining_whole_body() {
+    let body = "<html>".repeat(1_000_000);
+    let kept = truncate_error_text(&body, MAX_PROVIDER_ERROR_BODY_CHARS);
+    drop(body);
+    assert!(kept.starts_with("<html><html>"));
+    assert!(kept.ends_with(&format!(
+        "[truncated {} chars]",
+        6_000_000 - MAX_PROVIDER_ERROR_BODY_CHARS
+    )));
+}
+
+#[test]
+fn connection_error_cause_detail_appends_deepest_cause_and_error_code() {
+    let socket_err = pi_js::Error::js_with_code("Error", "connect ECONNREFUSED 127.0.0.1:8080", "ECONNREFUSED");
+    let fetch_err = pi_js::Error::js_with_cause("TypeError", "fetch failed", socket_err);
+    let error = pi_js::Error::js_with_cause("Error", "Connection error.", fetch_err);
+
+    assert_eq!(
+        format_provider_error(&normalize_provider_error(&error), None),
+        "Connection error.: connect ECONNREFUSED 127.0.0.1:8080"
+    );
+
+    let cause_no_code = pi_js::Error::js_with_code("Error", "other side closed", "UND_ERR_SOCKET");
+    let err_with_code = pi_js::Error::js_with_cause("Error", "Connection error.", cause_no_code);
+    assert_eq!(
+        with_cause_detail(&err_with_code),
+        "Connection error.: other side closed (UND_ERR_SOCKET)"
+    );
+
+    assert_eq!(
+        with_cause_detail(&pi_js::Error::js("Error", "Connection error.")),
+        "Connection error."
+    );
 }

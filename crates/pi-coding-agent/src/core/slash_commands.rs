@@ -66,12 +66,12 @@ pub static BUILTIN_SLASH_COMMANDS: LazyLock<Vec<BuiltinSlashCommand>> = LazyLock
         },
         BuiltinSlashCommand {
             name: "import",
-            description: "Import and resume a session from a JSONL file".to_owned(),
+            description: "Import a JSONL session, preserving its ID and working directory".to_owned(),
             argument_hint: None,
         },
         BuiltinSlashCommand {
             name: "share",
-            description: "Share session as a secret GitHub gist".to_owned(),
+            description: "Share session via a Radius artifact or a GitHub gist".to_owned(),
             argument_hint: None,
         },
         BuiltinSlashCommand {
@@ -141,7 +141,7 @@ pub static BUILTIN_SLASH_COMMANDS: LazyLock<Vec<BuiltinSlashCommand>> = LazyLock
         },
         BuiltinSlashCommand {
             name: "resume",
-            description: "Resume a different session".to_owned(),
+            description: "Resume another session".to_owned(),
             argument_hint: None,
         },
         BuiltinSlashCommand {

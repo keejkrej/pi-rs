@@ -3,30 +3,32 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::{APP_NAME, get_agent_dir};
 use crate::core::auth_storage::{AuthStorageBackend, FileAuthStorageBackend, LockResult};
-use crate::core::mcp_servers::mcp_namespace;
+pub use crate::core::mcp_servers::{McpClientRegistration, is_client_metadata_document_callback};
 use crate::vendor::proper_lockfile::{LockOptions, LockRelease, RetryOptions, lock};
 use pi_ai::utils::oauth_page::{oauth_error_html, oauth_success_html};
-use pi_js::abort::{AbortController, AbortReason, AbortSignal};
+use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Error, Result};
-use pi_mcp::oauth::provider::McpOAuthProviderClientMetadata;
-use pi_mcp::oauth::{
-    McpOAuthAuthorizationRequiredError, McpOAuthProvider, McpOAuthProviderOptions, McpOAuthState, McpOAuthStateStore,
-    OAuthCallback, OAuthCallbackPage, OAuthCallbackServer, OAuthCallbackServerOptions, OAuthChallenge,
-    OAuthClientInformationMixed, OAuthFlowOptions, OAuthFlowResult, authorize_mcp, parse_www_authenticate,
-    step_up_scope,
+pub use pi_mcp::mcp_namespace;
+pub use pi_mcp::oauth::{
+    CreateMcpAuthProviderOptions, ListenForLoopbackSignInOptions, McpAuthProvider, McpClientMetadataDocuments,
+    McpOAuthServerStore, McpOAuthSettings, McpOAuthState, McpOAuthStateStore, McpRefreshLockBusyError,
+    McpSignInOptions, McpSignInStart, OAuthCallbackPage, OAuthChallenge, OAuthTokens, WaitForLoopbackSignInOptions,
+    complete_mcp_sign_in, listen_for_loopback_sign_in, start_mcp_sign_in, wait_for_loopback_sign_in,
 };
-use pi_mcp::{AuthProvider, McpFetch, UnauthorizedContext};
-use serde_json::Value;
 
-const CALLBACK_HOST: &str = "127.0.0.1";
-const FALLBACK_REDIRECT_URL: &str = "http://127.0.0.1/callback";
-const REFRESH_SKEW_MS: i64 = 30_000;
-const REFRESH_REQUEST_TIMEOUT_MS: u64 = 15_000;
+pub use pi_mcp::oauth::McpSignInCancelledError;
+
+/// A refresh lock that its holder stopped renewing (the process was killed) is taken over after this.
+const REFRESH_LOCK_STALE_MS: u64 = 20_000;
+/// How long to wait for another process's refresh: longer than a stale lock lives.
+const REFRESH_LOCK_WAIT_MS: u64 = 25_000;
+const REFRESH_LOCK_RETRY_MS: u64 = 100;
 
 fn auth_with_lock<T, F>(backend: &dyn AuthStorageBackend, mut f: F) -> Result<T>
 where
@@ -49,83 +51,27 @@ async fn acquire_refresh_lock_async(lock_dir: &str, hash: &str) -> Result<LockRe
     lock(
         lock_dir,
         LockOptions {
-            stale: Some(30_000),
+            stale: Some(REFRESH_LOCK_STALE_MS),
             realpath: Some(false),
             lockfile_path: Some(lockfile_path),
             retries: Some(RetryOptions {
-                retries: 25,
-                factor: 1.5,
-                min_timeout: 20,
-                max_timeout: 1_000,
-                randomize: true,
+                retries: (REFRESH_LOCK_WAIT_MS / REFRESH_LOCK_RETRY_MS) as u32,
+                factor: 1.0,
+                min_timeout: REFRESH_LOCK_RETRY_MS,
+                max_timeout: REFRESH_LOCK_RETRY_MS,
+                randomize: false,
             }),
             ..Default::default()
         },
     )
     .await
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct McpOAuthSettings {
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub callback_port: Option<i64>,
-    pub callback_url: Option<String>,
-    pub scope: Option<String>,
-    pub client_name: Option<String>,
-    pub auth_server_metadata_url: Option<url::Url>,
-}
-
-struct CallbackSettings {
-    host: String,
-    redirect_host: String,
-    port: Option<i64>,
-    path: String,
-    fixed_redirect_url: Option<String>,
-}
-
-fn callback_settings(settings: &McpOAuthSettings) -> Result<CallbackSettings> {
-    let raw = settings.callback_url.as_deref().unwrap_or("http://127.0.0.1/callback");
-    let mut parsed = url::Url::parse(raw).map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
-    let host_str = parsed.host_str().unwrap_or(CALLBACK_HOST).to_string();
-    let address = host_str.trim_start_matches('[').trim_end_matches(']').to_string();
-    let url_port = parsed.port().map(i64::from);
-    let port = url_port.or(settings.callback_port);
-    let fixed_redirect_url = if url_port.is_some() {
-        settings.callback_url.clone()
-    } else if let Some(p) = port {
-        let _ = parsed.set_port(Some(p as u16));
-        Some(parsed.to_string())
-    } else {
-        None
-    };
-    Ok(CallbackSettings {
-        host: if address == "localhost" {
-            CALLBACK_HOST.to_string()
+    .map_err(|err| {
+        if err.code() == Some("ELOCKED") {
+            Error::typed("McpRefreshLockBusyError", McpRefreshLockBusyError::new())
         } else {
-            address.clone()
-        },
-        redirect_host: address,
-        port,
-        path: parsed.path().to_string(),
-        fixed_redirect_url,
-    })
-}
-
-fn merge_scopes(a: Option<&str>, b: Option<&str>) -> Option<String> {
-    let mut set = IndexSet::new();
-    for src in [a, b].into_iter().flatten() {
-        for word in src.split(|c: char| pi_js::str16::is_js_whitespace(c)) {
-            if !word.is_empty() {
-                set.insert(word.to_string());
-            }
+            err
         }
-    }
-    if set.is_empty() {
-        None
-    } else {
-        Some(set.into_iter().collect::<Vec<_>>().join(" "))
-    }
+    })
 }
 
 type StoredStates = IndexMap<String, McpOAuthState>;
@@ -160,31 +106,6 @@ fn store_keys(name: &str, server_url: &str) -> Result<(String, String)> {
         .to_string();
     let key = format!("{}|{legacy_key}", mcp_namespace(name));
     Ok((key, legacy_key))
-}
-
-#[async_trait]
-pub trait McpOAuthServerStore: McpOAuthStateStore {
-    async fn with_refresh_lock_erased(&self, f: Box<dyn FnOnce() -> BoxFuture<Result<()>> + Send>) -> Result<()>;
-}
-
-pub async fn with_refresh_lock<T, F>(store: &dyn McpOAuthServerStore, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> BoxFuture<Result<T>> + Send + 'static,
-{
-    let slot: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let slot_cb = Arc::clone(&slot);
-    store
-        .with_refresh_lock_erased(Box::new(move || {
-            Box::pin(async move {
-                let val = f().await?;
-                *slot_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(val);
-                Ok(())
-            })
-        }))
-        .await?;
-    let val = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
-    val.ok_or_else(|| Error::msg("Refresh lock closure completed without result"))
 }
 
 #[derive(Clone)]
@@ -223,7 +144,7 @@ impl McpOAuthCredentialStore {
         }))
     }
 
-    pub fn tokens(&self, name: &str, server_url: &str) -> Option<pi_mcp::oauth::OAuthTokens> {
+    pub fn tokens(&self, name: &str, server_url: &str) -> Option<OAuthTokens> {
         let (key, legacy_key) = store_keys(name, server_url).ok()?;
         auth_with_lock(self.backend.as_ref(), |current| {
             let states = parse_states(current)?;
@@ -273,8 +194,8 @@ impl McpOAuthCredentialStore {
     async fn run_with_refresh_lock(
         &self,
         key: &str,
-        f: Box<dyn FnOnce() -> BoxFuture<Result<()>> + Send>,
-    ) -> Result<()> {
+        f: Box<dyn FnOnce() -> BoxFuture<Result<Box<dyn std::any::Any + Send>>> + Send>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
         let in_proc_mutex = {
             let mut map = self.in_process_locks.lock().unwrap_or_else(|e| e.into_inner());
             Arc::clone(
@@ -334,211 +255,33 @@ impl McpOAuthStateStore for ServerOAuthStore {
 
 #[async_trait]
 impl McpOAuthServerStore for ServerOAuthStore {
-    async fn with_refresh_lock_erased(&self, f: Box<dyn FnOnce() -> BoxFuture<Result<()>> + Send>) -> Result<()> {
-        self.store.run_with_refresh_lock(&self.key, f).await
-    }
-}
-
-fn registered_redirect_urls(client: Option<&OAuthClientInformationMixed>) -> Vec<String> {
-    client.and_then(|c| c.redirect_uris.clone()).unwrap_or_default()
-}
-
-fn create_provider<F>(
-    server_url: &str,
-    store: Arc<dyn McpOAuthStateStore>,
-    settings: &McpOAuthSettings,
-    redirect_url: String,
-    on_redirect: F,
-) -> McpOAuthProvider
-where
-    F: Fn(url::Url) + Send + Sync + 'static,
-{
-    McpOAuthProvider::new(McpOAuthProviderOptions {
-        server_url: server_url.to_string(),
-        redirect_url,
-        client_metadata: McpOAuthProviderClientMetadata {
-            client_name: Some(settings.client_name.clone().unwrap_or_else(|| APP_NAME.to_string())),
-            ..McpOAuthProviderClientMetadata::default()
-        },
-        client_id: settings.client_id.clone(),
-        client_secret: settings.client_secret.clone(),
-        store: Some(store),
-        on_redirect: Arc::new(move |url| {
-            on_redirect(url);
-            Box::pin(async { Ok(()) })
-        }),
-    })
-}
-
-#[async_trait]
-pub trait McpAuthProvider: AuthProvider {
-    async fn settled(&self);
-}
-
-struct SharedMcpAuthProvider {
-    server_url: String,
-    store: Arc<dyn McpOAuthServerStore>,
-    settings_fn: Arc<dyn Fn() -> Result<McpOAuthSettings> + Send + Sync>,
-    on_challenge: Arc<dyn Fn(OAuthChallenge) + Send + Sync>,
-    refreshing: Arc<Mutex<Option<futures::future::Shared<BoxFuture<std::result::Result<(), Arc<Error>>>>>>>,
-}
-
-impl SharedMcpAuthProvider {
-    fn refresh(
+    async fn with_refresh_lock_boxed(
         &self,
-        stale_token: Option<String>,
-        custom_fetch: Option<McpFetch>,
-        challenge: Option<OAuthChallenge>,
-    ) -> futures::future::Shared<BoxFuture<std::result::Result<(), Arc<Error>>>> {
-        use futures::FutureExt;
-        let mut guard = self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref existing) = *guard {
-            return existing.clone();
-        }
-        let store = Arc::clone(&self.store);
-        let server_url = self.server_url.clone();
-        let settings_fn = Arc::clone(&self.settings_fn);
-        let slot = Arc::clone(&self.refreshing);
-
-        let fut: BoxFuture<std::result::Result<(), Arc<Error>>> = Box::pin(async move {
-            let store_in = Arc::clone(&store);
-            let result = with_refresh_lock(store.as_ref(), move || {
-                let store = store_in;
-                Box::pin(async move {
-                    let state = store.load().await?;
-                    let current_token = state
-                        .as_ref()
-                        .and_then(|s| s.tokens.as_ref())
-                        .map(|t| t.access_token.clone());
-                    if current_token != stale_token {
-                        return Ok(());
-                    }
-                    let has_refresh = state
-                        .as_ref()
-                        .and_then(|s| s.tokens.as_ref())
-                        .and_then(|t| t.refresh_token.as_ref())
-                        .is_some_and(|rt| !rt.is_empty());
-                    if !has_refresh {
-                        return Err(Error::typed(
-                            "McpOAuthAuthorizationRequiredError",
-                            McpOAuthAuthorizationRequiredError::new(),
-                        ));
-                    }
-                    let settings = settings_fn()?;
-                    let cb_settings = callback_settings(&settings)?;
-                    let registered =
-                        registered_redirect_urls(state.as_ref().and_then(|s| s.client_information.as_ref()));
-                    let redirect_url = cb_settings
-                        .fixed_redirect_url
-                        .or_else(|| registered.into_iter().next())
-                        .unwrap_or_else(|| FALLBACK_REDIRECT_URL.to_string());
-                    let provider = create_provider(
-                        &server_url,
-                        Arc::clone(&store) as Arc<dyn McpOAuthStateStore>,
-                        &settings,
-                        redirect_url,
-                        |_| {},
-                    );
-                    let wrapped_fetch: Option<McpFetch> = custom_fetch.map(|base| {
-                        Arc::new(move |url: &str, init: Option<pi_mcp::auth_provider::McpFetchInit>| {
-                            let mut init = init.unwrap_or_default();
-                            init.signal = Some(AbortSignal::timeout(REFRESH_REQUEST_TIMEOUT_MS));
-                            base(url, Some(init))
-                        }) as McpFetch
-                    });
-                    let flow_res = authorize_mcp(
-                        &provider,
-                        OAuthFlowOptions {
-                            server_url,
-                            authorization_code: None,
-                            iss: None,
-                            scope: challenge.as_ref().and_then(|c| c.scope.clone()),
-                            resource_metadata_url: challenge.as_ref().and_then(|c| c.resource_metadata_url.clone()),
-                            authorization_server_metadata_url: settings.auth_server_metadata_url,
-                            fetch: wrapped_fetch,
-                            skip_issuer_validation: None,
-                            skip_refresh: None,
-                        },
-                    )
-                    .await?;
-                    if flow_res == OAuthFlowResult::Redirect {
-                        return Err(Error::typed(
-                            "McpOAuthAuthorizationRequiredError",
-                            McpOAuthAuthorizationRequiredError::new(),
-                        ));
-                    }
-                    Ok(())
-                })
-            })
-            .await;
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            result.map_err(Arc::new)
-        });
-        let shared = fut.shared();
-        *guard = Some(shared.clone());
-        shared
+        work: Box<dyn FnOnce() -> BoxFuture<Result<Box<dyn std::any::Any + Send>>> + Send>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        self.store.run_with_refresh_lock(&self.key, work).await
     }
 }
 
-fn clone_arc_err(err: &Arc<Error>) -> Error {
-    if let Some(e) = err.downcast_ref::<McpOAuthAuthorizationRequiredError>() {
-        return Error::typed("McpOAuthAuthorizationRequiredError", e.clone());
-    }
-    Error::msg(err.message())
-}
+struct PiClientMetadataDocuments;
 
-#[async_trait]
-impl AuthProvider for SharedMcpAuthProvider {
-    async fn token(&self) -> Result<Option<String>> {
-        let pending = self.refreshing.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(fut) = pending {
-            let _ = fut.await;
-        }
-        let state = self.store.load().await?;
-        let token = state
-            .as_ref()
-            .and_then(|s| s.tokens.as_ref())
-            .map(|t| t.access_token.clone());
-        let expired = state
-            .as_ref()
-            .and_then(|s| s.tokens_expire_at)
-            .is_some_and(|exp| exp - REFRESH_SKEW_MS <= pi_js::time::now_ms());
-        let has_refresh = state
-            .as_ref()
-            .and_then(|s| s.tokens.as_ref())
-            .and_then(|t| t.refresh_token.as_ref())
-            .is_some_and(|rt| !rt.is_empty());
-        if !expired || !has_refresh {
-            return Ok(token);
-        }
-        let _ = self.refresh(token, None, None).await;
-        Ok(self.store.load().await?.and_then(|s| s.tokens).map(|t| t.access_token))
+impl McpClientMetadataDocuments for PiClientMetadataDocuments {
+    fn base_url(&self) -> &str {
+        "https://pi.dev/oauth"
     }
 
-    fn on_unauthorized(&self, context: UnauthorizedContext) -> Option<BoxFuture<Result<()>>> {
-        let challenge = parse_www_authenticate(context.response.headers().get("www-authenticate").as_deref());
-        (self.on_challenge)(challenge.clone());
-        if challenge.error.as_deref() == Some("insufficient_scope") {
-            return Some(Box::pin(async {
-                Err(Error::typed(
-                    "McpOAuthAuthorizationRequiredError",
-                    McpOAuthAuthorizationRequiredError::new(),
-                ))
-            }));
-        }
-        let fut = self.refresh(context.token, Some(context.fetch), Some(challenge));
-        Some(Box::pin(async move { fut.await.map_err(|e| clone_arc_err(&e)) }))
+    fn lists_redirect_url(&self, redirect_url: &str) -> bool {
+        is_client_metadata_document_callback(Some(redirect_url))
     }
 }
 
-#[async_trait]
-impl McpAuthProvider for SharedMcpAuthProvider {
-    async fn settled(&self) {
-        let pending = self.refreshing.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(fut) = pending {
-            let _ = fut.await;
-        }
+/// `settings` for `pi-mcp`: a rebranded build would show up as `pi` with pi's documents, so `auto` registers.
+fn pi_settings(mut settings: McpOAuthSettings) -> McpOAuthSettings {
+    let auto = settings.client_registration.unwrap_or(McpClientRegistration::Auto) == McpClientRegistration::Auto;
+    if auto && *APP_NAME != "pi" {
+        settings.client_registration = Some(McpClientRegistration::Dcr);
     }
+    settings
 }
 
 pub fn create_mcp_auth_provider(
@@ -546,13 +289,15 @@ pub fn create_mcp_auth_provider(
     store: Arc<dyn McpOAuthServerStore>,
     settings: Arc<dyn Fn() -> Result<McpOAuthSettings> + Send + Sync>,
     on_challenge: Arc<dyn Fn(OAuthChallenge) + Send + Sync>,
-) -> Arc<dyn McpAuthProvider> {
-    Arc::new(SharedMcpAuthProvider {
+) -> Arc<dyn McpAuthProvider + Send + Sync> {
+    pi_mcp::oauth::create_mcp_auth_provider(CreateMcpAuthProviderOptions {
         server_url: server_url.into(),
         store,
-        settings_fn: settings,
-        on_challenge,
-        refreshing: Arc::new(Mutex::new(None)),
+        settings: Arc::new(move || Ok(pi_settings(settings()?))),
+        client_name: (*APP_NAME).to_string(),
+        client_metadata_documents: Some(Arc::new(PiClientMetadataDocuments)),
+        on_challenge: Arc::new(move |challenge| on_challenge(challenge.clone())),
+        redirect_url: None,
     })
 }
 
@@ -562,198 +307,69 @@ pub trait McpSignInPrompt: Send + Sync {
     async fn prompt_for_redirect_url(&self, signal: AbortSignal) -> Result<Option<String>>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Sign-in cancelled")]
-pub struct McpSignInCancelledError;
-
-impl McpSignInCancelledError {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for McpSignInCancelledError {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn response_from_redirect_url(input: &str, state: &str) -> Result<OAuthCallback> {
-    let url = url::Url::parse(pi_js::str16::trim(input))
-        .map_err(|_| Error::msg("Expected the full redirect URL from the browser address bar"))?;
-    let param = |k: &str| url.query_pairs().find(|(key, _)| key == k).map(|(_, v)| v.into_owned());
-    if let Some(err) = param("error") {
-        return Err(Error::msg(param("error_description").unwrap_or(err)));
-    }
-    if param("state").as_deref() != Some(state) {
-        return Err(Error::msg("The redirect URL belongs to a different sign-in"));
-    }
-    let code = param("code").ok_or_else(|| Error::msg("The redirect URL does not contain an authorization code"))?;
-    Ok(OAuthCallback {
-        code,
-        state: state.to_string(),
-        iss: param("iss"),
-    })
-}
-
-async fn wait_for_authorization_response(
-    callback: &OAuthCallbackServer,
-    state: &str,
-    prompt: &dyn McpSignInPrompt,
-) -> Result<OAuthCallback> {
-    let controller = AbortController::new();
-    let browser_fut = callback.wait_for_callback(state);
-    let user_fut = prompt.prompt_for_redirect_url(controller.signal());
-    let res = tokio::select! {
-        res = browser_fut => res,
-        user_res = user_fut => match user_res {
-            Ok(Some(input)) if !pi_js::str16::trim(&input).is_empty() => {
-                response_from_redirect_url(&input, state)
-            }
-            Ok(_) => Err(Error::typed("McpSignInCancelledError", McpSignInCancelledError::new())),
-            Err(e) => Err(e),
-        }
-    };
-    controller.abort(Some(AbortReason::error("AbortError", "settled")));
-    res
-}
-
-async fn listen_for_callback(
-    settings: &CallbackSettings,
-    port: Option<i64>,
-    required: bool,
-) -> Result<OAuthCallbackServer> {
-    let render_page: Arc<dyn Fn(&OAuthCallbackPage) -> String + Send + Sync> =
-        Arc::new(|page: &OAuthCallbackPage| match page {
-            OAuthCallbackPage::Ok => oauth_success_html("Signed in to the MCP server. You may now close this page."),
-            OAuthCallbackPage::Err { message, details } => oauth_error_html(message, details.as_deref()),
-        });
-    let opts = OAuthCallbackServerOptions {
-        host: Some(settings.host.clone()),
-        redirect_host: Some(settings.redirect_host.clone()),
-        port,
-        path: Some(settings.path.clone()),
-        timeout_ms: None,
-        render_page: Some(Arc::clone(&render_page)),
-    };
-    match OAuthCallbackServer::listen(Some(opts)).await {
-        Ok(srv) => Ok(srv),
-        Err(err) => {
-            if required || port.is_none() {
-                return Err(err);
-            }
-            OAuthCallbackServer::listen(Some(OAuthCallbackServerOptions {
-                host: Some(settings.host.clone()),
-                redirect_host: Some(settings.redirect_host.clone()),
-                port: None,
-                path: Some(settings.path.clone()),
-                timeout_ms: None,
-                render_page: Some(render_page),
-            }))
-            .await
-        }
+fn render_callback_page(page: &OAuthCallbackPage) -> String {
+    match page {
+        OAuthCallbackPage::Ok => oauth_success_html("Signed in to the MCP server. You may now close this page."),
+        OAuthCallbackPage::Err { message, details } => oauth_error_html(message, details.as_deref()),
     }
 }
 
 pub struct SignInMcpServerOptions {
     pub server_url: String,
-    pub store: Arc<dyn McpOAuthStateStore>,
+    pub store: Arc<dyn McpOAuthServerStore>,
     pub settings: McpOAuthSettings,
     pub challenge: Option<OAuthChallenge>,
     pub prompt: Arc<dyn McpSignInPrompt>,
+    pub signal: Option<AbortSignal>,
 }
 
 pub async fn sign_in_mcp_server(options: SignInMcpServerOptions) -> Result<()> {
-    let stored = options.store.load().await?;
-    let step_up = options.challenge.as_ref().and_then(|c| c.error.as_deref()) == Some("insufficient_scope");
-    let cb_settings = callback_settings(&options.settings)?;
-    let registered = registered_redirect_urls(stored.as_ref().and_then(|s| s.client_information.as_ref()));
-    let preferred_port = cb_settings.port.or_else(|| {
-        registered
-            .first()
-            .and_then(|r| url::Url::parse(r).ok())
-            .and_then(|u| u.port())
-            .map(i64::from)
-    });
-    let callback = listen_for_callback(&cb_settings, preferred_port, cb_settings.port.is_some()).await?;
-    let redirect_url = cb_settings
-        .fixed_redirect_url
-        .unwrap_or_else(|| callback.redirect_url().to_string());
+    let settings = pi_settings(options.settings);
+    let client_docs: Arc<dyn McpClientMetadataDocuments> = Arc::new(PiClientMetadataDocuments);
+    let loopback = listen_for_loopback_sign_in(ListenForLoopbackSignInOptions {
+        server_url: options.server_url.clone(),
+        store: Arc::clone(&options.store) as Arc<dyn McpOAuthStateStore>,
+        settings: settings.clone(),
+        client_metadata_documents: Some(Arc::clone(&client_docs)),
+        render_page: Some(Arc::new(render_callback_page)),
+    })
+    .await?;
 
-    let run = async {
-        if let Some(ref existing) = stored {
-            let mut next = existing.clone();
-            next.oauth_state = None;
-            if options.settings.client_id.is_none() && !registered.contains(&redirect_url) {
-                next.client_information = None;
-                next.tokens = None;
-                next.tokens_expire_at = None;
-            }
-            options.store.save(next).await?;
-        }
+    let sign_in_opts = McpSignInOptions {
+        server_url: options.server_url,
+        store: options.store,
+        settings,
+        client_name: (*APP_NAME).to_string(),
+        client_metadata_documents: Some(client_docs),
+        redirect_url: loopback.redirect_url,
+        challenge: options.challenge,
+        signal: options.signal.clone(),
+    };
 
-        let auth_url_slot: Arc<Mutex<Option<url::Url>>> = Arc::new(Mutex::new(None));
-        let auth_url_cb = Arc::clone(&auth_url_slot);
-        let provider = create_provider(
-            &options.server_url,
-            Arc::clone(&options.store),
-            &options.settings,
-            redirect_url,
-            move |url| {
-                *auth_url_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
-            },
-        );
-        let scope = merge_scopes(
-            options.settings.scope.as_deref(),
-            if step_up {
-                let granted = stored
-                    .as_ref()
-                    .and_then(|s| s.tokens.as_ref())
-                    .and_then(|t| t.scope.as_deref());
-                let challenged = options.challenge.as_ref().and_then(|c| c.scope.as_deref());
-                step_up_scope(granted, challenged).as_deref().map(String::from)
-            } else {
-                options.challenge.as_ref().and_then(|c| c.scope.clone())
-            }
-            .as_deref(),
-        );
-        let flow = OAuthFlowOptions {
-            server_url: options.server_url.clone(),
-            authorization_code: None,
-            iss: None,
-            scope: scope.clone(),
-            resource_metadata_url: options.challenge.as_ref().and_then(|c| c.resource_metadata_url.clone()),
-            authorization_server_metadata_url: options.settings.auth_server_metadata_url.clone(),
-            fetch: None,
-            skip_issuer_validation: None,
-            skip_refresh: Some(step_up),
-        };
-        if authorize_mcp(&provider, flow.clone()).await? == OAuthFlowResult::Authorized {
+    let res = async {
+        let start = start_mcp_sign_in(sign_in_opts.clone()).await?;
+        let McpSignInStart::Redirect(authorization) = start else {
             return Ok(());
-        }
-        let auth_url = auth_url_slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .ok_or_else(|| Error::msg("OAuth flow did not produce an authorization URL"))?;
-        let state = pi_mcp::oauth::flow::OAuthClientProvider::state(&provider)
-            .await?
-            .ok_or_else(|| Error::msg("OAuth state is missing"))?;
+        };
+        let auth_url = url::Url::parse(&authorization.authorization_url)
+            .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
         options.prompt.show_authorization_url(&auth_url);
-        let resp = wait_for_authorization_response(&callback, &state, options.prompt.as_ref()).await?;
-        authorize_mcp(
-            &provider,
-            OAuthFlowOptions {
-                authorization_code: Some(resp.code),
-                iss: resp.iss,
-                ..flow
-            },
-        )
+        let prompt = Arc::clone(&options.prompt);
+        let response = wait_for_loopback_sign_in(WaitForLoopbackSignInOptions {
+            callback: loopback.callback.clone(),
+            authorization: authorization.clone(),
+            prompt_for_redirect_url: Some(Arc::new(move |sig| {
+                let p = Arc::clone(&prompt);
+                Box::pin(async move { p.prompt_for_redirect_url(sig).await })
+            })),
+            signal: options.signal,
+        })
         .await?;
+        complete_mcp_sign_in(sign_in_opts, authorization, response).await?;
         Ok(())
     }
     .await;
 
-    let _ = callback.close().await;
-    run
+    let _ = loopback.callback.close().await;
+    res
 }

@@ -2091,4 +2091,13 @@ impl Component for TreeSelectorComponent {
     fn invalidate(&self) {
         self.inner.container.invalidate();
     }
+
+    fn captures_viewport_input(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .label_input
+            .is_none()
+    }
 }

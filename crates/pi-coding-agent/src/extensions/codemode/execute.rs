@@ -1,14 +1,20 @@
 //! Port of packages/coding-agent/src/extensions/codemode/execute.ts
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::core::extensions::types::{ExecuteToolOptions, ExtensionToolContext, ModelRegistry, SessionEntry};
+use crate::core::extensions::types::{
+    ExecuteToolOptions, ExtensionToolContext, ModelRegistry, SessionEntry, ToolNamespace,
+};
+use crate::core::tools::truncate::{format_size, slice_head, slice_tail};
 use crate::core::usage_totals::combine_usage;
 use crate::extensions::codemode::tool::{
     CODEMODE_STORE_ENTRY_TYPE, CodemodeModelRuntime, CodemodeNestedCall, CodemodeNestedCallStatus,
@@ -18,6 +24,7 @@ use crate::extensions::codemode::tool::{
 use crate::extensions::tool_search::tool::{
     Bm25Ranker, DEFAULT_TOOL_SEARCH_LIMIT, ToolSearchDocumentInput, create_tool_search_document,
 };
+use crate::utils::output_files::write_output_file;
 use pi_agent_core::{AgentTool, AgentToolCallOutcome, AgentToolResult};
 use pi_ai::models::{ModelsClassifierOptions, ModelsImagesOptions};
 use pi_ai::types::{
@@ -29,7 +36,8 @@ use pi_codemode::declarations::{render_tool_sample, to_codemode_identifier};
 use pi_codemode::runtime::host::CodemodeSandbox;
 use pi_codemode::source::parse_codemode_source;
 use pi_codemode::types::{
-    CodemodeErrorKind, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult, CodemodeSandboxOptions, CodemodeTool,
+    CodemodeErrorKind, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult, CodemodeSandboxOptions,
+    CodemodeTool, CodemodeWorkerHooks,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::{Error, Result};
@@ -40,10 +48,133 @@ const MAX_CONCURRENT_MODEL_CALLS: usize = 4;
 const CODEMODE_MEMORY_LIMIT_BYTES: f64 = 256.0 * 1024.0 * 1024.0;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 10_000;
 const CHARS_PER_TOKEN: usize = 4;
+// Shared across calls and sessions. Allow one replacement while a cancelled worker is still exiting.
+const DEFAULT_MAX_CODEMODE_WORKERS: usize = 2;
+/// How long a script waits for a free worker before failing.
+const CODEMODE_WORKER_WAIT_MS: u64 = 60_000;
+
+struct CodemodeWorkerPool {
+    active: usize,
+    next_id: u64,
+    waiters: VecDeque<(u64, tokio::sync::oneshot::Sender<()>)>,
+}
+
+static CODEMODE_WORKER_POOL: LazyLock<Mutex<CodemodeWorkerPool>> = LazyLock::new(|| {
+    Mutex::new(CodemodeWorkerPool {
+        active: 0,
+        next_id: 0,
+        waiters: VecDeque::new(),
+    })
+});
+
+/// `PI_CODEMODE_MAX_WORKERS` if it is a positive integer. Read per call so hosts can set it at runtime.
+fn max_codemode_workers() -> usize {
+    pi_js::env::var("PI_CODEMODE_MAX_WORKERS")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_CODEMODE_WORKERS)
+}
+
+fn admit_codemode_workers(pool: &mut CodemodeWorkerPool) {
+    let max = max_codemode_workers();
+    while pool.active < max {
+        let Some((_id, tx)) = pool.waiters.pop_front() else {
+            break;
+        };
+        if tx.send(()).is_ok() {
+            pool.active += 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerReservationOutcome {
+    Reserved,
+    Aborted,
+    Timeout,
+}
+
+async fn wait_signal_aborted(signal: Option<&AbortSignal>) {
+    match signal {
+        Some(sig) => sig.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn reserve_codemode_worker(signal: Option<&AbortSignal>, timeout_ms: f64) -> WorkerReservationOutcome {
+    if signal.is_some_and(AbortSignal::aborted) {
+        return WorkerReservationOutcome::Aborted;
+    }
+    let (id, rx) = {
+        let mut pool = CODEMODE_WORKER_POOL.lock().unwrap_or_else(|e| e.into_inner());
+        let max = max_codemode_workers();
+        if pool.waiters.is_empty() && pool.active < max {
+            pool.active += 1;
+            return WorkerReservationOutcome::Reserved;
+        }
+        pool.next_id += 1;
+        let id = pool.next_id;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pool.waiters.push_back((id, tx));
+        admit_codemode_workers(&mut pool);
+        (id, rx)
+    };
+
+    struct WaiterGuard {
+        id: u64,
+        rx: Option<tokio::sync::oneshot::Receiver<()>>,
+        reserved: bool,
+    }
+
+    impl Drop for WaiterGuard {
+        fn drop(&mut self) {
+            if self.reserved {
+                return;
+            }
+            let mut pool = CODEMODE_WORKER_POOL.lock().unwrap_or_else(|e| e.into_inner());
+            let before = pool.waiters.len();
+            pool.waiters.retain(|(wid, _)| *wid != self.id);
+            let removed_from_waiters = pool.waiters.len() < before;
+            if !removed_from_waiters
+                && let Some(ref mut rx) = self.rx
+                && rx.try_recv().is_ok()
+            {
+                pool.active = pool.active.saturating_sub(1);
+                admit_codemode_workers(&mut pool);
+            }
+        }
+    }
+
+    let mut guard = WaiterGuard {
+        id,
+        rx: Some(rx),
+        reserved: false,
+    };
+    let delay = Duration::from_millis(timeout_ms.max(0.0).ceil() as u64);
+    let rx_mut = guard.rx.as_mut().expect("receiver present");
+    tokio::select! {
+        res = rx_mut => {
+            if res.is_ok() {
+                guard.reserved = true;
+                WorkerReservationOutcome::Reserved
+            } else {
+                WorkerReservationOutcome::Timeout
+            }
+        }
+        _ = tokio::time::sleep(delay) => WorkerReservationOutcome::Timeout,
+        _ = wait_signal_aborted(signal) => WorkerReservationOutcome::Aborted,
+    }
+}
+
+fn release_codemode_worker() {
+    let mut pool = CODEMODE_WORKER_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    pool.active = pool.active.saturating_sub(1);
+    admit_codemode_workers(&mut pool);
+}
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
     if pi_js::str16::len(text) > max_chars {
-        let prefix = pi_js::str16::slice(text, 0, Some((max_chars - 3) as i64));
+        let prefix = slice_head(text, max_chars.saturating_sub(3));
         format!("{prefix}...")
     } else {
         text.to_string()
@@ -146,7 +277,7 @@ fn describe_value(value: Option<&Value>) -> String {
     }
 }
 
-const CLASSIFIER_CONTEXT_SHAPE: &str = "{ state: { ... }, questions: { <id>: { type: \"choice\", instructions, criteria: { <label>: <meaning> } } | { type: \"score\", instructions, criteria: [<lowest level>, ..., <highest level>] } | { type: \"bool\", instructions, criteria: { true: <meaning>, false: <meaning> } } } }";
+const CLASSIFIER_CONTEXT_SHAPE: &str = "{ state: { ... }, images?: [{ type: \"image\", data: <base64>, mimeType }], questions: { <id>: { type: \"choice\", instructions, criteria: { <label>: <meaning> } } | { type: \"score\", instructions, criteria: [<lowest level>, ..., <highest level>] } | { type: \"bool\", instructions, criteria: { true: <meaning>, false: <meaning> } } } }";
 
 fn check_classifier_context(context: Option<&Value>) -> Result<Value> {
     let docs = codemode_docs_path();
@@ -376,13 +507,139 @@ fn format_error(result: &CodemodeResult, calls: &[CodemodeNestedCall]) -> String
     format!("{head}\n\n{}", format_call_summary(calls))
 }
 
-async fn spill_output(text: &str) -> std::result::Result<String, String> {
-    let name = format!("pi-codemode-{}.txt", hex::encode(pi_js::crypto::random_bytes(8)));
-    let path = pi_js::path::join(&[&pi_js::env::tmp_dir(), &name]);
-    match pi_js::fs::promises::write_file(&path, text.as_bytes(), None).await {
-        Ok(()) => Ok(path),
-        Err(e) => Err(e.message().to_string()),
+/// Lay out the script's output so the model can tell items apart. With more than one text item
+/// (`text()` or the returned value), each starts with `==> text N/M <==`. `console.*` lines follow
+/// all other output in one `<console_output>` block.
+fn format_output(output: &[(CodemodeOutputItem, bool)]) -> Vec<UserContentBlock> {
+    let total = output
+        .iter()
+        .filter(|(item, is_console)| matches!(item, CodemodeOutputItem::Text { .. }) && !is_console)
+        .count();
+    let mut items = Vec::new();
+    let mut console_lines = Vec::new();
+    let mut index = 0usize;
+    for (item, is_console) in output {
+        match item {
+            CodemodeOutputItem::Image { data, mime_type } => {
+                items.push(UserContentBlock::Image(ImageContent::new(
+                    data.clone(),
+                    mime_type.clone(),
+                )));
+            }
+            CodemodeOutputItem::Text { text } if *is_console => {
+                console_lines.push(text.as_str());
+            }
+            CodemodeOutputItem::Text { text } => {
+                index += 1;
+                let formatted = if total > 1 {
+                    format!("==> text {index}/{total} <==\n{text}")
+                } else {
+                    text.clone()
+                };
+                items.push(UserContentBlock::Text(TextContent::new(formatted)));
+            }
+        }
     }
+    if !console_lines.is_empty() {
+        items.push(UserContentBlock::Text(TextContent::new(format!(
+            "<console_output>\n{}\n</console_output>",
+            console_lines.join("\n")
+        ))));
+    }
+    items
+}
+
+/// Join adjacent text items into one, each part starting on its own line.
+fn join_adjacent_text(items: Vec<UserContentBlock>) -> Vec<UserContentBlock> {
+    let mut joined = Vec::new();
+    let mut parts = String::new();
+    let mut last_non_empty_ends_newline = false;
+    let mut has_last = false;
+    let flush =
+        |joined: &mut Vec<UserContentBlock>, parts: &mut String, has_last: &mut bool, last_ends_nl: &mut bool| {
+            if !parts.is_empty() {
+                joined.push(UserContentBlock::Text(TextContent::new(std::mem::take(parts))));
+            }
+            *has_last = false;
+            *last_ends_nl = false;
+        };
+    for item in items {
+        match item {
+            UserContentBlock::Text(t) => {
+                if has_last && !last_non_empty_ends_newline {
+                    parts.push('\n');
+                    last_non_empty_ends_newline = true;
+                }
+                if !t.text.is_empty() {
+                    last_non_empty_ends_newline = t.text.ends_with('\n');
+                    has_last = true;
+                    parts.push_str(&t.text);
+                }
+            }
+            other => {
+                flush(&mut joined, &mut parts, &mut has_last, &mut last_non_empty_ends_newline);
+                joined.push(other);
+            }
+        }
+    }
+    flush(&mut joined, &mut parts, &mut has_last, &mut last_non_empty_ends_newline);
+    joined
+}
+
+fn image_extension(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some(".png"),
+        "image/jpeg" => Some(".jpg"),
+        "image/gif" => Some(".gif"),
+        "image/webp" => Some(".webp"),
+        _ => None,
+    }
+}
+
+/// Save each image to a temp file and put a text item with its path before it.
+async fn save_images(items: Vec<UserContentBlock>) -> Result<Vec<UserContentBlock>> {
+    let mut labels: IndexMap<String, String> = IndexMap::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            UserContentBlock::Image(ref img) => {
+                let label = if let Some(cached) = labels.get(&img.data) {
+                    cached.clone()
+                } else {
+                    let ext = image_extension(&img.mime_type)
+                        .ok_or_else(|| Error::msg(format!("No file extension for image type {}", img.mime_type)))?;
+                    let decoded = base64::engine::general_purpose::STANDARD.decode(&img.data);
+                    let built = match decoded {
+                        Ok(bytes) => {
+                            let kind = format!("{}, {}", img.mime_type, format_size(bytes.len()));
+                            match write_output_file("pi-codemode", ext, &bytes).await {
+                                Ok(path) => format!("[Image saved to {path} ({kind})]"),
+                                Err(err) => {
+                                    format!("[Image ({kind}) could not be saved: {}]", err.message())
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let kind = format!("{}, 0B", img.mime_type);
+                            format!("[Image ({kind}) could not be saved: {err}]")
+                        }
+                    };
+                    labels.insert(img.data.clone(), built.clone());
+                    built
+                };
+                out.push(UserContentBlock::Text(TextContent::new(label)));
+                out.push(item);
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+async fn spill_output(text: &str) -> std::result::Result<String, String> {
+    write_output_file("pi-codemode", ".txt", text.as_bytes())
+        .await
+        .map_err(|e| e.message().to_string())
 }
 
 async fn truncate_output(items: Vec<UserContentBlock>, max_tokens: usize) -> (Vec<UserContentBlock>, Option<String>) {
@@ -402,12 +659,8 @@ async fn truncate_output(items: Vec<UserContentBlock>, max_tokens: usize) -> (Ve
     let head_chars = budget / 2;
     let tail_chars = budget - head_chars;
     let removed = combined_len.saturating_sub(head_chars + tail_chars);
-    let head = pi_js::str16::slice(&combined, 0, Some(head_chars as i64));
-    let tail = if tail_chars > 0 {
-        pi_js::str16::slice(&combined, -(tail_chars as i64), None)
-    } else {
-        String::new()
-    };
+    let head = slice_head(&combined, head_chars);
+    let tail = slice_tail(&combined, tail_chars);
     let original_tokens = combined_len.div_ceil(CHARS_PER_TOKEN);
     let total_lines = combined.split('\n').count();
     let removed_tokens = removed.div_ceil(CHARS_PER_TOKEN);
@@ -449,13 +702,17 @@ fn to_script_value(tool: &AgentTool, outcome: &AgentToolCallOutcome) -> Result<O
     Ok(Some(Value::String(text)))
 }
 
-fn is_namespace_name(namespace: &str, query: &str) -> bool {
-    let id = to_codemode_identifier(namespace);
+fn is_namespace_name(namespace: &ToolNamespace, query: &str) -> bool {
     let query_id = to_codemode_identifier(query);
-    fn suffix(name: &str) -> Option<&str> {
-        name.rfind("__").map(|idx| &name[idx + 2..])
+    if namespace.name == query || to_codemode_identifier(&namespace.name) == query_id {
+        return true;
     }
-    namespace == query || id == query_id || suffix(namespace) == Some(query) || suffix(&id) == Some(query_id.as_str())
+    namespace
+        .aliases
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|alias| alias == query || to_codemode_identifier(alias) == query_id)
 }
 
 fn create_discovery_globals(
@@ -515,7 +772,7 @@ fn create_discovery_globals(
                             let Some(ref ns) = tool_ns else {
                                 return None;
                             };
-                            if !is_namespace_name(&ns.name, ns_query) {
+                            if !is_namespace_name(ns, ns_query) {
                                 return None;
                             }
                         }
@@ -594,7 +851,7 @@ fn create_discovery_globals(
                     let Some(tool_ns) = get_ns.as_ref().and_then(|f| f(&tool.name)) else {
                         continue;
                     };
-                    if !is_namespace_name(&tool_ns.name, name) {
+                    if !is_namespace_name(&tool_ns, name) {
                         continue;
                     }
                     if matched_ns.is_none() {
@@ -1038,14 +1295,18 @@ pub async fn execute_codemode(
         model_usage: Arc::clone(&model_usage),
         generated_images: Arc::clone(&generated_images),
     };
+    // Show the script as running before its first nested call, so the row's timer starts.
+    tracker.publish();
 
     let callable = match &ctx {
         Some(c) => get_codemode_callable_tools(&c.tools()?),
         None => Vec::new(),
     };
+    let guidelines = options.get_tool_guidelines.as_ref().map(|f| f()).unwrap_or_default();
     let mut samples = IndexMap::new();
     for tool in &callable {
-        let decl = to_codemode_declaration(tool);
+        let tool_guidelines = guidelines.get(&tool.name).map(Vec::as_slice).unwrap_or(&[]);
+        let decl = to_codemode_declaration(tool, tool_guidelines);
         samples.insert(tool.name.clone(), render_tool_sample(&decl, None));
     }
 
@@ -1140,14 +1401,89 @@ pub async fn execute_codemode(
         }
     }
 
-    let sandbox = CodemodeSandbox::new(Some(CodemodeSandboxOptions {
-        tools: Some(sandbox_tools),
-        globals: Some(globals),
-        timeout_ms: Some(parsed.options.timeout_ms.map(|ms| ms as f64).unwrap_or(f64::INFINITY)),
-        memory_limit_bytes: Some(CODEMODE_MEMORY_LIMIT_BYTES),
-        wasm: None,
-        worker_url: None,
-    }))?;
+    // The wait for a worker counts toward the script's deadline.
+    let deadline = parsed.options.timeout_ms.map(|ms| ms as f64).unwrap_or(f64::INFINITY);
+    let wait_started_at = pi_js::time::performance_now();
+    let admission = reserve_codemode_worker(signal.as_ref(), deadline.min(CODEMODE_WORKER_WAIT_MS as f64)).await;
+    let waited_ms = pi_js::time::performance_now() - wait_started_at;
+    if admission != WorkerReservationOutcome::Reserved {
+        let waited = (pi_js::time::performance_now() - started_at) / 1000.0;
+        let error = if admission == WorkerReservationOutcome::Aborted {
+            let reason = signal
+                .as_ref()
+                .and_then(AbortSignal::reason)
+                .map(|r| {
+                    if r.message.is_empty() {
+                        "Execution aborted".to_string()
+                    } else {
+                        r.message
+                    }
+                })
+                .unwrap_or_else(|| "Execution aborted".to_string());
+            format!("Script aborted: {reason}")
+        } else if deadline <= CODEMODE_WORKER_WAIT_MS as f64 {
+            format!(
+                "Script timed out: Execution timed out after {} ms while waiting for a free codemode worker",
+                pi_js::num::to_string_radix(deadline, 10)
+            )
+        } else {
+            format!(
+                "No codemode worker became free within {} seconds. All {} workers, shared by every session in this process, are held by other scripts. Retry after they finish.",
+                CODEMODE_WORKER_WAIT_MS / 1000,
+                max_codemode_workers()
+            )
+        };
+        let mut out = AgentToolResult::text("");
+        out.content = vec![
+            UserContentBlock::Text(TextContent::new(format!(
+                "Script failed\nWall time {waited:.1} seconds\nOutput:\n"
+            ))),
+            UserContentBlock::Text(TextContent::new(format!(
+                "Script error:\n{error}\n\nThe script did not start."
+            ))),
+        ];
+        out.details = pi_js::json::parse(&pi_js::json::stringify(&tracker.snapshot())).ok();
+        out.is_error = Some(true);
+        return Ok(out);
+    }
+
+    let reserved = Arc::new(AtomicBool::new(true));
+    struct ReservedSlotGuard(Arc<AtomicBool>);
+    impl Drop for ReservedSlotGuard {
+        fn drop(&mut self) {
+            if self.0.swap(false, Ordering::AcqRel) {
+                release_codemode_worker();
+            }
+        }
+    }
+    let _reserved_guard = ReservedSlotGuard(Arc::clone(&reserved));
+    let acquire_reserved = Arc::clone(&reserved);
+    let remaining_timeout_ms = if deadline.is_finite() {
+        (deadline - waited_ms).round().max(1.0)
+    } else {
+        f64::INFINITY
+    };
+
+    let sandbox = CodemodeSandbox::with_worker_hooks(
+        Some(CodemodeSandboxOptions {
+            tools: Some(sandbox_tools),
+            globals: Some(globals),
+            timeout_ms: Some(remaining_timeout_ms),
+            memory_limit_bytes: Some(CODEMODE_MEMORY_LIMIT_BYTES),
+            wasm: None,
+            worker_url: None,
+        }),
+        CodemodeWorkerHooks {
+            acquire_worker: Some(Arc::new(move || {
+                if !acquire_reserved.swap(false, Ordering::AcqRel) {
+                    return Err(Error::msg("The script already settled"));
+                }
+                // From here the sandbox releases the slot when the worker actually exits.
+                Ok(Box::new(|| release_codemode_worker()))
+            })),
+            on_worker_started: None,
+        },
+    )?;
 
     let initial_store = match &ctx {
         Some(c) => c
@@ -1167,6 +1503,7 @@ pub async fn execute_codemode(
         )
         .await;
     sandbox.close().await;
+    drop(_reserved_guard);
     let result = result?;
 
     // Calls still marked running were cut off by script termination/timeout/abort.
@@ -1180,7 +1517,7 @@ pub async fn execute_codemode(
     }
     let snapshot_calls = calls.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-    let (ok, output_items) = match &result {
+    let (ok, mut items) = match &result {
         CodemodeResult::Success {
             value,
             output,
@@ -1198,39 +1535,31 @@ pub async fn execute_codemode(
                     },
                 );
             }
-            let mut items: Vec<UserContentBlock> = output
+            let mut tagged: Vec<(CodemodeOutputItem, bool)> = output
                 .iter()
-                .map(|item| match item {
-                    CodemodeOutputItem::Text { text } => UserContentBlock::Text(TextContent::new(text.clone())),
-                    CodemodeOutputItem::Image { data, mime_type } => {
-                        UserContentBlock::Image(ImageContent::new(data.clone(), mime_type.clone()))
-                    }
-                })
+                .enumerate()
+                .map(|(i, item)| (item.clone(), result.is_console_output(i)))
                 .collect();
             if let Some(val) = value {
-                items.push(UserContentBlock::Text(TextContent::new(value_text(val))));
+                tagged.push((CodemodeOutputItem::Text { text: value_text(val) }, false));
             }
-            (true, items)
+            (true, format_output(&tagged))
         }
         CodemodeResult::Failure { output, .. } => {
-            let mut items: Vec<UserContentBlock> = output
+            let tagged: Vec<(CodemodeOutputItem, bool)> = output
                 .iter()
-                .map(|item| match item {
-                    CodemodeOutputItem::Text { text } => UserContentBlock::Text(TextContent::new(text.clone())),
-                    CodemodeOutputItem::Image { data, mime_type } => {
-                        UserContentBlock::Image(ImageContent::new(data.clone(), mime_type.clone()))
-                    }
-                })
+                .enumerate()
+                .map(|(i, item)| (item.clone(), result.is_console_output(i)))
                 .collect();
-            items.push(UserContentBlock::Text(TextContent::new(format!(
+            let mut formatted = format_output(&tagged);
+            formatted.push(UserContentBlock::Text(TextContent::new(format!(
                 "Script error:\n{}",
                 format_error(&result, &snapshot_calls)
             ))));
-            (false, items)
+            (false, formatted)
         }
     };
 
-    let mut items = output_items;
     let img_total = generated_images.load(Ordering::Relaxed);
     if img_total > 0 && !items.iter().any(|item| matches!(item, UserContentBlock::Image(_))) {
         let plural = if img_total == 1 { "" } else { "s" };
@@ -1244,14 +1573,17 @@ pub async fn execute_codemode(
         .max_output_tokens
         .map(|n| n.max(0) as usize)
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-    let (truncated_items, full_output_path) = truncate_output(items, max_tokens).await;
+    let (truncated_items, full_output_path) = truncate_output(join_adjacent_text(items), max_tokens).await;
+    // After truncation, which joins the text items and moves images after them, so each path stays
+    // next to its image and is never cut.
+    let output = join_adjacent_text(save_images(truncated_items).await?);
     let wall_time = (pi_js::time::performance_now() - started_at) / 1000.0;
     let status_word = if ok { "completed" } else { "failed" };
     let header = format!("Script {status_word}\nWall time {wall_time:.1} seconds\nOutput:\n");
 
-    let mut content = Vec::with_capacity(truncated_items.len() + 1);
+    let mut content = Vec::with_capacity(output.len() + 1);
     content.push(UserContentBlock::Text(TextContent::new(header)));
-    content.extend(truncated_items);
+    content.extend(output);
 
     let details = CodemodeToolDetails {
         calls: snapshot_calls,

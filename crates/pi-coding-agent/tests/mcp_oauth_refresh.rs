@@ -85,6 +85,7 @@ async fn setup_signed_in() -> (OAuthMcpServerHandle, TempDir, Arc<InMemoryAuthSt
         settings: McpOAuthSettings::default(),
         challenge: None,
         prompt: Arc::new(HeadlessPrompt::new()),
+        signal: None,
     })
     .await
     .expect("sign_in_mcp_server");
@@ -205,6 +206,7 @@ async fn sign_in_with_settings(
         settings: cfg,
         challenge: None,
         prompt: Arc::new(HeadlessPrompt::new()),
+        signal: None,
     })
     .await;
     server.close().await;
@@ -233,7 +235,7 @@ async fn keeps_granted_scope_when_server_asks_for_more() {
 
     sign_in_mcp_server(SignInMcpServerOptions {
         server_url: server.url.clone(),
-        store: Arc::clone(&store) as Arc<dyn pi_mcp::oauth::McpOAuthStateStore>,
+        store: Arc::clone(&store),
         settings: McpOAuthSettings::default(),
         challenge: Some(OAuthChallenge {
             scope: Some("issues:read".to_string()),
@@ -242,6 +244,7 @@ async fn keeps_granted_scope_when_server_asks_for_more() {
             resource_metadata_url: None,
         }),
         prompt: Arc::clone(&prompt) as Arc<dyn McpSignInPrompt>,
+        signal: None,
     })
     .await
     .expect("first sign in");
@@ -259,7 +262,7 @@ async fn keeps_granted_scope_when_server_asks_for_more() {
 
     sign_in_mcp_server(SignInMcpServerOptions {
         server_url: server.url.clone(),
-        store: Arc::clone(&store) as Arc<dyn pi_mcp::oauth::McpOAuthStateStore>,
+        store: Arc::clone(&store),
         settings: McpOAuthSettings::default(),
         challenge: Some(OAuthChallenge {
             scope: Some("issues:write".to_string()),
@@ -268,6 +271,7 @@ async fn keeps_granted_scope_when_server_asks_for_more() {
             resource_metadata_url: None,
         }),
         prompt: Arc::clone(&prompt) as Arc<dyn McpSignInPrompt>,
+        signal: None,
     })
     .await
     .expect("step-up sign in");

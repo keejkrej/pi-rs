@@ -70,6 +70,7 @@ fn create_test_model(id: &str, name: &str) -> Model {
         prompt_cache: None,
         sampling_params: None,
         r#type: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

@@ -18,6 +18,7 @@ fn should_truncate_long_tool_results() {
         nested_calls: None,
         is_error: false,
         timestamp: 0,
+        duration_ms: None,
     })];
 
     let result = serialize_conversation(&messages);
@@ -40,6 +41,7 @@ fn should_not_truncate_short_tool_results() {
         nested_calls: None,
         is_error: false,
         timestamp: 0,
+        duration_ms: None,
     })];
 
     let result = serialize_conversation(&messages);
@@ -73,6 +75,7 @@ fn should_not_truncate_assistant_or_user_messages() {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: 0,
+            duration_ms: None,
         }),
     ];
 

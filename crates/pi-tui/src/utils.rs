@@ -479,6 +479,25 @@ fn is_whitespace_token(token: &str) -> bool {
     true
 }
 
+/// Replace each run of C0 and C1 control characters (`ESC`, `BEL`, newlines, ...) with one space.
+pub fn replace_control_characters(str: &str) -> String {
+    let mut out = String::with_capacity(str.len());
+    let mut in_run = false;
+    for ch in str.chars() {
+        let is_ctrl = ch <= '\u{001f}' || ('\u{007f}'..='\u{009f}').contains(&ch);
+        if is_ctrl {
+            if !in_run {
+                out.push(' ');
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// `{ start, end }` from [`get_grapheme_cell_range`]. Not exported from the TS module;
 /// public here because the function returns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

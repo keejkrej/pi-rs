@@ -349,18 +349,52 @@ async fn anthropic_oauth_login_resolves_through_the_manual_code_prompt_and_abort
 #[tokio::test]
 #[serial]
 async fn completes_login_through_the_browser_callback_and_shows_the_sign_in_page() {
+    let (credential, exchanged_code, _, _, status, body) = login_through_browser_callback().await;
+    assert_eq!(credential.access, "access");
+    assert_eq!(exchanged_code.as_deref(), Some("browser-code"));
+    assert_eq!(status, 200);
+    assert!(body.contains("Signed in to Anthropic."));
+}
+
+// #10571
+#[tokio::test]
+#[serial]
+async fn falls_back_to_a_free_callback_port_when_the_preferred_port_cannot_be_bound() {
+    let blocker = tokio::net::TcpListener::bind("127.0.0.1:53692")
+        .await
+        .expect("bind port 53692");
+    let (credential, _, redirect_uri, exchanged_redirect_uri, status, _) = login_through_browser_callback().await;
+    drop(blocker);
+
+    let parsed = url::Url::parse(&redirect_uri).unwrap();
+    assert_eq!(parsed.host_str(), Some("localhost"));
+    assert_eq!(parsed.path(), "/callback");
+    assert_ne!(parsed.port(), Some(53692));
+    assert_eq!(credential.access, "access");
+    assert_eq!(exchanged_redirect_uri.as_deref(), Some(redirect_uri.as_str()));
+    assert_eq!(status, 200);
+}
+
+async fn login_through_browser_callback() -> (
+    pi_ai::auth::types::OAuthCredential,
+    Option<String>,
+    String,
+    Option<String>,
+    u16,
+    String,
+) {
     let exchanged_code = Arc::new(Mutex::new(None));
+    let exchanged_redirect_uri = Arc::new(Mutex::new(None));
     let ec_c = exchanged_code.clone();
+    let eru_c = exchanged_redirect_uri.clone();
     let _guard = mock_fetch(move |req| {
         let ec = ec_c.clone();
+        let eru = eru_c.clone();
         Box::pin(async move {
             assert_eq!(req.url, "https://platform.claude.com/v1/oauth/token");
-            *ec.lock().unwrap() = req
-                .body_json()
-                .unwrap()
-                .get("code")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            let body = req.body_json().unwrap();
+            *ec.lock().unwrap() = body.get("code").and_then(Value::as_str).map(str::to_owned);
+            *eru.lock().unwrap() = body.get("redirect_uri").and_then(Value::as_str).map(str::to_owned);
             Ok(json_resp(&json!({
                 "access_token": "access",
                 "refresh_token": "refresh",
@@ -369,6 +403,8 @@ async fn completes_login_through_the_browser_callback_and_shows_the_sign_in_page
         })
     });
 
+    let redirect_uri_slot = Arc::new(Mutex::new(String::new()));
+    let ru_c = redirect_uri_slot.clone();
     let callback_task: Arc<Mutex<Option<tokio::task::JoinHandle<(u16, String)>>>> = Arc::new(Mutex::new(None));
     let cb_c = callback_task.clone();
     let sig = AbortController::new().signal();
@@ -383,7 +419,16 @@ async fn completes_login_through_the_browser_callback_and_shows_the_sign_in_page
                         .find(|(k, _)| k == "state")
                         .map(|(_, v)| v.into_owned())
                         .unwrap_or_default();
-                    let cb_url = format!("http://127.0.0.1:53692/callback?code=browser-code&state={state}");
+                    let ru = parsed
+                        .query_pairs()
+                        .find(|(k, _)| k == "redirect_uri")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap_or_default();
+                    *ru_c.lock().unwrap() = ru.clone();
+                    let mut cb_parsed = url::Url::parse(&ru).unwrap();
+                    let _ = cb_parsed.set_host(Some("127.0.0.1"));
+                    cb_parsed.set_query(Some(&format!("code=browser-code&state={state}")));
+                    let cb_url = cb_parsed.to_string();
                     let h = tokio::spawn(async move {
                         let resp = reqwest::Client::new().get(&cb_url).send().await.unwrap();
                         let status = resp.status().as_u16();
@@ -411,10 +456,10 @@ async fn completes_login_through_the_browser_callback_and_shows_the_sign_in_page
     );
 
     let credential = anthropic_oauth().login(interaction, None).await.unwrap();
-    assert_eq!(credential.access, "access");
-    assert_eq!(exchanged_code.lock().unwrap().as_deref(), Some("browser-code"));
     let handle = callback_task.lock().unwrap().take().unwrap();
     let (status, body) = handle.await.unwrap();
-    assert_eq!(status, 200);
-    assert!(body.contains("Signed in to Anthropic."));
+    let redirect_uri = redirect_uri_slot.lock().unwrap().clone();
+    let ec = exchanged_code.lock().unwrap().clone();
+    let eru = exchanged_redirect_uri.lock().unwrap().clone();
+    (credential, ec, redirect_uri, eru, status, body)
 }

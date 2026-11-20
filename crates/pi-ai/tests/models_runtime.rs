@@ -14,8 +14,8 @@ use pi_ai::auth::types::{
 };
 use pi_ai::models::{
     CreateModelsOptions, CreateProviderApi, CreateProviderOptions, ModelsError, ModelsErrorCode, ModelsPublication,
-    ModelsRefreshOptions, ModelsSimpleStreamOptions, Provider, RefreshModelsContext, calculate_cost, create_models,
-    create_provider, has_api,
+    ModelsRefreshOptions, ModelsSimpleStreamOptions, Provider, RefreshModelsAuth, RefreshModelsContext, calculate_cost,
+    create_models, create_provider, create_provider_with_refresh_auth, has_api,
 };
 use pi_ai::models_store::{InMemoryModelsStore, ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions};
 use pi_ai::types::{
@@ -47,6 +47,7 @@ fn test_model(provider: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn done_message(model: &Model, text: &str) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -402,6 +404,30 @@ fn applies_request_wide_pricing_tiers_above_the_configured_input_threshold() {
     assert_eq!(long.output, 4.5);
     assert_eq!(long.cache_read, 0.072);
     assert_eq!(long.cache_write, 0.0000125);
+}
+
+#[test]
+fn marks_catalog_derived_totals_as_not_provider_reported() {
+    let mut usage = Usage {
+        input: 1_000_000,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: None,
+        reasoning: None,
+        total_tokens: 1_000_000,
+        cost: UsageCost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 9.0,
+            total_from_provider: Some(true),
+        },
+    };
+    let model = AnyModel::Chat(test_model("openai", "gpt-5.6-sol"));
+    calculate_cost(&model, &mut usage);
+    assert_eq!(usage.cost.total_from_provider, Some(false));
 }
 
 #[test]
@@ -1053,6 +1079,252 @@ async fn refreshes_expired_oauth_before_refreshing_models() {
 }
 
 #[tokio::test]
+async fn passes_the_registered_providers_base_url_including_wrapper_overrides_to_refresh_models() {
+    struct WrapperProvider {
+        inner: Arc<dyn Provider + Send + Sync>,
+        base_url: String,
+    }
+    impl Provider for WrapperProvider {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn base_url(&self) -> Option<&str> {
+            Some(&self.base_url)
+        }
+        fn auth(&self) -> &ProviderAuth {
+            self.inner.auth()
+        }
+        fn get_models(&self) -> Vec<Model> {
+            self.inner.get_models()
+        }
+        fn refresh_models(&self, context: RefreshModelsContext) -> Option<BoxFuture<Result<()>>> {
+            self.inner.refresh_models(context)
+        }
+        fn stream(
+            &self,
+            model: &Model,
+            context: &TranscriptContext,
+            options: Option<ApiStreamOptions>,
+        ) -> AssistantMessageEventStream {
+            self.inner.stream(model, context, options)
+        }
+        fn stream_simple(
+            &self,
+            model: &Model,
+            context: &TranscriptContext,
+            options: Option<SimpleStreamOptions>,
+        ) -> AssistantMessageEventStream {
+            self.inner.stream_simple(model, context, options)
+        }
+    }
+
+    let base_urls = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let bu_c = Arc::clone(&base_urls);
+    let inner: Arc<dyn Provider + Send + Sync> = Arc::new(TestProvider {
+        id: "dynamic".to_owned(),
+        models: vec![test_model("dynamic", "model-a")],
+        auth: ProviderAuth {
+            api_key: Some(Arc::new(AmbientAuth)),
+            oauth: None,
+        },
+        get_models_fn: None,
+        refresh_fn: Some(Arc::new(move |ctx| {
+            let bu = Arc::clone(&bu_c);
+            Box::pin(async move {
+                bu.lock().unwrap().push(ctx.base_url);
+                Ok(())
+            })
+        })),
+        calls: None,
+        get_all_models_fn: None,
+    });
+
+    let models = create_models(None);
+    models.set_provider(Arc::new(WrapperProvider {
+        inner,
+        base_url: "https://regional.example.test/v1".to_owned(),
+    }));
+    models.refresh(None).await.unwrap();
+    assert_eq!(
+        *base_urls.lock().unwrap(),
+        vec![
+            Some("https://regional.example.test/v1".to_owned()),
+            Some("https://regional.example.test/v1".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn refreshes_catalogs_that_need_only_configured_auth_without_refreshing_oauth() {
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    credentials
+        .modify_with(
+            "catalog-oauth",
+            |_| async { Ok(Some(Credential::OAuth(OAuthCredential::new("revoked", "expired", 0)))) },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let oauth_calls = Arc::new(AtomicUsize::new(0));
+    let oc = Arc::clone(&oauth_calls);
+    let network_credentials = Arc::new(Mutex::new(Vec::<Option<Credential>>::new()));
+    let nc = Arc::clone(&network_credentials);
+    let unconfigured_refreshes = Arc::new(AtomicUsize::new(0));
+    let ur = Arc::clone(&unconfigured_refreshes);
+
+    let dummy_stream = ProviderStreams {
+        stream: Arc::new(|m, _c, _o| default_provider("x").respond(m, None)),
+        stream_simple: Arc::new(|m, _c, _o| default_provider("x").respond(m, None)),
+        fetch_deferred: None,
+        cancel_deferred: None,
+    };
+
+    let models = create_models(Some(CreateModelsOptions {
+        credentials: Some(credentials.clone()),
+        ..Default::default()
+    }));
+    models.set_provider(
+        create_provider_with_refresh_auth(
+            CreateProviderOptions {
+                id: "catalog-oauth".to_owned(),
+                name: None,
+                base_url: None,
+                headers: None,
+                auth: ProviderAuth {
+                    api_key: None,
+                    oauth: Some(TestOAuth::with_refresh(Arc::new(move |_, _| {
+                        oc.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Err(Error::msg("invalid_grant")) })
+                    }))),
+                },
+                models: vec![AnyModel::Chat(test_model("catalog-oauth", "model-a"))],
+                fetch_models: Some(Arc::new(move |ctx| {
+                    let nc = Arc::clone(&nc);
+                    Box::pin(async move {
+                        if ctx.allow_network {
+                            nc.lock().unwrap().push(ctx.credential);
+                        }
+                        Ok(Vec::new())
+                    })
+                })),
+                filter_models: None,
+                filter_all_models: None,
+                api: Some(CreateProviderApi::Single(dummy_stream.clone())),
+                images: None,
+                classifiers: None,
+            },
+            RefreshModelsAuth::Configured,
+        )
+        .unwrap(),
+    );
+    models.set_provider(
+        create_provider_with_refresh_auth(
+            CreateProviderOptions {
+                id: "catalog-unconfigured".to_owned(),
+                name: None,
+                base_url: None,
+                headers: None,
+                auth: ProviderAuth {
+                    api_key: Some(EnvKeyAuth::new(None)),
+                    oauth: None,
+                },
+                models: vec![AnyModel::Chat(test_model("catalog-unconfigured", "model-a"))],
+                fetch_models: Some(Arc::new(move |ctx| {
+                    let ur = Arc::clone(&ur);
+                    Box::pin(async move {
+                        if ctx.allow_network {
+                            ur.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Ok(Vec::new())
+                    })
+                })),
+                filter_models: None,
+                filter_all_models: None,
+                api: Some(CreateProviderApi::Single(dummy_stream)),
+                images: None,
+                classifiers: None,
+            },
+            RefreshModelsAuth::Configured,
+        )
+        .unwrap(),
+    );
+
+    assert!(models.refresh(None).await.unwrap().errors.is_empty());
+    assert_eq!(oauth_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(*network_credentials.lock().unwrap(), vec![None]);
+    assert_eq!(unconfigured_refreshes.load(Ordering::SeqCst), 0);
+    let stored = credentials.read("catalog-oauth", None).await.unwrap().unwrap();
+    assert_eq!(stored.as_oauth().unwrap().access, "expired");
+    assert_eq!(stored.as_oauth().unwrap().refresh, "revoked");
+}
+
+#[tokio::test]
+async fn persists_an_oauth_refresh_that_started_before_the_model_refresh_was_cancelled() {
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    credentials
+        .modify_with(
+            "p1",
+            |_| async { Ok(Some(Credential::OAuth(OAuthCredential::new("old-refresh", "old", 0)))) },
+            None,
+        )
+        .await
+        .unwrap();
+    let controller = Arc::new(AbortController::new());
+    let ctrl_c = Arc::clone(&controller);
+    let models = create_models(Some(CreateModelsOptions {
+        credentials: Some(credentials.clone()),
+        ..Default::default()
+    }));
+    models.set_provider(Arc::new(TestProvider {
+        id: "p1".to_owned(),
+        models: vec![test_model("p1", "model-a")],
+        auth: ProviderAuth {
+            api_key: None,
+            oauth: Some(TestOAuth::with_refresh(Arc::new(move |cred, _| {
+                let ctrl = Arc::clone(&ctrl_c);
+                Box::pin(async move {
+                    ctrl.abort(None);
+                    Ok(OAuthCredential {
+                        access: "new".to_owned(),
+                        refresh: "new-refresh".to_owned(),
+                        expires: time::now_ms() + 60_000,
+                        ..cred
+                    })
+                })
+            }))),
+        },
+        get_models_fn: None,
+        refresh_fn: Some(Arc::new(|_| Box::pin(async { Ok(()) }))),
+        calls: None,
+        get_all_models_fn: None,
+    }));
+
+    let res = models
+        .refresh(Some(ModelsRefreshOptions {
+            signal: Some(controller.signal()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert!(res.aborted);
+    for _ in 0..50 {
+        if let Ok(Some(Credential::OAuth(c))) = credentials.read("p1", None).await
+            && c.refresh == "new-refresh"
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+        let _ = time::sleep(1, None).await;
+    }
+    let final_cred = credentials.read("p1", None).await.unwrap().unwrap();
+    assert_eq!(final_cred.as_oauth().unwrap().refresh, "new-refresh");
+}
+
+#[tokio::test]
 async fn always_gives_providers_a_concrete_signal() {
     let received_signal = Arc::new(Mutex::new(None));
     let rs = received_signal.clone();
@@ -1648,27 +1920,21 @@ async fn cancels_queued_credential_mutations_without_running_them_later() {
     );
 }
 
+// Radius bug report 01a10855-43d8-7447-a710-2acf5ee0b2ee: refresh_token_invalidated after a cancelled refresh.
 #[tokio::test]
-async fn passes_cancellation_to_oauth_refresh_and_preserves_the_previous_credential() {
+async fn persists_an_oauth_refresh_that_started_before_the_request_was_cancelled() {
     let credentials = Arc::new(InMemoryCredentialStore::new());
-    let previous = OAuthCredential::new("old-refresh", "old", 0);
-    let prev_clone = previous.clone();
     credentials
-        .modify(
+        .modify_with(
             "p1",
-            Box::new(move |_| Box::pin(async move { Ok(Some(Credential::OAuth(prev_clone))) })),
+            |_| async { Ok(Some(Credential::OAuth(OAuthCredential::new("old-refresh", "old", 0)))) },
             None,
         )
         .await
         .unwrap();
 
-    let refresh_started = Arc::new(Notify::new());
-    let finish_refresh = Arc::new(Notify::new());
-    let received_signal = Arc::new(Mutex::new(None));
-
-    let rs_c = refresh_started.clone();
-    let ff_c = finish_refresh.clone();
-    let sig_c = received_signal.clone();
+    let controller = Arc::new(AbortController::new());
+    let ctrl_c = Arc::clone(&controller);
 
     let models = create_models(Some(CreateModelsOptions {
         credentials: Some(credentials.clone()),
@@ -1679,16 +1945,14 @@ async fn passes_cancellation_to_oauth_refresh_and_preserves_the_previous_credent
         models: vec![test_model("p1", "model-a")],
         auth: ProviderAuth {
             api_key: None,
-            oauth: Some(TestOAuth::with_refresh(Arc::new(move |cred, signal| {
-                let rs = rs_c.clone();
-                let ff = ff_c.clone();
-                let sg = sig_c.clone();
+            oauth: Some(TestOAuth::with_refresh(Arc::new(move |cred, _| {
+                let ctrl = Arc::clone(&ctrl_c);
                 Box::pin(async move {
-                    *sg.lock().unwrap() = Some(signal);
-                    rs.notify_waiters();
-                    ff.notified().await;
+                    // The provider has rotated old-refresh by the time the request is cancelled.
+                    ctrl.abort(None);
                     Ok(OAuthCredential {
                         access: "new".to_owned(),
+                        refresh: "new-refresh".to_owned(),
                         expires: time::now_ms() + 60_000,
                         ..cred
                     })
@@ -1701,31 +1965,28 @@ async fn passes_cancellation_to_oauth_refresh_and_preserves_the_previous_credent
         get_all_models_fn: None,
     }));
 
-    let controller = AbortController::new();
-    let sig = controller.signal();
-    let m_c = models.clone();
-    let auth = tokio::spawn(async move {
-        m_c.get_auth_provider_id(
+    let err = models
+        .get_auth_provider_id(
             "p1",
             Some(AuthResolutionOverrides {
-                signal: Some(sig),
+                signal: Some(controller.signal()),
                 ..Default::default()
             }),
         )
         .await
-    });
-    refresh_started.notified().await;
-    controller.abort(None);
-
-    let err = auth.await.unwrap().unwrap_err();
+        .unwrap_err();
     assert_eq!(err.name(), "AbortError");
-    assert!(received_signal.lock().unwrap().as_ref().unwrap().aborted());
-    finish_refresh.notify_waiters();
-    tokio::task::yield_now().await;
-    assert_eq!(
-        credentials.read("p1", None).await.unwrap(),
-        Some(Credential::OAuth(previous))
-    );
+    for _ in 0..50 {
+        if let Ok(Some(Credential::OAuth(c))) = credentials.read("p1", None).await
+            && c.refresh == "new-refresh"
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+        let _ = time::sleep(1, None).await;
+    }
+    let final_cred = credentials.read("p1", None).await.unwrap().unwrap();
+    assert_eq!(final_cred.as_oauth().unwrap().refresh, "new-refresh");
 }
 
 #[tokio::test]

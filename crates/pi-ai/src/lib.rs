@@ -5,12 +5,15 @@ pub mod api;
 pub mod auth;
 pub mod bedrock_provider;
 pub mod bun_oauth;
+pub mod cache_warming;
 pub mod cli;
 pub mod compat;
 pub mod env_api_keys;
 pub mod image_models;
 pub mod images;
 pub mod images_api_registry;
+pub mod lazy_bedrock_provider;
+pub mod lazy_oauth;
 pub mod legacy_api_aliases;
 pub mod model_catalog;
 pub mod models;
@@ -19,18 +22,21 @@ pub mod models_store;
 pub mod oauth;
 pub mod providers;
 pub mod session_resources;
+pub mod telemetry;
 pub mod types;
 pub mod utils;
 pub mod vendor;
 // @generated-mods end
 pub use pi_js::vendor::typebox as schema;
 pub use pi_js::{Error, Result};
+pub use pi_schema;
 
 // PORT: `Static<T>` is a TypeScript inference helper. It has no runtime value and no Rust type.
 pub use pi_js::vendor::typebox::Schema as TSchema;
 pub use pi_js::vendor::typebox::t as Type;
 
 pub use crate::api::anthropic_messages::{AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay};
+pub use crate::api::azure_openai_config::AzureEndpointOptions;
 pub use crate::api::azure_openai_responses::AzureOpenAIResponsesOptions;
 pub use crate::api::bedrock_converse_stream::{BedrockOptions, BedrockThinkingDisplay};
 pub use crate::api::google_generative_ai::GoogleOptions;
@@ -46,6 +52,7 @@ pub use crate::auth::context::*;
 pub use crate::auth::credential_store::*;
 pub use crate::auth::helpers::*;
 pub use crate::auth::types::*;
+pub use crate::cache_warming::*;
 pub use crate::compat::extension_oauth_types::{
     OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthPrompt, OAuthSelectOption, OAuthSelectPrompt,
 };
@@ -62,12 +69,16 @@ pub use crate::utils::assistant_message_frame::*;
 pub use crate::utils::diagnostics::*;
 #[allow(ambiguous_glob_reexports)]
 pub use crate::utils::event_stream::*;
+pub use crate::utils::identity::*;
 pub use crate::utils::json_parse::*;
 pub use crate::utils::overflow::*;
 pub use crate::utils::retry::*;
+pub use crate::utils::streaming_json::*;
+#[allow(ambiguous_glob_reexports)]
+pub use crate::utils::string_enum::*;
 pub use crate::utils::text::{content_text, get_system_message_text, render_system_message_update};
 #[allow(ambiguous_glob_reexports)]
 pub use crate::utils::transcript::*;
-pub use crate::utils::typebox_helpers::*;
 pub use crate::utils::uuid::uuidv7;
 pub use crate::utils::validation::*;
+pub use crate::utils::version::PI_AI_VERSION;

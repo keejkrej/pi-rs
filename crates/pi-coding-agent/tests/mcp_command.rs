@@ -57,6 +57,7 @@ async fn run_cmd(
             cwd: dir_str.clone(),
             agent_dir: dir_str,
             credentials: None,
+            provider_token: None,
             open_url: None,
             log: Some(Arc::new(move |line| {
                 out_log.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());

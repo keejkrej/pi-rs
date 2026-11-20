@@ -3,8 +3,40 @@
 use std::sync::{Arc, LazyLock, Mutex};
 
 use indexmap::IndexMap;
+pub use pi_mcp::oauth::client_settings::McpClientRegistration;
+use pi_mcp::{
+    McpServerConfigOptions as PiMcpServerConfigOptions, McpServerConfigResult as PiMcpServerConfigResult,
+    validate_mcp_server_config as validate_pi_mcp_server_config,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+pub const LIST_MCP_RESOURCES_TOOL: &str = "list_mcp_resources";
+pub const LIST_MCP_RESOURCE_TEMPLATES_TOOL: &str = "list_mcp_resource_templates";
+pub const READ_MCP_RESOURCE_TOOL: &str = "read_mcp_resource";
+
+/// Whether a tool comes from MCP: a server tool (`mcp__<server>__<tool>`) or a resource tool.
+pub fn is_mcp_tool_name(name: &str) -> bool {
+    name.starts_with("mcp__")
+        || matches!(
+            name,
+            LIST_MCP_RESOURCES_TOOL | LIST_MCP_RESOURCE_TEMPLATES_TOOL | READ_MCP_RESOURCE_TOOL
+        )
+}
+
+/// Whether a tool name matches any of the entries, each an exact name or a `*` wildcard pattern.
+pub fn create_tool_name_matcher(entries: &[String]) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    let mut exact = std::collections::HashSet::new();
+    let mut patterns = Vec::new();
+    for entry in entries {
+        if entry.contains('*') {
+            patterns.push(entry.clone());
+        } else {
+            exact.insert(entry.clone());
+        }
+    }
+    Arc::new(move |name: &str| exact.contains(name) || patterns.iter().any(|pat| pattern_matches(pat, name)))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +87,21 @@ pub struct McpOAuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_registration: Option<McpClientRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_server_metadata_url: Option<String>,
+}
+
+/// Whether pi's Client ID Metadata Documents list a redirect URI for the loopback `callbackUrl`: they list
+/// `/callback` on localhost and 127.0.0.1, on any port. Without `callbackUrl`, pi uses such a URI.
+pub fn is_client_metadata_document_callback(callback_url: Option<&str>) -> bool {
+    let Some(raw) = callback_url else {
+        return true;
+    };
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    url.host_str() != Some("[::1]") && url.path() == "/callback"
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +203,7 @@ impl McpServerConfig {
 }
 
 pub fn mcp_namespace(server: &str) -> String {
-    format!("mcp__{}", server.replace('-', "_"))
+    pi_mcp::mcp_namespace(server)
 }
 
 pub fn is_loopback_redirect_uri(value: &str) -> bool {
@@ -166,88 +212,6 @@ pub fn is_loopback_redirect_uri(value: &str) -> bool {
     };
     let host = url.host_str().unwrap_or("");
     url.scheme() == "http" && LOOPBACK_HOSTS.contains(&host) && url.query().is_none() && url.fragment().is_none()
-}
-
-fn is_valid_server_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-fn is_string_record(val: &Value) -> bool {
-    let Some(obj) = val.as_object() else {
-        return false;
-    };
-    obj.values().all(Value::is_string)
-}
-
-fn validate_oauth(value: &Value) -> Option<String> {
-    let Some(obj) = value.as_object() else {
-        return Some("oauth must be an object".to_owned());
-    };
-    if let Some(v) = obj.get("clientId")
-        && !v.is_string()
-    {
-        return Some("oauth.clientId must be a string".to_owned());
-    }
-    if let Some(v) = obj.get("clientSecret")
-        && !v.is_string()
-    {
-        return Some("oauth.clientSecret must be a string".to_owned());
-    }
-    let port_num: Option<u16> = if let Some(port) = obj.get("callbackPort") {
-        let Some(n) = port.as_f64() else {
-            return Some("oauth.callbackPort must be a port number".to_owned());
-        };
-        if n.fract() != 0.0 || !(1.0..=65535.0).contains(&n) {
-            return Some("oauth.callbackPort must be a port number".to_owned());
-        }
-        Some(n as u16)
-    } else {
-        None
-    };
-    if let Some(cb) = obj.get("callbackUrl") {
-        let Some(cb_str) = cb.as_str() else {
-            return Some(
-                "oauth.callbackUrl must be an http URI on localhost, 127.0.0.1, or [::1] without query or fragment"
-                    .to_owned(),
-            );
-        };
-        if !is_loopback_redirect_uri(cb_str) {
-            return Some(
-                "oauth.callbackUrl must be an http URI on localhost, 127.0.0.1, or [::1] without query or fragment"
-                    .to_owned(),
-            );
-        }
-        if let Ok(parsed) = url::Url::parse(cb_str)
-            && let Some(uport) = parsed.port()
-            && let Some(p) = port_num
-            && uport != p
-        {
-            return Some("oauth.callbackUrl and oauth.callbackPort name different ports".to_owned());
-        }
-    }
-    if let Some(v) = obj.get("scope")
-        && !v.is_string()
-    {
-        return Some("oauth.scope must be a string".to_owned());
-    }
-    if let Some(v) = obj.get("clientName")
-        && !v.as_str().is_some_and(|s| !pi_js::str16::trim(s).is_empty())
-    {
-        return Some("oauth.clientName must be a non-empty string".to_owned());
-    }
-    if let Some(meta) = obj.get("authServerMetadataUrl") {
-        let parsed = meta.as_str().and_then(|s| url::Url::parse(s).ok());
-        let ok = parsed.is_some_and(|u| {
-            u.scheme() == "https" || (u.scheme() == "http" && u.host_str().is_some_and(|h| LOOPBACK_HOSTS.contains(&h)))
-        });
-        if !ok {
-            return Some(
-                "oauth.authServerMetadataUrl must be an https URL, or http on localhost, 127.0.0.1, or [::1]"
-                    .to_owned(),
-            );
-        }
-    }
-    None
 }
 
 fn resolve_exposure_alias_value(value: &Value) -> Value {
@@ -310,130 +274,90 @@ pub fn get_mcp_tool_exposure(config: &McpServerConfig, tool_name: &str) -> McpEx
     config.exposure().unwrap_or(McpExposure::Codemode)
 }
 
-pub fn validate_mcp_server_config(name: &str, raw: &Value) -> std::result::Result<McpServerConfig, String> {
-    if !is_valid_server_name(name) {
-        return Err(format!(
-            "invalid server name \"{name}\" (use letters, digits, \"_\" and \"-\")"
-        ));
+fn check_exposures(extra: &IndexMap<String, Value>) -> Option<String> {
+    if let Some(exp) = extra.get("exposure")
+        && exp.as_str().and_then(McpExposure::from_str_or_alias).is_none()
+    {
+        return Some(format!("exposure must be one of {MCP_EXPOSURES_STR}"));
     }
-    let Some(raw_obj) = raw.as_object() else {
-        return Err(format!("server \"{name}\" must be an object"));
-    };
-    let value = resolve_exposure_aliases(raw_obj);
-
-    if let Some(exp) = value.get("exposure") {
-        let ok = exp.as_str().and_then(McpExposure::from_str_or_alias).is_some();
-        if !ok {
-            return Err(format!(
-                "server \"{name}\": exposure must be one of {MCP_EXPOSURES_STR}"
-            ));
-        }
-    }
-    if let Some(te) = value.get("toolExposure") {
+    if let Some(te) = extra.get("toolExposure") {
         let Some(te_obj) = te.as_object() else {
-            return Err(format!(
-                "server \"{name}\": toolExposure must map tool names to exposures"
-            ));
+            return Some("toolExposure must map tool names to exposures".to_owned());
         };
         for (tool, entry) in te_obj {
-            let ok = entry.as_str().and_then(McpExposure::from_str_or_alias).is_some();
-            if !ok {
-                return Err(format!(
-                    "server \"{name}\": toolExposure \"{tool}\" must be one of {MCP_EXPOSURES_STR}"
-                ));
+            if entry.as_str().and_then(McpExposure::from_str_or_alias).is_none() {
+                return Some(format!("toolExposure \"{tool}\" must be one of {MCP_EXPOSURES_STR}"));
             }
         }
     }
-    if let Some(enabled) = value.get("enabled")
-        && !enabled.is_boolean()
-    {
-        return Err(format!("server \"{name}\": enabled must be a boolean"));
-    }
-    if let Some(desc) = value.get("description")
-        && !desc.is_string()
-    {
-        return Err(format!("server \"{name}\": description must be a string"));
-    }
-    if let Some(timeout) = value.get("timeout") {
-        let ok = timeout.as_f64().is_some_and(|n| n > 0.0);
-        if !ok {
-            return Err(format!(
-                "server \"{name}\": timeout must be a positive number of seconds"
-            ));
-        }
-    }
+    None
+}
 
-    let server_type = value.get("type").and_then(Value::as_str);
-    if server_type == Some("sse") {
-        return Err(format!(
-            "server \"{name}\": legacy SSE transport is not supported; use the streamable HTTP URL"
-        ));
+fn check_auth(auth: Option<&Value>, url_str: &str) -> Option<String> {
+    let auth = auth?;
+    let valid_provider = auth
+        .as_object()
+        .and_then(|o| o.get("provider"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !valid_provider {
+        return Some("auth.provider must be a provider name".to_owned());
     }
+    if let Ok(parsed) = url::Url::parse(url_str) {
+        let host = parsed.host_str().unwrap_or("");
+        if parsed.scheme() != "https" && !LOOPBACK_HOSTS.contains(&host) {
+            return Some("auth requires an https URL, or http on localhost, 127.0.0.1, or [::1]".to_owned());
+        }
+    }
+    None
+}
 
-    if let Some(url_str) = value.get("url").and_then(Value::as_str)
-        && matches!(server_type, None | Some("http") | Some("streamable-http"))
-    {
-        let Ok(parsed_url) = url::Url::parse(url_str) else {
-            return Err(format!("server \"{name}\": url must be an http or https URL"));
-        };
-        if !matches!(parsed_url.scheme(), "http" | "https") {
-            return Err(format!("server \"{name}\": url must be an http or https URL"));
+/// Validate one server entry of the `mcpServers` shape: pi-mcp's shared fields and pi's own.
+/// Returns a copy of the config with exposure aliases resolved, or an error message.
+pub fn validate_mcp_server_config(name: &str, raw: &Value) -> std::result::Result<McpServerConfig, String> {
+    let resolved_storage;
+    let candidate = match raw.as_object() {
+        Some(obj) => {
+            resolved_storage = Value::Object(resolve_exposure_aliases(obj));
+            &resolved_storage
         }
-        if let Some(headers) = value.get("headers")
-            && !is_string_record(headers)
-        {
-            return Err(format!("server \"{name}\": headers must map names to strings"));
-        }
-        if let Some(oauth) = value.get("oauth")
-            && let Some(oauth_err) = validate_oauth(oauth)
-        {
-            return Err(format!("server \"{name}\": {oauth_err}"));
-        }
-        if let Some(auth) = value.get("auth") {
-            let valid_provider = auth
-                .as_object()
-                .and_then(|o| o.get("provider"))
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty());
-            if !valid_provider {
-                return Err(format!("server \"{name}\": auth.provider must be a provider name"));
+        None => raw,
+    };
+    let opts = PiMcpServerConfigOptions {
+        check_metadata_document_callback: Some(Arc::new(|callback_url| {
+            if is_client_metadata_document_callback(callback_url) {
+                None
+            } else {
+                Some(
+                    "oauth.clientRegistration \"cimd\" requires oauth.callbackUrl on localhost or 127.0.0.1 with path /callback"
+                        .to_owned(),
+                )
             }
-            let host = parsed_url.host_str().unwrap_or("");
-            if parsed_url.scheme() != "https" && !LOOPBACK_HOSTS.contains(&host) {
-                return Err(format!(
-                    "server \"{name}\": auth requires an https URL, or http on localhost, 127.0.0.1, or [::1]"
-                ));
+        })),
+    };
+    match validate_pi_mcp_server_config(name, candidate, Some(&opts)) {
+        PiMcpServerConfigResult::Invalid { error } => Err(error),
+        PiMcpServerConfigResult::Http(http_cfg) => {
+            if let Some(err) =
+                check_exposures(&http_cfg.extra).or_else(|| check_auth(http_cfg.extra.get("auth"), &http_cfg.url))
+            {
+                return Err(format!("server \"{name}\": {err}"));
             }
+            let val = serde_json::to_value(&http_cfg).map_err(|err| format!("server \"{name}\": {err}"))?;
+            let parsed: McpHttpServerConfig =
+                serde_json::from_value(val).map_err(|err| format!("server \"{name}\": {err}"))?;
+            Ok(McpServerConfig::Http(parsed))
         }
-        let parsed: McpHttpServerConfig =
-            serde_json::from_value(Value::Object(value)).map_err(|err| format!("server \"{name}\": {err}"))?;
-        return Ok(McpServerConfig::Http(parsed));
+        PiMcpServerConfigResult::Stdio(stdio_cfg) => {
+            if let Some(err) = check_exposures(&stdio_cfg.extra) {
+                return Err(format!("server \"{name}\": {err}"));
+            }
+            let val = serde_json::to_value(&stdio_cfg).map_err(|err| format!("server \"{name}\": {err}"))?;
+            let parsed: McpStdioServerConfig =
+                serde_json::from_value(val).map_err(|err| format!("server \"{name}\": {err}"))?;
+            Ok(McpServerConfig::Stdio(parsed))
+        }
     }
-
-    if value.get("command").is_some_and(Value::is_string) && matches!(server_type, None | Some("stdio")) {
-        if let Some(args) = value.get("args")
-            && !args.as_array().is_some_and(|a| a.iter().all(Value::is_string))
-        {
-            return Err(format!("server \"{name}\": args must be an array of strings"));
-        }
-        if let Some(env) = value.get("env")
-            && !is_string_record(env)
-        {
-            return Err(format!("server \"{name}\": env must map names to strings"));
-        }
-        if let Some(cwd) = value.get("cwd")
-            && !cwd.is_string()
-        {
-            return Err(format!("server \"{name}\": cwd must be a string"));
-        }
-        let parsed: McpStdioServerConfig =
-            serde_json::from_value(Value::Object(value)).map_err(|err| format!("server \"{name}\": {err}"))?;
-        return Ok(McpServerConfig::Stdio(parsed));
-    }
-
-    Err(format!(
-        "server \"{name}\" needs either \"command\" (stdio) or \"url\" (streamable HTTP)"
-    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -118,6 +118,7 @@ pub fn assistant(text: &str, calls: &[&str], stop_reason: Option<StopReason>) ->
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     }
 }
 
@@ -132,6 +133,7 @@ pub fn tool_result(id: &str, text: Option<&str>) -> ToolResultMessage {
         nested_calls: None,
         is_error: false,
         timestamp: 3,
+        duration_ms: None,
     }
 }
 

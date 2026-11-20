@@ -2439,3 +2439,322 @@ mod streaming_code_fences {
         assert_eq!(partial.render(80).len(), complete.render(80).len());
     }
 }
+
+mod v1_5_2_updates {
+    use super::*;
+
+    fn render_plain(text: &str, width: usize) -> Vec<String> {
+        Markdown::new(text, 0, 0, default_markdown_theme(), None, None)
+            .render(width)
+            .into_iter()
+            .map(|line| strip_ansi(&line).trim_end().to_string())
+            .collect()
+    }
+
+    mod block_reuse {
+        use super::*;
+
+        fn counting_theme(calls: Arc<Mutex<Vec<String>>>) -> MarkdownTheme {
+            let mut theme = default_markdown_theme();
+            theme.highlight_code = Some(Arc::new(move |code, lang| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{code}", lang.unwrap_or("undefined")));
+                code.split('\n').map(|line| format!("\x1b[32m{line}\x1b[39m")).collect()
+            }));
+            theme
+        }
+
+        #[test]
+        fn highlights_a_code_block_once_across_streamed_text_and_resizes_and_again_after_invalidate() {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let markdown = Markdown::new("```ts\nx\n```", 0, 0, counting_theme(Arc::clone(&calls)), None, None);
+            markdown.render(80);
+            markdown.set_text("```ts\nx\n```\n\nafter");
+            markdown.render(40);
+            assert_eq!(*calls.lock().unwrap(), vec!["ts:x".to_string()]);
+            markdown.invalidate();
+            markdown.render(40);
+            assert_eq!(*calls.lock().unwrap(), vec!["ts:x".to_string(), "ts:x".to_string()]);
+        }
+
+        #[test]
+        fn renders_a_block_again_when_the_block_after_it_changes_its_spacing() {
+            let markdown = Markdown::new("# Title", 0, 0, default_markdown_theme(), None, None);
+            markdown.render(80);
+            markdown.set_text("# Title\nfoo");
+            let rendered: Vec<String> = markdown
+                .render(80)
+                .into_iter()
+                .map(|line| strip_ansi(&line).trim().to_string())
+                .collect();
+            assert_eq!(rendered, vec!["Title", "", "foo"]);
+        }
+
+        #[test]
+        #[serial]
+        fn follows_changed_reference_link_definitions() {
+            set_capabilities(TerminalCapabilities {
+                images: None,
+                true_color: false,
+                hyperlinks: false,
+            });
+            let markdown = Markdown::new(
+                "[a][x]\n\n[x]: https://one.example",
+                0,
+                0,
+                default_markdown_theme(),
+                None,
+                None,
+            );
+            markdown.render(80);
+            markdown.set_text("[a][x]\n\n[x]: https://two.example");
+            let joined = strip_ansi(&markdown.render(80).join("\n"));
+            reset_capabilities_cache();
+            assert!(joined.contains("https://two.example"), "got: {joined:?}");
+        }
+    }
+
+    mod latex_and_tables {
+        use super::*;
+
+        // Regression test for https://github.com/earendil-works/pi/issues/11483
+        #[test]
+        fn falls_back_to_raw_source_when_display_math_is_wider_than_content_width() {
+            let source = [
+                "\\[",
+                r"\frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} = \sum_{i=1}^{n} \frac{1}{i^2} + \int_0^1 f(x)\,dx",
+                "\\]",
+            ]
+            .join("\n");
+
+            assert_eq!(
+                render_plain(&source, 40),
+                vec![
+                    "∂² u   ∂² u   n   1   1",
+                    "──── + ──── = ∑   ── +∫ f(x) dx",
+                    "∂ x²   ∂ y²  i=1  i²  0",
+                ]
+            );
+
+            let narrow = render_plain(&source, 30);
+            assert_eq!(narrow.first().map(String::as_str), Some("\\["));
+            assert_eq!(narrow.last().map(String::as_str), Some("\\]"));
+            assert!(!narrow.iter().any(|line| line.contains('─')));
+            assert!(narrow.iter().all(|line| line.chars().count() <= 30));
+        }
+
+        // Regression tests for https://github.com/earendil-works/pi/issues/11159
+        #[test]
+        fn renders_tables_after_orphan_display_math_openers() {
+            let table = "| A | B |\n|---|---|\n| 1 | 2 |";
+            let rendered_table = ["┌───┬───┐", "│ A │ B │", "├───┼───┤", "│ 1 │ 2 │", "└───┴───┘"];
+
+            let source1 = format!("Intro\n\n$$\n\n{table}\n\nAfter");
+            let mut expected1 = vec!["Intro", "", "$$", ""];
+            expected1.extend(rendered_table);
+            expected1.extend(["", "After"]);
+            assert_eq!(render_plain(&source1, 80), expected1);
+
+            let source2 = format!("Intro\n\n\\[\n\n{table}\n\nAfter");
+            let mut expected2 = vec!["Intro", "", "\\[", ""];
+            expected2.extend(rendered_table);
+            expected2.extend(["", "After"]);
+            assert_eq!(render_plain(&source2, 80), expected2);
+        }
+    }
+
+    mod styled_wrap_boundary_10925 {
+        use super::*;
+
+        #[test]
+        fn does_not_start_next_line_with_space_or_carry_styles_into_padding() {
+            let markdown = Markdown::new(
+                "aaaa **bold** next ~~strk~~ more words",
+                1,
+                0,
+                default_markdown_theme(),
+                Some(DefaultTextStyle {
+                    bg_color: Some(Arc::new(|t| format!("\x1b[44m{t}\x1b[49m"))),
+                    ..Default::default()
+                }),
+                None,
+            );
+
+            assert_eq!(
+                markdown.render(11),
+                vec![
+                    "\x1b[44m aaaa \x1b[1mbold\x1b[22m \x1b[49m",
+                    "\x1b[44m next \x1b[9mstrk\x1b[29m \x1b[49m",
+                    "\x1b[44m more      \x1b[49m",
+                    "\x1b[44m words     \x1b[49m",
+                ]
+            );
+        }
+    }
+
+    mod cjk_emphasis_10154 {
+        use super::*;
+
+        fn render_tags(text: &str) -> Vec<String> {
+            let mut theme = default_markdown_theme();
+            theme.bold = Arc::new(|t| format!("<b>{t}</b>"));
+            theme.italic = Arc::new(|t| format!("<i>{t}</i>"));
+            Markdown::new(text, 0, 0, theme, None, None)
+                .render(80)
+                .into_iter()
+                .map(|line| line.trim_end().to_string())
+                .collect()
+        }
+
+        #[test]
+        fn renders_emphasis_delimited_next_to_cjk_punctuation() {
+            assert_eq!(render_tags("**这是测试。**后面"), vec!["<b>这是测试。</b>后面"]);
+            assert_eq!(
+                render_tags("**一句话说清：**一台机器"),
+                vec!["<b>一句话说清：</b>一台机器"]
+            );
+            assert_eq!(
+                render_tags("**要点到此为止。**20 小时"),
+                vec!["<b>要点到此为止。</b>20 小时"]
+            );
+            assert_eq!(render_tags("字**「引用」**字"), vec!["字<b>「引用」</b>字"]);
+            assert_eq!(render_tags("*斜体。*后面"), vec!["<i>斜体。</i>后面"]);
+        }
+
+        #[test]
+        fn keeps_commonmark_flanking_rules_for_non_cjk_text() {
+            assert_eq!(render_tags("**end.**Then next"), vec!["**end.**Then next"]);
+        }
+    }
+
+    mod cjk_links {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn stops_bare_urls_at_cjk_punctuation_and_preserves_following_text() {
+            set_capabilities(TerminalCapabilities {
+                images: None,
+                true_color: false,
+                hyperlinks: true,
+            });
+            for punctuation in "。，；：！？、“”‘’（）【】《》「」『』…—·・〈〉［］｛｝．｡｢｣､･".chars()
+            {
+                for url in [
+                    "https://example.com",
+                    "https://example.com/中文?q=搜索#片段",
+                    "www.example.com",
+                ] {
+                    let source = format!("{url}{punctuation}后面的中文");
+                    let output = Markdown::new(&source, 0, 0, default_markdown_theme(), None, None)
+                        .render(160)
+                        .join("");
+                    let href = if url.starts_with("www.") {
+                        format!("http://{url}")
+                    } else {
+                        url.to_string()
+                    };
+                    assert!(output.contains(&format!("\x1b]8;;{href}\x1b\\")), "{source}");
+                    assert!(
+                        strip_ansi(&output).contains(&format!("\x1b]8;;\x1b\\{punctuation}后面的中文")),
+                        "{source}"
+                    );
+                    let without_osc8 = OSC8_SEQUENCE_REGEX.replace_all(&output, "");
+                    assert_eq!(strip_ansi(&without_osc8).trim_end(), source);
+                }
+            }
+            reset_capabilities_cache();
+        }
+
+        #[test]
+        #[serial]
+        fn preserves_chinese_without_punctuation_and_explicit_links_with_cjk_punct() {
+            set_capabilities(TerminalCapabilities {
+                images: None,
+                true_color: false,
+                hyperlinks: true,
+            });
+            for url in [
+                "https://example.com紧接着中文",
+                "https://example.com/中文?q=搜索#片段",
+                "https://example.com/テストー한글",
+            ] {
+                let output = Markdown::new(url, 0, 0, default_markdown_theme(), None, None)
+                    .render(160)
+                    .join("");
+                assert!(output.contains(&format!("\x1b]8;;{url}\x1b\\")), "{url}");
+            }
+
+            let punct_url = "https://example.com/中文，路径·テスト・한글…—。";
+            for source in [format!("[文档]({punct_url})"), format!("<{punct_url}>")] {
+                let output = Markdown::new(&source, 0, 0, default_markdown_theme(), None, None)
+                    .render(160)
+                    .join("");
+                assert!(output.contains(&format!("\x1b]8;;{punct_url}\x1b\\")), "{source}");
+            }
+
+            let mixed = "https://example.com.，后面的中文";
+            let mixed_out = Markdown::new(mixed, 0, 0, default_markdown_theme(), None, None)
+                .render(160)
+                .join("");
+            assert!(mixed_out.contains("\x1b]8;;https://example.com\x1b\\"));
+            assert!(strip_ansi(&mixed_out).contains("\x1b]8;;\x1b\\.，后面的中文"));
+            reset_capabilities_cache();
+        }
+    }
+
+    mod html_comments_11710 {
+        use super::*;
+
+        #[test]
+        fn hides_block_and_inline_comments_without_extra_spacing() {
+            assert_eq!(
+                render_plain(
+                    "## [1.0.0]\n\n<!-- release-notes:start -->\nFixed a bug.\n\nSee <!-- todo: link --> the docs.",
+                    60,
+                ),
+                render_plain("## [1.0.0]\n\nFixed a bug.\n\nSee the docs.", 60)
+            );
+        }
+
+        #[test]
+        fn drops_one_blank_line_around_comment_only_blocks() {
+            assert_eq!(
+                render_plain(
+                    "<!-- start -->\n\n## [1.0.0]\n\n<!-- a -->\n\n- item\n\n<!-- b -->\n\n## [0.9.0]\n\n<!-- end -->",
+                    60,
+                ),
+                render_plain("## [1.0.0]\n\n- item\n\n## [0.9.0]", 60)
+            );
+        }
+
+        #[test]
+        fn hides_multi_line_and_unclosed_comments() {
+            assert_eq!(
+                render_plain("<!--\nmulti\nline\n-->\ntext", 60),
+                render_plain("text", 60)
+            );
+            assert_eq!(render_plain("text\n\n<!-- streaming", 60), render_plain("text", 60));
+        }
+
+        #[test]
+        fn hides_comments_in_blockquotes_and_list_items() {
+            assert_eq!(
+                render_plain(
+                    "> q\n>\n> <!-- c -->\n>\n> r\n\n- a\n\n  <!-- c -->\n\n  b\n- <!-- c --> item",
+                    60
+                ),
+                render_plain("> q\n>\n> r\n\n- a\n\n  b\n- item", 60)
+            );
+        }
+
+        #[test]
+        fn keeps_other_html_and_text_after_a_comment_in_a_block() {
+            assert_eq!(render_plain("with <tag> markers", 60), vec!["with <tag> markers"]);
+            assert_eq!(render_plain("<!-- c --> trailing text", 60), vec!["trailing text"]);
+            assert_eq!(render_plain("<div>\n<!-- c -->a</div>", 60), vec!["<div>", "a</div>"]);
+        }
+    }
+}

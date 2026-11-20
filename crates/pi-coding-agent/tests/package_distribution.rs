@@ -24,17 +24,3 @@ fn uses_the_bundle_for_executables_and_modular_output_for_libraries() {
         json!("./dist/bundle/rpc-entry.js")
     );
 }
-
-// Regression for #9132: internal experimental entrypoints must not be published runtime exports.
-#[test]
-fn keeps_experimental_exports_source_only() {
-    let package_json = read_coding_agent_package_json();
-    assert_eq!(
-        package_json["exports"]["./client"],
-        json!({ "source": "./src/client/index.ts" })
-    );
-    assert_eq!(
-        package_json["exports"]["./experimental/plugin"],
-        json!({ "source": "./src/experimental/plugin.ts" })
-    );
-}

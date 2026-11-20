@@ -12,16 +12,16 @@ use indexmap::IndexSet;
 use pi_agent_core::types::AgentMessage;
 use pi_ai::types::{AssistantContentBlock, AssistantMessage, Message, UserContentBlock, UserMessageContent};
 use pi_coding_agent::core::extensions::types::{
-    AgentEndEvent, BeforeAgentStartEvent, BeforeAgentStartEventResult, ContextEvent, ContextEventResult,
-    CustomMessageContent, CustomMessageDraft, DeliverAs, Extension, ExtensionApi, ExtensionContext, ExtensionFactory,
-    FlagOptions, FlagType, FlagValue, InlineExtension, InputDeliveryBehavior, NotifyType, RegisteredCommandOptions,
-    SendMessageOptions, SendUserMessageOptions, SessionStartEvent, ShortcutOptions, ToolCallEvent, ToolCallEventResult,
-    TurnEndEvent,
+    AgentEndEvent, BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeAgentStartMessageType, ContextEvent,
+    ContextEventResult, CustomMessageContent, CustomMessageDraft, DeliverAs, Extension, ExtensionApi, ExtensionContext,
+    ExtensionFactory, FlagOptions, FlagType, FlagValue, InlineExtension, InputDeliveryBehavior, NotifyType,
+    RegisteredCommandOptions, SendMessageOptions, SendUserMessageOptions, SessionStartEvent, ShortcutOptions,
+    ToolCallEvent, ToolCallEventResult, TurnEndEvent,
 };
 use pi_tui::Key;
 use serde::{Deserialize, Serialize};
 
-use self::utils::{TodoItem, extract_todo_items, is_safe_command, mark_completed_steps};
+use self::utils::{TodoItem, all_steps_complete, extract_todo_items, is_safe_command, mark_completed_steps};
 
 const PLAN_MODE_TOOLS: &[&str] = &["read", "bash", "grep", "find", "ls", "questionnaire"];
 const NORMAL_MODE_TOOLS: &[&str] = &["read", "bash", "edit", "write"];
@@ -71,6 +71,7 @@ fn get_assistant_text(message: &AssistantMessage) -> String {
         .iter()
         .filter_map(|block| match block {
             AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+            AssistantContentBlock::Thinking(th) => Some(th.thinking.as_str()),
             _ => None,
         })
         .collect();
@@ -128,14 +129,20 @@ fn update_status(ctx: &ExtensionContext, state: &Mutex<SharedState>) -> pi_js::R
         let lines: Vec<String> = items
             .iter()
             .map(|item| {
+                let text = if item.text.chars().count() > 60 {
+                    let prefix: String = item.text.chars().take(57).collect();
+                    format!("{prefix}...")
+                } else {
+                    item.text.clone()
+                };
                 if item.completed {
                     format!(
                         "{}{}",
                         theme.fg("success", "☑ "),
-                        theme.fg("muted", &theme.strikethrough(&item.text))
+                        theme.fg("muted", &theme.strikethrough(&text))
                     )
                 } else {
-                    format!("{}{}", theme.fg("muted", "☐ "), item.text)
+                    format!("{}{text}", theme.fg("muted", "☐ "))
                 }
             })
             .collect();
@@ -362,9 +369,13 @@ impl Extension for PlanModeExtension {
 
         {
             let state_bas = Arc::clone(&state);
-            pi.on::<BeforeAgentStartEvent>(move |_event, _ctx| {
+            pi.on::<BeforeAgentStartEvent>(move |event, _ctx| {
                 let state = Arc::clone(&state_bas);
+                let is_user = event.message_type == BeforeAgentStartMessageType::User;
                 Box::pin(async move {
+                    if !is_user {
+                        return Ok(None);
+                    }
                     let (plan_enabled, exec_mode, items) = {
                         let guard = state.lock().unwrap_or_else(|e| e.into_inner());
                         (guard.plan_mode_enabled, guard.execution_mode, guard.todo_items.clone())
@@ -446,14 +457,12 @@ impl Extension for PlanModeExtension {
                         return Ok(None);
                     };
                     let text = get_assistant_text(msg);
-                    let updated = mark_completed_steps(&text, &mut items) > 0;
-                    if updated {
-                        {
-                            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                            guard.todo_items = items;
-                        }
-                        update_status(&ctx, &state)?;
+                    mark_completed_steps(&text, &mut items);
+                    {
+                        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.todo_items = items;
                     }
+                    update_status(&ctx, &state)?;
                     persist_state(&pi, &state)?;
                     Ok(None)
                 })
@@ -473,6 +482,14 @@ impl Extension for PlanModeExtension {
                     };
 
                     if exec_mode && !items.is_empty() {
+                        if let Some(last_assistant) = event.messages.iter().rev().find_map(|m| assistant_message_from_agent(m))
+                            && all_steps_complete(&get_assistant_text(last_assistant))
+                        {
+                            for item in &mut items {
+                                item.completed = true;
+                            }
+                            state.lock().unwrap_or_else(|e| e.into_inner()).todo_items = items.clone();
+                        }
                         if items.iter().all(|t| t.completed) {
                             let completed_list: Vec<String> =
                                 items.iter().map(|t| format!("~~{}~~", t.text)).collect();
@@ -487,8 +504,8 @@ impl Extension for PlanModeExtension {
                                     details: None,
                                 },
                                 Some(SendMessageOptions {
-                                    trigger_turn: Some(false),
-                                    deliver_as: None,
+                                    trigger_turn: None,
+                                    deliver_as: Some(DeliverAs::NextTurn),
                                 }),
                             )?;
                             {

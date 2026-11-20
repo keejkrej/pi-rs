@@ -7,8 +7,8 @@ use pi_ai::api::openai_responses_shared::{
 };
 use pi_ai::compat::{get_model, normalize_context};
 use pi_ai::types::{
-    AssistantContentBlock, AssistantMessage, Context, Message, Model, ModelCompat, ModelCost, ModelInput,
-    OpenAIResponsesCompat, StopReason, ToolCall, Usage, UserMessage, UserMessageContent,
+    AssistantContentBlock, AssistantMessage, Context, Message, Model, StopReason, ToolCall, Usage, UserMessage,
+    UserMessageContent,
 };
 use pi_ai::utils::event_stream::create_assistant_message_event_stream;
 use pi_js::time;
@@ -127,6 +127,7 @@ async fn preserves_namespace_on_function_calls_when_only_done_includes_it() {
             arguments: expected_args,
             thought_signature: None,
             namespace: Some("dynamic_tools".to_owned()),
+            arguments_error: None,
         })]
     );
 
@@ -220,6 +221,7 @@ async fn preserves_namespace_on_custom_tool_calls_with_grammar_properties() {
             arguments: expected_args,
             thought_signature: None,
             namespace: Some("dynamic_tools".to_owned()),
+            arguments_error: None,
         })]
     );
 
@@ -260,6 +262,7 @@ fn drops_namespace_when_replaying_across_models_that_do_not_support_tool_search_
                 arguments: fc_args,
                 thought_signature: None,
                 namespace: Some("dynamic_tools".to_owned()),
+                arguments_error: None,
             }),
             AssistantContentBlock::ToolCall(ToolCall {
                 id: "call_custom|ctc_1".to_owned(),
@@ -267,6 +270,7 @@ fn drops_namespace_when_replaying_across_models_that_do_not_support_tool_search_
                 arguments: ctc_args,
                 thought_signature: None,
                 namespace: Some("dynamic_tools".to_owned()),
+                arguments_error: None,
             }),
         ],
         api: source_model.api.clone(),
@@ -284,6 +288,7 @@ fn drops_namespace_when_replaying_across_models_that_do_not_support_tool_search_
         raw_stop_reason: None,
         end_turn: None,
         timestamp: time::now_ms(),
+        duration_ms: None,
     };
 
     let ctx = normalize_context(&Context {
@@ -304,34 +309,20 @@ fn drops_namespace_when_replaying_across_models_that_do_not_support_tool_search_
     let targets = vec![
         get_model("openai", "gpt-5.2").unwrap(),
         Model {
-            r#type: None,
-            id: "gpt-5.4".to_owned(),
-            name: "gpt-5.4".to_owned(),
-            api: "azure-openai-responses".to_owned(),
-            provider: "azure-openai-responses".to_owned(),
-            base_url: "https://example.openai.azure.com/openai/v1".to_owned(),
-            reasoning: true,
-            thinking_level_map: None,
-            prompt_cache: None,
-            input: vec![ModelInput::Text],
-            input_limits: None,
-            cost: ModelCost::default(),
-            context_window: 400_000,
-            max_tokens: 128_000,
-            headers: None,
-            sampling_params: None,
-            compat: Some(ModelCompat::OpenAIResponses(OpenAIResponsesCompat {
-                supports_open_ai_grammar_tools: Some(true),
-                ..Default::default()
-            })),
+            provider: "azure".to_owned(),
+            ..source_model.clone()
         },
-        get_model("openai-codex", "gpt-5.3-codex-spark").unwrap(),
+        Model {
+            id: "gpt-5.3-codex-spark".to_owned(),
+            name: "GPT-5.3 Codex Spark".to_owned(),
+            api: "openai-codex-responses".to_owned(),
+            provider: "openai-codex".to_owned(),
+            ..source_model.clone()
+        },
     ];
 
     let mut allowed = IndexSet::new();
     allowed.insert("openai".to_owned());
-    allowed.insert("openai-codex".to_owned());
-    allowed.insert("azure-openai-responses".to_owned());
 
     for target_model in targets {
         let replayed = convert_responses_messages(

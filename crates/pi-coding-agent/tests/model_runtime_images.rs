@@ -65,6 +65,7 @@ fn classifier_model(provider: &str, id: &str) -> ClassifierModel {
         context_window: 1000,
         cost: zero_cost(),
         headers: None,
+        compat: None,
     }
 }
 
@@ -87,6 +88,7 @@ fn chat_model(provider: &str, id: &str, base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -124,7 +126,11 @@ fn sample_classifier_context() -> ClassifierContext {
             },
         },
     );
-    ClassifierContext { state, questions }
+    ClassifierContext {
+        state,
+        questions,
+        images: None,
+    }
 }
 
 async fn create_runtime(models_json: Option<serde_json::Value>) -> (ModelRuntime, Option<TempDir>) {
@@ -285,6 +291,7 @@ async fn extension_model_lists_replace_undeclared_models_of_every_operation() {
                     max_tokens: 100,
                     sampling_params: None,
                     compat: None,
+                    sampling_params_by_thinking_level: None,
                 })]),
                 ..Default::default()
             },
@@ -393,6 +400,7 @@ async fn registers_extension_image_and_classifier_models_with_implementations() 
                         cost: zero_cost(),
                         headers: Some(cls_headers),
                         context_window: 1000,
+                        compat: None,
                     }),
                 ]),
                 images: Some(images_map),

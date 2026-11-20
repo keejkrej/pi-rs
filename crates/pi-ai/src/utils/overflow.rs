@@ -11,25 +11,29 @@ const OVERFLOW_PATTERN_SOURCES: &[&str] = &[
     r"input is too long for requested model", // Amazon Bedrock
     r"exceeds the context window",            // OpenAI (Completions & Responses API)
     r"exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))", // OpenAI-compatible proxies (LiteLLM)
-    r"input token count.*exceeds the maximum",                                                    // Google (Gemini)
-    r"maximum prompt length is \d+",                                                              // xAI (Grok)
-    r"reduce the length of the messages",                                                         // Groq
+    r"context window exceeded", // LiteLLM pre-call check (ContextWindowExceededError)
+    r"input token count.*exceeds the maximum", // Google (Gemini)
+    r"maximum prompt length is \d+", // xAI (Grok)
+    r"reduce the length of the messages", // Groq
     r"maximum context length is \d+ tokens", // OpenRouter (most backends)
     r"exceeds (?:the )?maximum allowed input length of [\d,]+ tokens?", // OpenRouter/Poolside
     r"input \(\d+ tokens\) is longer than the model'?s context length \(\d+ tokens\)", // Together AI
-    r"exceeds the limit of \d+",             // GitHub Copilot
-    r"exceeds the available context size",   // llama.cpp server
-    r"greater than the context length",      // LM Studio
-    r"context window exceeds limit",         // MiniMax
-    r"exceeded model token limit",           // Kimi For Coding
+    r"exceeds the limit of \d+", // GitHub Copilot
+    r"exceeds the available context size", // llama.cpp server
+    r"greater than the context length", // LM Studio
+    r"context window exceeds limit", // MiniMax
+    r"exceeded model token limit", // Kimi For Coding
     r"too large for model with \d+ maximum context length", // Mistral
     r"prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?", // DS4 server
-    r"model_context_window_exceeded",        // z.ai non-standard finish_reason surfaced as error text
+    r"model_context_window_exceeded", // z.ai non-standard finish_reason surfaced as error text
     r"prompt too long; exceeded (?:max )?context length", // Ollama explicit overflow error
-    r"range of input length should be",      // DashScope / Qwen Token Plan
-    r"context[_ ]length[_ ]exceeded",        // Generic fallback
-    r"too many tokens",                      // Generic fallback
-    r"token limit exceeded",                 // Generic fallback
+    r"range of input length should be", // DashScope / Qwen Token Plan
+    r"context[_ ]length[_ ]exceeded", // Generic fallback
+    r"too many tokens",         // Generic fallback
+    r"token limit exceeded",    // Generic fallback
+    // HTTP 413 means request-size overflow regardless of provider or body text.
+    // Match raw SDK errors and formatProviderError's prefix, not a status mentioned in the body.
+    r"^(?:[\w -]+ API error \(413\):|413(?:\s|:|$))",
 ];
 
 const CEREBRAS_BODYLESS_OVERFLOW_SOURCE: &str = r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)";

@@ -4,7 +4,7 @@ Start with the guide for your area. Repository rules and day-to-day commands liv
 
 ## Engineering Guides
 
-- [Architecture](architecture.md) — workspace crate graph, execution model, `pi-js` runtime contract, vendored libraries, and storage/wire parity
+- [Architecture](architecture.md) — workspace crate graph (`pi-js`, `pi-schema`, runtime, and client crates), execution model, `pi-js` runtime contract, vendored libraries, and storage/wire parity
 - [Desktop GUI (`pi-gui`)](gui.md) — Rune UI layout, `GuiBridge` worker, deterministic `--scene` / `--snap` verification, and Rune dependency pin maintenance
 - [Extensions & Plugins](extensions.md) — QuickJS WASM extension host (`.ts`/`.js`), virtual modules, native Rust `InlineExtension` API, and built-in extensions
 - [Building & Testing](building-and-testing.md) — Rust toolchain, OS build dependencies, offline faux-provider testing, and `pi-evals`
@@ -20,7 +20,7 @@ User documentation shipped with the `pi` package lives in [`crates/pi-coding-age
   - [Settings](../crates/pi-coding-agent/package/docs/settings.md) · [Configuration](../crates/pi-coding-agent/package/docs/configuration.md) · [Environment Variables](../crates/pi-coding-agent/package/docs/environment-variables.md)
   - [Terminal Setup](../crates/pi-coding-agent/package/docs/terminal-setup.md) · [Shell Aliases](../crates/pi-coding-agent/package/docs/shell-aliases.md) · [tmux](../crates/pi-coding-agent/package/docs/tmux.md) · [Windows](../crates/pi-coding-agent/package/docs/windows.md) · [Termux](../crates/pi-coding-agent/package/docs/termux.md)
 - **Providers & Models**
-  - [Models](../crates/pi-coding-agent/package/docs/models.md) · [Providers](../crates/pi-coding-agent/package/docs/providers.md) · [Custom Providers](../crates/pi-coding-agent/package/docs/custom-provider.md) · [Virtual Models](../crates/pi-coding-agent/package/docs/virtual-models.md) · [Local `llama.cpp` Models](../crates/pi-coding-agent/package/docs/llama-cpp.md)
+  - [Models](../crates/pi-coding-agent/package/docs/models.md) · [Models Configuration](../crates/pi-coding-agent/package/docs/models-configuration.md) · [Providers](../crates/pi-coding-agent/package/docs/providers.md) · [Custom Providers](../crates/pi-coding-agent/package/docs/custom-provider.md) · [Virtual Models](../crates/pi-coding-agent/package/docs/virtual-models.md) · [Local `llama.cpp` Models](../crates/pi-coding-agent/package/docs/llama-cpp.md) · [RTX Local Models](../crates/pi-coding-agent/package/docs/nvidia-rtx-llama-cpp.md)
 - **Sessions, Context & Security**
   - [Sessions](../crates/pi-coding-agent/package/docs/sessions.md) · [Session Format](../crates/pi-coding-agent/package/docs/session-format.md) · [Compaction](../crates/pi-coding-agent/package/docs/compaction.md) · [Message Types](../crates/pi-coding-agent/package/docs/message-types.md)
   - [Security](../crates/pi-coding-agent/package/docs/security.md) · [Containerization](../crates/pi-coding-agent/package/docs/containerization.md)

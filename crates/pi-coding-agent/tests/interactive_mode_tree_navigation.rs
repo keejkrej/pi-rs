@@ -310,6 +310,7 @@ impl MockSessionManager {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1001,
+                duration_ms: None,
             })),
         });
         let tree = vec![SessionTreeNode {

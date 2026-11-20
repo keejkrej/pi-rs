@@ -14,124 +14,7 @@ use regex::Regex;
 use super::super::theme::theme::{ThemeColor, theme};
 use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::get_select_page_index;
-
-pub(crate) mod provider_brand {
-    use std::cmp::Ordering;
-    use std::sync::{Arc, LazyLock};
-
-    use pi_js::intl::locale_compare;
-    use pi_js::time::{Interval, set_interval};
-    use pi_tui::TUI;
-    use pi_tui::colors::{Color, ColorMixSpace, ParseColorValue, foreground_ansi, mix_colors, parse_color};
-
-    use super::super::super::theme::theme::{ThemeAppearance, theme};
-
-    pub(crate) const RADIUS_PROVIDER_ID: &str = "radius";
-    pub(crate) const PREFERRED_PROVIDER_IDS: &[&str] = &[RADIUS_PROVIDER_ID, "openrouter"];
-
-    pub(crate) fn is_preferred_provider(provider_id: &str) -> bool {
-        PREFERRED_PROVIDER_IDS.contains(&provider_id)
-    }
-
-    #[allow(dead_code)]
-    fn preferred_rank(provider_id: &str) -> usize {
-        PREFERRED_PROVIDER_IDS
-            .iter()
-            .position(|&id| id == provider_id)
-            .unwrap_or(PREFERRED_PROVIDER_IDS.len())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn compare_providers(a_id: &str, a_name: &str, b_id: &str, b_name: &str) -> Ordering {
-        preferred_rank(a_id)
-            .cmp(&preferred_rank(b_id))
-            .then_with(|| locale_compare(a_name, b_name))
-    }
-
-    pub(crate) type ProviderBrandStyle = fn(&str, f64) -> String;
-
-    pub(crate) fn get_provider_brand_style(provider_id: &str) -> Option<ProviderBrandStyle> {
-        if provider_id == RADIUS_PROVIDER_ID {
-            return Some(radius_shimmer);
-        }
-        if provider_id == "openrouter" {
-            return Some(open_router_glow);
-        }
-        None
-    }
-
-    static RADIUS_COLORS: LazyLock<[Color; 4]> = LazyLock::new(|| {
-        [
-            parse_color(ParseColorValue::Text("#4d9abf")).expect("radius color 0 parses"),
-            parse_color(ParseColorValue::Text("#83ccd2")).expect("radius color 1 parses"),
-            parse_color(ParseColorValue::Text("#f1be57")).expect("radius color 2 parses"),
-            parse_color(ParseColorValue::Text("#f09082")).expect("radius color 3 parses"),
-        ]
-    });
-
-    const CHARS_PER_COLOR: f64 = 4.0;
-    const CHARS_PER_SECOND: f64 = 10.0;
-
-    pub(crate) fn radius_shimmer(text: &str, elapsed_ms: f64) -> String {
-        let mode = theme().get_color_mode();
-        let cycle = (RADIUS_COLORS.len() as f64) * CHARS_PER_COLOR;
-        let offset = (elapsed_ms / 1000.0) * CHARS_PER_SECOND;
-        let mut result = String::new();
-        for (index, ch) in text.chars().enumerate() {
-            let position = ((((index as f64) - offset) % cycle) + cycle) % cycle;
-            let band = ((position / CHARS_PER_COLOR).floor() as usize) % RADIUS_COLORS.len();
-            let t = (position / CHARS_PER_COLOR - band as f64).clamp(0.0, 1.0);
-            let amount = (t * t * (3.0 - 2.0 * t)).clamp(0.0, 1.0);
-            let from = RADIUS_COLORS[band];
-            let to = RADIUS_COLORS[(band + 1) % RADIUS_COLORS.len()];
-            let mixed = mix_colors(from, to, amount, Some(ColorMixSpace::Srgb)).unwrap_or(from);
-            result.push_str(&foreground_ansi(mixed, mode));
-            result.push(ch);
-        }
-        result.push_str("\x1b[39m");
-        result
-    }
-
-    static OPENROUTER_DARK: LazyLock<(Color, Color)> = LazyLock::new(|| {
-        (
-            parse_color(ParseColorValue::Text("#c6f243")).expect("openrouter dark base parses"),
-            parse_color(ParseColorValue::Text("#efffb0")).expect("openrouter dark peak parses"),
-        )
-    });
-    static OPENROUTER_LIGHT: LazyLock<(Color, Color)> = LazyLock::new(|| {
-        (
-            parse_color(ParseColorValue::Text("#5d32e1")).expect("openrouter light base parses"),
-            parse_color(ParseColorValue::Text("#8f6bff")).expect("openrouter light peak parses"),
-        )
-    });
-    const GLOW_PERIOD_MS: f64 = 2400.0;
-
-    pub(crate) fn open_router_glow(text: &str, elapsed_ms: f64) -> String {
-        let t = theme();
-        let (base, peak) = match t.appearance() {
-            ThemeAppearance::Dark => *OPENROUTER_DARK,
-            ThemeAppearance::Light => *OPENROUTER_LIGHT,
-        };
-        let amount = ((1.0 - ((2.0 * std::f64::consts::PI * elapsed_ms) / GLOW_PERIOD_MS).cos()) / 2.0).clamp(0.0, 1.0);
-        let mixed = mix_colors(base, peak, amount, Some(ColorMixSpace::Oklch)).unwrap_or(base);
-        format!("{}{text}\x1b[39m", foreground_ansi(mixed, t.get_color_mode()))
-    }
-
-    const ANIMATION_FRAME_MS: u64 = 50;
-
-    pub(crate) fn start_brand_animation(
-        tui: Arc<dyn TUI + Send + Sync>,
-        is_animating: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Interval {
-        let interval = set_interval(ANIMATION_FRAME_MS, move || {
-            if is_animating() {
-                tui.request_render(None);
-            }
-        });
-        interval.unref();
-        interval
-    }
-}
+pub(crate) use super::provider_brand;
 
 const MAX_VISIBLE: usize = 8;
 
@@ -584,6 +467,10 @@ impl Component for OAuthSelectorComponent {
     }
 
     fn has_handle_input(&self) -> bool {
+        true
+    }
+
+    fn captures_viewport_input(&self) -> bool {
         true
     }
 

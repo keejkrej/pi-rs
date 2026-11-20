@@ -50,6 +50,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn msg(text: &str, stop_reason: StopReason, error_message: Option<&str>) -> Assi
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 

@@ -11,7 +11,10 @@ const MAX_OSC52_ENCODED_LENGTH: usize = 100_000;
 
 fn is_remote_session(env: &IndexMap<String, String>) -> bool {
     let has = |k: &str| env.get(k).is_some_and(|v| !v.is_empty());
-    has("SSH_CONNECTION") || has("SSH_CLIENT") || has("MOSH_CONNECTION")
+    has("SSH_CONNECTION")
+        || has("SSH_CLIENT")
+        || has("MOSH_CONNECTION")
+        || env.get("PI_CLIPBOARD_OSC52").is_some_and(|v| v == "1")
 }
 
 fn emit_osc52(text: &str) -> bool {
@@ -72,11 +75,12 @@ async fn copy_via_windows_clipboard(text: &str) -> bool {
 
 /// Read plain text from the system clipboard.
 pub async fn read_clipboard_text() -> Option<String> {
+    let mut commands: Vec<(&str, Vec<&str>)> = Vec::new();
+    // Termux reports platform "android", not "linux" (#10391).
+    if pi_js::env::var("TERMUX_VERSION").is_some_and(|v| !v.is_empty()) {
+        commands.push(("termux-clipboard-get", Vec::new()));
+    }
     if pi_js::env::platform() == "linux" {
-        let mut commands: Vec<(&str, Vec<&str>)> = Vec::new();
-        if pi_js::env::var("TERMUX_VERSION").is_some_and(|v| !v.is_empty()) {
-            commands.push(("termux-clipboard-get", Vec::new()));
-        }
         if pi_js::env::var("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
             commands.push(("wl-paste", vec!["--no-newline", "--type", "text"]));
         }
@@ -84,22 +88,22 @@ pub async fn read_clipboard_text() -> Option<String> {
             commands.push(("xclip", vec!["-selection", "clipboard", "-out"]));
             commands.push(("xsel", vec!["--clipboard", "--output"]));
         }
-        for (command, args) in commands {
-            let arg_refs: Vec<&str> = args;
-            if let Some(bytes) = run_clipboard_command(
-                command,
-                &arg_refs,
-                ClipboardCommandOptions {
-                    input: None,
-                    timeout_ms: Some(5000),
-                    max_buffer_bytes: None,
-                },
-            )
-            .await
-            {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                return if text.is_empty() { None } else { Some(text) };
-            }
+    }
+    for (command, args) in commands {
+        let arg_refs: Vec<&str> = args;
+        if let Some(bytes) = run_clipboard_command(
+            command,
+            &arg_refs,
+            ClipboardCommandOptions {
+                input: None,
+                timeout_ms: Some(5000),
+                max_buffer_bytes: None,
+            },
+        )
+        .await
+        {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            return if text.is_empty() { None } else { Some(text) };
         }
     }
 
@@ -195,12 +199,12 @@ pub async fn copy_to_clipboard(text: &str) -> Result<()> {
     if oversized {
         return Err(Error::msg("Clipboard unavailable: text exceeds the OSC 52 size limit"));
     }
+    if has("TERMUX_VERSION") {
+        return Err(Error::msg(
+            "Clipboard unavailable: install the Termux:API app and `termux-api` package",
+        ));
+    }
     if p == "linux" {
-        if has("TERMUX_VERSION") {
-            return Err(Error::msg(
-                "Clipboard unavailable: install the Termux:API app and `termux-api` package",
-            ));
-        }
         if has("WAYLAND_DISPLAY") {
             return Err(Error::msg(
                 "Clipboard unavailable: install `wl-clipboard` (`wl-copy`) or check Wayland access",

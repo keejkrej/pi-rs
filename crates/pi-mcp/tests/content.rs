@@ -38,6 +38,15 @@ fn passes_text_and_images_through_and_replaces_other_blocks_with_text() {
 
 #[test]
 fn falls_back_to_the_structured_content_as_json_when_there_are_no_blocks() {
+    // #10416: structured content may be any JSON value.
+    let result_arr: CallToolResult = from_value(json!({ "content": [], "structuredContent": [1, 2] })).unwrap();
+    let expected_arr: Vec<LlmContent> = from_value(json!([{ "type": "text", "text": "[\n  1,\n  2\n]" }])).unwrap();
+    assert_eq!(to_llm_content(&result_arr), expected_arr);
+
+    let result_null: CallToolResult = from_value(json!({ "content": [], "structuredContent": null })).unwrap();
+    let expected_null: Vec<LlmContent> = from_value(json!([{ "type": "text", "text": "null" }])).unwrap();
+    assert_eq!(to_llm_content(&result_null), expected_null);
+
     let result_empty: CallToolResult = from_value(json!({ "content": [], "structuredContent": { "n": 1 } })).unwrap();
     let expected_json: Vec<LlmContent> = from_value(json!([{ "type": "text", "text": "{\n  \"n\": 1\n}" }])).unwrap();
     assert_eq!(to_llm_content(&result_empty), expected_json);

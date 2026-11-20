@@ -31,6 +31,7 @@ fn assistant_msg(text: &str, ts: i64) -> AgentMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: ts,
+        duration_ms: None,
     }))
 }
 

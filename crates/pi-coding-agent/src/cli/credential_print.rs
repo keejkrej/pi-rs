@@ -6,7 +6,10 @@ use pi_js::abort::AbortSignal;
 
 use crate::cli::args::Args;
 use crate::cli::auth_command::{AuthCommandError, AuthCommandKind, get_auth_credential, validate_auth_command_args};
-use crate::core::model_resolver::{ResolveCliModelOptions, resolve_cli_model};
+use crate::core::model_resolver::{
+    ModelReferenceRequest, ModelReferenceResult, ResolveCliModelOptions, ThinkingSuffixMode, resolve_cli_model,
+    resolve_model_reference,
+};
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeAuthOverrides};
 
 const DEFAULT_BEARER_TOKEN_MIN_EXPIRY_MS: i64 = 30 * 60_000;
@@ -55,6 +58,7 @@ pub async fn resolve_credential_for_print(
                 cli_provider: Some(&pid),
                 cli_model: Some(cli_model),
                 cli_thinking: None,
+                inline_api_key: Some(false),
                 model_runtime,
             });
             if resolved.error.is_some() || resolved.model.is_none() {
@@ -72,24 +76,23 @@ pub async fn resolve_credential_for_print(
         }
     } else {
         let model_query = cli_model.as_deref().unwrap_or("");
+        let models = model_runtime.get_models(None);
         for provider in model_runtime.get_providers() {
             let pid = provider.id().to_string();
             if !credential_types.contains_key(&pid) {
                 continue;
             }
-            let resolved = resolve_cli_model(ResolveCliModelOptions {
-                cli_provider: Some(&pid),
-                cli_model: Some(model_query),
-                cli_thinking: None,
-                model_runtime,
-            });
-            if let Some(model) = resolved.model
-                && resolved.error.is_none()
-                && !resolved
-                    .warning
-                    .as_deref()
-                    .is_some_and(|w| w.contains("Using custom model id"))
-            {
+            let resolved = resolve_model_reference(
+                ModelReferenceRequest {
+                    text: model_query,
+                    provider: Some(&pid),
+                    thinking_suffix: ThinkingSuffixMode::Strict,
+                    fuzzy: true,
+                },
+                &models,
+                |_| true,
+            );
+            if let ModelReferenceResult::Resolved { model, .. } = resolved {
                 providers.push(CandidateProvider {
                     id: pid,
                     model: Some(model),

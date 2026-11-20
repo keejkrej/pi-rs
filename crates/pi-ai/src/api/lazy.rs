@@ -4,12 +4,18 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Error, Result};
 
 use crate::types::{AssistantMessage, AssistantMessageEvent, Model, ProviderStreams, StopReason, Usage};
 use crate::utils::event_stream::AssistantMessageEventStream;
 
-fn create_setup_error_message(model: &Model, error: &Error) -> AssistantMessage {
+fn create_setup_error_message(
+    model: &Model,
+    error: &Error,
+    timestamp: i64,
+    stop_reason: StopReason,
+) -> AssistantMessage {
     AssistantMessage {
         content: Vec::new(),
         api: model.api.clone(),
@@ -21,20 +27,48 @@ fn create_setup_error_message(model: &Model, error: &Error) -> AssistantMessage 
         thinking_level: None,
         diagnostics: None,
         usage: Usage::default(),
-        stop_reason: StopReason::Error,
+        stop_reason,
         deferred: None,
         error_message: Some(error.to_string()),
         raw_stop_reason: None,
         end_turn: None,
-        timestamp: pi_js::time::now_ms(),
+        timestamp,
+        duration_ms: None,
     }
 }
 
-async fn forward_stream(target: AssistantMessageEventStream, mut source: AssistantMessageEventStream) {
+/// Synchronous, read-only observation of `lazy_stream_with_options`'s forwarding path.
+#[derive(Clone, Default)]
+pub struct LazyStreamObserver {
+    pub on_event: Option<Arc<dyn Fn(&AssistantMessageEvent) + Send + Sync>>,
+    pub on_result: Option<Arc<dyn Fn(Option<&AssistantMessage>) + Send + Sync>>,
+}
+
+async fn forward_stream<F>(
+    target: AssistantMessageEventStream,
+    mut source: AssistantMessageEventStream,
+    observer: Option<&LazyStreamObserver>,
+    observe_result: &mut F,
+) where
+    F: FnMut(Option<&AssistantMessage>),
+{
+    let mut result: Option<AssistantMessage> = None;
     while let Some(event) = source.next().await {
-        target.push(event);
+        match &event {
+            AssistantMessageEvent::Done { message, .. } => result = Some(message.clone()),
+            AssistantMessageEvent::Error { error, .. } => result = Some(error.clone()),
+            _ => {}
+        }
+        target.push(event.clone());
+        if let Some(cb) = observer.and_then(|o| o.on_event.as_ref()) {
+            cb(&event);
+        }
     }
-    target.end(source.try_result());
+    if let Some(src_result) = source.try_result() {
+        result = Some(src_result);
+    }
+    target.end(result.clone());
+    observe_result(result.as_ref());
 }
 
 /// Returns a stream synchronously while running async setup (auth resolution,
@@ -44,22 +78,58 @@ pub fn lazy_stream<F>(model: &Model, setup: F) -> AssistantMessageEventStream
 where
     F: Future<Output = Result<AssistantMessageEventStream>> + Send + 'static,
 {
+    lazy_stream_with_options(model, setup, None, None)
+}
+
+/// Variant of [`lazy_stream`] accepting an optional observer and abort signal so setup failures
+/// occurring after cancellation terminate with [`StopReason::Aborted`].
+pub fn lazy_stream_with_options<F>(
+    model: &Model,
+    setup: F,
+    observer: Option<LazyStreamObserver>,
+    signal: Option<AbortSignal>,
+) -> AssistantMessageEventStream
+where
+    F: Future<Output = Result<AssistantMessageEventStream>> + Send + 'static,
+{
+    let started_at = pi_js::time::now_ms();
     let outer = AssistantMessageEventStream::new();
     let outer_clone = outer.clone();
     let model_owned = model.clone();
 
     tokio::spawn(async move {
+        let mut observed_result = false;
+        let mut observe_result = |result: Option<&AssistantMessage>| {
+            if observed_result {
+                return;
+            }
+            observed_result = true;
+            if let Some(cb) = observer.as_ref().and_then(|o| o.on_result.as_ref()) {
+                cb(result);
+            }
+        };
+
         match setup.await {
             Ok(inner) => {
-                forward_stream(outer_clone, inner).await;
+                forward_stream(outer_clone, inner, observer.as_ref(), &mut observe_result).await;
             }
             Err(error) => {
-                let message = create_setup_error_message(&model_owned, &error);
-                outer_clone.push(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
+                let reason = if signal.as_ref().is_some_and(AbortSignal::aborted) {
+                    StopReason::Aborted
+                } else {
+                    StopReason::Error
+                };
+                let message = create_setup_error_message(&model_owned, &error, started_at, reason);
+                let event = AssistantMessageEvent::Error {
+                    reason,
                     error: message.clone(),
-                });
-                outer_clone.end(Some(message));
+                };
+                outer_clone.push(event.clone());
+                if let Some(cb) = observer.as_ref().and_then(|o| o.on_event.as_ref()) {
+                    cb(&event);
+                }
+                outer_clone.end(Some(message.clone()));
+                observe_result(Some(&message));
             }
         }
     });
@@ -85,10 +155,16 @@ pub fn lazy_api(load: LoadProviderStreams, capabilities: Option<LazyApiCapabilit
         let load_fn = Arc::clone(&load_for_stream);
         let model_owned = model.clone();
         let context_owned = context.clone();
-        lazy_stream(model, async move {
-            let api = load_fn().await?;
-            Ok(api.stream(&model_owned, &context_owned, options))
-        })
+        let signal = options.as_ref().and_then(|o| o.base.signal.clone());
+        lazy_stream_with_options(
+            model,
+            async move {
+                let api = load_fn().await?;
+                Ok(api.stream(&model_owned, &context_owned, options))
+            },
+            None,
+            signal,
+        )
     });
 
     let load_for_simple = Arc::clone(&load);
@@ -96,10 +172,16 @@ pub fn lazy_api(load: LoadProviderStreams, capabilities: Option<LazyApiCapabilit
         let load_fn = Arc::clone(&load_for_simple);
         let model_owned = model.clone();
         let context_owned = context.clone();
-        lazy_stream(model, async move {
-            let api = load_fn().await?;
-            Ok(api.stream_simple(&model_owned, &context_owned, options))
-        })
+        let signal = options.as_ref().and_then(|o| o.base.signal.clone());
+        lazy_stream_with_options(
+            model,
+            async move {
+                let api = load_fn().await?;
+                Ok(api.stream_simple(&model_owned, &context_owned, options))
+            },
+            None,
+            signal,
+        )
     });
 
     let fetch_deferred = if caps.fetch_deferred {
@@ -111,14 +193,20 @@ pub fn lazy_api(load: LoadProviderStreams, capabilities: Option<LazyApiCapabilit
                 let load_fn = Arc::clone(&load_for_fetch);
                 let model_owned = model.clone();
                 let handle_owned = handle.clone();
-                lazy_stream(model, async move {
-                    let api = load_fn().await?;
-                    let fetch_fn = api
-                        .fetch_deferred
-                        .as_ref()
-                        .ok_or_else(|| Error::msg("API does not support deferred responses"))?;
-                    Ok(fetch_fn(&model_owned, &handle_owned, options))
-                })
+                let signal = options.as_ref().and_then(|o| o.base.signal.clone());
+                lazy_stream_with_options(
+                    model,
+                    async move {
+                        let api = load_fn().await?;
+                        let fetch_fn = api
+                            .fetch_deferred
+                            .as_ref()
+                            .ok_or_else(|| Error::msg("API does not support deferred responses"))?;
+                        Ok(fetch_fn(&model_owned, &handle_owned, options))
+                    },
+                    None,
+                    signal,
+                )
             },
         ) as crate::types::FetchDeferredFunction)
     } else {

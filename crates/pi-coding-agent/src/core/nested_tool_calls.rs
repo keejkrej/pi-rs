@@ -183,6 +183,8 @@ pub enum NestedToolExecutionEvent {
         tool_name: String,
         result: AgentToolResult,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<i64>,
         parent_tool_call_id: String,
     },
 }
@@ -396,6 +398,7 @@ impl NestedToolCallRunner {
                 tool_name: name.to_owned(),
                 result: outcome.result.clone(),
                 is_error: outcome.is_error,
+                duration_ms: outcome.duration_ms,
                 parent_tool_call_id: caller_id.to_owned(),
             })
             .await;

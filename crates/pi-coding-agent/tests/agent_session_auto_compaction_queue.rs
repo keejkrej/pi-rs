@@ -97,6 +97,7 @@ async fn create_session(
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     (session, session_manager, settings_manager, temp_dir)
@@ -145,6 +146,7 @@ async fn should_resume_after_threshold_compaction_when_only_agent_level_queued_m
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now - 500,
+        duration_ms: None,
     };
     session_manager
         .append_message(pi_ai::types::Message::Assistant(assistant).into())
@@ -248,6 +250,7 @@ async fn should_not_compact_repeatedly_after_overflow_recovery_already_attempted
         raw_stop_reason: None,
         end_turn: None,
         timestamp: now - 2000,
+        duration_ms: None,
     };
     let u2 = UserMessage {
         content: UserMessageContent::Text("trigger overflow".to_string()),
@@ -283,6 +286,7 @@ async fn should_not_compact_repeatedly_after_overflow_recovery_already_attempted
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     };
 
     let compaction_ends: Arc<Mutex<Vec<(CompactionReason, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -354,6 +358,7 @@ async fn should_ignore_stale_pre_compaction_assistant_usage_on_pre_prompt_compac
         raw_stop_reason: None,
         end_turn: None,
         timestamp: stale_ts,
+        duration_ms: None,
     };
 
     let u1 = UserMessage {
@@ -458,6 +463,7 @@ async fn should_trigger_threshold_compaction_for_error_messages_using_last_succe
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     };
     let error_assistant = AssistantMessage {
         content: vec![AssistantContentBlock::Text(TextContent::new(""))],
@@ -476,6 +482,7 @@ async fn should_trigger_threshold_compaction_for_error_messages_using_last_succe
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms() + 1000,
+        duration_ms: None,
     };
 
     let u1 = UserMessage {
@@ -538,6 +545,7 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_no_prio
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     };
 
     let u = UserMessage {
@@ -593,6 +601,7 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_only_ke
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pre_compaction_ts,
+        duration_ms: None,
     };
 
     let u_before = UserMessage {
@@ -633,6 +642,7 @@ async fn should_not_trigger_threshold_compaction_for_error_messages_when_only_ke
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     };
 
     let u_kept = UserMessage {

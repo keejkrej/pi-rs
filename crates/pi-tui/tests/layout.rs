@@ -8,7 +8,9 @@ use pi_tui::components::scroll_view::{ScrollViewFollow, ScrollViewOptions, Scrol
 use pi_tui::components::stack::{StackChild, StackEntry, StackOptions, StackVisibleFn};
 use pi_tui::layout::render_layout_frame;
 use pi_tui::layout_node::{StackAlign, StackBasis};
-use pi_tui::terminal_image::{EncodeKittyOptions, KittyImageMetadata, encode_kitty, register_kitty_image_metadata};
+use pi_tui::terminal_image::{
+    EncodeKittyOptions, KittyImageMetadata, encode_kitty, get_max_kitty_image_rows, register_kitty_image_metadata,
+};
 use pi_tui::{Component, HStack, ScrollView, Text, VStack, strip_terminal_sequences};
 
 fn visible_lines(lines: &[String]) -> Vec<String> {
@@ -739,7 +741,7 @@ fn rebuilds_geometry_after_content_changes() {
 }
 
 #[test]
-fn stops_kitty_reverse_scan_at_non_empty_content_line_above_scroll_top() {
+fn crops_kitty_image_within_max_rows_past_non_empty_placeholder_lines_and_ignores_images_further_above() {
     let image_id = 4321;
     let image_line = encode_kitty(
         "AAAA",
@@ -757,25 +759,36 @@ fn stops_kitty_reverse_scan_at_non_empty_content_line_above_scroll_top() {
         width_px: 100,
         height_px: 100,
     });
+    assert!(get_max_kitty_image_rows() >= 4);
     let scroll_view = Arc::new(ScrollView::new(
         CustomComponent::new(move |_| {
             vec![
                 image_line.clone(),
-                "non-empty separator".to_string(),
-                String::new(),
+                "   | sidebar 1".to_string(),
+                "   | sidebar 2".to_string(),
                 "visible top".to_string(),
                 "visible bottom".to_string(),
+                "after 1".to_string(),
+                "after 2".to_string(),
             ]
         }),
         None,
     ));
     render_layout_frame(Arc::clone(&scroll_view) as Arc<dyn Component>, 24, 2, noop_render());
-    scroll_view.scroll_to(3.0, None);
-    let frame = render_layout_frame(scroll_view, 24, 2, noop_render());
 
-    assert_eq!(visible_lines(&frame.lines), vec!["visible top", "visible bottom"]);
+    scroll_view.scroll_to(3.0, None);
+    let cropped_frame = render_layout_frame(Arc::clone(&scroll_view) as Arc<dyn Component>, 24, 2, noop_render());
     assert!(
-        !frame.lines[0].contains("\x1b_G"),
-        "reverse scan should stop at non-empty line above scroll_top instead of cropping earlier image"
+        cropped_frame.lines[0].contains("\x1b_Ga=T,f=100,q=2,C=1,c=2,i=4321,y=75,h=25,r=1;AAAA\x1b\\"),
+        "reverse scan bounded by max kitty image rows should crop 4-row image past sidebar placeholder lines: {:?}",
+        cropped_frame.lines[0]
+    );
+
+    scroll_view.scroll_to(4.0, None);
+    let beyond_frame = render_layout_frame(scroll_view, 24, 2, noop_render());
+    assert_eq!(visible_lines(&beyond_frame.lines), vec!["visible bottom", "after 1"]);
+    assert!(
+        !beyond_frame.lines[0].contains("\x1b_G"),
+        "image above hidden_rows >= metadata.rows must not crop onto visible top"
     );
 }

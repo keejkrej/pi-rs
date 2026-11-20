@@ -10,7 +10,10 @@ use serde_json::Value;
 use crate::config::get_docs_path;
 use crate::core::extensions::types::{
     CodemodeMode, ConstrainedSamplingOption, ToolDefinition, ToolExposure, ToolLoadoutBackend, ToolLoadoutChanges,
-    ToolNamespace,
+    ToolNamespace, ToolReachScope,
+};
+use crate::core::settings_defaults::{
+    DEFAULT_CODEMODE_INLINE_BUDGET as SETTINGS_DEFAULT_CODEMODE_INLINE_BUDGET, DEFAULT_CODEMODE_MODE,
 };
 use crate::core::tools::tool_definition_wrapper::wrap_tool_definition;
 use crate::extensions::codemode::execute_lazy::execute_codemode_lazy;
@@ -18,10 +21,7 @@ use crate::extensions::codemode::renderer::{codemode_render_call, codemode_rende
 use crate::extensions::tool_search::tool::resolve_schema_ref;
 use pi_agent_core::AgentTool;
 use pi_ai::{ConstrainedSamplingConfig, GrammarFormat};
-use pi_codemode::declarations::{
-    MCP_TYPESCRIPT_PREAMBLE, mcp_structured_content_schema, render_tool_output_type, render_tool_sample,
-    to_codemode_identifier,
-};
+use pi_codemode::declarations::{render_tool_output_type, render_tool_sample, to_codemode_identifier};
 use pi_codemode::source::CODEMODE_SOURCE_GRAMMAR;
 use pi_codemode::types::{CodemodeJsonSchema, CodemodeTool};
 use pi_js::abort::AbortSignal;
@@ -32,8 +32,16 @@ pub const CODEMODE_TOOL_NAME: &str = "codemode";
 /// Custom entry type holding one script's `store()` writes: [`CodemodeStoreEntryData`].
 pub const CODEMODE_STORE_ENTRY_TYPE: &str = "codemode-store";
 /// Default for [`CodemodeDescriptionOptions::inline_budget`], in estimated tokens.
-pub const DEFAULT_CODEMODE_INLINE_BUDGET: usize = 3000;
+pub const DEFAULT_CODEMODE_INLINE_BUDGET: usize = SETTINGS_DEFAULT_CODEMODE_INLINE_BUDGET as usize;
 const CHARS_PER_TOKEN: usize = 4;
+
+fn default_codemode_mode() -> CodemodeMode {
+    if DEFAULT_CODEMODE_MODE == "only" {
+        CodemodeMode::Only
+    } else {
+        CodemodeMode::On
+    }
+}
 
 pub const CODEMODE_SNIPPET: &str = "Run JavaScript that calls other tools";
 pub const CODEMODE_GUIDELINES: &[&str] = &[
@@ -68,6 +76,7 @@ pub trait CodemodeModelRuntime: Send + Sync {
 }
 
 pub type GetToolNamespaceFn = Arc<dyn Fn(&str) -> Option<ToolNamespace> + Send + Sync>;
+pub type GetToolGuidelinesFn = Arc<dyn Fn() -> IndexMap<String, Vec<String>> + Send + Sync>;
 pub type AppendEntryFn = Arc<dyn Fn(&str, CodemodeStoreEntryData) + Send + Sync>;
 pub type GetModeFn = Arc<dyn Fn() -> CodemodeMode + Send + Sync>;
 pub type GetInlineBudgetFn = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
@@ -76,6 +85,8 @@ pub type GetInlineBudgetFn = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
 pub struct CodemodeToolOptions {
     /// Namespace of a tool, for `searchTools()` ranking and its `namespace` filter.
     pub get_tool_namespace: Option<GetToolNamespaceFn>,
+    /// Prompt guidelines of every tool, by tool name, shown with declarations by `describeTool()` and `ALL_TOOLS`.
+    pub get_tool_guidelines: Option<GetToolGuidelinesFn>,
     /// Expose the `models` namespace to scripts, backed by the session's model registry.
     pub models: bool,
     /// Optional explicit model runtime adapter (overrides `ctx.model_registry()` when provided).
@@ -96,12 +107,6 @@ pub fn codemode_schema() -> Schema {
 #[serde(rename_all = "camelCase")]
 pub struct CodemodeToolInput {
     pub code: String,
-}
-
-/// Whether a registered tool is this package's `codemode` tool rather than another extension's
-/// tool with the same name.
-pub fn is_codemode_tool(name: &str, parameters: &Schema) -> bool {
-    name == CODEMODE_TOOL_NAME && parameters.to_value() == codemode_schema().to_value()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,17 +174,34 @@ pub(crate) fn codemode_schema_to_value(schema: &CodemodeJsonSchema) -> Value {
     }
 }
 
-/// What a script sees of a tool. Tools without an output schema resolve to their text output.
-pub fn to_codemode_declaration(tool: &AgentTool) -> CodemodeTool {
+/// What a script sees of a tool: its description followed by its prompt guidelines, which the system
+/// prompt only has for declared tools. Tools without an output schema resolve to their text output.
+pub fn to_codemode_declaration(tool: &AgentTool, guidelines: &[String]) -> CodemodeTool {
     let input_val = tool.parameters.to_value();
     let output_schema = tool
         .output_schema
         .as_ref()
         .map(value_to_codemode_schema)
         .unwrap_or_else(text_output_schema);
+    let bullets: Vec<String> = guidelines
+        .iter()
+        .filter_map(|g| {
+            let trimmed = pi_js::str16::trim(g);
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("- {trimmed}"))
+            }
+        })
+        .collect();
+    let description = if bullets.is_empty() {
+        tool.description.clone()
+    } else {
+        format!("{}\n\n{}", pi_js::str16::trim(&tool.description), bullets.join("\n"))
+    };
     CodemodeTool {
         name: tool.name.clone(),
-        description: Some(tool.description.clone()),
+        description: Some(description),
         input_schema: Some(value_to_codemode_schema(&input_val)),
         output_schema: Some(output_schema),
         spread: None,
@@ -202,17 +224,18 @@ pub struct CodemodeDescriptionOptions {
     pub models: bool,
     pub namespaces: IndexMap<String, ToolNamespace>,
     pub deferred: IndexSet<String>,
+    pub guidelines: IndexMap<String, Vec<String>>,
     pub inline_budget: Option<usize>,
 }
 
-const DESCRIPTION_INTRO: &str = "Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.\n- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. Calls still running when the script ends are cancelled.\n- Optional first line: `// @options: {\"max_output_tokens\": 10000, \"timeout_ms\": 60000}`";
+const DESCRIPTION_INTRO: &str = "Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.\n- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it returned that object; check its fields. Calls still running when the script ends are cancelled.\n- Optional first line: `// @options: {\"max_output_tokens\": 10000, \"timeout_ms\": 60000}`";
 
 fn describe_globals(models: bool) -> String {
     let mut lines = vec![
         "Globals:".to_string(),
-        "- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script.".to_string(),
+        "- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.".to_string(),
         "- `store(key, value)` and `load(key)` keep JSON values across codemode calls.".to_string(),
-        "- `ALL_TOOLS`, `searchTools(query, { limit?, namespace? })`, `describeTool(name)`, `describeNamespace(name)`: find unlisted tools, such as MCP tools.".to_string(),
+        "- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.".to_string(),
     ];
     if models {
         lines.push(format!(
@@ -291,7 +314,10 @@ pub fn create_codemode_description(tools: &[AgentTool], options: CodemodeDescrip
     let declarations: Vec<CodemodeTool> = get_codemode_callable_tools(tools)
         .into_iter()
         .filter(|tool| !options.deferred.contains(&tool.name))
-        .map(|tool| to_codemode_declaration(&tool))
+        .map(|tool| {
+            let guidelines = options.guidelines.get(&tool.name).map(Vec::as_slice).unwrap_or(&[]);
+            to_codemode_declaration(&tool, guidelines)
+        })
         .collect();
     let mut groups: IndexMap<String, CatalogGroup> = IndexMap::new();
     groups.insert(
@@ -329,12 +355,6 @@ pub fn create_codemode_description(tools: &[AgentTool], options: CodemodeDescrip
     let shown = select_catalog(&ordered, options.inline_budget);
 
     let mut sections = vec![DESCRIPTION_INTRO.to_string(), describe_globals(options.models)];
-    let has_mcp_types = declarations.iter().any(|declaration| {
-        shown.contains(&declaration.name) && mcp_structured_content_schema(declaration.output_schema.as_ref()).is_some()
-    });
-    if has_mcp_types {
-        sections.push(format!("Shared MCP Types:\n```ts\n{MCP_TYPESCRIPT_PREAMBLE}\n```"));
-    }
     if declarations.is_empty() {
         return sections.join("\n\n");
     }
@@ -447,18 +467,12 @@ fn describe_union_fields(schema: &Value, root: &Value) -> Option<String> {
     described.map(|d| d.join(" | "))
 }
 
-fn collapse_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn describe_output(schema: Option<&CodemodeJsonSchema>) -> String {
+fn describe_output(name: &str, schema: Option<&CodemodeJsonSchema>) -> String {
     let rendered = render_tool_output_type(schema);
     if rendered == "string" {
         return "a string".to_string();
     }
-    if let Some(s) = schema
-        && mcp_structured_content_schema(Some(s)).is_none()
-    {
+    if let Some(s) = schema {
         let root_val = codemode_schema_to_value(s);
         if let Some(fields) =
             describe_fields(&root_val, &root_val, 1).or_else(|| describe_union_fields(&root_val, &root_val))
@@ -466,21 +480,29 @@ fn describe_output(schema: Option<&CodemodeJsonSchema>) -> String {
             return format!("`{fields}`");
         }
     }
-    format!("`{}`", collapse_whitespace(&rendered))
+    if !rendered.contains('\n') {
+        return format!("`{rendered}`");
+    }
+    let quoted = pi_js::json::stringify(&Value::String(name.to_string()));
+    format!("a value; `await describeTool({quoted})` shows its type")
 }
 
 fn describe_script_call(tool: &AgentTool) -> String {
-    let decl = to_codemode_declaration(tool);
+    let decl = to_codemode_declaration(tool, &[]);
     format!(
         "{}\n\nCodemode: `tools.{}(args)` resolves to {}.",
         pi_js::str16::trim(&tool.description),
         to_codemode_identifier(&tool.name),
-        describe_output(decl.output_schema.as_ref()),
+        describe_output(&tool.name, decl.output_schema.as_ref()),
     )
 }
 
 fn prepare_codemode_loadout(loadout: &dyn ToolLoadoutBackend, options: &CodemodeToolOptions) -> ToolLoadoutChanges {
-    let mode = options.get_mode.as_ref().map(|f| f()).unwrap_or(CodemodeMode::On);
+    let mode = options
+        .get_mode
+        .as_ref()
+        .map(|f| f())
+        .unwrap_or_else(default_codemode_mode);
     let is_direct = |tool: &AgentTool| loadout.get_exposure(&tool.name) == ToolExposure::Direct;
     let callable = get_codemode_callable_tools(loadout.callable());
     let callable_names: IndexSet<String> = callable.iter().map(|t| t.name.clone()).collect();
@@ -500,6 +522,7 @@ fn prepare_codemode_loadout(loadout: &dyn ToolLoadoutBackend, options: &Codemode
     };
     let mut namespaces = IndexMap::new();
     let mut deferred = IndexSet::new();
+    let mut guidelines = IndexMap::new();
     for tool in &listed {
         if let Some(ns) = loadout.get_namespace(&tool.name) {
             namespaces.insert(tool.name.clone(), ns);
@@ -507,6 +530,7 @@ fn prepare_codemode_loadout(loadout: &dyn ToolLoadoutBackend, options: &Codemode
         if loadout.get_exposure(&tool.name) == ToolExposure::Deferred {
             deferred.insert(tool.name.clone());
         }
+        guidelines.insert(tool.name.clone(), loadout.get_prompt_guidelines(&tool.name));
     }
     let inline_budget = match &options.get_inline_budget {
         Some(f) => f(),
@@ -520,6 +544,7 @@ fn prepare_codemode_loadout(loadout: &dyn ToolLoadoutBackend, options: &Codemode
                 models: options.models,
                 namespaces,
                 deferred,
+                guidelines,
                 inline_budget,
             },
         ),
@@ -540,6 +565,32 @@ fn prepare_codemode_loadout(loadout: &dyn ToolLoadoutBackend, options: &Codemode
     }
 }
 
+/// Script globals that list or look up tools and namespaces, which the script may then call by any name.
+static DISCOVERY_GLOBALS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b")
+        .expect("valid discovery globals regex")
+});
+
+static IDENTIFIER_WORD_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9_]+").expect("valid word regex"));
+
+/// The tools a script may call (`ToolDefinition::reaches_tools`): every tool when it uses a discovery
+/// global, else the words of its source, so `tools.mcp__docs__search` and
+/// `tools["mcp__docs__" + name]` both name the `mcp__docs` namespace.
+fn get_script_reach(code: Option<&str>) -> ToolReachScope {
+    let Some(code) = code else {
+        return ToolReachScope::Names(Vec::new());
+    };
+    if DISCOVERY_GLOBALS_RE.is_match(code) {
+        return ToolReachScope::All;
+    }
+    let words = IDENTIFIER_WORD_RE
+        .find_iter(code)
+        .map(|m| m.as_str().to_string())
+        .collect();
+    ToolReachScope::Names(words)
+}
+
 pub fn create_codemode_tool_definition(options: CodemodeToolOptions) -> ToolDefinition {
     let initial_description = create_codemode_description(
         &[],
@@ -547,6 +598,7 @@ pub fn create_codemode_tool_definition(options: CodemodeToolOptions) -> ToolDefi
             models: options.models,
             namespaces: IndexMap::new(),
             deferred: IndexSet::new(),
+            guidelines: IndexMap::new(),
             inline_budget: None,
         },
     );
@@ -599,6 +651,9 @@ pub fn create_codemode_tool_definition(options: CodemodeToolOptions) -> ToolDefi
         render_call: Some(codemode_render_call()),
         render_result: Some(codemode_render_result()),
     }
+    .with_reaches_tools(Arc::new(|input| {
+        get_script_reach(input.get("code").and_then(Value::as_str))
+    }))
 }
 
 /// Create the codemode tool as an `AgentTool` (for direct/unit testing).
@@ -607,6 +662,7 @@ pub fn create_codemode_tool(tools: &[AgentTool], options: CodemodeToolOptions) -
         model_runtime: options.model_runtime.clone(),
         models: options.models,
         get_tool_namespace: options.get_tool_namespace.clone(),
+        get_tool_guidelines: options.get_tool_guidelines.clone(),
         append_entry: options.append_entry.clone(),
         get_mode: options.get_mode.clone(),
         get_inline_budget: options.get_inline_budget.clone(),
@@ -617,6 +673,7 @@ pub fn create_codemode_tool(tools: &[AgentTool], options: CodemodeToolOptions) -
             models: options.models,
             namespaces: IndexMap::new(),
             deferred: IndexSet::new(),
+            guidelines: IndexMap::new(),
             inline_budget: None,
         },
     );

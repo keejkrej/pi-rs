@@ -828,6 +828,7 @@ fn create_assistant_tool_call_message() -> AgentMessage {
                 cache_read: 0.0,
                 cache_write: 0.0,
                 total: 0.0,
+                total_from_provider: None,
             },
         },
         stop_reason: StopReason::ToolUse,
@@ -836,6 +837,7 @@ fn create_assistant_tool_call_message() -> AgentMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }))
 }
 
@@ -849,6 +851,7 @@ fn create_tool_result_message(text: &str) -> AgentMessage {
         nested_calls: None,
         is_error: false,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }))
 }
 

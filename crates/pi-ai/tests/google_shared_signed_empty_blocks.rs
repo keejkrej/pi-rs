@@ -30,6 +30,7 @@ fn make_model(id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn make_context(model_id: &str, content: Vec<AssistantContentBlock>) -> Context 
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: now,
+                duration_ms: None,
             }),
         ],
         tools: None,

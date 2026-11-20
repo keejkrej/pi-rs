@@ -177,6 +177,7 @@ pub async fn find_initial_agent_model(
             cli_provider: cli.provider.as_deref(),
             cli_model: Some(cli.model.as_str()),
             cli_thinking: None,
+            inline_api_key: None,
             model_runtime,
         });
         if resolved.error.is_some() || resolved.model.is_none() {
@@ -199,8 +200,6 @@ pub async fn find_initial_agent_model(
     let default_provider = settings_manager.get_default_provider();
     let default_model_id = settings_manager.get_default_model();
     let initial = find_initial_model(FindInitialModelOptions {
-        cli_provider: None,
-        cli_model: None,
         scoped_models: &[],
         is_continuing: false,
         default_provider: default_provider.as_deref(),

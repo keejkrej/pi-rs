@@ -43,9 +43,10 @@ fn keeps_non_windows_defaults_on_other_platforms() {
 fn keeps_ctrl_v_as_a_paste_key_on_wsl() {
     let _wsl = EnvGuard::set("WSL_DISTRO_NAME", Some("Ubuntu"));
     let wsl_keybindings = build_keybindings("linux", None);
-    // PORT: Rust `core::keybindings::build_keybindings` maps `app.clipboard.pasteImage` to
-    // single `"alt+v"` when `use_windows_keybindings` is true (TS later changed this to `["alt+v", "ctrl+v"]`).
-    assert_eq!(wsl_keybindings["app.clipboard.pasteImage"].default_keys, one("alt+v"));
+    assert_eq!(
+        wsl_keybindings["app.clipboard.pasteImage"].default_keys,
+        many(&["alt+v", "ctrl+v"])
+    );
 }
 
 #[test]
@@ -55,7 +56,11 @@ fn applies_the_detected_defaults_consistently() {
 
     assert_eq!(
         KEYBINDINGS["app.clipboard.pasteImage"].default_keys,
-        one(if windows_keybindings { "alt+v" } else { "ctrl+v" })
+        if windows_keybindings {
+            many(&["alt+v", "ctrl+v"])
+        } else {
+            one("ctrl+v")
+        }
     );
     assert_eq!(
         KEYBINDINGS["tui.altScreen.search"].default_keys,

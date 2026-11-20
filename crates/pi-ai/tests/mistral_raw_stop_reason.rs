@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pi_ai::api::mistral_conversations::{MistralOptions, stream_with_options};
 use pi_ai::providers::mistral_models::mistral_models;
+use pi_ai::utils::retry::is_retryable_assistant_error;
 use pi_ai::utils::transcript::normalize_context;
 use pi_ai::{Context, FetchFunction, Message, Model, StopReason, StreamOptions, UserMessage};
 use pi_js::fetch::testing::response;
@@ -89,7 +90,12 @@ async fn preserves_raw_mistral_finish_reasons_for_provider_error_stops() {
 
     assert_eq!(message.stop_reason, StopReason::Error);
     assert_eq!(message.raw_stop_reason.as_deref(), Some("error"));
-    assert_eq!(message.error_message.as_deref(), Some("Provider stopped with: error"));
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Provider stopped with: error (server error)")
+    );
+    // #10487
+    assert!(is_retryable_assistant_error(&message));
 }
 
 #[tokio::test]
@@ -114,4 +120,5 @@ async fn treats_unknown_mistral_finish_reasons_as_provider_error_stops() {
         message.error_message.as_deref(),
         Some("Provider stopped with: unmapped_error")
     );
+    assert!(!is_retryable_assistant_error(&message));
 }

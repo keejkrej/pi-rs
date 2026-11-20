@@ -47,7 +47,7 @@ fn echo_tool(executed: Option<Arc<AtomicBool>>) -> AgentTool {
         name: "echo".to_owned(),
         label: "Echo".to_owned(),
         description: "Echo back".to_owned(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

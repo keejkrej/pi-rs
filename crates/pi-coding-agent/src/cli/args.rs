@@ -77,6 +77,7 @@ pub struct Args {
     pub no_builtin_tools: Option<bool>,
     pub extensions: Option<Vec<String>>,
     pub no_extensions: Option<bool>,
+    pub no_mcp: Option<bool>,
     pub print: Option<bool>,
     pub export: Option<String>,
     pub no_skills: Option<bool>,
@@ -233,14 +234,20 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Args {
             result.no_builtin_tools = Some(true);
         } else if (arg == "--tools" || arg == "-t") && i + 1 < args.len() {
             i += 1;
-            result.tools = Some(
-                args[i]
-                    .as_ref()
-                    .split(',')
-                    .map(|s| str16::trim(s).to_string())
-                    .filter(|name| !name.is_empty())
-                    .collect(),
-            );
+            let tools: Vec<String> = args[i]
+                .as_ref()
+                .split(',')
+                .map(|s| str16::trim(s).to_string())
+                .filter(|name| !name.is_empty())
+                .collect();
+            if let Some(error) = crate::core::settings_manager::get_tool_list_error(&tools) {
+                result.diagnostics.push(ArgDiagnostic {
+                    r#type: ArgDiagnosticType::Error,
+                    message: format!("{arg}: {error}"),
+                });
+            } else {
+                result.tools = Some(tools);
+            }
         } else if (arg == "--exclude-tools" || arg == "-xt") && i + 1 < args.len() {
             i += 1;
             result.exclude_tools = Some(
@@ -285,6 +292,8 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Args {
                 .push(args[i].as_ref().to_string());
         } else if arg == "--no-extensions" || arg == "-ne" {
             result.no_extensions = Some(true);
+        } else if arg == "--no-mcp" {
+            result.no_mcp = Some(true);
         } else if arg == "--skill" && i + 1 < args.len() {
             i += 1;
             result
@@ -448,8 +457,8 @@ pub fn print_help(extension_flags: Option<&[ExtensionFlag]>) {
   {app} update [source|self|pi]   Update pi, extensions, or model catalogs
   {app} list                      List installed extensions from settings
   {app} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
-  {app} auth <command>            Print credentials or check provider readiness
-  {app} mcp <command>             Check MCP servers, sign in to or out of OAuth servers
+  {app} auth <command>            Log in or out, print credentials, or check provider readiness
+  {app} mcp <command>             Manage MCP servers
   {app} gui [options]             Launch the graphical pi-gui desktop client
   {app} <command> --help          Show help for install/remove/uninstall/update/list/config/auth/mcp
 
@@ -461,11 +470,11 @@ pub fn print_help(extension_flags: Option<&[ExtensionFlag]>) {
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
-  --continue, -c                 Continue previous session
-  --resume, -r                   Select a session to resume
-  --session <path|id>            Use specific session file or partial UUID
-  --session-id <id>              Use exact project session ID, creating it if missing
-  --fork <path|id>               Fork specific session file or partial UUID into a new session
+  --continue, -c                 Continue the most recent session for the current directory
+  --resume, -r                   Pick a session to resume
+  --session <path|id>            Open a session by file path or full/partial ID
+  --session-id <id>              Use the current directory's existing session with the ID, creating it otherwise
+  --fork <path|id>               Fork a session by file path or full/partial ID into the current directory
   --session-dir <dir>            Directory for session storage and lookup
   --no-session                   Don't save session (ephemeral)
   --name, -n <name>              Set session display name
@@ -473,13 +482,15 @@ pub fn print_help(extension_flags: Option<&[ExtensionFlag]>) {
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
-  --tools, -t <tools>            Comma-separated allowlist of tool names to enable
-                                 Applies to built-in, extension, and custom tools
-  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
-                                 Applies to built-in, extension, and custom tools
+  --tools, -t <tools>            Comma-separated allowlist of tool names or patterns (*) to enable
+                                 Keeps MCP tools unless an entry starts with mcp__
+                                 Only +name/-name entries add to or remove from the defaults
+  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names or patterns (*) to disable
+                                 Applies to all tools, MCP tools included
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
   --extension, -e <path>         Load an extension file or builtin:<name> (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery and built-in extensions (explicit -e paths still work)
+  --no-mcp                       Disable built-in MCP support: no servers connect and no MCP tools
   --skill <path>                 Load a skill file or directory (can be used multiple times)
   --no-skills, -ns               Disable skills discovery and loading
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
@@ -488,7 +499,7 @@ pub fn print_help(extension_flags: Option<&[ExtensionFlag]>) {
   --use-theme <name[/name]>      Set the initial interactive theme for this run
   --no-themes                    Disable theme discovery and loading
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
-  --export <file>                Export session file to HTML and exit
+  --export <file> [output]       Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --tui-mode <mode>              TUI mode: fullscreen (default) or regular
@@ -557,6 +568,12 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
   # Read-only mode (no file modifications possible)
   {app} --tools read,grep,find,ls -p \"Review the code in src/\"
 
+  # Add codemode to the default tools
+  {app} --tools +codemode
+
+  # Codemode with only the tools of one MCP server
+  {app} --tools read,bash,codemode,'mcp__radius__*'
+
   # Disable one tool while keeping the rest available
   {app} --exclude-tools ask_question
 
@@ -612,6 +629,7 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
   {env_session_padded} - Session storage directory (overridden by --session-dir)
   PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
+  PI_SELF_UPDATE_COMMAND           - Command pi update runs to update pi itself ({{packageName}}, {{version}}, {{installSpec}})
   PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 

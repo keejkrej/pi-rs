@@ -140,7 +140,21 @@ async fn abortable_sleep(ms: u64, signal: Option<&AbortSignal>) -> pi_js::Result
 
 /// Reproduce the retry behavior used by the OpenAI and Anthropic SDKs while making
 /// their backoff sleep interruptible.
-pub async fn retry_provider_request<T, F, Fut>(mut request: F, options: ProviderRetryOptions) -> pi_js::Result<T>
+pub async fn retry_provider_request<T, F, Fut>(request: F, options: ProviderRetryOptions) -> pi_js::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = pi_js::Result<T>>,
+{
+    retry_provider_request_with_no_retry_statuses(request, options, None).await
+}
+
+/// Variant of [`retry_provider_request`] that accepts explicit `no_retry_statuses` (`v1.5.2` `noRetryStatuses`).
+// PORT: Separate helper during Stage 1 avoids adding a field to `ProviderRetryOptions` that would break `src/api/*` literals before Stage 2.
+pub async fn retry_provider_request_with_no_retry_statuses<T, F, Fut>(
+    mut request: F,
+    options: ProviderRetryOptions,
+    no_retry_statuses: Option<&[u16]>,
+) -> pi_js::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = pi_js::Result<T>>,
@@ -159,6 +173,11 @@ where
                     return Err(error);
                 };
                 if retries_remaining == 0 || !is_retryable_provider_error(http_error) {
+                    return Err(error);
+                }
+                if let Some(status) = http_error.status
+                    && no_retry_statuses.is_some_and(|list| list.contains(&status))
+                {
                     return Err(error);
                 }
 

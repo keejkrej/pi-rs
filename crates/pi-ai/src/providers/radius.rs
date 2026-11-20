@@ -32,7 +32,9 @@ struct RadiusProvider {
     gateway: String,
     auth: ProviderAuth,
     baseline_models: Vec<Model>,
-    dynamic_models: Arc<Mutex<Vec<Model>>>,
+    // Gateway catalog for this account. Radius org owners can disable models, so once known it replaces
+    // the shipped baseline instead of overlaying it. The baseline only covers the time before any catalog exists.
+    dynamic_models: Arc<Mutex<Option<Vec<Model>>>>,
     streams: ProviderStreams,
 }
 
@@ -50,19 +52,11 @@ impl Provider for RadiusProvider {
     }
 
     fn get_models(&self) -> Vec<Model> {
-        let mut merged = self.baseline_models.clone();
         let dynamic = match self.dynamic_models.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
         };
-        for model in dynamic {
-            if let Some(pos) = merged.iter().position(|entry| entry.id == model.id) {
-                merged[pos] = model;
-            } else {
-                merged.push(model);
-            }
-        }
-        merged
+        dynamic.unwrap_or_else(|| self.baseline_models.clone())
     }
 
     fn refresh_models(&self, context: RefreshModelsContext) -> Option<BoxFuture<Result<()>>> {
@@ -89,7 +83,7 @@ impl Provider for RadiusProvider {
                             Ok(g) => g,
                             Err(p) => p.into_inner(),
                         };
-                        *guard = restored.clone();
+                        *guard = Some(restored.clone());
                     })),
                 })
                 .await?;
@@ -117,7 +111,7 @@ impl Provider for RadiusProvider {
                                     Ok(g) => g,
                                     Err(p) => p.into_inner(),
                                 };
-                                *guard = legacy.clone();
+                                *guard = Some(legacy.clone());
                             })),
                         })
                         .await?;
@@ -158,7 +152,7 @@ impl Provider for RadiusProvider {
                         Ok(g) => g,
                         Err(p) => p.into_inner(),
                     };
-                    *guard = refreshed.clone();
+                    *guard = Some(refreshed.clone());
                 })),
             })
             .await?;
@@ -220,7 +214,7 @@ pub fn radius_provider_with_options(options: RadiusProviderOptions) -> Arc<dyn P
         Vec::new()
     };
 
-    let dynamic_models = Arc::new(Mutex::new(get_radius_models(&id, None)));
+    let dynamic_models = Arc::new(Mutex::new(None));
     let streams = pi_messages_api();
 
     let oauth_name = name.clone();

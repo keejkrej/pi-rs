@@ -87,3 +87,104 @@ fn gives_an_explicit_history_binding_precedence_over_model_cycling() {
     editor.handle_input("\x0e"); // Ctrl+N
     assert_eq!(editor.get_text(), "draft");
 }
+
+#[tokio::test]
+#[serial]
+async fn pages_an_open_autocomplete_menu_before_pasting_an_image_with_same_key_7629() {
+    use async_trait::async_trait;
+    use pi_tui::autocomplete::{ApplyCompletionResult, GetSuggestionsOptions};
+    use pi_tui::{AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions};
+
+    struct TestAutocomplete;
+
+    #[async_trait]
+    impl AutocompleteProvider for TestAutocomplete {
+        async fn get_suggestions(
+            &self,
+            _lines: &[String],
+            _cursor_line: i64,
+            _cursor_col: i64,
+            _options: GetSuggestionsOptions,
+        ) -> Option<AutocompleteSuggestions> {
+            Some(AutocompleteSuggestions {
+                items: (0..12)
+                    .map(|index| AutocompleteItem {
+                        value: format!("/command-{index}"),
+                        label: format!("command-{index}"),
+                        description: None,
+                    })
+                    .collect(),
+                prefix: "/".to_owned(),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: i64,
+            _cursor_col: i64,
+            item: &AutocompleteItem,
+            _prefix: &str,
+        ) -> ApplyCompletionResult {
+            let new_lines: Vec<String> = lines
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    if idx as i64 == cursor_line {
+                        item.value.clone()
+                    } else {
+                        line.clone()
+                    }
+                })
+                .collect();
+            ApplyCompletionResult {
+                lines: new_lines,
+                cursor_line,
+                cursor_col: item.value.len() as i64,
+            }
+        }
+    }
+
+    let mut user = KeybindingsConfig::new();
+    user.insert(
+        "tui.select.pageDown".to_string(),
+        Some(KeyIdOrList::One("ctrl+v".to_string())),
+    );
+    user.insert(
+        "app.clipboard.pasteImage".to_string(),
+        Some(KeyIdOrList::One("ctrl+v".to_string())),
+    );
+    let keybindings = AppKeybindingsManager::new(Some(user.clone()), None);
+    set_keybindings(KeybindingsManager::new(KEYBINDINGS.clone(), Some(user)));
+
+    let tui = Arc::new(TuiMainScreen::new(Arc::new(NoopTerminal), None, None));
+    let editor = CustomEditor::new(tui, get_editor_theme(), keybindings, None);
+    let pastes = Arc::new(AtomicUsize::new(0));
+    let pastes_c = Arc::clone(&pastes);
+    editor.set_on_paste_image(Some(Arc::new(move || {
+        pastes_c.fetch_add(1, Ordering::SeqCst);
+    })));
+    let submitted = Arc::new(std::sync::Mutex::new(String::new()));
+    let submitted_c = Arc::clone(&submitted);
+    editor.set_on_submit(Some(Arc::new(move |text| {
+        *submitted_c.lock().unwrap() = text.to_owned();
+    })));
+    editor.set_autocomplete_provider(Arc::new(TestAutocomplete));
+
+    editor.handle_input("/");
+    for _ in 0..50 {
+        if editor.is_showing_autocomplete() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(editor.is_showing_autocomplete(), "autocomplete menu should open");
+
+    editor.handle_input("\x16"); // Ctrl+V pages autocomplete instead of pasting image
+    editor.handle_input("\r");
+    assert_eq!(pastes.load(Ordering::SeqCst), 0);
+    assert_eq!(&*submitted.lock().unwrap(), "/command-5");
+
+    editor.handle_input("\x16"); // Ctrl+V with autocomplete closed triggers pasteImage
+    assert_eq!(pastes.load(Ordering::SeqCst), 1);
+}

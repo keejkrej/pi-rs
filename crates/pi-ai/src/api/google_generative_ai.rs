@@ -108,12 +108,17 @@ fn build_google_ai_url(model: &Model, wire_model_id: &str) -> Result<String> {
     }
 }
 
-fn build_google_ai_headers(model: &Model, api_key: &str, options_headers: Option<&ProviderHeaders>) -> Result<Headers> {
+fn build_google_ai_headers(
+    model: &Model,
+    api_key: &str,
+    options_headers: Option<&ProviderHeaders>,
+    identity: Option<&crate::utils::identity::ClientIdentity>,
+) -> Result<Headers> {
     if api_key.starts_with("auth_tokens/") {
         return Err(Error::msg("Ephemeral tokens are only supported by the live API."));
     }
     let mut headers = Headers::new();
-    if let Some(merged) = build_google_headers(model.headers.as_ref(), options_headers) {
+    if let Some(merged) = build_google_headers(model, options_headers, identity) {
         for (name, value) in merged {
             headers.set(&name, &value);
         }
@@ -170,7 +175,12 @@ pub fn stream_with_options(
 
             let (wire_model_id, wire_body) = project_google_params_to_wire_body(&params, false)?;
             let url = build_google_ai_url(&model_owned, &wire_model_id)?;
-            let headers = build_google_ai_headers(&model_owned, &api_key, opts.base.headers.as_ref())?;
+            let headers = build_google_ai_headers(
+                &model_owned,
+                &api_key,
+                opts.base.headers.as_ref(),
+                opts.base.identity.as_ref(),
+            )?;
 
             let retry_signal = opts.base.signal.clone();
             Ok(GoogleStreamRequest {

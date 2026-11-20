@@ -265,6 +265,18 @@ struct FunctionalCodepoints {
     page_down: i64,
     home: i64,
     end: i64,
+    f1: i64,
+    f2: i64,
+    f3: i64,
+    f4: i64,
+    f5: i64,
+    f6: i64,
+    f7: i64,
+    f8: i64,
+    f9: i64,
+    f10: i64,
+    f11: i64,
+    f12: i64,
 }
 
 const FUNCTIONAL_CODEPOINTS: FunctionalCodepoints = FunctionalCodepoints {
@@ -274,12 +286,35 @@ const FUNCTIONAL_CODEPOINTS: FunctionalCodepoints = FunctionalCodepoints {
     page_down: -13,
     home: -14,
     end: -15,
+    f1: -21,
+    f2: -22,
+    f3: -23,
+    f4: -24,
+    f5: -25,
+    f6: -26,
+    f7: -27,
+    f8: -28,
+    f9: -29,
+    f10: -30,
+    f11: -31,
+    f12: -32,
 };
+
+// Kitty reserves this Private Use Area range for functional keys (F13-F35,
+// media keys, modifier keys, ...). CSI-u codepoints in it are never text.
+const KITTY_FUNCTIONAL_PUA_START: i64 = 57344;
+const KITTY_FUNCTIONAL_PUA_END: i64 = 63743;
 
 static SYMBOL_KEYS: LazyLock<IndexSet<&'static str>> = LazyLock::new(|| {
     IndexSet::from([
         "`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_",
         "+", "|", "~", "{", "}", ":", "<", ">", "?",
+    ])
+});
+
+static SHIFTED_SYMBOL_KEYS: LazyLock<IndexSet<&'static str>> = LazyLock::new(|| {
+    IndexSet::from([
+        "~", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+", "|", "{", "}", ":", "<", ">", "?",
     ])
 });
 
@@ -522,6 +557,8 @@ static KITTY_FUNC_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\x1b\[(\d+)(?:;(\d+))?(?::(\d+))?~$").unwrap());
 static KITTY_HOME_END_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\x1b\[1;(\d+)(?::(\d+))?([HF])$").unwrap());
+static KITTY_FKEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\x1b\[(?:1;(\d+)(?::(\d+))?)?([PQS])$").unwrap());
 static MODIFY_OTHER_KEYS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\x1b\[27;(\d+);(\d+)~$").unwrap());
 
 #[inline]
@@ -558,6 +595,23 @@ fn normalize_shifted_letter_identity_codepoint(codepoint: i64, modifier: i64) ->
         return codepoint + 32;
     }
     codepoint
+}
+
+fn get_logical_shifted_symbol_candidate(
+    codepoint: Option<i64>,
+    modifier: i64,
+    allowed_symbols: &IndexSet<&'static str>,
+) -> Option<(i64, i64)> {
+    let cp = codepoint?;
+    if js_bitand(modifier, MODIFIERS.shift) == 0 {
+        return None;
+    }
+    let normalized_codepoint = normalize_kitty_functional_codepoint(cp);
+    let sym = from_char_code_str(normalized_codepoint);
+    if !allowed_symbols.contains(sym.as_str()) {
+        return None;
+    }
+    Some((normalized_codepoint, js_bitand(modifier, js_bitnot(MODIFIERS.shift))))
 }
 
 fn matches_legacy_sequence(data: &str, sequences: &[&str]) -> bool {
@@ -651,6 +705,18 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKittySequence> {
             6 => FUNCTIONAL_CODEPOINTS.page_down,
             7 => FUNCTIONAL_CODEPOINTS.home,
             8 => FUNCTIONAL_CODEPOINTS.end,
+            11 => FUNCTIONAL_CODEPOINTS.f1,
+            12 => FUNCTIONAL_CODEPOINTS.f2,
+            13 => FUNCTIONAL_CODEPOINTS.f3,
+            14 => FUNCTIONAL_CODEPOINTS.f4,
+            15 => FUNCTIONAL_CODEPOINTS.f5,
+            17 => FUNCTIONAL_CODEPOINTS.f6,
+            18 => FUNCTIONAL_CODEPOINTS.f7,
+            19 => FUNCTIONAL_CODEPOINTS.f8,
+            20 => FUNCTIONAL_CODEPOINTS.f9,
+            21 => FUNCTIONAL_CODEPOINTS.f10,
+            23 => FUNCTIONAL_CODEPOINTS.f11,
+            24 => FUNCTIONAL_CODEPOINTS.f12,
             _ => -1,
         };
         if codepoint != -1 {
@@ -683,6 +749,27 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKittySequence> {
         });
     }
 
+    // F1, F2, F4: \x1b[P/Q/S or \x1b[1;<mod>P/Q/S or \x1b[1;<mod>:<event>P/Q/S
+    // F3 is sent as \x1b[13~ because \x1b[1;<mod>R collides with cursor position reports.
+    if let Some(caps) = KITTY_FKEY_REGEX.captures(data) {
+        let mod_value = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()).unwrap_or(1);
+        let event_type = parse_event_type(caps.get(2).map(|m| m.as_str()));
+        let codepoint = match caps.get(3)?.as_str() {
+            "P" => FUNCTIONAL_CODEPOINTS.f1,
+            "Q" => FUNCTIONAL_CODEPOINTS.f2,
+            "S" => FUNCTIONAL_CODEPOINTS.f4,
+            _ => return None,
+        };
+        *LAST_EVENT_TYPE.lock().unwrap() = event_type;
+        return Some(ParsedKittySequence {
+            codepoint,
+            shifted_key: None,
+            base_layout_key: None,
+            modifier: mod_value - 1,
+            event_type,
+        });
+    }
+
     None
 }
 
@@ -696,10 +783,6 @@ fn matches_kitty_sequence(data: &str, expected_codepoint: i64, expected_modifier
     let actual_mod = js_bitand(parsed.modifier, js_bitnot(LOCK_MASK));
     let expected_mod = js_bitand(expected_modifier, js_bitnot(LOCK_MASK));
 
-    if actual_mod != expected_mod {
-        return false;
-    }
-
     let normalized_codepoint = normalize_shifted_letter_identity_codepoint(
         normalize_kitty_functional_codepoint(parsed.codepoint),
         parsed.modifier,
@@ -709,8 +792,24 @@ fn matches_kitty_sequence(data: &str, expected_codepoint: i64, expected_modifier
         expected_modifier,
     );
 
-    if normalized_codepoint == normalized_expected_codepoint {
+    // Physical match: primary codepoint and every reported modifier match.
+    if actual_mod == expected_mod && normalized_codepoint == normalized_expected_codepoint {
         return true;
+    }
+
+    // Logical match: Kitty reports symbols such as "+" as Shift plus the physical "=" key.
+    // Bindings name the produced symbol, so consume that implicit Shift while preserving
+    // Ctrl, Alt, and Super. The physical "shift+=" spelling remains valid through the match above.
+    if let Some((logical_codepoint, logical_modifier)) =
+        get_logical_shifted_symbol_candidate(parsed.shifted_key, actual_mod, &SYMBOL_KEYS)
+        && js_bitand(logical_modifier, js_bitnot(LOCK_MASK)) == expected_mod
+        && logical_codepoint == normalize_kitty_functional_codepoint(expected_codepoint)
+    {
+        return true;
+    }
+
+    if actual_mod != expected_mod {
+        return false;
     }
 
     if parsed.base_layout_key == Some(expected_codepoint) {
@@ -799,17 +898,17 @@ fn is_digit_key(key: &str) -> bool {
 }
 
 fn matches_printable_modify_other_keys(data: &str, expected_keycode: i64, expected_modifier: i64) -> bool {
-    if expected_modifier == 0 {
-        return false;
-    }
     let Some(parsed) = parse_modify_other_keys_sequence(data) else {
         return false;
     };
-    if parsed.modifier != expected_modifier {
-        return false;
+    let physical_match = parsed.modifier == expected_modifier
+        && normalize_shifted_letter_identity_codepoint(parsed.codepoint, parsed.modifier)
+            == normalize_shifted_letter_identity_codepoint(expected_keycode, expected_modifier);
+    if physical_match {
+        return true;
     }
-    normalize_shifted_letter_identity_codepoint(parsed.codepoint, parsed.modifier)
-        == normalize_shifted_letter_identity_codepoint(expected_keycode, expected_modifier)
+    get_logical_shifted_symbol_candidate(Some(parsed.codepoint), parsed.modifier, &SHIFTED_SYMBOL_KEYS)
+        .is_some_and(|(cp, modifier)| modifier == expected_modifier && cp == expected_keycode)
 }
 
 fn format_key_name_with_modifiers(key_name: &str, modifier: i64) -> Option<String> {
@@ -839,18 +938,49 @@ fn format_key_name_with_modifiers(key_name: &str, modifier: i64) -> Option<Strin
 }
 
 fn parse_key_id(key_id: &str) -> Option<ParsedKeyId> {
-    let lower = key_id.to_lowercase();
-    let parts: Vec<&str> = lower.split('+').collect();
-    let key = *parts.last()?;
-    if key.is_empty() {
+    let mut key = key_id.to_lowercase();
+    let mut shift = false;
+    let mut alt = false;
+    let mut ctrl = false;
+    let mut super_ = false;
+    loop {
+        if let Some(rest) = key.strip_prefix("shift+") {
+            if shift {
+                return None;
+            }
+            shift = true;
+            key = rest.to_string();
+        } else if let Some(rest) = key.strip_prefix("alt+") {
+            if alt {
+                return None;
+            }
+            alt = true;
+            key = rest.to_string();
+        } else if let Some(rest) = key.strip_prefix("ctrl+") {
+            if ctrl {
+                return None;
+            }
+            ctrl = true;
+            key = rest.to_string();
+        } else if let Some(rest) = key.strip_prefix("super+") {
+            if super_ {
+                return None;
+            }
+            super_ = true;
+            key = rest.to_string();
+        } else {
+            break;
+        }
+    }
+    if key.is_empty() || (key.contains('+') && key != "+") {
         return None;
     }
     Some(ParsedKeyId {
-        key: key.to_string(),
-        ctrl: parts.contains(&"ctrl"),
-        shift: parts.contains(&"shift"),
-        alt: parts.contains(&"alt"),
-        super_: parts.contains(&"super"),
+        key,
+        ctrl,
+        shift,
+        alt,
+        super_,
     })
 }
 
@@ -894,6 +1024,9 @@ fn format_parsed_key(codepoint: i64, modifier: i64, base_layout_key: Option<i64>
         Some("pageUp")
     } else if effective_codepoint == FUNCTIONAL_CODEPOINTS.page_down {
         Some("pageDown")
+    } else if effective_codepoint <= FUNCTIONAL_CODEPOINTS.f1 && effective_codepoint >= FUNCTIONAL_CODEPOINTS.f12 {
+        effective_str = format!("f{}", FUNCTIONAL_CODEPOINTS.f1 - effective_codepoint + 1);
+        Some(effective_str.as_str())
     } else if effective_codepoint == ARROW_CODEPOINTS.up {
         Some("up")
     } else if effective_codepoint == ARROW_CODEPOINTS.down {
@@ -946,6 +1079,9 @@ pub fn is_key_release(data: &str) -> bool {
         || data.contains(":3D")
         || data.contains(":3H")
         || data.contains(":3F")
+        || data.contains(":3P")
+        || data.contains(":3Q")
+        || data.contains(":3S")
 }
 
 /// Check if the last parsed key event was a key repeat.
@@ -964,6 +1100,9 @@ pub fn is_key_repeat(data: &str) -> bool {
         || data.contains(":2D")
         || data.contains(":2H")
         || data.contains(":2F")
+        || data.contains(":2P")
+        || data.contains(":2Q")
+        || data.contains(":2S")
 }
 
 /// Match input data against a key identifier string.
@@ -1239,25 +1378,25 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
             return matches_kitty_sequence(data, ARROW_CODEPOINTS.right, modifier);
         }
         "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
-            if modifier != 0 {
-                return false;
-            }
-            let seqs = match key {
-                "f1" => LEGACY_KEY_SEQUENCES.f1,
-                "f2" => LEGACY_KEY_SEQUENCES.f2,
-                "f3" => LEGACY_KEY_SEQUENCES.f3,
-                "f4" => LEGACY_KEY_SEQUENCES.f4,
-                "f5" => LEGACY_KEY_SEQUENCES.f5,
-                "f6" => LEGACY_KEY_SEQUENCES.f6,
-                "f7" => LEGACY_KEY_SEQUENCES.f7,
-                "f8" => LEGACY_KEY_SEQUENCES.f8,
-                "f9" => LEGACY_KEY_SEQUENCES.f9,
-                "f10" => LEGACY_KEY_SEQUENCES.f10,
-                "f11" => LEGACY_KEY_SEQUENCES.f11,
-                "f12" => LEGACY_KEY_SEQUENCES.f12,
+            let (seqs, func_cp) = match key {
+                "f1" => (LEGACY_KEY_SEQUENCES.f1, FUNCTIONAL_CODEPOINTS.f1),
+                "f2" => (LEGACY_KEY_SEQUENCES.f2, FUNCTIONAL_CODEPOINTS.f2),
+                "f3" => (LEGACY_KEY_SEQUENCES.f3, FUNCTIONAL_CODEPOINTS.f3),
+                "f4" => (LEGACY_KEY_SEQUENCES.f4, FUNCTIONAL_CODEPOINTS.f4),
+                "f5" => (LEGACY_KEY_SEQUENCES.f5, FUNCTIONAL_CODEPOINTS.f5),
+                "f6" => (LEGACY_KEY_SEQUENCES.f6, FUNCTIONAL_CODEPOINTS.f6),
+                "f7" => (LEGACY_KEY_SEQUENCES.f7, FUNCTIONAL_CODEPOINTS.f7),
+                "f8" => (LEGACY_KEY_SEQUENCES.f8, FUNCTIONAL_CODEPOINTS.f8),
+                "f9" => (LEGACY_KEY_SEQUENCES.f9, FUNCTIONAL_CODEPOINTS.f9),
+                "f10" => (LEGACY_KEY_SEQUENCES.f10, FUNCTIONAL_CODEPOINTS.f10),
+                "f11" => (LEGACY_KEY_SEQUENCES.f11, FUNCTIONAL_CODEPOINTS.f11),
+                "f12" => (LEGACY_KEY_SEQUENCES.f12, FUNCTIONAL_CODEPOINTS.f12),
                 _ => return false,
             };
-            return matches_legacy_sequence(data, seqs);
+            if modifier == 0 && matches_legacy_sequence(data, seqs) {
+                return true;
+            }
+            return matches_kitty_sequence(data, func_cp, modifier);
         }
         _ => {}
     }
@@ -1310,7 +1449,9 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
                 || matches_printable_modify_other_keys(data, codepoint, modifier);
         }
 
-        return data == key || matches_kitty_sequence(data, codepoint, 0);
+        return data == key
+            || matches_kitty_sequence(data, codepoint, 0)
+            || matches_printable_modify_other_keys(data, codepoint, 0);
     }
 
     false
@@ -1325,11 +1466,25 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
 /// PORT: TS return type is `string | undefined`, not `KeyId`.
 pub fn parse_key(data: &str) -> Option<String> {
     if let Some(kitty) = parse_kitty_sequence(data) {
-        return format_parsed_key(kitty.codepoint, kitty.modifier, kitty.base_layout_key);
+        let logical = get_logical_shifted_symbol_candidate(kitty.shifted_key, kitty.modifier, &SYMBOL_KEYS);
+        return format_parsed_key(
+            logical.map_or(kitty.codepoint, |(cp, _)| cp),
+            logical.map_or(kitty.modifier, |(_, m)| m),
+            kitty.base_layout_key,
+        );
     }
 
     if let Some(modify_other_keys) = parse_modify_other_keys_sequence(data) {
-        return format_parsed_key(modify_other_keys.codepoint, modify_other_keys.modifier, None);
+        let logical = get_logical_shifted_symbol_candidate(
+            Some(modify_other_keys.codepoint),
+            modify_other_keys.modifier,
+            &SHIFTED_SYMBOL_KEYS,
+        );
+        return format_parsed_key(
+            logical.map_or(modify_other_keys.codepoint, |(cp, _)| cp),
+            logical.map_or(modify_other_keys.modifier, |(_, m)| m),
+            None,
+        );
     }
 
     let kitty_active = is_kitty_protocol_active();
@@ -1460,6 +1615,10 @@ pub fn decode_kitty_printable(data: &str) -> Option<String> {
     }
     effective_codepoint = normalize_kitty_functional_codepoint(effective_codepoint);
     if effective_codepoint < 32 {
+        return None;
+    }
+    // Drop unmapped Kitty functional keys (F13-F35, media keys, ...).
+    if (KITTY_FUNCTIONAL_PUA_START..=KITTY_FUNCTIONAL_PUA_END).contains(&effective_codepoint) {
         return None;
     }
 

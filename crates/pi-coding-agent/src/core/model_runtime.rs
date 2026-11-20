@@ -3,23 +3,26 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::{IndexMap, IndexSet};
-use pi_ai::api::lazy::lazy_stream;
+use pi_ai::api::lazy::lazy_stream_with_options;
 use pi_ai::auth::resolve::AuthResolutionOverrides;
 use pi_ai::models::{
     CreateModelsOptions, Models, ModelsApiStreamOptions, ModelsClassifierOptions, ModelsDeferredCancelOptions,
     ModelsDeferredFetchOptions, ModelsImagesOptions, ModelsRefreshOptions, ModelsRefreshResult,
-    ModelsSimpleStreamOptions, MutableModels, Provider, create_models,
+    ModelsSimpleStreamOptions, MutableModels, Provider, RefreshModelsContext, create_models,
 };
 use pi_ai::models_store::ModelsStore;
 use pi_ai::providers::all::{builtin_providers, get_builtin_model_data_generated_at};
+use pi_ai::providers::openrouter::personalize_openrouter_catalog;
 use pi_ai::providers::radius::{RadiusProviderOptions, radius_provider_with_options};
 use pi_ai::types::{
     AnyModel, AssistantImages, ClassifierContext, ClassifierModel, ClassifierResult, Context, DeferredHandle,
     ImageModel, ImagesContext, Message, Model, ModelThinkingLevel, ModelType, ProviderEnv, ProviderHeaders,
     SimpleStreamOptions, TranscriptContext,
 };
+use pi_ai::utils::identity::{ClientIdentity, ClientIdentityTarget, get_opencode_session_headers};
 use pi_ai::utils::model_operations::{
-    assert_chat_model, assert_classifier_model, assert_image_model, classifier_error_result, image_error_result,
+    assert_chat_model, assert_classifier_input_supported, assert_classifier_model, assert_image_model,
+    classifier_error_result, image_error_result,
 };
 use pi_ai::utils::models_error::{ModelsError, ModelsErrorCode};
 use pi_ai::{
@@ -38,7 +41,7 @@ use crate::core::provider_composer::{
     configured_request_auth_status, resolve_compatibility_request_config, resolve_configured_model_headers,
     validate_extension_provider,
 };
-use crate::core::remote_catalog_provider::with_remote_catalog;
+use crate::core::remote_catalog_provider::{PersonalizeCatalog, with_personalized_catalog, with_remote_catalog};
 use crate::core::runtime_credentials::RuntimeCredentials;
 use crate::core::virtual_models::{
     ModelRoute, ModelRouteFailed, ModelRoutePrevious, ModelRouteReason, ModelRouteRequest, VirtualModelDefinition,
@@ -77,6 +80,8 @@ pub struct CreateModelRuntimeOptions {
     pub signal: Option<AbortSignal>,
     /// Skip initial catalog and availability refresh. Static models remain available.
     pub refresh_on_create: Option<bool>,
+    /// Default identity applied to all requests unless overridden per request.
+    pub identity: Option<ClientIdentity>,
 }
 
 /// Alias matching camelCase-to-PascalCase expectation (`ModelRuntimeCreateOptions`).
@@ -277,6 +282,7 @@ impl ModelRuntime {
         models_store: Arc<dyn ModelsStore + Send + Sync>,
         providers: Vec<Arc<dyn Provider + Send + Sync>>,
         model_network_enabled: bool,
+        identity: Option<ClientIdentity>,
     ) -> Self {
         pi_ai::compat::register_built_in_api_providers();
         let mut default_builtins = IndexMap::new();
@@ -292,6 +298,7 @@ impl ModelRuntime {
             credentials: Some(cred_store),
             models_store: Some(models_store),
             auth_context: None,
+            identity,
         }));
         let (availability_event_tx, _) = tokio::sync::watch::channel(0u64);
 
@@ -335,6 +342,7 @@ impl ModelRuntime {
             Arc::new(InMemoryCodingAgentModelsStore::new()),
             Vec::new(),
             false,
+            None,
         )
     }
 
@@ -369,11 +377,32 @@ impl ModelRuntime {
 
         let builtin_generated_at = get_builtin_model_data_generated_at();
         let catalog_base_url = options.catalog_base_url.as_deref();
+        let openrouter_personalizer: PersonalizeCatalog = Arc::new(|catalog, ctx| {
+            let owned_catalog = catalog.to_vec();
+            let owned_ctx = RefreshModelsContext {
+                credential: ctx.credential.clone(),
+                stored: ctx.stored.clone(),
+                publish: Arc::clone(&ctx.publish),
+                allow_network: ctx.allow_network,
+                force: ctx.force,
+                signal: ctx.signal.clone(),
+                base_url: ctx.base_url.clone(),
+            };
+            Box::pin(async move { personalize_openrouter_catalog(&owned_catalog, &owned_ctx).await })
+        });
         let providers: Vec<Arc<dyn Provider + Send + Sync>> = builtin_providers()
             .into_iter()
             .map(|p| {
                 if p.id() == "radius" {
                     p
+                } else if p.id() == "openrouter" {
+                    // OpenRouter narrows the catalog to the models, limits and prices of the user's key.
+                    with_personalized_catalog(
+                        p,
+                        Arc::clone(&openrouter_personalizer),
+                        catalog_base_url,
+                        builtin_generated_at,
+                    )
                 } else {
                     with_remote_catalog(p, catalog_base_url, builtin_generated_at)
                 }
@@ -388,6 +417,7 @@ impl ModelRuntime {
             models_store,
             providers,
             network_enabled,
+            options.identity,
         );
         runtime.configure_radius_providers();
         runtime.rebuild_providers();
@@ -1092,6 +1122,12 @@ impl ModelRuntime {
         .await
     }
 
+    /// Wait until credential writes already in progress finish, such as an OAuth refresh started by a
+    /// background catalog refresh. Call before the process exits so a rotated token is not lost.
+    pub async fn settle_credential_writes(&self) -> Result<()> {
+        self.inner.credentials.settled().await
+    }
+
     pub async fn list_credentials(&self, options: Option<AuthOperationOptions>) -> Result<Vec<CredentialInfo>> {
         self.inner.credentials.list(options).await
     }
@@ -1139,6 +1175,7 @@ impl ModelRuntime {
         req_env: Option<ProviderEnv>,
         req_headers: Option<ProviderHeaders>,
         req_signal: Option<AbortSignal>,
+        session_id: Option<&str>,
         transform_headers: Option<&pi_ai::models::TransformHeaders>,
     ) -> Result<(
         Arc<dyn Provider + Send + Sync>,
@@ -1172,22 +1209,6 @@ impl ModelRuntime {
                 ))
             })?;
 
-        let mut headers = merge_headers(resolution.auth.headers.as_ref(), req_headers.as_ref());
-        if let Some(transform) = transform_headers {
-            headers = Some(transform(headers.unwrap_or_default()).await?);
-        }
-        let env = match (resolution.env, req_env) {
-            (None, None) => None,
-            (Some(re), None) => Some(re),
-            (None, Some(oe)) => Some(oe),
-            (Some(mut re), Some(oe)) => {
-                for (k, v) in oe {
-                    re.insert(k, v);
-                }
-                Some(re)
-            }
-        };
-
         let request_model = match resolution.auth.base_url {
             Some(url) => match model.clone() {
                 AnyModel::Chat(mut m) => {
@@ -1212,6 +1233,31 @@ impl ModelRuntime {
             None => model.clone(),
         };
 
+        let opencode_headers: Option<ProviderHeaders> = get_opencode_session_headers(
+            ClientIdentityTarget {
+                provider: request_model.provider(),
+                base_url: request_model.base_url(),
+            },
+            session_id,
+        )
+        .map(|hdrs| hdrs.into_iter().map(|(k, v)| (k, Some(v))).collect());
+        let auth_with_session = merge_headers(opencode_headers.as_ref(), resolution.auth.headers.as_ref());
+        let mut headers = merge_headers(auth_with_session.as_ref(), req_headers.as_ref());
+        if let Some(transform) = transform_headers {
+            headers = Some(transform(headers.unwrap_or_default()).await?);
+        }
+        let env = match (resolution.env, req_env) {
+            (None, None) => None,
+            (Some(re), None) => Some(re),
+            (None, Some(oe)) => Some(oe),
+            (Some(mut re), Some(oe)) => {
+                for (k, v) in oe {
+                    re.insert(k, v);
+                }
+                Some(re)
+            }
+        };
+
         let applied_api_key = req_api_key.or(resolution.auth.api_key);
         Ok((provider, request_model, applied_api_key, headers, env))
     }
@@ -1225,27 +1271,34 @@ impl ModelRuntime {
         let transcript: TranscriptContext = normalize_context(context);
         let runtime = self.clone();
         let model_owned = model.clone();
-        lazy_stream(model, async move {
-            let any_model = AnyModel::Chat(model_owned.clone());
-            assert_chat_model(&any_model)?;
-            let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
-            let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
-            let (provider, req_model, api_key, headers, env) = runtime
-                .prepare_request_inner(
-                    &any_model,
-                    req_opts.base.api_key.clone(),
-                    req_opts.base.env.clone(),
-                    req_opts.base.headers.clone(),
-                    req_opts.base.signal.clone(),
-                    transform,
-                )
-                .await?;
-            let final_model = req_model.into_chat().unwrap_or(model_owned);
-            req_opts.base.api_key = api_key;
-            req_opts.base.headers = headers;
-            req_opts.base.env = env;
-            Ok(provider.stream(&final_model, &transcript, Some(req_opts)))
-        })
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
+        lazy_stream_with_options(
+            model,
+            async move {
+                let any_model = AnyModel::Chat(model_owned.clone());
+                assert_chat_model(&any_model)?;
+                let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
+                let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
+                let (provider, req_model, api_key, headers, env) = runtime
+                    .prepare_request_inner(
+                        &any_model,
+                        req_opts.base.api_key.clone(),
+                        req_opts.base.env.clone(),
+                        req_opts.base.headers.clone(),
+                        req_opts.base.signal.clone(),
+                        req_opts.base.session_id.as_deref(),
+                        transform,
+                    )
+                    .await?;
+                let final_model = req_model.into_chat().unwrap_or(model_owned);
+                req_opts.base.api_key = api_key;
+                req_opts.base.headers = headers;
+                req_opts.base.env = env;
+                Ok(provider.stream(&final_model, &transcript, Some(req_opts)))
+            },
+            None,
+            signal,
+        )
     }
 
     pub async fn complete(
@@ -1267,69 +1320,81 @@ impl ModelRuntime {
         let runtime = self.clone();
         let model_owned = model.clone();
         let context_owned = context.clone();
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
 
         if is_virtual_model(model) {
-            return lazy_stream(model, async move {
-                let thinking_level = options
-                    .as_ref()
-                    .and_then(|o| o.base.reasoning)
-                    .map(ModelThinkingLevel::from)
-                    .unwrap_or(ModelThinkingLevel::Off);
-                let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
-                let route = runtime
-                    .resolve_model(
-                        &model_owned,
-                        &transcript.messages,
-                        ResolveModelOptions {
-                            reason: ModelRouteReason::Direct,
-                            thinking_level,
-                            signal,
-                            failed: None,
-                            state: None,
-                        },
-                    )
-                    .await?;
-                let mut next_opts = options.unwrap_or_else(|| ModelsSimpleStreamOptions {
-                    base: SimpleStreamOptions::default(),
-                    transform_headers: None,
-                });
-                let limit = route.model.max_tokens;
-                if let Some(req_max) = next_opts.base.base.max_tokens
-                    && limit > 0
-                {
-                    next_opts.base.base.max_tokens = Some(req_max.min(limit));
-                }
-                next_opts.base.reasoning = route.thinking_level.as_thinking_level();
-                if route.model.provider != model_owned.provider {
-                    next_opts.base.base.api_key = None;
-                    next_opts.base.base.headers = None;
-                    next_opts.base.base.env = None;
-                }
-                Ok(runtime.stream_simple(&route.model, &context_owned, Some(next_opts)))
-            });
+            return lazy_stream_with_options(
+                model,
+                async move {
+                    let thinking_level = options
+                        .as_ref()
+                        .and_then(|o| o.base.reasoning)
+                        .map(ModelThinkingLevel::from)
+                        .unwrap_or(ModelThinkingLevel::Off);
+                    let sig = options.as_ref().and_then(|o| o.base.base.signal.clone());
+                    let route = runtime
+                        .resolve_model(
+                            &model_owned,
+                            &transcript.messages,
+                            ResolveModelOptions {
+                                reason: ModelRouteReason::Direct,
+                                thinking_level,
+                                signal: sig,
+                                failed: None,
+                                state: None,
+                            },
+                        )
+                        .await?;
+                    let mut next_opts = options.unwrap_or_else(|| ModelsSimpleStreamOptions {
+                        base: SimpleStreamOptions::default(),
+                        transform_headers: None,
+                    });
+                    let limit = route.model.max_tokens;
+                    if let Some(req_max) = next_opts.base.base.max_tokens
+                        && limit > 0
+                    {
+                        next_opts.base.base.max_tokens = Some(req_max.min(limit));
+                    }
+                    next_opts.base.reasoning = route.thinking_level.as_thinking_level();
+                    if route.model.provider != model_owned.provider {
+                        next_opts.base.base.api_key = None;
+                        next_opts.base.base.headers = None;
+                        next_opts.base.base.env = None;
+                    }
+                    Ok(runtime.stream_simple(&route.model, &context_owned, Some(next_opts)))
+                },
+                None,
+                signal,
+            );
         }
 
-        lazy_stream(model, async move {
-            let any_model = AnyModel::Chat(model_owned.clone());
-            assert_chat_model(&any_model)?;
-            let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
-            let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
-            let (provider, req_model, api_key, headers, env) = runtime
-                .prepare_request_inner(
-                    &any_model,
-                    req_opts.base.api_key.clone(),
-                    req_opts.base.env.clone(),
-                    req_opts.base.headers.clone(),
-                    req_opts.base.signal.clone(),
-                    transform,
-                )
-                .await?;
-            let final_model = req_model.into_chat().unwrap_or(model_owned);
-            req_opts.base.api_key = api_key;
-            req_opts.base.headers = headers;
-            req_opts.base.env = env;
-            Ok(provider.stream_simple(&final_model, &transcript, Some(req_opts)))
-        })
+        lazy_stream_with_options(
+            model,
+            async move {
+                let any_model = AnyModel::Chat(model_owned.clone());
+                assert_chat_model(&any_model)?;
+                let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
+                let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
+                let (provider, req_model, api_key, headers, env) = runtime
+                    .prepare_request_inner(
+                        &any_model,
+                        req_opts.base.api_key.clone(),
+                        req_opts.base.env.clone(),
+                        req_opts.base.headers.clone(),
+                        req_opts.base.signal.clone(),
+                        req_opts.base.session_id.as_deref(),
+                        transform,
+                    )
+                    .await?;
+                let final_model = req_model.into_chat().unwrap_or(model_owned);
+                req_opts.base.api_key = api_key;
+                req_opts.base.headers = headers;
+                req_opts.base.env = env;
+                Ok(provider.stream_simple(&final_model, &transcript, Some(req_opts)))
+            },
+            None,
+            signal,
+        )
     }
 
     pub async fn complete_simple(
@@ -1350,34 +1415,41 @@ impl ModelRuntime {
         let runtime = self.clone();
         let model_owned = model.clone();
         let handle_owned = handle.clone();
-        lazy_stream(model, async move {
-            let any_model = AnyModel::Chat(model_owned.clone());
-            assert_chat_model(&any_model)?;
-            let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
-            let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
-            let (provider, req_model, api_key, headers, env) = runtime
-                .prepare_request_inner(
-                    &any_model,
-                    req_opts.base.api_key.clone(),
-                    req_opts.base.env.clone(),
-                    req_opts.base.headers.clone(),
-                    req_opts.base.signal.clone(),
-                    transform,
-                )
-                .await?;
-            let final_model = req_model.into_chat().unwrap_or(model_owned.clone());
-            req_opts.base.api_key = api_key;
-            req_opts.base.headers = headers;
-            req_opts.base.env = env;
-            provider
-                .fetch_deferred(&final_model, &handle_owned, Some(req_opts))
-                .ok_or_else(|| {
-                    Error::from(ModelsError::new(
-                        ModelsErrorCode::Provider,
-                        format!("Provider {} does not support deferred responses", model_owned.provider),
-                    ))
-                })
-        })
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
+        lazy_stream_with_options(
+            model,
+            async move {
+                let any_model = AnyModel::Chat(model_owned.clone());
+                assert_chat_model(&any_model)?;
+                let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
+                let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
+                let (provider, req_model, api_key, headers, env) = runtime
+                    .prepare_request_inner(
+                        &any_model,
+                        req_opts.base.api_key.clone(),
+                        req_opts.base.env.clone(),
+                        req_opts.base.headers.clone(),
+                        req_opts.base.signal.clone(),
+                        None,
+                        transform,
+                    )
+                    .await?;
+                let final_model = req_model.into_chat().unwrap_or_else(|| model_owned.clone());
+                req_opts.base.api_key = api_key;
+                req_opts.base.headers = headers;
+                req_opts.base.env = env;
+                provider
+                    .fetch_deferred(&final_model, &handle_owned, Some(req_opts))
+                    .ok_or_else(|| {
+                        Error::from(ModelsError::new(
+                            ModelsErrorCode::Provider,
+                            format!("Provider {} does not support deferred responses", model_owned.provider),
+                        ))
+                    })
+            },
+            None,
+            signal,
+        )
     }
 
     pub async fn fetch_deferred(
@@ -1406,6 +1478,7 @@ impl ModelRuntime {
                 req_opts.env.clone(),
                 req_opts.headers.clone(),
                 req_opts.signal.clone(),
+                None,
                 transform,
             )
             .await?;
@@ -1446,6 +1519,7 @@ impl ModelRuntime {
                     req_opts.base.env.clone(),
                     req_opts.base.headers.clone(),
                     req_opts.base.signal.clone(),
+                    None,
                     transform,
                 )
                 .await?;
@@ -1484,6 +1558,7 @@ impl ModelRuntime {
         let any_model = AnyModel::Classifier(model.clone());
         let res: Result<ClassifierResult> = async {
             assert_classifier_model(&any_model)?;
+            assert_classifier_input_supported(model, context)?;
             let mut req_opts = options.as_ref().map(|o| o.base.clone()).unwrap_or_default();
             let transform = options.as_ref().and_then(|o| o.transform_headers.as_ref());
             let (provider, req_model, api_key, headers, env) = self
@@ -1493,6 +1568,7 @@ impl ModelRuntime {
                     req_opts.base.env.clone(),
                     req_opts.base.headers.clone(),
                     req_opts.base.signal.clone(),
+                    None,
                     transform,
                 )
                 .await?;

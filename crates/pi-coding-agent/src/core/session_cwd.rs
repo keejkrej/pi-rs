@@ -56,10 +56,38 @@ pub fn format_missing_session_cwd_error(issue: &SessionCwdIssue) -> String {
 }
 
 pub fn format_missing_session_cwd_prompt(issue: &SessionCwdIssue) -> String {
-    format!(
-        "cwd from session file does not exist\n{}\n\ncontinue in current cwd\n{}",
-        issue.session_cwd, issue.fallback_cwd
-    )
+    format!("Session cwd does not exist: {}", issue.session_cwd)
+}
+
+/// How to open a session whose stored cwd is missing: run it in the current cwd once, or fork it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MissingSessionCwdChoice {
+    Continue,
+    Fork,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingSessionCwdOption {
+    pub label: String,
+    pub value: Option<MissingSessionCwdChoice>,
+}
+
+/// Prompt options for a missing session cwd, naming the current cwd; `None` cancels.
+pub fn get_missing_session_cwd_options(issue: &SessionCwdIssue) -> Vec<MissingSessionCwdOption> {
+    vec![
+        MissingSessionCwdOption {
+            label: format!("Continue in {} (asks again next time)", issue.fallback_cwd),
+            value: Some(MissingSessionCwdChoice::Continue),
+        },
+        MissingSessionCwdOption {
+            label: format!("Fork into {} (new session ID, original kept)", issue.fallback_cwd),
+            value: Some(MissingSessionCwdChoice::Fork),
+        },
+        MissingSessionCwdOption {
+            label: "Cancel".to_owned(),
+            value: None,
+        },
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

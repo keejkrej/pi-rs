@@ -20,10 +20,12 @@ use pi_tui::components::select_list::{
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::fuzzy::fuzzy_filter;
+use pi_tui::get_select_page_index;
 use pi_tui::tui::{Component, Container, Focusable, TUI};
 use pi_tui::utils::{truncate_to_width, visible_width};
 
 const DOWNLOAD_VALUE: &str = "\0download";
+const SEARCH_MAX_VISIBLE: usize = 10;
 
 #[derive(Clone, Debug)]
 pub enum LlamaManagerAction {
@@ -171,6 +173,8 @@ struct HuggingFaceSearchState {
     results: Vec<HuggingFaceModel>,
     filtered_results: Vec<HuggingFaceModel>,
     selected_index: usize,
+    // Whether the user moved the selection since the query last changed.
+    selection_touched: bool,
     query: String,
     status: String,
     debounce: Option<Timeout>,
@@ -232,6 +236,7 @@ impl HuggingFaceSearch {
                 results: Vec::new(),
                 filtered_results: Vec::new(),
                 selected_index: 0,
+                selection_touched: false,
                 query: String::new(),
                 status: "Type at least 2 characters".to_string(),
                 debounce: None,
@@ -247,7 +252,7 @@ impl HuggingFaceSearch {
     fn update_results(&self) {
         self.results_container.clear();
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let max_visible = 10usize;
+        let max_visible = SEARCH_MAX_VISIBLE;
         let len = st.filtered_results.len();
         let start = if len <= max_visible {
             0
@@ -290,7 +295,7 @@ impl HuggingFaceSearch {
         self.tui.request_render(None);
     }
 
-    fn filter_results(&self) {
+    fn filter_results(&self, preferred_id: Option<&str>) {
         {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !st.query.is_empty() {
@@ -301,7 +306,10 @@ impl HuggingFaceSearch {
             } else {
                 st.filtered_results = st.results.clone();
             }
-            if st.filtered_results.is_empty() {
+            let preferred_idx = preferred_id.and_then(|id| st.filtered_results.iter().position(|m| m.id == id));
+            if let Some(idx) = preferred_idx {
+                st.selected_index = idx;
+            } else if st.filtered_results.is_empty() {
                 st.selected_index = 0;
             } else {
                 st.selected_index = st.selected_index.min(st.filtered_results.len() - 1);
@@ -322,7 +330,7 @@ impl HuggingFaceSearch {
             if st.query.len() < 2 {
                 st.status = "Type at least 2 characters".to_string();
                 drop(st);
-                self.filter_results();
+                self.filter_results(None);
                 return;
             }
             let cache_key = st.query.to_ascii_lowercase();
@@ -340,13 +348,13 @@ impl HuggingFaceSearch {
                 };
                 st.results = results;
                 drop(st);
-                self.filter_results();
+                self.filter_results(None);
                 return;
             }
             st.status = "Searching Hugging Face…".to_string();
             st.query.clone()
         };
-        self.filter_results();
+        self.filter_results(None);
         let this = self.clone();
         let timer = pi_js::time::set_timeout(500, move || {
             let inner = this.clone();
@@ -366,6 +374,7 @@ impl HuggingFaceSearch {
         }
         let outcome = (self.search)(query.clone(), signal.clone()).await;
         let mut should_filter = false;
+        let mut preferred_id = None;
         {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(ref results) = outcome {
@@ -375,6 +384,9 @@ impl HuggingFaceSearch {
                     .insert(query.to_ascii_lowercase(), results.clone());
             }
             if !st.closed && !signal.aborted() && st.query == query {
+                if st.selection_touched {
+                    preferred_id = st.filtered_results.get(st.selected_index).map(|m| m.id.clone());
+                }
                 match outcome {
                     Ok(results) => {
                         st.status = if results.is_empty() {
@@ -397,7 +409,7 @@ impl HuggingFaceSearch {
             }
         }
         if should_filter {
-            self.filter_results();
+            self.filter_results(preferred_id.as_deref());
         }
     }
 
@@ -436,6 +448,10 @@ impl Component for HuggingFaceSearch {
         self.container.render(width)
     }
 
+    fn captures_viewport_input(&self) -> bool {
+        true
+    }
+
     fn handle_input(&self, data: &str) {
         if self.keybindings.matches(data, "tui.select.up") {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -445,6 +461,7 @@ impl Component for HuggingFaceSearch {
                 } else {
                     st.selected_index - 1
                 };
+                st.selection_touched = true;
                 drop(st);
                 self.update_results();
             }
@@ -458,10 +475,29 @@ impl Component for HuggingFaceSearch {
                 } else {
                     st.selected_index + 1
                 };
+                st.selection_touched = true;
                 drop(st);
                 self.update_results();
             }
             return;
+        }
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(page_index) = get_select_page_index(
+                &self.keybindings,
+                data,
+                st.selected_index as i64,
+                st.filtered_results.len() as i64,
+                SEARCH_MAX_VISIBLE as i64,
+            ) {
+                if !st.filtered_results.is_empty() {
+                    st.selected_index = page_index as usize;
+                    st.selection_touched = true;
+                    drop(st);
+                    self.update_results();
+                }
+                return;
+            }
         }
         if self.keybindings.matches(data, "tui.select.confirm") {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -488,6 +524,7 @@ impl Component for HuggingFaceSearch {
                 return;
             }
             st.query = query;
+            st.selection_touched = false;
         }
         self.schedule_search();
     }
@@ -584,6 +621,15 @@ impl Focusable for LlamaView {
 }
 
 impl Component for LlamaView {
+    fn captures_viewport_input(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .input_handler
+            .as_ref()
+            .is_some_and(|h| h.captures_viewport_input())
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let content = self.state.lock().unwrap_or_else(|e| e.into_inner()).content.clone();
         content

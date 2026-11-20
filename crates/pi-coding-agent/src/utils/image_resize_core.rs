@@ -6,6 +6,9 @@ use crate::utils::photon::{PhotonBackend, PhotonImage, SamplingFilter, load_phot
 // 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
 const DEFAULT_MAX_BYTES: usize = 4_718_592; // 4.5 * 1024 * 1024
 
+/// Tag on image resize worker replies.
+pub const IMAGE_RESIZE_WORKER_RESPONSE_TYPE: &str = "pi:image-resize-response";
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImageResizeOptions {
     pub max_width: Option<u32>,

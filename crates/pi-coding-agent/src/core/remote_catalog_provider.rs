@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexMap;
-use pi_ai::models::{ModelsPublication, Provider, RefreshModelsContext};
+use pi_ai::models::{ModelsPublication, Provider, RefreshModelsAuth, RefreshModelsContext};
 use pi_ai::models_store::ModelsStoreEntry;
 use pi_ai::types::{
     AnyModel, ApiStreamOptions, AssistantImages, ClassifierContext, ClassifierModel, ClassifierOptions,
@@ -11,6 +11,7 @@ use pi_ai::types::{
     ImagesOptions, Model, ModelType, ProviderHeaders, SimpleStreamOptions, TranscriptContext,
 };
 use pi_ai::{AssistantMessageEventStream, Credential, ProviderAuth, get_model_type};
+use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Request};
 use pi_js::{BoxFuture, Error, Result};
 use serde_json::Value;
@@ -92,16 +93,76 @@ fn parse_catalog(provider_id: &str, value: Value) -> Result<Vec<AnyModel>> {
     Ok(out)
 }
 
-fn remote_models(entry: Option<&ModelsStoreEntry>, local_generated_at: Option<i64>) -> Vec<AnyModel> {
-    let Some(entry) = entry else {
-        return Vec::new();
-    };
-    if let Some(local_ts) = local_generated_at
-        && entry.last_modified.is_none_or(|lm| lm <= local_ts)
-    {
-        return Vec::new();
+/// Whether a pi.dev catalog is newer than the model data shipped with pi.
+fn is_newer(last_modified: Option<i64>, local_generated_at: Option<i64>) -> bool {
+    match local_generated_at {
+        None => true,
+        Some(local_ts) => last_modified.is_some_and(|lm| lm > local_ts),
     }
-    entry.models.clone()
+}
+
+struct ParsedRemoteCatalog {
+    models: Vec<AnyModel>,
+    last_modified: i64,
+    etag: Option<String>,
+}
+
+async fn read_catalog(provider_id: &str, response: pi_js::fetch::Response) -> Result<ParsedRemoteCatalog> {
+    let last_modified = response
+        .headers()
+        .get("last-modified")
+        .as_deref()
+        .and_then(pi_js::time::parse_date)
+        .unwrap_or(0);
+    let etag = response.headers().get("etag");
+    let json = response.json().await?;
+    Ok(ParsedRemoteCatalog {
+        models: parse_catalog(provider_id, json)?,
+        last_modified,
+        etag,
+    })
+}
+
+fn remote_models(entry: Option<&ModelsStoreEntry>, local_generated_at: Option<i64>) -> Vec<AnyModel> {
+    match entry {
+        Some(entry) if is_newer(entry.last_modified, local_generated_at) => entry.models.clone(),
+        _ => Vec::new(),
+    }
+}
+
+async fn request_catalog(
+    provider_id: &str,
+    catalog_base_url: &str,
+    signal: AbortSignal,
+    validator: Option<&str>,
+) -> Result<pi_js::fetch::Response> {
+    let path = format!("/api/models/providers/{}", encode_uri_component(provider_id));
+    let mut url = url::Url::parse(catalog_base_url)
+        .and_then(|base| base.join(&path))
+        .map_err(|err| Error::msg(format!("Invalid catalog URL: {err}")))?;
+    let types_param = REMOTE_CATALOG_MODEL_TYPES
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    url.query_pairs_mut().append_pair("types", &types_param);
+
+    let mut headers = Headers::new();
+    headers.set("accept", "application/json");
+    headers.set("User-Agent", &get_pi_user_agent(*VERSION));
+    if let Some(etag) = validator {
+        headers.set("if-none-match", etag);
+    }
+
+    let req = Request::get(url.to_string()).with_headers(headers).signal(signal);
+    fetch_with_retry(
+        req,
+        FetchRetryOptions {
+            attempt_timeout_ms: Some(REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 fn encode_uri_component(s: &str) -> String {
@@ -168,6 +229,11 @@ impl Provider for RemoteCatalogProvider {
         Some(merge_models(baseline, &dynamic))
     }
 
+    fn refresh_models_auth(&self) -> RefreshModelsAuth {
+        // pi.dev serves the catalog, so a stale provider login must not block or fail its refresh.
+        RefreshModelsAuth::Configured
+    }
+
     fn refresh_models(&self, context: RefreshModelsContext) -> Option<BoxFuture<Result<()>>> {
         let provider_id = self.inner.id().to_owned();
         let catalog_base_url = self.catalog_base_url.clone();
@@ -197,6 +263,8 @@ impl Provider for RemoteCatalogProvider {
                 return Ok(());
             }
 
+            // Skip the request if pi.dev was checked less than REMOTE_CATALOG_REFRESH_INTERVAL_MS ago.
+            // An entry without lastModified is always refetched.
             if !context.force.unwrap_or(false)
                 && let Some(ref entry) = stored
                 && let Some(checked_at) = entry.checked_at
@@ -211,46 +279,15 @@ impl Provider for RemoteCatalogProvider {
             let validator = stored
                 .as_ref()
                 .filter(|entry| !entry.models.is_empty())
-                .and_then(|entry| entry.etag.clone());
+                .and_then(|entry| entry.etag.as_deref());
 
-            let path = format!("/api/models/providers/{}", encode_uri_component(&provider_id));
-            let mut url = url::Url::parse(&catalog_base_url)
-                .and_then(|base| base.join(&path))
-                .map_err(|err| Error::msg(format!("Invalid catalog URL: {err}")))?;
-            let types_param = REMOTE_CATALOG_MODEL_TYPES
-                .iter()
-                .map(|t| t.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            url.query_pairs_mut().append_pair("types", &types_param);
-
-            let mut headers = Headers::new();
-            headers.set("accept", "application/json");
-            headers.set("User-Agent", &get_pi_user_agent(*VERSION));
-            if let Some(ref etag) = validator {
-                headers.set("if-none-match", etag);
-            }
-
-            let req = Request::get(url.to_string())
-                .with_headers(headers)
-                .signal(context.signal.clone());
-
-            let response = fetch_with_retry(
-                req,
-                FetchRetryOptions {
-                    attempt_timeout_ms: Some(REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS),
-                    ..Default::default()
-                },
-            )
-            .await?;
+            let response = request_catalog(&provider_id, &catalog_base_url, context.signal.clone(), validator).await?;
 
             if context.signal.aborted() {
                 return Ok(());
             }
 
             let checked_at = pi_js::time::now_ms();
-            // Unchanged: dynamicModels already holds the stored overlay, so only the
-            // freshness window moves.
             if response.status() == 304
                 && let Some(mut entry) = stored
             {
@@ -277,8 +314,7 @@ impl Provider for RemoteCatalogProvider {
             }
 
             if !response.ok() {
-                // Transient failure: the cached body and its validator stay valid, so keep the
-                // etag and let the next refresh revalidate instead of downloading the catalog.
+                let status = response.status();
                 let mut entry = stored.unwrap_or_default();
                 entry.checked_at = Some(checked_at);
                 let _ = (context.publish)(ModelsPublication {
@@ -287,29 +323,20 @@ impl Provider for RemoteCatalogProvider {
                 })
                 .await?;
                 return Err(Error::msg(format!(
-                    "Model catalog request failed for {provider_id}: {}",
-                    response.status()
+                    "Model catalog request failed for {provider_id}: {status}"
                 )));
             }
 
-            let last_modified = response
-                .headers()
-                .get("last-modified")
-                .as_deref()
-                .and_then(pi_js::time::parse_date)
-                .unwrap_or(0);
-            let etag = response.headers().get("etag");
-            let json = response.json().await?;
-            let refreshed = parse_catalog(&provider_id, json)?;
+            let catalog = read_catalog(&provider_id, response).await?;
             if context.signal.aborted() {
                 return Ok(());
             }
 
             let entry = ModelsStoreEntry {
-                models: refreshed,
-                last_modified: Some(last_modified),
+                models: catalog.models,
+                last_modified: Some(catalog.last_modified),
                 checked_at: Some(checked_at),
-                etag,
+                etag: catalog.etag,
             };
             let published = remote_models(Some(&entry), local_generated_at);
             let dynamic_for_publish = dynamic_models;
@@ -398,5 +425,233 @@ pub fn with_remote_catalog(
         catalog_base_url: catalog_base_url.unwrap_or(DEFAULT_CATALOG_BASE_URL).to_owned(),
         local_generated_at,
         dynamic_models: Arc::new(Mutex::new(Vec::new())),
+    })
+}
+
+/// Replaces the catalog with a credential-specific model list.
+pub type PersonalizeCatalog =
+    Arc<dyn Fn(&[AnyModel], &RefreshModelsContext) -> BoxFuture<Result<Vec<AnyModel>>> + Send + Sync>;
+
+struct PersonalizedCatalogProvider {
+    inner: Arc<dyn Provider + Send + Sync>,
+    personalize: PersonalizeCatalog,
+    catalog_base_url: String,
+    local_generated_at: Option<i64>,
+    personal_models: Arc<Mutex<Vec<AnyModel>>>,
+}
+
+impl PersonalizedCatalogProvider {
+    fn builtin_models(&self) -> Vec<AnyModel> {
+        self.inner
+            .get_all_models()
+            .unwrap_or_else(|| self.inner.get_models().into_iter().map(AnyModel::Chat).collect())
+    }
+
+    fn effective_models(&self) -> Vec<AnyModel> {
+        let personal = self
+            .personal_models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if personal.is_empty() {
+            self.builtin_models()
+        } else {
+            personal
+        }
+    }
+}
+
+impl Provider for PersonalizedCatalogProvider {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn base_url(&self) -> Option<&str> {
+        self.inner.base_url()
+    }
+
+    fn headers(&self) -> Option<&ProviderHeaders> {
+        self.inner.headers()
+    }
+
+    fn auth(&self) -> &ProviderAuth {
+        self.inner.auth()
+    }
+
+    fn get_models(&self) -> Vec<Model> {
+        self.effective_models()
+            .into_iter()
+            .filter_map(|m| m.into_chat())
+            .collect()
+    }
+
+    fn get_all_models(&self) -> Option<Vec<AnyModel>> {
+        Some(self.effective_models())
+    }
+
+    fn refresh_models_auth(&self) -> RefreshModelsAuth {
+        self.inner.refresh_models_auth()
+    }
+
+    fn refresh_models(&self, context: RefreshModelsContext) -> Option<BoxFuture<Result<()>>> {
+        let provider_id = self.inner.id().to_owned();
+        let builtin = self.builtin_models();
+        let personalize = Arc::clone(&self.personalize);
+        let catalog_base_url = self.catalog_base_url.clone();
+        let local_generated_at = self.local_generated_at;
+        let personal_models = Arc::clone(&self.personal_models);
+
+        Some(Box::pin(async move {
+            let restored: Vec<AnyModel> = context
+                .stored
+                .as_ref()
+                .map(|entry| {
+                    entry
+                        .models
+                        .iter()
+                        .filter(|m| m.provider() == provider_id)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let personal_for_restore = Arc::clone(&personal_models);
+            let restored_clone = restored.clone();
+            let restored_ok = (context.publish)(ModelsPublication {
+                persist: None,
+                update: Some(Arc::new(move || {
+                    *personal_for_restore.lock().unwrap_or_else(PoisonError::into_inner) = restored_clone.clone();
+                })),
+            })
+            .await?;
+            if !restored_ok {
+                return Ok(());
+            }
+            if !context.allow_network || context.signal.aborted() {
+                return Ok(());
+            }
+
+            let response = request_catalog(&provider_id, &catalog_base_url, context.signal.clone(), None).await?;
+            if context.signal.aborted() {
+                return Ok(());
+            }
+            let mut remote = Vec::new();
+            if response.status() != 404 && response.status() != 501 {
+                if !response.ok() {
+                    return Err(Error::msg(format!(
+                        "Model catalog request failed for {provider_id}: {}",
+                        response.status()
+                    )));
+                }
+                let catalog = read_catalog(&provider_id, response).await?;
+                if is_newer(Some(catalog.last_modified), local_generated_at) {
+                    remote = catalog.models;
+                }
+            }
+
+            let merged = merge_models(builtin, &remote);
+            let personalized = personalize(&merged, &context).await?;
+            if context.signal.aborted() {
+                return Ok(());
+            }
+
+            let entry = ModelsStoreEntry {
+                models: personalized.clone(),
+                last_modified: None,
+                checked_at: Some(pi_js::time::now_ms()),
+                etag: None,
+            };
+            let _ = (context.publish)(ModelsPublication {
+                persist: Some(Some(entry)),
+                update: Some(Arc::new(move || {
+                    *personal_models.lock().unwrap_or_else(PoisonError::into_inner) = personalized.clone();
+                })),
+            })
+            .await?;
+            Ok(())
+        }))
+    }
+
+    fn filter_models(&self, models: &[Model], credential: Option<&Credential>) -> Option<Vec<Model>> {
+        self.inner.filter_models(models, credential)
+    }
+
+    fn filter_all_models(&self, models: &[AnyModel], credential: Option<&Credential>) -> Option<Vec<AnyModel>> {
+        self.inner.filter_all_models(models, credential)
+    }
+
+    fn stream(
+        &self,
+        model: &Model,
+        context: &TranscriptContext,
+        options: Option<ApiStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        self.inner.stream(model, context, options)
+    }
+
+    fn stream_simple(
+        &self,
+        model: &Model,
+        context: &TranscriptContext,
+        options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        self.inner.stream_simple(model, context, options)
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: Option<DeferredFetchOptions>,
+    ) -> Option<AssistantMessageEventStream> {
+        self.inner.fetch_deferred(model, handle, options)
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        options: Option<DeferredCancelOptions>,
+    ) -> Option<BoxFuture<Result<()>>> {
+        self.inner.cancel_deferred(model, handle, options)
+    }
+
+    fn generate_images(
+        &self,
+        model: &ImageModel,
+        context: &ImagesContext,
+        options: Option<ImagesOptions>,
+    ) -> Option<BoxFuture<AssistantImages>> {
+        self.inner.generate_images(model, context, options)
+    }
+
+    fn classify(
+        &self,
+        model: &ClassifierModel,
+        context: &ClassifierContext,
+        options: Option<ClassifierOptions>,
+    ) -> Option<BoxFuture<ClassifierResult>> {
+        self.inner.classify(model, context, options)
+    }
+}
+
+/// Like `with_remote_catalog`, but on each network refresh the catalog (built-in models plus a newer
+/// pi.dev catalog) is passed through `personalize` and the result is saved.
+pub fn with_personalized_catalog(
+    provider: Arc<dyn Provider + Send + Sync>,
+    personalize: PersonalizeCatalog,
+    catalog_base_url: Option<&str>,
+    local_generated_at: Option<i64>,
+) -> Arc<dyn Provider + Send + Sync> {
+    Arc::new(PersonalizedCatalogProvider {
+        inner: provider,
+        personalize,
+        catalog_base_url: catalog_base_url.unwrap_or(DEFAULT_CATALOG_BASE_URL).to_owned(),
+        local_generated_at,
+        personal_models: Arc::new(Mutex::new(Vec::new())),
     })
 }

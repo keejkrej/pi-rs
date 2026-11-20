@@ -6,7 +6,8 @@ use indexmap::IndexSet;
 use pi_js::{Error, Result};
 
 use crate::evals::{
-    custom_provider_docs_eval, extensions_docs_eval, models_docs_eval, openai_provider_docs_eval, tui_docs_eval,
+    custom_provider_docs_eval, extensions_docs_eval, models_docs_eval, openai_provider_docs_eval,
+    prompt_templates_docs_eval, tui_docs_eval,
 };
 use crate::harness::{DiscoveredTestEntry, EvalCaseDef, EvalSuite};
 use crate::plan::DocumentationVariant;
@@ -139,12 +140,14 @@ fn assert_sandbox_cannot_read(_path: &str, _sandbox_uid: u32, _sandbox_gid: u32)
     Ok(())
 }
 
-fn docs_suites() -> Vec<EvalSuite> {
+/// Returns all documentation-lift eval suites registered in the container runner.
+pub fn docs_suites() -> Vec<EvalSuite> {
     vec![
         models_docs_eval::suite(),
         custom_provider_docs_eval::suite(),
         openai_provider_docs_eval::suite(),
         extensions_docs_eval::suite(),
+        prompt_templates_docs_eval::suite(),
         tui_docs_eval::suite(),
     ]
 }
@@ -195,9 +198,28 @@ fn parse_entrypoint_args(args: &[String]) -> Result<(bool, Vec<String>, Option<S
 }
 
 fn normalize_eval_file(file: &str) -> String {
-    file.trim_start_matches("/repo/packages/evals/")
-        .trim_start_matches("/repo/crates/pi-evals/")
-        .to_string()
+    let normalized = file.replace('\\', "/");
+    let trimmed = normalized
+        .strip_prefix("/repo/packages/evals/")
+        .or_else(|| normalized.strip_prefix("/repo/crates/pi-evals/"))
+        .unwrap_or(&normalized);
+    match trimmed {
+        "src/evals/custom_provider_docs_eval.rs" | "evals/custom_provider_docs_eval.rs" => {
+            "evals/custom-provider.docs.eval.ts".to_string()
+        }
+        "src/evals/extensions_docs_eval.rs" | "evals/extensions_docs_eval.rs" => {
+            "evals/extensions.docs.eval.ts".to_string()
+        }
+        "src/evals/models_docs_eval.rs" | "evals/models_docs_eval.rs" => "evals/models.docs.eval.ts".to_string(),
+        "src/evals/openai_provider_docs_eval.rs" | "evals/openai_provider_docs_eval.rs" => {
+            "evals/openai-provider.docs.eval.ts".to_string()
+        }
+        "src/evals/prompt_templates_docs_eval.rs" | "evals/prompt_templates_docs_eval.rs" => {
+            "evals/prompt-templates.docs.eval.ts".to_string()
+        }
+        "src/evals/tui_docs_eval.rs" | "evals/tui_docs_eval.rs" => "evals/tui.docs.eval.ts".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Runs inside the Docker container entrypoint as root, preparing the sandbox and executing eval cases.
@@ -319,4 +341,37 @@ pub async fn run(args: &[String]) -> Result<i32> {
     }
 
     Ok(status_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_eval_file_handles_container_prefixes_and_rust_modules() {
+        assert_eq!(
+            normalize_eval_file("/repo/packages/evals/evals/prompt-templates.docs.eval.ts"),
+            "evals/prompt-templates.docs.eval.ts"
+        );
+        assert_eq!(
+            normalize_eval_file("/repo/crates/pi-evals/src/evals/prompt_templates_docs_eval.rs"),
+            "evals/prompt-templates.docs.eval.ts"
+        );
+    }
+
+    #[test]
+    fn parse_entrypoint_args_supports_discover_project_and_pattern() {
+        let (discover, files, pattern) = parse_entrypoint_args(&[
+            "--discover".to_string(),
+            "--project".to_string(),
+            "docs".to_string(),
+            "evals/prompt-templates.docs.eval.ts".to_string(),
+            "--testNamePattern".to_string(),
+            "^Create a project prompt template$".to_string(),
+        ])
+        .unwrap();
+        assert!(discover);
+        assert_eq!(files, vec!["evals/prompt-templates.docs.eval.ts"]);
+        assert_eq!(pattern.as_deref(), Some("^Create a project prompt template$"));
+    }
 }

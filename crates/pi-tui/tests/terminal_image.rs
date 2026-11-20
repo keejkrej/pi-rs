@@ -7,13 +7,13 @@ use pi_js::env::testing::EnvGuard;
 use pi_tui::terminal_image::{
     KittyImageMetadata, NumberOrString, TerminalCapabilityOverrides, crop_kitty_image_line, delete_all_kitty_images,
     delete_all_kitty_placements, delete_kitty_image, detect_capabilities, encode_iterm2, encode_kitty,
-    get_capabilities, get_kitty_image_metadata, get_kitty_image_placement, hyperlink, image_fallback, is_image_line,
-    register_kitty_image_metadata, render_image, reset_capabilities_cache, set_capabilities, set_capability_overrides,
-    set_cell_dimensions,
+    get_capabilities, get_kitty_image_metadata, get_kitty_image_placement, get_kitty_image_placement_rows, hyperlink,
+    image_fallback, is_image_line, register_kitty_image_metadata, render_image, reset_capabilities_cache,
+    set_capabilities, set_capability_overrides, set_cell_dimensions,
 };
 use pi_tui::{
     CellDimensions, Image, ImageDimensions, ImageOptions, ImageProtocol, ImageRenderOptions, ImageTheme,
-    TerminalCapabilities, utils::visible_width,
+    TerminalCapabilities, set_image_transcoder, utils::visible_width,
 };
 use regex::Regex;
 use serial_test::serial;
@@ -21,6 +21,7 @@ use serial_test::serial;
 const ENV_KEYS: &[&str] = &[
     "TERM",
     "TERM_PROGRAM",
+    "ORCA_IMAGE_PROTOCOL",
     "TERMINAL_EMULATOR",
     "COLORTERM",
     "TMUX",
@@ -29,6 +30,7 @@ const ENV_KEYS: &[&str] = &[
     "WEZTERM_PANE",
     "ITERM_SESSION_ID",
     "WT_SESSION",
+    "ALACRITTY_WINDOW_ID",
     "CMUX_WORKSPACE_ID",
     "WARP_SESSION_ID",
     "WARP_TERMINAL_SESSION_UUID",
@@ -536,11 +538,13 @@ fn kitty_image_cursor_movement_and_metadata() {
     );
     let line = format!("left {} right", crop_kitty_image_line(&transmission, 2, 1));
     let placement = get_kitty_image_placement(&line).unwrap();
+    assert_eq!(get_kitty_image_placement_rows(&line), Some(1));
     assert_eq!(
         placement.transmission_bytes as usize,
         line.len() - "left ".len() - " right".len()
     );
     assert_eq!(placement.estimated_decoded_bytes, 100 * 100 * 4);
+    assert_eq!(placement.rows, 1);
     assert_eq!(placement.sequence, "\x1b_Ga=p,q=2,C=1,c=3,i=42,y=66,h=34,r=1\x1b\\");
     assert_eq!(placement.replacement_line, format!("left {} right", placement.sequence));
     assert!(!placement.replacement_line.contains("AAAA"));
@@ -965,4 +969,250 @@ fn hyperlink_tests() {
     let file_res = hyperlink("README.md", "file:///home/user/README.md");
     assert!(file_res.contains("file:///home/user/README.md"));
     assert!(file_res.contains("README.md"));
+}
+
+#[test]
+#[serial]
+fn detect_capabilities_enables_hyperlinks_and_kitty_images_for_herdr() {
+    // #10573
+    with_env(
+        &[
+            ("TERM_PROGRAM", Some("herdr")),
+            ("TERM", Some("xterm-256color")),
+            ("COLORTERM", Some("truecolor")),
+            ("KITTY_WINDOW_ID", Some("1")),
+        ],
+        || {
+            let caps = detect_capabilities(None);
+            assert!(caps.hyperlinks);
+            assert_eq!(caps.images, Some(ImageProtocol::Kitty));
+            assert!(caps.true_color);
+        },
+    );
+    with_env(&[("TERM_PROGRAM", Some("herdr")), ("PI_HYPERLINKS", Some("0"))], || {
+        assert!(!detect_capabilities(None).hyperlinks);
+    });
+}
+
+#[test]
+#[serial]
+fn detect_capabilities_enables_hyperlinks_without_images_for_rex() {
+    // #11131
+    with_env(
+        &[
+            ("TERM_PROGRAM", Some("rex")),
+            ("TERM", Some("xterm-256color")),
+            ("KITTY_WINDOW_ID", Some("1")),
+        ],
+        || {
+            let caps = detect_capabilities(None);
+            assert!(caps.hyperlinks);
+            assert_eq!(caps.images, Some(ImageProtocol::Kitty));
+            assert!(caps.true_color);
+        },
+    );
+    with_env(&[("TERM_PROGRAM", Some("rex")), ("PI_HYPERLINKS", Some("0"))], || {
+        assert!(!detect_capabilities(None).hyperlinks);
+    });
+}
+
+#[test]
+#[serial]
+fn detect_capabilities_keeps_images_disabled_for_orca_without_image_signal() {
+    with_env(&[("TERM_PROGRAM", Some("Orca"))], || {
+        assert_eq!(detect_capabilities(None).images, None);
+    });
+}
+
+#[test]
+#[serial]
+fn detect_capabilities_enables_images_and_hyperlinks_for_orca_advertising_kitty_support() {
+    with_env(
+        &[("TERM_PROGRAM", Some("Orca")), ("ORCA_IMAGE_PROTOCOL", Some("kitty"))],
+        || {
+            let caps = detect_capabilities(None);
+            assert_eq!(caps.images, Some(ImageProtocol::Kitty));
+            assert!(caps.true_color);
+            assert!(caps.hyperlinks);
+        },
+    );
+}
+
+#[test]
+#[serial]
+fn detect_capabilities_enables_hyperlinks_for_alacritty_without_term_program() {
+    with_env(&[("TERM", Some("alacritty")), ("COLORTERM", Some("truecolor"))], || {
+        assert_eq!(
+            detect_capabilities(None),
+            TerminalCapabilities {
+                images: None,
+                true_color: true,
+                hyperlinks: true,
+            }
+        );
+    });
+    with_env(
+        &[
+            ("TERM", Some("xterm-256color")),
+            ("COLORTERM", Some("truecolor")),
+            ("ALACRITTY_WINDOW_ID", Some("1")),
+        ],
+        || {
+            assert_eq!(
+                detect_capabilities(None),
+                TerminalCapabilities {
+                    images: None,
+                    true_color: true,
+                    hyperlinks: true,
+                }
+            );
+        },
+    );
+}
+
+#[test]
+#[serial]
+fn reads_explicit_placement_rows_without_registered_metadata() {
+    let sequence = encode_kitty(
+        "AAAA",
+        Some(pi_tui::terminal_image::EncodeKittyOptions {
+            columns: Some(2),
+            rows: Some(3),
+            move_cursor: Some(false),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(get_kitty_image_placement_rows(&sequence), Some(3));
+}
+
+struct ImageTranscodingGuard;
+
+impl ImageTranscodingGuard {
+    fn new() -> Self {
+        set_capabilities(TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        });
+        set_cell_dimensions(CellDimensions {
+            width_px: 10,
+            height_px: 10,
+        });
+        Self
+    }
+}
+
+impl Drop for ImageTranscodingGuard {
+    fn drop(&mut self) {
+        set_image_transcoder(None);
+        reset_capabilities_cache();
+        set_cell_dimensions(CellDimensions {
+            width_px: 9,
+            height_px: 18,
+        });
+    }
+}
+
+#[test]
+#[serial]
+fn image_transcoding_tests() {
+    // Kitty only accepts PNG (f=100); non-PNG images must be transcoded (#10292)
+    let _guard = ImageTranscodingGuard::new();
+    let jpeg = pi_js::b64::encode(b"jpeg");
+    // Minimal PNG header (signature + IHDR) for a 40x10 image. Enough for get_png_dimensions.
+    let png = pi_js::b64::encode(&[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+        0x00, 0x28, 0x00, 0x00, 0x00, 0x0a,
+    ]);
+    let theme = || ImageTheme {
+        fallback_color: Arc::new(|value: &str| value.to_string()),
+    };
+    let render = |data: &str, mime_type: &str| {
+        Image::new(
+            data,
+            mime_type,
+            theme(),
+            None,
+            Some(ImageDimensions {
+                width_px: 20,
+                height_px: 20,
+            }),
+        )
+        .render(20)
+    };
+
+    // 1. Sends converted PNG data sized from the PNG
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let jpeg_clone = jpeg.clone();
+    let png_clone = png.clone();
+    let calls_ref = Arc::clone(&calls);
+    set_image_transcoder(Some(Arc::new(move |data, _mime| {
+        calls_ref.lock().unwrap().push(data.to_string());
+        if data == jpeg_clone {
+            Some(png_clone.clone())
+        } else {
+            None
+        }
+    })));
+    let lines = render(&jpeg, "image/jpeg");
+    assert!(lines[0].contains("f=100") && lines[0].contains(&format!(";{png}\x1b\\")));
+    // 40x10 PNG at 18 columns: 5 rows, not the 18 rows of the 20x20 source dimensions.
+    assert_eq!(lines.len(), 5);
+
+    // 2. Renders a text fallback until a working transcoder is registered
+    set_image_transcoder(None);
+    let image = Image::new(&jpeg, "image/jpeg", theme(), None, None);
+    assert!(image.render(80)[0].starts_with("[Image: [image/jpeg]"));
+    set_image_transcoder(Some(Arc::new(|_, _| None)));
+    image.invalidate();
+    assert!(image.render(80)[0].starts_with("[Image: [image/jpeg]"));
+    let jpeg_clone = jpeg.clone();
+    let png_clone = png.clone();
+    set_image_transcoder(Some(Arc::new(move |data, _mime| {
+        if data == jpeg_clone {
+            Some(png_clone.clone())
+        } else {
+            None
+        }
+    })));
+    image.invalidate();
+    assert!(image.render(80)[0].contains("\x1b_G"));
+
+    // 3. Converts each image once
+    calls.lock().unwrap().clear();
+    let jpeg_clone = jpeg.clone();
+    let png_clone = png.clone();
+    let calls_ref = Arc::clone(&calls);
+    set_image_transcoder(Some(Arc::new(move |data, _mime| {
+        calls_ref.lock().unwrap().push(data.to_string());
+        if data == jpeg_clone {
+            Some(png_clone.clone())
+        } else {
+            None
+        }
+    })));
+    let image = Image::new(&jpeg, "image/jpeg", theme(), None, None);
+    image.render(80);
+    render(&jpeg, "image/jpeg");
+    for i in 0..40 {
+        render(&format!("other-{i}"), "image/jpeg");
+    }
+    image.invalidate();
+    image.render(40);
+    assert_eq!(calls.lock().unwrap().iter().filter(|data| *data == &jpeg).count(), 1);
+
+    // 4. Does not convert PNG data or iTerm2 output
+    calls.lock().unwrap().clear();
+    assert!(render(&png, "image/png")[0].contains(&format!(";{png}\x1b\\")));
+    set_capabilities(TerminalCapabilities {
+        images: Some(ImageProtocol::Iterm2),
+        true_color: true,
+        hyperlinks: true,
+    });
+    assert!(
+        render(&jpeg, "image/jpeg")
+            .last()
+            .is_some_and(|line| line.ends_with(&format!(":{jpeg}\x07")))
+    );
+    assert!(calls.lock().unwrap().is_empty());
 }

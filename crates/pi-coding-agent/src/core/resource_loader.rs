@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use indexmap::{IndexMap, IndexSet};
 use pi_js::console::error as console_error;
 use pi_js::fs::{exists, read_to_string, readdir_with_file_types, stat};
-use pi_js::path::{basename, dirname, join, resolve, sep};
+use pi_js::path::{basename, dirname, join, resolve};
 use pi_js::{BoxFuture, Error, Result};
 use pi_tui::colors::{Color, ParseColorValue, TerminalColorMode, background_ansi, foreground_ansi, parse_color};
 use pi_tui::terminal_image::{TerminalCapabilities, detect_capabilities, get_terminal_color_mode};
@@ -20,18 +20,20 @@ pub use crate::core::prompt_templates::{
     LoadPromptTemplatesOptions, LoadPromptTemplatesResult, PromptTemplate, load_prompt_templates,
 };
 
-use crate::config::CONFIG_DIR_NAME;
+use crate::config::{APP_NAME, CONFIG_DIR_NAME};
 use crate::core::event_bus::{EventBus, create_event_bus};
 use crate::core::footer_data_provider::find_git_paths;
-use crate::core::package_manager::{DefaultPackageManager, PathMetadata, ResolvedResource};
+use crate::core::package_manager::{DefaultPackageManager, PackageInstallFailure, PathMetadata, ResolvedResource};
 use crate::core::settings_manager::SettingsManager;
 use crate::core::skills::{LoadSkillsOptions, Skill, load_skills};
 use crate::core::source_info::{
     BUILTIN_PATH_PREFIX, SourceInfo, SourceOrigin, SourceScope, SyntheticSourceOptions, create_source_info,
-    create_synthetic_source_info, get_synthetic_path_source, is_synthetic_path,
+    create_synthetic_source_info, get_resource_path_key, get_synthetic_path_source, is_synthetic_path,
 };
 use crate::core::timings::{TimingNamespaceKind, reset_timings};
-use crate::utils::paths::{PathInputOptions, canonicalize_path, is_local_path, resolve_path};
+use crate::utils::paths::{
+    PathInputOptions, canonicalize_path, is_local_path, is_path_within, paths_equal, resolve_path,
+};
 use crate::utils::text::strip_bom;
 use crate::vendor::chalk::yellow;
 
@@ -1172,6 +1174,45 @@ fn collect_extension_package_warnings(
     Ok(warnings)
 }
 
+fn describe_package_install_failure(failure: &PackageInstallFailure) -> String {
+    let hint = if failure.scope == SourceScope::Temporary {
+        "Check the source and try again.".to_owned()
+    } else {
+        let local_flag = if failure.scope == SourceScope::Project {
+            " --local"
+        } else {
+            ""
+        };
+        format!(
+            "Run \"{} remove {}{}\" to remove it from settings.json.",
+            *APP_NAME, failure.source, local_flag
+        )
+    };
+    format!("failed to install ({}). {hint}", failure.message)
+}
+
+/// One-line startup warning for a package that could not be installed.
+pub fn format_package_install_warning(failure: &PackageInstallFailure) -> String {
+    format!(
+        "Extension package \"{}\": {}",
+        failure.source,
+        describe_package_install_failure(failure)
+    )
+}
+
+fn collect_package_install_warnings(groups: &[Option<&[PackageInstallFailure]>]) -> Vec<ExtensionLoadWarning> {
+    let mut warnings = Vec::new();
+    for group in groups.iter().flatten() {
+        for failure in *group {
+            warnings.push(ExtensionLoadWarning {
+                path: failure.source.clone(),
+                warning: describe_package_install_failure(failure),
+            });
+        }
+    }
+    warnings
+}
+
 fn merge_extension_warnings(result: &mut LoadExtensionsResult, warnings: Vec<ExtensionLoadWarning>) {
     let mut by_path: IndexMap<String, ExtensionLoadWarning> = IndexMap::new();
     for warning in result.warnings.drain(..).chain(warnings) {
@@ -1312,16 +1353,10 @@ fn find_shadowed_context_file(cwd: &str) -> Option<String> {
     let common_git_dir = canonicalize_path(&git_paths.common_git_dir);
     let worktree_root = canonicalize_path(&git_paths.repo_dir);
     let main_repo_root = dirname(&common_git_dir);
-    let separator = sep();
-    let prefix = if main_repo_root.ends_with(&separator) {
-        main_repo_root.clone()
-    } else {
-        format!("{main_repo_root}{separator}")
-    };
-    if !worktree_root.starts_with(&prefix) {
+    if !is_path_within(&main_repo_root, &worktree_root) || paths_equal(&worktree_root, &main_repo_root) {
         return None;
     }
-    if canonicalize_path(&join(&[&main_repo_root, ".git"])) != common_git_dir {
+    if !paths_equal(&canonicalize_path(&join(&[&main_repo_root, ".git"])), &common_git_dir) {
         return None;
     }
     let worktree_context_file = load_context_file_from_dir(&worktree_root)?;
@@ -1352,9 +1387,12 @@ pub fn load_project_context_files(options: LoadProjectContextFilesOptions) -> Ve
 
     loop {
         if let Some(context_file) = load_context_file_from_dir(&current_dir) {
-            let is_shadowed = shadowed_context_file
-                .as_ref()
-                .is_some_and(|shadowed| canonicalize_path(&context_file.path) == *shadowed);
+            let is_shadowed = shadowed_context_file.as_ref().is_some_and(|shadowed| {
+                paths_equal(
+                    &join(&[&canonicalize_path(&current_dir), &basename(&context_file.path, None)]),
+                    shadowed,
+                )
+            });
             if !is_shadowed && !seen_paths.contains(&context_file.path) {
                 seen_paths.insert(context_file.path.clone());
                 ancestor_context_files.insert(0, context_file);
@@ -1410,6 +1448,8 @@ pub struct DefaultResourceLoaderOptions {
     pub additional_theme_paths: Vec<String>,
     pub extension_factories: Vec<InlineExtension>,
     pub no_extensions: bool,
+    /// Built-in extensions not to load, by name (such as `mcp`), even when settings or `-e` enable them.
+    pub disabled_builtin_extensions: Option<Vec<String>>,
     pub no_skills: bool,
     pub no_prompt_templates: bool,
     pub no_themes: bool,
@@ -1470,6 +1510,7 @@ struct ResourceLoaderInner {
     builtin_extensions: IndexMap<String, BuiltinExtension>,
     builtin_core_extensions: IndexMap<String, crate::core::extensions::types::NamedInlineExtension>,
     no_extensions: bool,
+    disabled_builtin_extensions: IndexSet<String>,
     no_skills: bool,
     no_prompt_templates: bool,
     no_themes: bool,
@@ -1576,6 +1617,11 @@ impl DefaultResourceLoader {
                 builtin_extensions,
                 builtin_core_extensions,
                 no_extensions: options.no_extensions,
+                disabled_builtin_extensions: options
+                    .disabled_builtin_extensions
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
                 no_skills: options.no_skills,
                 no_prompt_templates: options.no_prompt_templates,
                 no_themes: options.no_themes,
@@ -1780,6 +1826,10 @@ impl DefaultResourceLoader {
             .package_manager
             .resolve_extension_sources(&self.inner.additional_extension_paths, false, true)
             .await?;
+        let install_warnings = collect_package_install_warnings(&[
+            resolved_paths.install_failures.as_deref(),
+            cli_extension_paths.install_failures.as_deref(),
+        ]);
 
         let mut metadata_by_path: IndexMap<String, PathMetadata> = IndexMap::new();
 
@@ -1857,17 +1907,28 @@ impl DefaultResourceLoader {
             .map(|r| r.path.clone())
             .collect();
 
-        let extension_paths = if self.inner.no_extensions {
+        let extension_paths: Vec<String> = (if self.inner.no_extensions {
             cli_enabled_extensions.clone()
         } else {
             self.merge_paths(&cli_enabled_extensions, &enabled_extensions)
-        };
+        })
+        .into_iter()
+        .filter(|path| {
+            !path.starts_with(BUILTIN_PATH_PREFIX)
+                || !self
+                    .inner
+                    .disabled_builtin_extensions
+                    .contains(&path[BUILTIN_PATH_PREFIX.len()..])
+        })
+        .collect();
 
         let package_warnings = collect_extension_package_warnings(&extension_paths, &metadata_by_path)?;
         let mut extensions_result = self
             .load_final_extension_set(&extension_paths, pre_trust_extensions)
             .await;
-        merge_extension_warnings(&mut extensions_result, package_warnings);
+        let mut combined_warnings = install_warnings;
+        combined_warnings.extend(package_warnings);
+        merge_extension_warnings(&mut extensions_result, combined_warnings);
         for p in &self.inner.additional_extension_paths {
             if is_local_path(p) {
                 let resolved = self.resolve_resource_path(p);
@@ -2079,6 +2140,10 @@ impl DefaultResourceLoader {
         }
 
         let package_warnings = collect_extension_package_warnings(&extension_paths, &metadata_by_path)?;
+        let install_warnings = collect_package_install_warnings(&[
+            resolved_paths.install_failures.as_deref(),
+            cli_extension_paths.install_failures.as_deref(),
+        ]);
         let mut extensions_result = self
             .inner
             .extension_host
@@ -2089,7 +2154,9 @@ impl DefaultResourceLoader {
                 None,
             )
             .await;
-        merge_extension_warnings(&mut extensions_result, package_warnings);
+        let mut combined_warnings = install_warnings;
+        combined_warnings.extend(package_warnings);
+        merge_extension_warnings(&mut extensions_result, combined_warnings);
         if !include_inline_factories {
             return Ok(extensions_result);
         }
@@ -2117,6 +2184,10 @@ impl DefaultResourceLoader {
                 },
             )
         }
+    }
+
+    fn get_extension_path_key(&self, path: &str) -> String {
+        get_resource_path_key(&self.resolve_extension_load_path(path))
     }
 
     async fn load_extension_paths(&self, paths: &[String], runtime: Option<ExtensionRuntime>) -> LoadExtensionsResult {
@@ -2213,21 +2284,21 @@ impl DefaultResourceLoader {
         let mut preloaded_by_path: IndexMap<String, Extension> = IndexMap::new();
         for ext in preloaded {
             if !ext.path.starts_with("<inline:") {
-                preloaded_by_path.insert(ext.resolved_path.clone(), ext.clone());
+                preloaded_by_path.insert(get_resource_path_key(&ext.resolved_path), ext.clone());
             }
         }
         let mut failed_preload_paths = IndexSet::new();
         if let Some(ref pre) = pre_trust_extensions {
             for error in &pre.errors {
-                failed_preload_paths.insert(self.resolve_extension_load_path(&error.path));
+                failed_preload_paths.insert(self.get_extension_path_key(&error.path));
             }
         }
 
         let remaining_paths: Vec<String> = extension_paths
             .iter()
             .filter(|p| {
-                let resolved = self.resolve_extension_load_path(p);
-                !preloaded_by_path.contains_key(&resolved) && !failed_preload_paths.contains(&resolved)
+                let path_key = self.get_extension_path_key(p);
+                !preloaded_by_path.contains_key(&path_key) && !failed_preload_paths.contains(&path_key)
             })
             .cloned()
             .collect();
@@ -2241,7 +2312,7 @@ impl DefaultResourceLoader {
 
         let mut loaded_by_path = preloaded_by_path;
         for ext in &remaining_extensions.extensions {
-            loaded_by_path.insert(ext.resolved_path.clone(), ext.clone());
+            loaded_by_path.insert(get_resource_path_key(&ext.resolved_path), ext.clone());
         }
 
         let (inline_exts, inline_errors) = if pre_trust_extensions.is_some() {
@@ -2257,7 +2328,7 @@ impl DefaultResourceLoader {
 
         let mut ordered_extensions: Vec<Extension> = extension_paths
             .iter()
-            .filter_map(|p| loaded_by_path.get(&self.resolve_extension_load_path(p)).cloned())
+            .filter_map(|p| loaded_by_path.get(&self.get_extension_path_key(p)).cloned())
             .collect();
         ordered_extensions.extend(inline_exts);
 
@@ -2483,12 +2554,9 @@ impl DefaultResourceLoader {
         }
 
         let normalized_resource_path = resolve(&[resource_path]);
-        let separator = sep();
         if let Some(extra) = extra_source_infos {
             for (source_path, source_info) in extra {
-                let normalized_source_path = resolve(&[source_path]);
-                let prefix = format!("{normalized_source_path}{separator}");
-                if normalized_resource_path == normalized_source_path || normalized_resource_path.starts_with(&prefix) {
+                if is_path_within(source_path, &normalized_resource_path) {
                     let mut cloned = source_info.clone();
                     cloned.path = resource_path.to_owned();
                     return Some(cloned);
@@ -2504,9 +2572,7 @@ impl DefaultResourceLoader {
                 return Some(create_source_info(resource_path, &exact.to_source_metadata()));
             }
             for (source_path, metadata) in meta_map {
-                let normalized_source_path = resolve(&[source_path]);
-                let prefix = format!("{normalized_source_path}{separator}");
-                if normalized_resource_path == normalized_source_path || normalized_resource_path.starts_with(&prefix) {
+                if is_path_within(source_path, &normalized_resource_path) {
                     return Some(create_source_info(resource_path, &metadata.to_source_metadata()));
                 }
             }
@@ -2589,8 +2655,8 @@ impl DefaultResourceLoader {
 
         for p in primary.iter().chain(additional.iter()) {
             let resolved = self.resolve_resource_path(p);
-            let canonical = canonicalize_path(&resolved);
-            if !seen.insert(canonical) {
+            let path_key = get_resource_path_key(&resolved);
+            if !seen.insert(path_key) {
                 continue;
             }
             merged.push(resolved);
@@ -2902,17 +2968,7 @@ impl DefaultResourceLoader {
     }
 
     fn is_under_path(&self, target: &str, root: &str) -> bool {
-        let normalized_root = resolve(&[root]);
-        if target == normalized_root {
-            return true;
-        }
-        let separator = sep();
-        let prefix = if normalized_root.ends_with(&separator) {
-            normalized_root
-        } else {
-            format!("{normalized_root}{separator}")
-        };
-        target.starts_with(&prefix)
+        is_path_within(root, target)
     }
 
     fn detect_extension_conflicts(&self, extensions: &[Extension]) -> Vec<(String, String)> {

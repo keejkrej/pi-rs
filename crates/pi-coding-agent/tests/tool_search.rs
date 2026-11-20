@@ -161,6 +161,7 @@ fn bm25_ranker_includes_namespace_in_search_text() {
     let entry = make_tool("mcp__x__run", "Run it.", json!({}));
     let ns = ToolNamespace {
         name: "mcp__x".to_string(),
+        aliases: None,
         description: Some("Kubernetes cluster tools".to_string()),
         instructions: None,
     };
@@ -181,7 +182,7 @@ fn bm25_ranker_includes_namespace_in_search_text() {
 #[test]
 fn schema_references_in_search_text() {
     let search_text = |parameters: Value| -> String {
-        let schema = Schema::from(parameters);
+        let schema = pi_schema::Schema::from(parameters);
         create_tool_search_document(
             ToolSearchDocumentInput {
                 name: "mcp__ledger__inspect",
@@ -204,7 +205,7 @@ fn schema_references_in_search_text() {
                 }
             }
         })),
-        "mcp__ledger__inspect mcp  ledger  inspect Inspect records options mode reconciliation"
+        "Inspect records options mode reconciliation"
     );
 
     assert_eq!(
@@ -213,7 +214,7 @@ fn schema_references_in_search_text() {
             "properties": { "range": { "$ref": "#/$defs/date~1range" } },
             "$defs": { "date/range": { "description": "fiscal period" } }
         })),
-        "mcp__ledger__inspect mcp  ledger  inspect Inspect records range fiscal period"
+        "Inspect records range fiscal period"
     );
 
     assert_eq!(
@@ -231,7 +232,7 @@ fn schema_references_in_search_text() {
                 }
             }
         })),
-        "mcp__ledger__inspect mcp  ledger  inspect Inspect records root tree node children other self"
+        "Inspect records root tree node children other self"
     );
 
     assert_eq!(
@@ -244,7 +245,7 @@ fn schema_references_in_search_text() {
             },
             "$defs": { "unused": { "description": "reconciliation" } }
         })),
-        "mcp__ledger__inspect mcp  ledger  inspect Inspect records remote missing malformed"
+        "Inspect records remote missing malformed"
     );
 }
 
@@ -270,6 +271,7 @@ fn codemode_description_catalog() {
             entry.name.clone(),
             ToolNamespace {
                 name: "mcp__github".to_string(),
+                aliases: None,
                 description: Some("GitHub server".to_string()),
                 instructions: None,
             },
@@ -280,6 +282,7 @@ fn codemode_description_catalog() {
             entry.name.clone(),
             ToolNamespace {
                 name: "mcp__docs".to_string(),
+                aliases: None,
                 description: None,
                 instructions: None,
             },
@@ -358,6 +361,7 @@ fn codemode_description_catalog() {
                 entry.name.clone(),
                 ToolNamespace {
                     name: "mcp__github".to_string(),
+                    aliases: None,
                     description: None,
                     instructions: Some("Long usage guide.".to_string()),
                 },

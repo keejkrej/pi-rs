@@ -6,7 +6,7 @@ pub use part_2::*;
 mod part_3;
 // @generated-mods end
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
@@ -16,13 +16,13 @@ use pi_agent_core::types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool,
     AgentToolCall, AgentToolCallOutcome, AgentToolResult, BeforeToolCallContext, BeforeToolCallResult,
     FinishTurnAction, FinishTurnContext, FinishTurnDecision, PrepareNextTurnContext, PrepareRequestContext,
-    PrepareRequestResult,
+    PrepareRequestResult, StreamFn,
 };
-use pi_ai::AnyModel;
 use pi_ai::types::{
     AssistantMessage, AssistantMessageEvent, ImageContent, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders,
-    ToolResultMessage, UserContentBlock,
+    SimpleStreamOptions, ToolResultMessage, UserContentBlock,
 };
+use pi_ai::{AnyModel, Context as AiContext};
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::{BoxFuture, Unsubscribe};
 use regex::Regex;
@@ -48,6 +48,7 @@ use crate::core::extensions::types::{
     TurnStartEvent, WriteToolResultEvent,
 };
 use crate::core::messages::{BashExecutionMessage, convert_to_llm};
+use crate::core::model_resolver::parse_valid_thinking_level;
 use crate::core::model_runtime::{ModelRuntime, ModelRuntimeAuthOverrides, ResolveModelOptions};
 use crate::core::nested_tool_calls::{
     NestedCallSummary, NestedToolCallHost, NestedToolCallOptions, NestedToolCallRunner, NestedToolExecutionEvent,
@@ -117,6 +118,29 @@ use crate::core::virtual_models::{
 };
 use crate::utils::tool_result_images::{NormalizeToolResultImagesOptions, normalize_tool_result_images};
 
+type RuntimeStreamFnInner = dyn Fn(Model, AiContext, Option<SimpleStreamOptions>) -> BoxFuture<pi_ai::Result<pi_ai::AssistantMessageEventStream>>
+    + Send
+    + Sync;
+
+static RUNTIME_STREAM_FUNCTIONS: LazyLock<Mutex<Vec<(Weak<RuntimeStreamFnInner>, usize)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Mark `stream_fn` as resolving auth through `model_runtime` on its own (`#11520`).
+pub fn mark_runtime_stream_function(stream_fn: &StreamFn, model_runtime: &ModelRuntime) {
+    let mut guard = RUNTIME_STREAM_FUNCTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|(w, _)| w.strong_count() > 0);
+    guard.push((Arc::downgrade(stream_fn), model_runtime.ptr_key()));
+}
+
+fn is_runtime_stream_function(stream_fn: &StreamFn, model_runtime: &ModelRuntime) -> bool {
+    let mut guard = RUNTIME_STREAM_FUNCTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|(w, _)| w.strong_count() > 0);
+    let runtime_key = model_runtime.ptr_key();
+    guard
+        .iter()
+        .any(|(w, key)| *key == runtime_key && w.upgrade().is_some_and(|arc| Arc::ptr_eq(&arc, stream_fn)))
+}
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -184,7 +208,7 @@ pub enum AgentSessionEvent {
         will_retry: bool,
     },
     #[serde(rename = "agent_settled")]
-    AgentSettled,
+    AgentSettled { aborted: bool },
     #[serde(rename = "turn_start")]
     TurnStart,
     #[serde(rename = "turn_end")]
@@ -332,6 +356,7 @@ pub struct AgentSessionConfig {
     pub cache_warmer: Option<Arc<CacheWarmer>>,
     pub initial_active_tool_names: Option<Vec<String>>,
     pub uses_default_tools: Option<bool>,
+    pub default_tool_modifiers: Option<Vec<String>>,
     pub allowed_tool_names: Option<Vec<String>>,
     pub excluded_tool_names: Option<Vec<String>>,
     pub base_tools_override: Option<IndexMap<String, AgentTool>>,
@@ -541,15 +566,16 @@ pub(crate) struct AgentSessionState {
     pub pending_user_bash_operations: Option<Arc<dyn crate::core::tools::bash::BashOperations>>,
     pub scoped_models: Vec<ScopedModelEntry>,
     pub is_agent_run_active: bool,
+    pub prompt_preflight_count: usize,
     pub agent_run_abort_requested: bool,
     pub overflow_recovery_attempted: bool,
     pub idle_waiters: Vec<oneshot::Sender<()>>,
     pub turn_index: usize,
     pub last_assistant_message: Option<AssistantMessage>,
-    pub last_assistant_tool_results: Vec<ToolResultMessage>,
     pub failed_response: Option<AssistantMessage>,
     pub entry_ids_by_message: Vec<(AgentMessage, String)>,
     pub message_end_replacements: Vec<(AgentMessage, AgentMessage)>,
+    pub queued_messages_with_images: Vec<AgentMessage>,
     pub boundary_dispatched_messages: Vec<AssistantMessage>,
     pub pending_extension_send_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub last_activity_outcome: AgentActivityOutcome,
@@ -565,7 +591,9 @@ pub(crate) struct AgentSessionState {
     pub initial_active_tool_names: Option<Vec<String>>,
     pub pending_tool_names: IndexSet<String>,
     pub uses_default_tools: bool,
+    pub default_tool_modifiers: Vec<String>,
     pub allowed_tool_names: Option<IndexSet<String>>,
+    pub allowlist_filters_mcp: bool,
     pub excluded_tool_names: Option<IndexSet<String>>,
     pub base_tools_override: Option<IndexMap<String, AgentTool>>,
     pub session_start_event: SessionStartEvent,
@@ -642,15 +670,16 @@ impl AgentSession {
             pending_user_bash_operations: None,
             scoped_models: config.scoped_models.unwrap_or_default(),
             is_agent_run_active: false,
+            prompt_preflight_count: 0,
             agent_run_abort_requested: false,
             overflow_recovery_attempted: false,
             idle_waiters: Vec::new(),
             turn_index: 0,
             last_assistant_message: None,
-            last_assistant_tool_results: Vec::new(),
             failed_response: None,
             entry_ids_by_message: Vec::new(),
             message_end_replacements: Vec::new(),
+            queued_messages_with_images: Vec::new(),
             boundary_dispatched_messages: Vec::new(),
             pending_extension_send_tasks: Vec::new(),
             last_activity_outcome: AgentActivityOutcome::Completed,
@@ -666,6 +695,11 @@ impl AgentSession {
             initial_active_tool_names: config.initial_active_tool_names.clone(),
             pending_tool_names: IndexSet::new(),
             uses_default_tools: config.uses_default_tools.unwrap_or(false),
+            default_tool_modifiers: config.default_tool_modifiers.clone().unwrap_or_default(),
+            allowlist_filters_mcp: config
+                .allowed_tool_names
+                .as_ref()
+                .is_some_and(|v| v.is_empty() || v.iter().any(|entry| entry.starts_with("mcp__"))),
             allowed_tool_names: config.allowed_tool_names.map(|v| v.into_iter().collect()),
             excluded_tool_names: config.excluded_tool_names.map(|v| v.into_iter().collect()),
             base_tools_override: config.base_tools_override,
@@ -739,8 +773,12 @@ impl AgentSession {
 
         let initial_active = config.initial_active_tool_names;
         session._build_runtime(initial_active.as_deref(), None, true);
-        if initial_active.is_none() {
-            session._restore_tools_from_transcript();
+        let (uses_default, modifiers) = {
+            let guard = session.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            (guard.uses_default_tools, guard.default_tool_modifiers.clone())
+        };
+        if uses_default {
+            session._restore_tools_from_transcript(&modifiers);
         }
 
         session
@@ -831,13 +869,23 @@ impl AgentSession {
             (selected_model.clone(), current_thinking)
         };
 
-        if self.inner.agent.stream_fn().is_none() {
+        let stream_fn_opt = self.inner.agent.stream_fn();
+        let Some(ref stream_fn) = stream_fn_opt else {
             let auth = self._get_required_request_auth(&model, signal).await?;
             return Ok(SummarizationRequestAuth {
                 model: auth.model,
                 api_key: auth.api_key,
                 headers: auth.headers,
                 env: auth.env,
+                thinking_level,
+            });
+        };
+        if is_runtime_stream_function(stream_fn, &self.inner.model_runtime) {
+            return Ok(SummarizationRequestAuth {
+                model,
+                api_key: None,
+                headers: None,
+                env: None,
                 thinking_level,
             });
         }
@@ -905,11 +953,16 @@ impl AgentSession {
     }
 
     pub(crate) fn _record_selection(&self) {
+        let branch = self.inner.session_manager.get_branch(None);
+        self._record_model_selection(&branch);
+        self._record_thinking_level(&branch);
+    }
+
+    fn _record_model_selection(&self, branch: &[SessionEntry]) {
         let Some(model) = self.model() else {
             return;
         };
-        let branch = self.inner.session_manager.get_branch(None);
-        let recorded = get_branch_selection(&branch, |provider, model_id| {
+        let recorded = get_branch_selection(branch, |provider, model_id| {
             self.inner.model_runtime.get_model(provider, model_id)
         });
         let Some((recorded_provider, recorded_model_id)) = recorded else {
@@ -929,6 +982,32 @@ impl AgentSession {
             .inner
             .session_manager
             .append_model_change(&model.provider, &model.id);
+    }
+
+    fn _record_thinking_level(&self, branch: &[SessionEntry]) {
+        let recorded_str = branch.iter().rev().find_map(|entry| match entry {
+            SessionEntry::ThinkingLevelChange(tl) => Some(tl.thinking_level.as_str()),
+            _ => None,
+        });
+        let Some(recorded_str) = recorded_str else {
+            return;
+        };
+        let available_levels = self.get_available_thinking_levels();
+        let current_level = self.thinking_level();
+        if let Some(recorded_level) = parse_valid_thinking_level(recorded_str) {
+            let effective = if available_levels.contains(&recorded_level) {
+                recorded_level
+            } else {
+                self._clamp_thinking_level(recorded_level, &available_levels)
+            };
+            if effective == current_level {
+                return;
+            }
+        }
+        let _ = self
+            .inner
+            .session_manager
+            .append_thinking_level_change(current_level.as_str());
     }
 
     pub(crate) fn _limits_model(&self) -> Option<Model> {
@@ -1252,6 +1331,7 @@ impl AgentSession {
                                 tool_call,
                                 result: AgentToolResult::text("No assistant message issued this call"),
                                 is_error: true,
+                                duration_ms: None,
                             };
                         };
                         let session = AgentSession { inner };
@@ -1260,6 +1340,7 @@ impl AgentSession {
                                 tool_call,
                                 result: AgentToolResult::text("No assistant message issued this call"),
                                 is_error: true,
+                                duration_ms: None,
                             };
                         };
                         let tools = session._get_callable_tools(None);
@@ -1361,6 +1442,7 @@ impl AgentSession {
                                     tool_name,
                                     result,
                                     is_error,
+                                    duration_ms,
                                     parent_tool_call_id,
                                 } => (
                                     RunnerEmitEvent::ToolExecutionEnd(ToolExecutionEndEvent {
@@ -1368,6 +1450,7 @@ impl AgentSession {
                                         tool_name: tool_name.clone(),
                                         result: serde_json::to_value(&result).unwrap_or(Value::Null),
                                         is_error,
+                                        duration_ms,
                                         parent_tool_call_id: Some(parent_tool_call_id.clone()),
                                     }),
                                     AgentSessionEvent::ToolExecutionEnd {
@@ -2015,17 +2098,17 @@ impl AgentSession {
         if let Some(ref warmer) = self.inner.cache_warmer {
             warmer.on_agent_settled();
         }
-        let runner = {
+        let (runner, aborted) = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             guard.is_agent_run_active = false;
             guard.is_emitting_agent_settled = true;
-            guard.extension_runner.clone()
+            (guard.extension_runner.clone(), guard.agent_run_abort_requested)
         };
 
         if let Some(runner) = runner {
-            let _ = runner.emit(AgentSettledEvent {}).await;
+            let _ = runner.emit(AgentSettledEvent { aborted }).await;
         }
-        self._emit(AgentSessionEvent::AgentSettled);
+        self._emit(AgentSessionEvent::AgentSettled { aborted });
 
         let deferred = {
             let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2077,12 +2160,17 @@ impl AgentSession {
         let mut event = event;
         match &mut event {
             AgentEvent::AgentStart => {
-                self.inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .message_end_replacements
-                    .clear();
+                let abort_now = {
+                    let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.message_end_replacements.clear();
+                    guard.agent_run_abort_requested
+                };
+                if abort_now {
+                    self.inner.agent.abort();
+                }
+            }
+            AgentEvent::MessageEnd { message } => {
+                *message = self._resolve_message_replacement(message.clone());
             }
             AgentEvent::TurnEnd { message, .. } => {
                 *message = self._resolve_message_replacement(message.clone());
@@ -2191,7 +2279,7 @@ impl AgentSession {
             }
         }
 
-        if let AgentEvent::MessageStart { ref message } = event
+        let queued_image_msg = if let AgentEvent::MessageStart { ref message } = event
             && let Some(user_msg) = message.as_user()
         {
             let message_text = match &user_msg.content {
@@ -2206,22 +2294,36 @@ impl AgentSession {
                     .join(""),
             };
             let mut queue_changed = false;
+            let has_queued_images;
             {
                 let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                 guard.overflow_recovery_attempted = false;
-                if !message_text.is_empty() {
-                    if let Some(idx) = guard.steering_messages.iter().position(|s| s == &message_text) {
-                        guard.steering_messages.remove(idx);
-                        queue_changed = true;
-                    } else if let Some(idx) = guard.follow_up_messages.iter().position(|s| s == &message_text) {
-                        guard.follow_up_messages.remove(idx);
-                        queue_changed = true;
-                    }
+                if let Some(idx) = guard.steering_messages.iter().position(|s| s == &message_text) {
+                    guard.steering_messages.remove(idx);
+                    queue_changed = true;
+                } else if let Some(idx) = guard.follow_up_messages.iter().position(|s| s == &message_text) {
+                    guard.follow_up_messages.remove(idx);
+                    queue_changed = true;
+                }
+                if let Some(idx) = guard.queued_messages_with_images.iter().position(|m| m == message) {
+                    guard.queued_messages_with_images.remove(idx);
+                    has_queued_images = true;
+                } else {
+                    has_queued_images = false;
                 }
             }
             if queue_changed {
                 self._emit_queue_update();
             }
+            if has_queued_images { Some(message.clone()) } else { None }
+        } else {
+            None
+        };
+        if let Some(msg_to_normalize) = queued_image_msg
+            && let Some(normalized) = self._normalize_queued_message_images(&msg_to_normalize).await
+            && let AgentEvent::MessageStart { ref mut message } = event
+        {
+            self._replace_message_in_place(message, normalized);
         }
 
         self._emit_extension_event(&mut event).await;
@@ -2277,6 +2379,7 @@ impl AgentSession {
                 tool_name,
                 result,
                 is_error,
+                duration_ms: _,
             } => AgentSessionEvent::ToolExecutionEnd {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
@@ -2337,11 +2440,7 @@ impl AgentSession {
             }
         }
 
-        if let AgentEvent::TurnEnd { tool_results, .. } = event {
-            {
-                let mut guard = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-                guard.last_assistant_tool_results = tool_results;
-            }
+        if matches!(event, AgentEvent::TurnEnd { .. }) {
             self._flush_pending_custom_messages();
         }
     }
@@ -2405,20 +2504,47 @@ impl AgentSession {
         None
     }
 
-    pub(crate) fn _omit_recovery_attempt(
-        &self,
-        message: &AssistantMessage,
-        tool_results: &[AgentMessage],
-    ) -> pi_js::Result<()> {
+    /// Persistently omit a failed attempt and its tool results from model context (`#11227`).
+    pub(crate) fn _omit_recovery_attempt(&self, message: &AssistantMessage) -> pi_js::Result<()> {
+        let tool_call_ids: IndexSet<String> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pi_ai::AssistantContentBlock::ToolCall(tc) => Some(tc.id.clone()),
+                _ => None,
+            })
+            .collect();
+        let assistant_agent_msg = AgentMessage::from(message.clone());
+        let entry_id = self._find_persisted_message_entry_id(&assistant_agent_msg);
+        let agent_messages = self.inner.agent.state().messages;
+        let index = agent_messages.iter().position(|m| {
+            m == &assistant_agent_msg
+                || entry_id
+                    .as_ref()
+                    .is_some_and(|eid| self._find_persisted_message_entry_id(m).as_ref() == Some(eid))
+        });
+        let mut tool_results: Vec<AgentMessage> = Vec::new();
+        if let Some(start) = index {
+            for m in &agent_messages[start + 1..] {
+                if m.role() == Some("assistant") {
+                    break;
+                }
+                if let Some(tr) = m.as_tool_result()
+                    && tool_call_ids.contains(&tr.tool_call_id)
+                {
+                    tool_results.push(m.clone());
+                }
+            }
+        }
+
         let mut targets: Vec<AgentMessage> = Vec::with_capacity(1 + tool_results.len());
-        targets.push(AgentMessage::from(message.clone()));
-        targets.extend(tool_results.iter().cloned());
+        targets.push(assistant_agent_msg);
+        targets.extend(tool_results);
 
         let target_ids: Vec<Option<String>> = targets
             .iter()
             .map(|target| self._find_persisted_message_entry_id(target))
             .collect();
-        let agent_messages = self.inner.agent.state().messages;
         let unresolved_projected_target = targets
             .iter()
             .enumerate()
@@ -2570,6 +2696,7 @@ impl AgentSession {
                 tool_name,
                 result,
                 is_error,
+                duration_ms,
             } => {
                 let _ = runner
                     .emit(ToolExecutionEndEvent {
@@ -2577,6 +2704,7 @@ impl AgentSession {
                         tool_name: tool_name.clone(),
                         result: serde_json::to_value(result).unwrap_or(Value::Null),
                         is_error: *is_error,
+                        duration_ms: *duration_ms,
                         parent_tool_call_id: None,
                     })
                     .await;

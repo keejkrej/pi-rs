@@ -1,33 +1,54 @@
 //! Port of packages/ai/src/api/system-one-shared.ts
 
-use std::sync::{Arc, Mutex};
-
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use url::Url;
 
 use pi_js::abort::AbortSignal;
-use pi_js::fetch::{Body, Headers, Request};
 use pi_js::{Error, Result};
 
-use crate::models::calculate_cost;
+use crate::api::classifier_shared::{is_record, parse_classifier_usage, post_classifier_request, required_number};
+pub(crate) use crate::api::classifier_shared::{model_headers_to_provider_headers, serialize_to_value};
 use crate::types::{
-    AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
-    ClassifierQuestion, ClassifierResult, ClassifierStopReason, JsonObject, JsonValue, ProviderHeaders,
-    ProviderResponse, Usage, UsageCost,
+    ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
+    ClassifierQuestion, ClassifierResult, ClassifierStopReason, ImageContent, JsonValue, ModelModality,
+    ProviderHeaders, SystemOneImageInput,
 };
-use crate::utils::abort::race_with_abort_signal;
-use crate::utils::abort_signals::combine_abort_signals;
-use crate::utils::error_body::{SdkErrorInfo, format_provider_error, normalize_provider_error};
-use crate::utils::headers::{headers_to_record, provider_headers_to_record};
-use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
+use crate::utils::error_body::{format_provider_error, normalize_provider_error};
+
+/// A System One image asset: base64 file bytes, referenced by its name from the state.
+#[derive(Clone, Debug, Serialize)]
+pub struct SystemOneImageAsset {
+    #[serde(rename = "type")]
+    pub r#type: &'static str,
+    pub format: &'static str,
+    pub data_base64: String,
+}
 
 /// TypeSafe System One request body without the transport-specific envelope.
 #[derive(Clone, Debug, Serialize)]
 pub struct SystemOneWireRequest {
-    pub state: JsonObject,
+    pub state: JsonValue,
     pub questions: IndexMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<IndexMap<String, SystemOneImageAsset>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
+
+/// System One compatibility settings with every field resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedSystemOneCompat {
+    pub image_input: SystemOneImageInput,
+    pub send_image_opt_in_header: bool,
+}
+
+/// TypeSafe's opt-in header for its experimental image input.
+const IMAGE_OPT_IN_HEADER: (&str, &str) = ("TypeSafe-Danger-Zone-Images", "true");
+
+/// Clef accepts at most this many images per request.
+const MAX_DATA_URL_IMAGES: usize = 4;
 
 /// Differences between services that serve System One models.
 pub trait SystemOneTransport: Send + Sync {
@@ -37,8 +58,11 @@ pub trait SystemOneTransport: Send + Sync {
     /// Service name used in error messages.
     fn label(&self) -> &str;
 
+    /// Compatibility settings for models that do not set them in `compat`.
+    fn detect_compat(&self, model: &ClassifierModel) -> ResolvedSystemOneCompat;
+
     /// Absolute request URL.
-    fn url(&self, model: &ClassifierModel) -> Result<String>;
+    fn url(&self, model: &ClassifierModel) -> Result<Url>;
 
     /// Wraps the System One request in the service's request envelope.
     fn payload(&self, model: &ClassifierModel, request: SystemOneWireRequest) -> JsonValue;
@@ -47,34 +71,8 @@ pub trait SystemOneTransport: Send + Sync {
     fn output<'a>(&self, body: &'a JsonValue) -> Result<&'a Map<String, JsonValue>>;
 }
 
-pub(crate) fn serialize_to_value<T: Serialize + ?Sized>(value: &T) -> JsonValue {
-    match pi_js::json::parse(&pi_js::json::stringify(value)) {
-        Ok(parsed) => parsed,
-        Err(_) => JsonValue::Null,
-    }
-}
-
-pub(crate) fn model_headers_to_provider_headers(headers: Option<&IndexMap<String, String>>) -> Option<ProviderHeaders> {
-    headers.map(|map| {
-        map.iter()
-            .map(|(k, v)| (k.clone(), Some(v.clone())))
-            .collect::<ProviderHeaders>()
-    })
-}
-
-pub fn is_record(value: &JsonValue) -> bool {
-    value.is_object()
-}
-
-fn required_number(label: &str, value: Option<&JsonValue>, field: &str) -> Result<f64> {
-    match value.and_then(Value::as_f64) {
-        Some(n) if n.is_finite() => Ok(n),
-        _ => Err(Error::msg(format!("{label} returned an invalid {field}"))),
-    }
-}
-
 fn parse_probabilities(label: &str, value: Option<&JsonValue>, id: &str) -> Result<IndexMap<String, f64>> {
-    let Some(obj) = value.and_then(Value::as_object) else {
+    let Some(obj) = value.and_then(|v| is_record(v).then(|| v.as_object()).flatten()) else {
         return Err(Error::msg(format!("{label} returned invalid probabilities for {id}")));
     };
     let mut out = IndexMap::with_capacity(obj.len());
@@ -90,7 +88,7 @@ fn parse_answers(
     value: Option<&JsonValue>,
     context: &ClassifierContext,
 ) -> Result<IndexMap<String, ClassifierAnswer>> {
-    let Some(obj) = value.and_then(Value::as_object) else {
+    let Some(obj) = value.and_then(|v| is_record(v).then(|| v.as_object()).flatten()) else {
         return Err(Error::msg(format!("{label} returned an unexpected response")));
     };
     let mut answers = IndexMap::with_capacity(context.questions.len());
@@ -144,41 +142,95 @@ fn parse_answers(
     Ok(answers)
 }
 
-fn token_count(value: Option<&JsonValue>) -> i64 {
-    let Some(val) = value else {
-        return 0;
-    };
-    if let Some(n) = val.as_i64() {
-        return if n > 0 { n } else { 0 };
-    }
-    match val.as_f64() {
-        Some(n) if n.is_finite() && n > 0.0 => n as i64,
-        _ => 0,
+fn asset_format(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpeg"),
+        _ => None,
     }
 }
 
-/// Usage from System One's `{ input_tokens, output_tokens }`, priced from the model catalog like
-/// chat usage. A missing or malformed usage object leaves the result without usage instead of
-/// failing it.
-fn parse_usage(value: Option<&JsonValue>, model: &ClassifierModel) -> Option<Usage> {
-    let obj = value.and_then(Value::as_object)?;
-    if !obj.contains_key("input_tokens") && !obj.contains_key("output_tokens") {
-        return None;
+fn is_supported_data_url_type(mime_type: &str) -> bool {
+    matches!(mime_type, "image/png" | "image/jpeg" | "image/webp")
+}
+
+/// Adds the context images to `request` in the service's form.
+fn add_images(
+    label: &str,
+    model: &ClassifierModel,
+    input: SystemOneImageInput,
+    images: &[ImageContent],
+    request: &mut SystemOneWireRequest,
+) -> Result<()> {
+    match input {
+        SystemOneImageInput::Images => {
+            if images.len() > MAX_DATA_URL_IMAGES {
+                return Err(Error::msg(format!(
+                    "{label} accepts at most {MAX_DATA_URL_IMAGES} images for {}, got {}",
+                    model.id,
+                    images.len()
+                )));
+            }
+            let mut urls = Vec::with_capacity(images.len());
+            for image in images {
+                if !is_supported_data_url_type(&image.mime_type) {
+                    return Err(Error::msg(format!(
+                        "{label} accepts PNG, JPEG, and WebP images for {}, got {}",
+                        model.id, image.mime_type
+                    )));
+                }
+                urls.push(format!("data:{};base64,{}", image.mime_type, image.data));
+            }
+            request.images = Some(urls);
+            Ok(())
+        }
+        SystemOneImageInput::StateImageUrls => {
+            // OpenRouter validates the images against the model that serves the request.
+            let mut state_items = Vec::with_capacity(images.len() + 1);
+            for image in images {
+                let mut iu = Map::new();
+                iu.insert(
+                    "url".to_owned(),
+                    Value::String(format!("data:{};base64,{}", image.mime_type, image.data)),
+                );
+                let mut part = Map::new();
+                part.insert("type".to_owned(), Value::String("image_url".to_owned()));
+                part.insert("image_url".to_owned(), Value::Object(iu));
+                state_items.push(Value::Object(part));
+            }
+            state_items.push(request.state.clone());
+            request.state = Value::Array(state_items);
+            Ok(())
+        }
+        SystemOneImageInput::Assets => {
+            let mut assets = IndexMap::with_capacity(images.len());
+            let mut state_items = Vec::with_capacity(images.len() + 1);
+            for (index, image) in images.iter().enumerate() {
+                let Some(format) = asset_format(&image.mime_type) else {
+                    return Err(Error::msg(format!(
+                        "{label} accepts PNG and JPEG images for {}, got {}",
+                        model.id, image.mime_type
+                    )));
+                };
+                let name = format!("<image-{}>", index + 1);
+                assets.insert(
+                    name.clone(),
+                    SystemOneImageAsset {
+                        r#type: "image",
+                        format,
+                        data_base64: image.data.clone(),
+                    },
+                );
+                state_items.push(Value::String(name));
+            }
+            // Every asset must be referenced from the request. The names go before the state, where Clef
+            // also places its images.
+            state_items.push(request.state.clone());
+            request.assets = Some(assets);
+            request.state = Value::Array(state_items);
+            Ok(())
+        }
     }
-    let input = token_count(obj.get("input_tokens"));
-    let output = token_count(obj.get("output_tokens"));
-    let mut usage = Usage {
-        input,
-        output,
-        cache_read: 0,
-        cache_write: 0,
-        cache_write_1h: None,
-        reasoning: None,
-        total_tokens: input + output,
-        cost: UsageCost::default(),
-    };
-    calculate_cost(&AnyModel::Classifier(model.clone()), &mut usage);
-    Some(usage)
 }
 
 #[derive(Serialize)]
@@ -204,23 +256,10 @@ fn wire_request(context: &ClassifierContext) -> SystemOneWireRequest {
         questions.insert(id.clone(), wired);
     }
     SystemOneWireRequest {
-        state: context.state.clone(),
+        state: serialize_to_value(&context.state),
         questions,
-    }
-}
-
-fn request_headers(
-    model: &ClassifierModel,
-    api_key: &str,
-    options_headers: Option<&ProviderHeaders>,
-) -> IndexMap<String, String> {
-    let mut defaults = ProviderHeaders::new();
-    defaults.insert("authorization".to_owned(), Some(format!("Bearer {api_key}")));
-    defaults.insert("content-type".to_owned(), Some("application/json".to_owned()));
-    let model_hdrs = model_headers_to_provider_headers(model.headers.as_ref());
-    match provider_headers_to_record([Some(&defaults), model_hdrs.as_ref(), options_headers]) {
-        Some(map) => map,
-        None => IndexMap::new(),
+        assets: None,
+        images: None,
     }
 }
 
@@ -248,165 +287,57 @@ pub async fn classify_system_one(
         if model.api != transport.api() {
             return Err(Error::msg(format!("Unsupported classifier API: {}", model.api)));
         }
-        let api_key = options
-            .as_ref()
-            .and_then(|o| o.base.api_key.as_deref())
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| Error::msg(format!("No API key for provider: {}", model.provider)))?;
-
-        let mut payload = transport.payload(model, wire_request(context));
-        if let Some(on_payload) = options.as_ref().and_then(|o| o.base.on_payload.as_ref()) {
-            if let Some(transformed) = on_payload(payload.clone(), model).await? {
-                payload = transformed;
+        let mut request = wire_request(context);
+        let mut request_options = options.clone();
+        if let Some(images) = context.images.as_deref().filter(|imgs| !imgs.is_empty()) {
+            if !model.input.contains(&ModelModality::Image) {
+                return Err(Error::msg(format!(
+                    "{} does not support image input for {}",
+                    transport.label(),
+                    model.id
+                )));
+            }
+            let detected = transport.detect_compat(model);
+            let image_input = model
+                .compat
+                .as_ref()
+                .and_then(|c| c.image_input)
+                .unwrap_or(detected.image_input);
+            add_images(transport.label(), model, image_input, images, &mut request)?;
+            let send_opt_in = model
+                .compat
+                .as_ref()
+                .and_then(|c| c.send_image_opt_in_header)
+                .unwrap_or(detected.send_image_opt_in_header);
+            if send_opt_in {
+                let mut opts = request_options.unwrap_or_default();
+                let mut merged_headers = ProviderHeaders::new();
+                merged_headers.insert(IMAGE_OPT_IN_HEADER.0.to_owned(), Some(IMAGE_OPT_IN_HEADER.1.to_owned()));
+                if let Some(existing) = &opts.base.headers {
+                    for (k, v) in existing {
+                        merged_headers.insert(k.clone(), v.clone());
+                    }
+                }
+                opts.base.headers = Some(merged_headers);
+                request_options = Some(opts);
             }
         }
 
-        let request_url = transport.url(model)?;
-        let hdr_map = request_headers(model, api_key, options.as_ref().and_then(|o| o.base.headers.as_ref()));
-        let body_text = pi_js::json::stringify(&payload);
-        let timeout_ms = options.as_ref().and_then(|o| o.base.timeout_ms);
-        let max_retries = options.as_ref().and_then(|o| o.base.max_retries).or(Some(2));
-        let max_retry_delay_ms = options.as_ref().and_then(|o| o.base.max_retry_delay_ms);
-        let custom_fetch = options.as_ref().and_then(|o| o.base.fetch.clone());
-        let label = transport.label();
-
-        let last_http_body: Arc<Mutex<Option<(u16, String)>>> = Arc::new(Mutex::new(None));
-
-        let attempt_result = retry_provider_request(
-            || {
-                let request_url = request_url.clone();
-                let hdr_map = hdr_map.clone();
-                let body_text = body_text.clone();
-                let caller_signal = caller_signal.clone();
-                let custom_fetch = custom_fetch.clone();
-                let last_http_body = Arc::clone(&last_http_body);
-                async move {
-                    let timeout_signal = timeout_ms.map(AbortSignal::timeout);
-                    let combined = combine_abort_signals([caller_signal.as_ref(), timeout_signal.as_ref()]);
-
-                    let mut hdrs = Headers::new();
-                    for (k, v) in &hdr_map {
-                        hdrs.set(k, v);
-                    }
-                    let mut req = Request::post(request_url)
-                        .with_headers(hdrs)
-                        .body(Body::Text(body_text));
-                    if let Some(sig) = &combined.signal {
-                        req = req.signal(sig.clone());
-                    }
-
-                    let perform = async {
-                        let next = if let Some(fetch_fn) = &custom_fetch {
-                            fetch_fn(req).await?
-                        } else {
-                            pi_js::fetch::fetch(req).await?
-                        };
-                        if !next.ok() {
-                            let status = next.status();
-                            let resp_headers = next.headers().clone();
-                            let text = match next.text().await {
-                                Ok(t) => t,
-                                Err(_) => String::new(),
-                            };
-                            {
-                                let mut guard = match last_http_body.lock() {
-                                    Ok(g) => g,
-                                    Err(p) => p.into_inner(),
-                                };
-                                *guard = Some((status, text));
-                            }
-                            return Err(ProviderHttpError::new(
-                                Some(status),
-                                Some(resp_headers),
-                                format!("{label} returned {status}"),
-                            )
-                            .into_js_error());
-                        }
-                        let text = next.text().await?;
-                        let parsed = pi_js::json::parse(&text)?;
-                        Ok((next, parsed))
-                    };
-
-                    let res = match &combined.signal {
-                        Some(sig) => race_with_abort_signal(perform, sig).await,
-                        None => perform.await,
-                    };
-                    combined.cleanup();
-
-                    match res {
-                        Ok(pair) => Ok(pair),
-                        Err(err) => {
-                            if let Some(ms) = timeout_ms {
-                                let timed_out = timeout_signal.as_ref().is_some_and(AbortSignal::aborted);
-                                let caller_aborted = caller_signal.as_ref().is_some_and(AbortSignal::aborted);
-                                if timed_out && !caller_aborted {
-                                    return Err(ProviderHttpError::new(
-                                        None,
-                                        None,
-                                        format!("Request timed out after {ms}ms"),
-                                    )
-                                    .into_js_error());
-                                }
-                            }
-                            Err(err)
-                        }
-                    }
-                }
-            },
-            ProviderRetryOptions {
-                max_retries,
-                max_retry_delay_ms,
-                signal: caller_signal.clone(),
-            },
+        let url = transport.url(model)?;
+        let body = post_classifier_request(
+            transport.label(),
+            &url,
+            model,
+            transport.payload(model, request),
+            request_options.as_ref(),
+            None,
         )
-        .await;
-
-        let (response, body) = match attempt_result {
-            Ok(pair) => pair,
-            Err(err) => {
-                if let Some(http_err) = err.downcast_ref::<ProviderHttpError>() {
-                    let captured = {
-                        let guard = match last_http_body.lock() {
-                            Ok(g) => g,
-                            Err(p) => p.into_inner(),
-                        };
-                        guard.as_ref().and_then(|(st, text)| {
-                            if Some(*st) == http_err.status {
-                                Some(text.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    };
-                    let sdk = SdkErrorInfo {
-                        status: http_err.status,
-                        body: captured,
-                        message: http_err.message.clone(),
-                        ..Default::default()
-                    };
-                    return Err(sdk.into_js_error());
-                }
-                return Err(err);
-            }
-        };
-
-        if let Some(on_response) = options.as_ref().and_then(|o| o.base.on_response.as_ref()) {
-            on_response(
-                ProviderResponse {
-                    status: response.status(),
-                    headers: headers_to_record(response.headers()),
-                },
-                model,
-            )
-            .await?;
-        }
+        .await?;
 
         let result = transport.output(&body)?;
         // Set before parsing answers: a request with malformed answers was still billed.
-        if let Some(usage) = parse_usage(result.get("usage"), model) {
-            output.usage = Some(usage);
-        }
-        output.answers = parse_answers(label, result.get("answers"), context)?;
+        output.usage = parse_classifier_usage(result.get("usage"), model);
+        output.answers = parse_answers(transport.label(), result.get("answers"), context)?;
         Ok(())
     }
     .await;
@@ -414,6 +345,7 @@ pub async fn classify_system_one(
     match run {
         Ok(()) => output,
         Err(error) => {
+            output.answers.clear();
             output.stop_reason = if caller_signal.as_ref().is_some_and(AbortSignal::aborted) {
                 ClassifierStopReason::Aborted
             } else {

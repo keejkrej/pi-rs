@@ -44,6 +44,7 @@ fn create_assistant_message(content: Vec<AssistantContentBlock>, stop_reason: St
                 cache_read: 0.0,
                 cache_write: 0.0,
                 total: 0.0,
+                total_from_provider: None,
             },
         },
         stop_reason,
@@ -52,6 +53,7 @@ fn create_assistant_message(content: Vec<AssistantContentBlock>, stop_reason: St
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -266,6 +268,8 @@ fn chains_markdown_transformers_in_registration_order() {
                     message_type: MarkdownMessageType::Assistant,
                     is_streaming: false,
                     available_width: 78,
+                    message_id: None,
+                    timestamp: None,
                 }
             );
             markdown.replace("$x^2$", "x²")
@@ -382,6 +386,9 @@ fn transforms_text_and_thinking_markdown_without_mutating_the_original_message()
                 MarkdownMessageType::User => "user",
                 MarkdownMessageType::Assistant => "assistant",
                 MarkdownMessageType::AssistantThinking => "assistant-thinking",
+                MarkdownMessageType::Custom => "custom",
+                MarkdownMessageType::Summary => "summary",
+                MarkdownMessageType::Changelog => "changelog",
             };
             format!("{prefix}:{markdown}")
         })]),

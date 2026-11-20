@@ -58,6 +58,7 @@ fn adds_presentation_data_without_changing_conversation_ids_or_links() {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: 2,
+            duration_ms: None,
         })))
         .unwrap();
 
@@ -71,6 +72,7 @@ fn adds_presentation_data_without_changing_conversation_ids_or_links() {
             nested_calls: None,
             is_error: false,
             timestamp: 3,
+            duration_ms: None,
         })))
         .unwrap();
 

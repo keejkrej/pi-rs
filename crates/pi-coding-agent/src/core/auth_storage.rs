@@ -160,21 +160,12 @@ impl FileAuthStorageBackend {
     fn acquire_lock_sync_with_retry(&self, path: &str) -> Result<LockRelease> {
         let max_attempts = 10u32;
         let delay_ms = 20i64;
-        let mut eperm_retries = 0u32;
 
         for attempt in 1u32.. {
             match lock_sync(path, LockOptions::default()) {
                 Ok(release) => return Ok(release),
                 Err(error) => {
-                    let Some(code) = get_retryable_lock_error_code(&error) else {
-                        return Err(error);
-                    };
-                    if attempt == max_attempts
-                        || (code == "EPERM" && {
-                            eperm_retries += 1;
-                            eperm_retries > MAX_EPERM_RETRIES
-                        })
-                    {
+                    if get_retryable_lock_error_code(&error).is_none() || attempt == max_attempts {
                         return Err(error);
                     }
                     let start = pi_js::time::now_ms();

@@ -10,16 +10,13 @@ use crate::model_catalog::{
 };
 
 // Per-provider strongly-typed catalogs live in `providers/*_models.rs` and `providers/all.rs`;
-// loading directly from `providers/data/*.json` provides complete runtime coverage across all 42 built-in providers.
+// loading directly from `providers/data/*.json` provides complete runtime coverage across all built-in catalog providers.
 
 const PROVIDER_DATA: &[(&str, &str)] = &[
     ("amazon-bedrock", include_str!("providers/data/amazon-bedrock.json")),
     ("ant-ling", include_str!("providers/data/ant-ling.json")),
     ("anthropic", include_str!("providers/data/anthropic.json")),
-    (
-        "azure-openai-responses",
-        include_str!("providers/data/azure-openai-responses.json"),
-    ),
+    ("azure", include_str!("providers/data/azure.json")),
     ("baseten", include_str!("providers/data/baseten.json")),
     ("cerebras", include_str!("providers/data/cerebras.json")),
     (
@@ -59,6 +56,10 @@ const PROVIDER_DATA: &[(&str, &str)] = &[
         "qwen-token-plan-individual",
         include_str!("providers/data/qwen-token-plan-individual.json"),
     ),
+    (
+        "qwen-token-plan-individual-cn",
+        include_str!("providers/data/qwen-token-plan-individual-cn.json"),
+    ),
     ("radius", include_str!("providers/data/radius.json")),
     ("together", include_str!("providers/data/together.json")),
     ("typesafe", include_str!("providers/data/typesafe.json")),
@@ -88,7 +89,7 @@ pub const BUILTIN_MODEL_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
     "ant-ling",
     "anthropic",
-    "azure-openai-responses",
+    "azure",
     "baseten",
     "cerebras",
     "cloudflare-ai-gateway",
@@ -116,6 +117,7 @@ pub const BUILTIN_MODEL_PROVIDER_IDS: &[&str] = &[
     "qwen-token-plan",
     "qwen-token-plan-cn",
     "qwen-token-plan-individual",
+    "qwen-token-plan-individual-cn",
     "radius",
     "together",
     "typesafe",
