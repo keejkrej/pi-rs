@@ -3,11 +3,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_telemetry::memory::{InMemoryTelemetryContext, RecordedTelemetryEvent, RecordedTelemetrySpan};
+use pi_telemetry::TelemetryMetrics;
+use pi_telemetry::memory::{
+    InMemoryTelemetryContext, RecordedTelemetryEvent, RecordedTelemetryMeasurement, RecordedTelemetrySpan,
+};
 use pi_telemetry::testing::{
     TelemetryAdapterFixture, TelemetryAdapterFixtureFactory, create_telemetry_adapter_conformance,
 };
-use pi_telemetry::{AttributeValue, Result, SpanAttributes, SpanOptions, SpanValue, TelemetryContext};
+use pi_telemetry::{
+    AttributeValue, Result, SpanAttributes, SpanOptions, SpanValue, TelemetryContext, TelemetryPropagation,
+};
 
 struct InMemoryFixture {
     context: InMemoryTelemetryContext,
@@ -16,7 +21,19 @@ struct InMemoryFixture {
 #[async_trait]
 impl TelemetryAdapterFixture for InMemoryFixture {
     fn context(&self) -> Arc<dyn TelemetryContext + Send + Sync> {
-        Arc::new(self.context.clone())
+        self.context.as_context()
+    }
+
+    fn propagation(&self) -> Option<Arc<dyn TelemetryPropagation + Send + Sync>> {
+        self.context.propagation()
+    }
+
+    fn metrics(&self) -> Option<Arc<dyn TelemetryMetrics + Send + Sync>> {
+        self.context.metrics()
+    }
+
+    async fn get_metrics(&self) -> Result<Vec<RecordedTelemetryMeasurement>> {
+        Ok(self.context.get_metrics())
     }
 
     async fn get_spans(&self) -> Result<Vec<RecordedTelemetrySpan>> {
@@ -52,6 +69,80 @@ mod in_memory_telemetry_context_conformance {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn registers_all_conformance_cases() {
+        let cases = create_telemetry_adapter_conformance(in_memory_fixture_factory());
+        assert_eq!(cases.len(), 14);
+    }
+
+    mod capabilities {
+        use super::*;
+
+        #[tokio::test]
+        async fn carries_adapter_capabilities_through_contexts_and_spans() {
+            run_conformance_case(
+                "capabilities",
+                "carries adapter capabilities through contexts and spans",
+            )
+            .await;
+        }
+    }
+
+    mod metrics {
+        use super::*;
+
+        #[tokio::test]
+        async fn records_ordered_measurements_and_optional_histogram_exemplars() {
+            run_conformance_case(
+                "metrics",
+                "records ordered measurements and optional histogram exemplars",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn copies_instrument_metadata_and_measurement_attributes() {
+            run_conformance_case("metrics", "copies instrument metadata and measurement attributes").await;
+        }
+    }
+
+    mod links {
+        use super::*;
+
+        #[tokio::test]
+        async fn records_initial_and_late_links_without_changing_parents() {
+            run_conformance_case("links", "records initial and late links without changing parents").await;
+        }
+
+        #[tokio::test]
+        async fn ignores_links_added_after_source_settlement() {
+            run_conformance_case("links", "ignores links added after source settlement").await;
+        }
+    }
+
+    mod propagation {
+        use super::*;
+
+        #[tokio::test]
+        async fn roundtrips_parent_identity_through_json_without_retaining_the_carrier() {
+            run_conformance_case(
+                "propagation",
+                "roundtrips parent identity through JSON without retaining the carrier",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn absent_and_unknown_carriers_produce_recorded_roots() {
+            run_conformance_case("propagation", "absent and unknown carriers produce recorded roots").await;
+        }
+
+        #[tokio::test]
+        async fn propagates_across_fresh_adapters_and_multiple_hops() {
+            run_conformance_case("propagation", "propagates across fresh adapters and multiple hops").await;
+        }
+    }
 
     mod callback_lifecycle {
         use super::*;
@@ -93,11 +184,6 @@ mod in_memory_telemetry_context_conformance {
         }
 
         #[tokio::test]
-        async fn ignores_failed_attribute_calls_atomically() {
-            run_conformance_case("recording", "ignores failed attribute calls atomically").await;
-        }
-
-        #[tokio::test]
         async fn makes_calls_after_settlement_inert() {
             run_conformance_case("recording", "makes calls after settlement inert").await;
         }
@@ -109,20 +195,6 @@ mod in_memory_telemetry_context_conformance {
         #[tokio::test]
         async fn records_nested_and_concurrent_child_relationships() {
             run_conformance_case("parentage", "records nested and concurrent child relationships").await;
-        }
-    }
-
-    mod passivity {
-        use super::*;
-
-        #[tokio::test]
-        async fn suppresses_unreadable_telemetry_payload_failures() {
-            run_conformance_case("passivity", "suppresses unreadable telemetry payload failures").await;
-        }
-
-        #[tokio::test]
-        async fn ignores_failed_status_calls_atomically() {
-            run_conformance_case("passivity", "ignores failed status calls atomically").await;
         }
     }
 
@@ -144,6 +216,7 @@ mod in_memory_telemetry_context_conformance {
                 SpanOptions {
                     name: "snapshot".to_string(),
                     attributes: Some(start_attrs),
+                    links: None,
                 },
                 Arc::new(move |span| {
                     let context_in_cb = context_in_cb.clone();

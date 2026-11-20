@@ -130,6 +130,11 @@ impl<T, R> EventStream<T, R> {
         }
     }
 
+    pub fn is_done(&self) -> bool {
+        let state = self.inner.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.done
+    }
+
     pub fn try_result(&self) -> Option<R>
     where
         R: Clone,
@@ -180,6 +185,8 @@ impl<T, R: Clone> Future for EventStreamResult<T, R> {
 #[derive(Clone)]
 pub struct AssistantMessageEventStream {
     inner: EventStream<AssistantMessageEvent, AssistantMessage>,
+    started_at_ms: i64,
+    started_at_monotonic: std::time::Instant,
 }
 
 impl AssistantMessageEventStream {
@@ -198,14 +205,33 @@ impl AssistantMessageEventStream {
                     _ => fallback_unexpected_result_message("Unexpected event type for final result"),
                 },
             ),
+            started_at_ms: pi_js::time::now_ms(),
+            started_at_monotonic: std::time::Instant::now(),
         }
     }
 
-    pub fn push(&self, event: AssistantMessageEvent) {
+    fn time_message(&self, message: &mut AssistantMessage) {
+        if self.inner.is_done() || message.duration_ms.is_some() || message.timestamp < self.started_at_ms {
+            return;
+        }
+        let elapsed = self.started_at_monotonic.elapsed().as_secs_f64() * 1000.0;
+        let rounded = elapsed.round().max(0.0);
+        message.duration_ms = Some(rounded.min(i64::MAX as f64) as i64);
+    }
+
+    pub fn push(&self, mut event: AssistantMessageEvent) {
+        match &mut event {
+            AssistantMessageEvent::Done { message, .. } => self.time_message(message),
+            AssistantMessageEvent::Error { error, .. } => self.time_message(error),
+            _ => {}
+        }
         self.inner.push(event);
     }
 
-    pub fn end(&self, result: Option<AssistantMessage>) {
+    pub fn end(&self, mut result: Option<AssistantMessage>) {
+        if let Some(ref mut message) = result {
+            self.time_message(message);
+        }
         self.inner.end(result);
     }
 
@@ -260,6 +286,7 @@ fn fallback_unexpected_result_message(reason: &str) -> AssistantMessage {
                 cache_read: 0.0,
                 cache_write: 0.0,
                 total: 0.0,
+                total_from_provider: None,
             },
         },
         stop_reason: StopReason::Error,
@@ -268,6 +295,7 @@ fn fallback_unexpected_result_message(reason: &str) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 

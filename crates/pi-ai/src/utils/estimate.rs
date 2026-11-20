@@ -8,8 +8,12 @@ use crate::types::{
 };
 use crate::utils::text::get_system_message_text;
 
-const CHARS_PER_TOKEN: usize = 4;
+const CHARS_PER_TOKEN: f64 = 3.5;
 const ESTIMATED_IMAGE_CHARS: usize = 4800;
+
+fn chars_to_tokens(chars: usize) -> i64 {
+    (chars as f64 / CHARS_PER_TOKEN).ceil() as i64
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,11 +120,11 @@ fn estimate_text_and_image_content_chars(content: TextOrBlocks<'_>) -> usize {
 }
 
 pub fn estimate_text_tokens(text: &str) -> i64 {
-    pi_js::str16::len(text).div_ceil(CHARS_PER_TOKEN) as i64
+    chars_to_tokens(pi_js::str16::len(text))
 }
 
 pub fn estimate_text_and_image_content_tokens<'a>(content: impl Into<TextOrBlocks<'a>>) -> i64 {
-    estimate_text_and_image_content_chars(content.into()).div_ceil(CHARS_PER_TOKEN) as i64
+    chars_to_tokens(estimate_text_and_image_content_chars(content.into()))
 }
 
 fn estimate_tools_tokens<T: Serialize>(tools: Option<&[T]>) -> i64 {
@@ -160,7 +164,7 @@ pub fn estimate_message_tokens(message: &Message) -> i64 {
                     }
                 }
             }
-            chars.div_ceil(CHARS_PER_TOKEN) as i64
+            chars_to_tokens(chars)
         }
     }
 }

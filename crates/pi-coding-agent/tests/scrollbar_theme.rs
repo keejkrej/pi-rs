@@ -5,7 +5,7 @@ use std::sync::Arc;
 use pi_coding_agent::modes::interactive::theme::theme::{
     ThemeBg, ThemeColor, load_theme_from_path, set_theme_json_validator,
 };
-use pi_coding_agent::modes::interactive::theme::theme_json::validate_theme_json;
+use pi_coding_agent::modes::interactive::theme::theme_schema::validate_theme_json;
 use pi_tui::TerminalColorMode;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};

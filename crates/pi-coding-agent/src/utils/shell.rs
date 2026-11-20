@@ -9,7 +9,14 @@ use pi_js::{Error, Result};
 use crate::config::get_bin_dir;
 
 pub type TaskkillSpawnFn = Arc<dyn Fn(&str, &[String]) -> std::io::Result<()> + Send + Sync>;
+pub type ShellPathExistsFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+pub type FindExecutableFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type UnixSignalFn = Arc<dyn Fn(i32, &str) -> std::result::Result<(), ()> + Send + Sync>;
+
 static TASKKILL_SPAWN_SLOT: LazyLock<Slot<TaskkillSpawnFn>> = LazyLock::new(Slot::new);
+static SHELL_PATH_EXISTS_SLOT: LazyLock<Slot<ShellPathExistsFn>> = LazyLock::new(Slot::new);
+static FIND_EXECUTABLE_SLOT: LazyLock<Slot<FindExecutableFn>> = LazyLock::new(Slot::new);
+static UNIX_SIGNAL_SLOT: LazyLock<Slot<UnixSignalFn>> = LazyLock::new(Slot::new);
 
 #[doc(hidden)]
 pub mod testing {
@@ -17,6 +24,18 @@ pub mod testing {
 
     pub fn override_taskkill_spawn(func: TaskkillSpawnFn) -> Guard {
         TASKKILL_SPAWN_SLOT.set(Arc::new(func))
+    }
+
+    pub fn override_shell_path_exists(func: ShellPathExistsFn) -> Guard {
+        SHELL_PATH_EXISTS_SLOT.set(Arc::new(func))
+    }
+
+    pub fn override_find_executable(func: FindExecutableFn) -> Guard {
+        FIND_EXECUTABLE_SLOT.set(Arc::new(func))
+    }
+
+    pub fn override_unix_signal(func: UnixSignalFn) -> Guard {
+        UNIX_SIGNAL_SLOT.set(Arc::new(func))
     }
 }
 
@@ -36,14 +55,33 @@ pub struct ShellConfig {
 static TRACKED_DETACHED_CHILD_PIDS: LazyLock<Mutex<IndexSet<u32>>> = LazyLock::new(|| Mutex::new(IndexSet::new()));
 
 fn is_legacy_wsl_bash_path(path: &str) -> bool {
-    let normalized = path.replace('/', "\\").to_ascii_lowercase();
-    if normalized.len() < 3 {
-        return false;
+    let normalized = pi_js::path::win32::normalize(path).to_ascii_lowercase();
+    if let Some(system_root) = pi_js::env::var("SystemRoot").filter(|s| !s.is_empty()) {
+        let bytes = system_root.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || (bytes[2] != b'\\' && bytes[2] != b'/')
+        {
+            return false;
+        }
+        return ["System32", "Sysnative"].iter().any(|directory| {
+            normalized == pi_js::path::win32::join(&[&system_root, directory, "bash.exe"]).to_ascii_lowercase()
+        });
     }
+    // Fall back to conventional launcher paths only when the Windows directory is unknown.
     let bytes = normalized.as_bytes();
-    bytes[0].is_ascii_alphabetic()
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
         && &bytes[1..3] == b":\\"
         && (normalized[3..].eq("windows\\system32\\bash.exe") || normalized[3..].eq("windows\\sysnative\\bash.exe"))
+}
+
+fn shell_path_exists(path: &str) -> bool {
+    if let Some(hook) = SHELL_PATH_EXISTS_SLOT.get() {
+        return hook(path);
+    }
+    pi_js::fs::access(path, 0).is_ok()
 }
 
 fn get_bash_shell_config(shell: &str) -> ShellConfig {
@@ -63,6 +101,9 @@ fn get_bash_shell_config(shell: &str) -> ShellConfig {
 }
 
 fn find_executable_on_path(executable: &str) -> Option<String> {
+    if let Some(hook) = FIND_EXECUTABLE_SLOT.get() {
+        return hook(executable);
+    }
     let vars = pi_js::env::vars();
     let path_var = vars
         .iter()
@@ -81,7 +122,7 @@ fn find_executable_on_path(executable: &str) -> Option<String> {
 /// 3. On Unix: `/bin/bash`, then bash on PATH, then fallback to `sh`
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> Result<ShellConfig> {
     if let Some(custom) = custom_shell_path.filter(|s| !s.is_empty()) {
-        if pi_js::fs::exists(custom) {
+        if shell_path_exists(custom) {
             return Ok(get_bash_shell_config(custom));
         }
         return Err(Error::msg(format!("Custom shell path not found: {custom}")));
@@ -97,7 +138,7 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> Result<ShellConfig> 
         }
 
         for path in &paths {
-            if pi_js::fs::exists(path) {
+            if shell_path_exists(path) {
                 return Ok(get_bash_shell_config(path));
             }
         }
@@ -112,7 +153,7 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> Result<ShellConfig> 
         )));
     }
 
-    if pi_js::fs::exists("/bin/bash") {
+    if shell_path_exists("/bin/bash") {
         return Ok(get_bash_shell_config("/bin/bash"));
     }
 
@@ -141,7 +182,30 @@ pub fn get_power_shell_config() -> Result<ShellConfig> {
         return Err(Error::msg("The powershell tool is only available on Windows."));
     }
 
-    let shell = find_executable_on_path("pwsh.exe").or_else(|| find_executable_on_path("powershell.exe"));
+    let mut shell = find_executable_on_path("pwsh.exe");
+    // Installation directories may be on any drive and need not be on PATH.
+    if shell.is_none()
+        && let Some(program_files) = pi_js::env::var("ProgramFiles").filter(|s| !s.is_empty())
+    {
+        let pwsh7 = pi_js::path::win32::join(&[&program_files, "PowerShell", "7", "pwsh.exe"]);
+        if shell_path_exists(&pwsh7) {
+            shell = Some(pwsh7);
+        }
+    }
+
+    if shell.is_none() {
+        shell = find_executable_on_path("powershell.exe");
+    }
+    if shell.is_none()
+        && let Some(system_root) = pi_js::env::var("SystemRoot").filter(|s| !s.is_empty())
+    {
+        let windows_ps =
+            pi_js::path::win32::join(&[&system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"]);
+        if shell_path_exists(&windows_ps) {
+            shell = Some(windows_ps);
+        }
+    }
+
     let Some(shell) = shell else {
         return Err(Error::msg(
             "No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH.",
@@ -247,11 +311,25 @@ pub fn kill_process_tree(pid: u32) {
         }
         let _ = cmd.spawn();
     } else {
+        let raw_pid = pid as i32;
+        if let Some(hook) = UNIX_SIGNAL_SLOT.get() {
+            if pi_js::env::platform() == "darwin" {
+                let _ = hook(-raw_pid, "SIGSTOP");
+            }
+            if hook(-raw_pid, "SIGKILL").is_err() {
+                let _ = hook(raw_pid, "SIGKILL");
+            }
+            return;
+        }
         #[cfg(unix)]
         {
             use nix::sys::signal::{Signal, killpg};
             use nix::unistd::Pid;
-            let raw_pid = pid as i32;
+            if pi_js::env::platform() == "darwin" {
+                // macOS signals group members individually after releasing the group lock; stop first to reduce
+                // the race where a killed child wakes a waiting shell (`a; b` starting `b` during cancel, #11252).
+                let _ = killpg(Pid::from_raw(raw_pid), Signal::SIGSTOP);
+            }
             if killpg(Pid::from_raw(raw_pid), Signal::SIGKILL).is_err() {
                 let _ = nix::sys::signal::kill(Pid::from_raw(raw_pid), Signal::SIGKILL);
             }

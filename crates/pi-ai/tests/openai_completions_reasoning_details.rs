@@ -57,6 +57,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -372,4 +373,47 @@ async fn merges_consecutive_text_and_summary_reasoning_details_deltas_before_rep
         get_assistant_payload(&payload2).get("reasoning_details"),
         Some(&Value::Array(expected))
     );
+}
+
+// https://github.com/earendil-works/pi/issues/10926
+#[tokio::test]
+async fn places_thinking_before_text_when_one_delta_carries_reasoning_content_or_details_and_content() {
+    let (msg1, _) = run_stream(
+        Vec::new(),
+        vec![chunk(
+            json!({ "role": "assistant", "reasoning_content": "thinking", "content": "answer" }),
+            Some("stop"),
+        )],
+    )
+    .await;
+    assert_eq!(
+        msg1.content,
+        vec![
+            AssistantContentBlock::Thinking(pi_ai::types::ThinkingContent {
+                thinking: "thinking".to_owned(),
+                thinking_signature: Some("reasoning_content".to_owned()),
+                redacted: None,
+            }),
+            AssistantContentBlock::Text(pi_ai::types::TextContent::new("answer")),
+        ]
+    );
+
+    let (msg2, _) = run_stream(
+        Vec::new(),
+        vec![chunk(
+            json!({ "reasoning_details": [reasoning_detail()], "content": "answer" }),
+            Some("stop"),
+        )],
+    )
+    .await;
+    let types: Vec<&str> = msg2
+        .content
+        .iter()
+        .map(|b| match b {
+            AssistantContentBlock::Thinking(_) => "thinking",
+            AssistantContentBlock::Text(_) => "text",
+            AssistantContentBlock::ToolCall(_) => "toolCall",
+        })
+        .collect();
+    assert_eq!(types, vec!["thinking", "text"]);
 }

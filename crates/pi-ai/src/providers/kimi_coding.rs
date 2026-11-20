@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::api::anthropic_messages_lazy::anthropic_messages_api;
+use crate::api::openai_completions_lazy::openai_completions_api;
 use crate::auth::helpers::{env_api_key_auth, lazy_oauth};
 use crate::auth::oauth::load::load_kimi_coding_oauth;
 use crate::auth::types::ProviderAuth;
@@ -15,7 +15,7 @@ pub fn kimi_coding_provider() -> Arc<dyn Provider + Send + Sync> {
     build_provider(CreateProviderOptions {
         id: "kimi-coding".to_owned(),
         name: Some("Kimi For Coding".to_owned()),
-        base_url: Some("https://api.kimi.com/coding".to_owned()),
+        base_url: Some("https://api.kimi.com/coding/v1".to_owned()),
         headers: None,
         auth: ProviderAuth {
             api_key: Some(env_api_key_auth("Kimi API key", &["KIMI_API_KEY"])),
@@ -30,7 +30,7 @@ pub fn kimi_coding_provider() -> Arc<dyn Provider + Send + Sync> {
         fetch_models: None,
         filter_models: None,
         filter_all_models: None,
-        api: Some(CreateProviderApi::Single(anthropic_messages_api())),
+        api: Some(CreateProviderApi::Single(openai_completions_api())),
         images: None,
         classifiers: None,
     })

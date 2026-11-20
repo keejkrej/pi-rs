@@ -37,6 +37,7 @@ fn max_thinking_level_is_opt_in_and_exposed_for_codex_models() {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     };
 
     assert_eq!(
@@ -113,7 +114,14 @@ fn max_thinking_level_is_opt_in_and_exposed_for_codex_models() {
 
 #[tokio::test]
 async fn sends_max_to_codex_responses_api() {
-    for model_id in ["gpt-5.6-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] {
+    for model_id in [
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+    ] {
         let model = get_model("openai-codex", model_id).unwrap();
         let context = normalize_context(&Context {
             system_prompt: Some("You are a helpful assistant.".to_string()),

@@ -4,18 +4,21 @@ mod support;
 
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_js::env::testing::EnvGuard;
 use pi_tui::components::image::{Image, ImageOptions, ImageTheme};
+use pi_tui::components::input::Input;
 use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
 use pi_tui::terminal_image::{
     CellDimensions, EncodeKittyOptions, ImageDimensions, ImageProtocol, TerminalCapabilities, delete_kitty_image,
     encode_kitty, reset_capabilities_cache, set_capabilities, set_cell_dimensions,
 };
-use pi_tui::tui::Component;
+use pi_tui::tui::{CURSOR_MARKER, Component, OverlayOptions, SizeValue, render_fake_cursor};
 use pi_tui::tui_main_screen::TuiMainScreen;
+use pi_tui::utils::slice_by_column;
 use serial_test::serial;
 
 use support::virtual_terminal::VirtualTerminal;
@@ -91,13 +94,19 @@ impl Component for InputComponent {
 
 struct BoundedWriteTerminal {
     writes: Mutex<Vec<String>>,
+    rows: AtomicI64,
 }
 
 impl BoundedWriteTerminal {
     fn new() -> Self {
         Self {
             writes: Mutex::new(Vec::new()),
+            rows: AtomicI64::new(24),
         }
+    }
+
+    fn set_rows(&self, rows: i64) {
+        self.rows.store(rows, Ordering::SeqCst);
     }
 
     fn writes(&self) -> Vec<String> {
@@ -126,7 +135,7 @@ impl Terminal for BoundedWriteTerminal {
     }
 
     fn rows(&self) -> i64 {
-        24
+        self.rows.load(Ordering::SeqCst)
     }
 
     fn kitty_protocol_active(&self) -> bool {
@@ -340,6 +349,64 @@ mod tui_debug_logging {
 
 mod tui_bounded_render_output {
     use super::*;
+
+    #[test]
+    fn does_not_write_duplicate_cursor_markers_to_the_terminal() {
+        let terminal = Arc::new(BoundedWriteTerminal::new());
+        let tui = TuiMainScreen::new(terminal.clone(), None, None);
+        // Regression for #9257: terminals may render the payload of a leaked APC marker.
+        let component = Arc::new(TestComponent::new(vec![format!(
+            "\x1b[31m界🙂\x1b[0m{CURSOR_MARKER} world{CURSOR_MARKER}"
+        )]));
+        tui.add_child(component);
+
+        tui.render_now(None);
+
+        let output = terminal.writes().concat();
+        assert!(
+            output.contains("\x1b[31m界🙂\x1b[0m world"),
+            "visible styled text should be preserved"
+        );
+        assert!(
+            !output.contains(CURSOR_MARKER),
+            "internal cursor markers must not reach the terminal"
+        );
+        assert!(
+            output.contains("\x1b[5G"),
+            "the first marker should keep the cursor at visible column 4"
+        );
+    }
+
+    #[test]
+    fn does_not_write_cursor_markers_from_other_visible_or_scrollback_lines() {
+        let terminal = Arc::new(BoundedWriteTerminal::new());
+        terminal.set_rows(2);
+        let tui = TuiMainScreen::new(terminal.clone(), None, None);
+        // Regression for #9257: cursor extraction must not leave markers on other rendered lines.
+        let component = Arc::new(TestComponent::new(vec![
+            format!("offscreen{CURSOR_MARKER}"),
+            format!("a{CURSOR_MARKER}"),
+            format!("visible-b{CURSOR_MARKER}"),
+        ]));
+        tui.add_child(component);
+
+        tui.render_now(None);
+
+        let output = terminal.writes().concat();
+        assert!(
+            output.contains("offscreen"),
+            "full renders should preserve scrollback content"
+        );
+        assert!(output.contains("a"), "full renders should preserve other visible lines");
+        assert!(
+            !output.contains(CURSOR_MARKER),
+            "internal cursor markers must not reach the terminal"
+        );
+        assert!(
+            output.contains("\x1b[10G"),
+            "the bottom visible marker should determine the cursor column"
+        );
+    }
 
     #[test]
     fn splits_a_large_full_render_without_changing_its_output() {
@@ -1218,5 +1285,127 @@ mod tui_differential_rendering {
             ]
         );
         tui.stop(None);
+    }
+}
+
+mod tui_osc_133_markers {
+    use super::*;
+
+    #[test]
+    fn does_not_write_osc_133_prompt_markers_to_the_terminal() {
+        // Terminals read 133;A as a new shell prompt and drop the OSC 7501 program status.
+        let terminal = Arc::new(BoundedWriteTerminal::new());
+        let tui = TuiMainScreen::new(terminal.clone(), None, None);
+        let component = Arc::new(TestComponent::new(vec![
+            "\x1b]133;A\x07prompt".to_string(),
+            "\x1b]133;B\x07\x1b]133;C\x07output".to_string(),
+        ]));
+        tui.add_child(component.clone());
+        tui.render_now(None);
+        component.set_lines(vec![
+            "\x1b]133;A\x07prompt".to_string(),
+            "\x1b]133;B\x07\x1b]133;C\x07output".to_string(),
+            "\x1b]133;A\x1b\\reply".to_string(),
+            "\x1b]133;B\x1b\\\x1b]133;C\x1b\\done".to_string(),
+        ]);
+        tui.render_now(None);
+
+        let output = terminal.writes().concat();
+        assert!(
+            !output.contains("\x1b]133;"),
+            "regular mode must not emit OSC 133 markers"
+        );
+        for text in ["prompt", "output", "reply", "done"] {
+            assert!(output.contains(text), "expected output to include {text}");
+        }
+    }
+}
+
+mod tui_fake_cursor {
+    use super::*;
+
+    #[tokio::test]
+    async fn draws_the_focused_fake_cursor_in_reverse_video_and_omits_it_when_the_hardware_cursor_is_shown() {
+        let terminal = Arc::new(LoggingVirtualTerminal::new(20, 5));
+        let tui = Arc::new(TuiMainScreen::new(terminal.clone(), None, None));
+        let input = Arc::new(Input::new(None));
+        input.set_value("abc");
+        tui.add_child(input.clone());
+        tui.set_focus(Some(input));
+        tui.start();
+        terminal.wait_for_render().await;
+        assert!(terminal.get_writes().contains("> \x1b[7ma\x1b[27mbc"));
+
+        terminal.clear_writes();
+        tui.set_show_hardware_cursor(true);
+        terminal.wait_for_render().await;
+        assert!(!terminal.get_writes().contains("\x1b[7m"));
+        assert!(!terminal.get_writes().contains("\x1b_pi:"));
+
+        tui.stop(None);
+    }
+
+    #[tokio::test]
+    async fn keeps_the_fake_cursor_of_an_unfocused_input_when_the_hardware_cursor_is_shown() {
+        let terminal = Arc::new(LoggingVirtualTerminal::new(20, 5));
+        let tui = Arc::new(TuiMainScreen::new(terminal.clone(), Some(true), None));
+        let input = Arc::new(Input::new(None));
+        input.set_value("abc");
+        tui.add_child(input);
+        tui.start();
+        terminal.wait_for_render().await;
+        assert!(terminal.get_writes().contains("> \x1b[7ma\x1b[27mbc"));
+        tui.stop(None);
+    }
+
+    #[tokio::test]
+    async fn omits_the_focused_fake_cursor_when_truncation_dropped_its_end_marker() {
+        let terminal = Arc::new(LoggingVirtualTerminal::new(20, 5));
+        let tui = Arc::new(TuiMainScreen::new(terminal.clone(), Some(true), None));
+        let truncated = slice_by_column(
+            &format!("ab{CURSOR_MARKER}{}def", render_fake_cursor("c")),
+            0,
+            3,
+            Some(true),
+        );
+        let base = Arc::new(TestComponent::new(vec![truncated]));
+        tui.add_child(base);
+        tui.start();
+        terminal.wait_for_render().await;
+        assert!(!terminal.get_writes().contains("\x1b[7m"));
+        assert!(terminal.get_writes().ends_with("\x1b[3G"));
+        tui.stop(None);
+    }
+
+    #[tokio::test]
+    async fn keeps_the_cursor_when_an_overlay_ends_directly_left_of_it() {
+        for show_hardware_cursor in [false, true] {
+            let terminal = Arc::new(LoggingVirtualTerminal::new(20, 5));
+            let tui = Arc::new(TuiMainScreen::new(terminal.clone(), Some(show_hardware_cursor), None));
+            let base = Arc::new(TestComponent::new(vec![format!(
+                "abc{CURSOR_MARKER}{}ef",
+                render_fake_cursor("d")
+            )]));
+            tui.add_child(base);
+            let overlay = Arc::new(TestComponent::new(vec!["XXX".to_string()]));
+            tui.show_overlay(
+                overlay,
+                Some(OverlayOptions {
+                    row: Some(SizeValue::Absolute(0.0)),
+                    col: Some(SizeValue::Absolute(0.0)),
+                    width: Some(SizeValue::Absolute(3.0)),
+                    ..Default::default()
+                }),
+            );
+            tui.start();
+            terminal.wait_for_render().await;
+
+            let writes = terminal.get_writes();
+            assert!(writes.contains("XXX"));
+            assert_eq!(writes.contains("\x1b[7md"), !show_hardware_cursor);
+            // The hardware cursor is positioned at column 4 in both modes
+            assert!(writes.ends_with("\x1b[4G"));
+            tui.stop(None);
+        }
     }
 }

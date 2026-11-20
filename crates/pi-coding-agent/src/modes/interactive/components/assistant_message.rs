@@ -12,7 +12,9 @@ use pi_tui::{
 };
 
 use super::super::theme::theme::{ThemeColor, get_markdown_theme, theme};
-use super::markdown_transform::{MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic};
+use super::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic_with_meta,
+};
 
 const OSC133_ZONE_START: &str = "\x1b]133;A\x07";
 const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
@@ -36,6 +38,8 @@ struct AssistantMessageState {
     hidden_thinking_label: String,
     output_pad: i64,
     markdown_transformers: Vec<MarkdownTransformer>,
+    message_id: Option<String>,
+    timestamp: Option<String>,
     last_message: Option<AssistantMessage>,
     has_tool_calls: bool,
     thinking_visibility_overrides: IndexMap<usize, bool>,
@@ -64,6 +68,29 @@ impl AssistantMessageComponent {
         output_pad: Option<i64>,
         markdown_transformers: Option<Vec<MarkdownTransformer>>,
     ) -> Self {
+        Self::new_with_meta(
+            message,
+            hide_thinking_block,
+            markdown_theme,
+            hidden_thinking_label,
+            output_pad,
+            markdown_transformers,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_meta(
+        message: Option<AssistantMessage>,
+        hide_thinking_block: Option<bool>,
+        markdown_theme: Option<MarkdownTheme>,
+        hidden_thinking_label: Option<&str>,
+        output_pad: Option<i64>,
+        markdown_transformers: Option<Vec<MarkdownTransformer>>,
+        message_id: Option<String>,
+        timestamp: Option<String>,
+    ) -> Self {
         let container = Container::new();
         let content_container = Container::new();
         container.add_child(Arc::new(content_container.clone()));
@@ -79,6 +106,8 @@ impl AssistantMessageComponent {
                     hidden_thinking_label: hidden_thinking_label.unwrap_or("Thinking...").to_string(),
                     output_pad: output_pad.unwrap_or(1),
                     markdown_transformers: markdown_transformers.unwrap_or_default(),
+                    message_id,
+                    timestamp,
                     last_message: None,
                     has_tool_calls: false,
                     thinking_visibility_overrides: IndexMap::new(),
@@ -178,6 +207,8 @@ impl AssistantMessageComponent {
             hidden_thinking_label,
             output_pad,
             transformers,
+            message_id,
+            timestamp,
             overrides,
             prev_slots,
         ) = {
@@ -190,6 +221,8 @@ impl AssistantMessageComponent {
                 state.hidden_thinking_label.clone(),
                 state.output_pad,
                 state.markdown_transformers.clone(),
+                state.message_id.clone(),
+                state.timestamp.clone(),
                 state.thinking_visibility_overrides.clone(),
                 prev_slots,
             )
@@ -211,6 +244,8 @@ impl AssistantMessageComponent {
                 } else {
                     let streaming_c = Arc::clone(&streaming_flag);
                     let transformers_c = transformers.clone();
+                    let msg_id_c = message_id.clone();
+                    let ts_c = timestamp.clone();
                     Markdown::new(
                         text,
                         output_pad,
@@ -220,10 +255,12 @@ impl AssistantMessageComponent {
                         Some(MarkdownOptions {
                             preserve_ordered_list_markers: None,
                             preserve_backslash_escapes: None,
-                            transform: Some(create_markdown_transform_dynamic(
+                            transform: Some(create_markdown_transform_dynamic_with_meta(
                                 msg_type,
                                 Arc::new(move || streaming_c.load(Ordering::SeqCst)),
                                 transformers_c,
+                                msg_id_c,
+                                ts_c,
                             )),
                             render_latex: None,
                         }),

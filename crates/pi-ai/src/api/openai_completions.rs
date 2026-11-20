@@ -12,35 +12,40 @@ use serde_json::{Map, Value};
 
 use crate::api::constrained_sampling::{
     GrammarConstrainedSampling, GrammarSamplingFormat, GrammarToolInputJsonBuffer,
-    append_grammar_tool_input_json_delta, create_grammar_tool_input_properties, get_json_schema_tool_parameters,
-    resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
+    append_grammar_tool_input_json_delta, close_grammar_tool_input_json, create_grammar_tool_input_properties,
+    get_json_schema_tool_parameters, resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
 };
 use crate::api::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::api::openai_responses_shared::{create_pending_assistant_message, response_to_sse_json_stream};
-use crate::api::simple_options::{build_base_options, clamp_thinking_budget_to_answer_room, thinking_budget_for_level};
+use crate::api::simple_options::{
+    build_base_options, clamp_thinking_budget_to_answer_room, resolve_sampling_params, thinking_budget_for_level,
+};
 use crate::api::transform_messages::transform_messages;
 use crate::models::{calculate_cost, clamp_thinking_level};
 use crate::types::{
     AnyModel, ApiStreamOptions, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheControlFormat,
     CacheRetention, ChatTemplateKwargValue, ChatTemplateVarKind, MaxTokensField, Message, Model, ModelModality,
-    ModelThinkingLevel, OpenAICompletionsCompat, ProviderEnv, ProviderHeaders, ProviderResponse, ProviderStreams,
-    SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets,
-    ThinkingContent, ThinkingFormat, ThinkingLevel, ThinkingTokenBudgetField, Tool, ToolCall, ToolChoice,
-    TranscriptContext, Usage, UserContentBlock, UserMessageContent,
+    ModelThinkingLevel, OpenAICompletionsCompat, PromptCacheKeyMode, ProviderEnv, ProviderHeaders, ProviderResponse,
+    ProviderStreams, SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
+    ThinkingBudgets, ThinkingContent, ThinkingFormat, ThinkingLevel, ThinkingTokenBudgetField, Tool, ToolCall,
+    ToolChoice, TranscriptContext, Usage, UserContentBlock, UserMessageContent,
 };
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::error_body::{format_provider_error, normalize_provider_error};
 use crate::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::utils::headers::headers_to_record;
-use crate::utils::json_parse::parse_streaming_json;
-use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
+use crate::utils::openrouter_cost::{
+    OpenRouterCostDetails, OpenRouterUsageAccounting, apply_openrouter_reported_cost, is_openrouter_model,
+};
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{get_system_message_text, render_system_message_update};
 use crate::utils::transcript::{
-    get_declared_tools, get_initial_system_message, resolve_transcript, resolve_transcript_tools,
-    without_initial_system_message,
+    TranscriptToolSupport, get_declared_tools, get_initial_system_message, resolve_transcript,
+    resolve_transcript_tools_with_support, without_initial_system_message,
 };
 
 /// Reasoning effort values accepted by OpenAI Chat Completions requests.
@@ -236,6 +241,8 @@ pub struct ResolvedOpenAICompletionsCompat {
     pub max_tokens_field: MaxTokensField,
     pub requires_tool_result_name: bool,
     pub requires_assistant_after_tool_result: bool,
+    pub requires_non_null_assistant_content: bool,
+    pub requires_tools_with_tool_history: bool,
     pub requires_thinking_as_text: bool,
     pub requires_mistral_tool_ids: bool,
     pub requires_reasoning_content_on_assistant_messages: Option<bool>,
@@ -246,6 +253,7 @@ pub struct ResolvedOpenAICompletionsCompat {
     pub supports_long_cache_retention: bool,
     pub send_session_affinity_headers: bool,
     pub session_affinity_format: SessionAffinityFormat,
+    pub prompt_cache_key_mode: Option<PromptCacheKeyMode>,
     pub supports_open_ai_grammar_tools: bool,
     pub supports_open_ai_custom_tools: bool,
     pub cache_control_format: Option<CacheControlFormat>,
@@ -313,10 +321,7 @@ pub fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         SessionAffinityFormat::OpenAI
     };
 
-    let send_affinity_default = provider == "openai"
-        || base_url.contains("api.openai.com")
-        || provider == "openrouter"
-        || base_url.contains("openrouter.ai");
+    let send_affinity_default = provider == "openrouter" || base_url.contains("openrouter.ai");
 
     let c: Option<&OpenAICompletionsCompat> = model.compat.as_ref().and_then(|mc| mc.as_openai_completions());
 
@@ -334,6 +339,8 @@ pub fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         }),
         requires_tool_result_name: c.and_then(|x| x.requires_tool_result_name).unwrap_or(is_mistral),
         requires_assistant_after_tool_result: c.and_then(|x| x.requires_assistant_after_tool_result).unwrap_or(false),
+        requires_non_null_assistant_content: c.and_then(|x| x.requires_non_null_assistant_content).unwrap_or(false),
+        requires_tools_with_tool_history: c.and_then(|x| x.requires_tools_with_tool_history).unwrap_or(false),
         requires_thinking_as_text: c.and_then(|x| x.requires_thinking_as_text).unwrap_or(false),
         requires_mistral_tool_ids: is_mistral,
         requires_reasoning_content_on_assistant_messages: c
@@ -353,6 +360,7 @@ pub fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
             .and_then(|x| x.send_session_affinity_headers)
             .unwrap_or(send_affinity_default),
         session_affinity_format: c.and_then(|x| x.session_affinity_format).unwrap_or(default_affinity),
+        prompt_cache_key_mode: c.and_then(|x| x.prompt_cache_key_mode),
         supports_open_ai_grammar_tools: c.and_then(|x| x.supports_open_ai_grammar_tools).unwrap_or(false),
         supports_open_ai_custom_tools: false,
         cache_control_format: c.and_then(|x| x.cache_control_format),
@@ -478,9 +486,14 @@ pub fn convert_messages(
         normalize_completions_tool_call_id(id, target, &compat_clone)
     };
 
-    let allow_tool_changes = compat.supports_mid_convo_system_messages == Some(true)
-        && compat.supports_mid_convo_tool_additions == Some(true);
-    let transcript_tools = resolve_transcript_tools(&context.messages, allow_tool_changes);
+    let tool_support = if compat.supports_mid_convo_system_messages == Some(true)
+        && compat.supports_mid_convo_tool_additions == Some(true)
+    {
+        TranscriptToolSupport::Additions
+    } else {
+        TranscriptToolSupport::None
+    };
+    let transcript_tools = resolve_transcript_tools_with_support(&context.messages, tool_support);
     let initial_sys = get_initial_system_message(&context.messages);
     let body_msgs = without_initial_system_message(&context.messages);
     let transformed = transform_messages(&body_msgs, model, Some(&normalize_cb));
@@ -507,13 +520,16 @@ pub fn convert_messages(
         .last()
         .and_then(|v| v.get("role").and_then(Value::as_str).map(str::to_string));
 
+    let mut system_index = usize::from(initial_sys.is_some());
     let mut i = 0;
     while i < transformed.len() {
         let msg = &transformed[i];
         match msg {
             Message::System(sys) => {
                 if compat.supports_mid_convo_system_messages == Some(true) {
-                    if transcript_tools.anchors_additions {
+                    let anchors_tools = system_index >= transcript_tools.folded_system_messages;
+                    system_index += 1;
+                    if anchors_tools {
                         if let Some(added) = sys.tools_added.as_deref().filter(|t| !t.is_empty()) {
                             if let Ok(converted) = convert_tools(added, compat) {
                                 let mut tool_msg = Map::new();
@@ -717,7 +733,13 @@ pub fn convert_messages(
                         i += 1;
                         continue;
                     }
-                    msg_obj.insert("content".to_string(), Value::Null);
+                    let empty_content =
+                        if compat.requires_assistant_after_tool_result || compat.requires_non_null_assistant_content {
+                            Value::String(String::new())
+                        } else {
+                            Value::Null
+                        };
+                    msg_obj.insert("content".to_string(), empty_content);
                 } else if content_parts.len() == 1
                     && !compat.requires_thinking_as_text
                     && content_parts[0].get("type").and_then(Value::as_str) == Some("text")
@@ -773,7 +795,7 @@ pub fn convert_messages(
                         }
                     }
                     let joined = texts.join("\n");
-                    let content_str = if !joined.is_empty() {
+                    let content_str = if !joined.trim().is_empty() {
                         joined
                     } else if !image_blocks.is_empty() {
                         "(see attached image)".to_string()
@@ -1038,9 +1060,14 @@ fn build_params(
     cache_retention: CacheRetention,
     grammar_props: &IndexMap<String, String>,
 ) -> Result<Value> {
-    let allow_tool_changes = compat.supports_mid_convo_system_messages == Some(true)
-        && compat.supports_mid_convo_tool_additions == Some(true);
-    let transcript_tools = resolve_transcript_tools(&context.messages, allow_tool_changes);
+    let tool_support = if compat.supports_mid_convo_system_messages == Some(true)
+        && compat.supports_mid_convo_tool_additions == Some(true)
+    {
+        TranscriptToolSupport::Additions
+    } else {
+        TranscriptToolSupport::None
+    };
+    let transcript_tools = resolve_transcript_tools_with_support(&context.messages, tool_support);
     let msg_opts = ConvertCompletionsMessagesOptions {
         grammar_tool_input_properties: if grammar_props.is_empty() {
             None
@@ -1054,9 +1081,12 @@ fn build_params(
     params.insert("model".to_string(), Value::String(model.id.clone()));
     params.insert("stream".to_string(), Value::Bool(true));
 
-    if (model.base_url.contains("api.openai.com") && cache_retention != CacheRetention::None)
-        || (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention)
-    {
+    let prompt_cache_key_mode = compat.prompt_cache_key_mode.unwrap_or(PromptCacheKeyMode::Auto);
+    let supports_prompt_cache_key = prompt_cache_key_mode == PromptCacheKeyMode::Enabled
+        || (prompt_cache_key_mode == PromptCacheKeyMode::Auto
+            && (model.base_url.contains("api.openai.com")
+                || (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention)));
+    if cache_retention != CacheRetention::None && supports_prompt_cache_key {
         if let Some(key) = clamp_openai_prompt_cache_key(options.base.session_id.as_deref()) {
             if !key.is_empty() {
                 params.insert("prompt_cache_key".to_string(), Value::String(key));
@@ -1096,7 +1126,7 @@ fn build_params(
 
     let mut tools_json = if !transcript_tools.request_tools.is_empty() {
         Some(convert_tools(&transcript_tools.request_tools, compat)?)
-    } else if has_tool_history(&context.messages) {
+    } else if compat.requires_tools_with_tool_history && has_tool_history(&context.messages) {
         Some(Vec::new())
     } else {
         None
@@ -1342,19 +1372,29 @@ fn build_params(
         }
     }
 
-    if let Some(model_sp) = &model.sampling_params {
-        for (k, v) in model_sp {
-            params.insert(k.clone(), v.clone());
-        }
-    }
+    let mut merged_req_sampling: IndexMap<String, Value> = IndexMap::new();
     if let Some(base_sp) = &options.base.sampling_params {
         for (k, v) in base_sp {
-            params.insert(k.clone(), v.clone());
+            merged_req_sampling.insert(k.clone(), v.clone());
         }
     }
     if let Some(opt_sp) = &options.sampling_params {
         for (k, v) in opt_sp {
-            params.insert(k.clone(), v.clone());
+            merged_req_sampling.insert(k.clone(), v.clone());
+        }
+    }
+    let sampling_level = options
+        .reasoning_effort
+        .map(OpenAICompletionsReasoningEffort::to_model_thinking_level)
+        .unwrap_or(ModelThinkingLevel::Off);
+    let resolved_sampling = resolve_sampling_params(
+        model,
+        sampling_level,
+        (!merged_req_sampling.is_empty()).then_some(&merged_req_sampling),
+    );
+    if let Some(sp) = resolved_sampling {
+        for (k, v) in sp {
+            params.insert(k, v);
         }
     }
 
@@ -1383,12 +1423,21 @@ fn build_headers(
     options_headers: Option<&ProviderHeaders>,
     cache_session_id: Option<&str>,
     compat: &ResolvedOpenAICompletionsCompat,
+    identity: Option<&ClientIdentity>,
 ) -> Headers {
     let mut headers = Headers::new();
     headers.set("accept", "text/event-stream");
     headers.set("content-type", "application/json");
-    headers.set("user-agent", &get_pi_user_agent());
     headers.set("authorization", &format!("Bearer {api_key}"));
+
+    let identity_headers = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        identity,
+    );
+    apply_raw_header_layer(&mut headers, &identity_headers);
 
     if let Some(mh) = &model.headers {
         apply_raw_header_layer(&mut headers, mh);
@@ -1478,17 +1527,48 @@ fn parse_chunk_usage(usage_val: &Value, model: &Model) -> Usage {
         ..Usage::default()
     };
     calculate_cost(&AnyModel::Chat(model.clone()), &mut usage);
+    if is_openrouter_model(model) {
+        let cost = usage_val.get("cost").and_then(Value::as_f64);
+        let is_byok = usage_val.get("is_byok").and_then(Value::as_bool).unwrap_or(false);
+        let cost_details = usage_val
+            .get("cost_details")
+            .and_then(Value::as_object)
+            .map(|d| OpenRouterCostDetails {
+                upstream_inference_cost: d.get("upstream_inference_cost").and_then(Value::as_f64),
+                upstream_inference_prompt_cost: d
+                    .get("upstream_inference_prompt_cost")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN),
+                upstream_inference_completions_cost: d
+                    .get("upstream_inference_completions_cost")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN),
+                server_tool_cost: d.get("server_tool_cost").and_then(Value::as_f64),
+            });
+        apply_openrouter_reported_cost(
+            &mut usage,
+            &OpenRouterUsageAccounting {
+                cost,
+                is_byok,
+                cost_details,
+            },
+        );
+    }
     usage
 }
 
-#[derive(Debug, Clone)]
+enum ToolCallInput {
+    Json(ToolCallArgumentsStream),
+    Custom {
+        prop: String,
+        buffer: GrammarToolInputJsonBuffer,
+    },
+}
+
 struct ToolCallScratch {
     block_idx: usize,
     stream_index: Option<usize>,
-    partial_args: Option<String>,
-    custom_input_prop: Option<String>,
-    custom_input_val: String,
-    custom_json_buffer: Option<GrammarToolInputJsonBuffer>,
+    input: ToolCallInput,
 }
 
 fn fill_missing_common_reasoning_detail_fields(last: &mut Map<String, Value>, source: &Map<String, Value>) {
@@ -1650,6 +1730,7 @@ async fn run_completions_stream(
         options.base.headers.as_ref(),
         cache_session_id,
         &compat,
+        options.base.identity.as_ref(),
     );
 
     let mut params = build_params(
@@ -1746,34 +1827,8 @@ async fn run_completions_stream(
             continue;
         };
 
-        if let Some(content_delta) = delta.get("content").and_then(Value::as_str) {
-            if !content_delta.is_empty() {
-                let idx = if let Some(i) = text_block_idx {
-                    i
-                } else {
-                    let i = output.content.len();
-                    output.content.push(AssistantContentBlock::Text(TextContent {
-                        text: String::new(),
-                        text_signature: None,
-                    }));
-                    text_block_idx = Some(i);
-                    stream.push(AssistantMessageEvent::TextStart {
-                        content_index: i,
-                        partial: output.clone(),
-                    });
-                    i
-                };
-                if let Some(AssistantContentBlock::Text(t)) = output.content.get_mut(idx) {
-                    t.text.push_str(content_delta);
-                }
-                stream.push(AssistantMessageEvent::TextDelta {
-                    content_index: idx,
-                    delta: content_delta.to_string(),
-                    partial: output.clone(),
-                });
-            }
-        }
-
+        // Handle reasoning before content: some proxies (e.g. LiteLLM) aggregate reasoning and
+        // answer into one delta, and the thinking block must precede the text block.
         let mut found_field: Option<&str> = None;
         for field in ["reasoning_content", "reasoning", "reasoning_text"] {
             if delta.get(field).and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
@@ -1810,6 +1865,58 @@ async fn run_completions_stream(
                 stream.push(AssistantMessageEvent::ThinkingDelta {
                     content_index: idx,
                     delta: r_delta.to_string(),
+                    partial: output.clone(),
+                });
+            }
+        }
+
+        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+            for d in details {
+                let idx = if let Some(i) = thinking_block_idx {
+                    i
+                } else {
+                    let i = output.content.len();
+                    output.content.push(AssistantContentBlock::Thinking(ThinkingContent {
+                        thinking: String::new(),
+                        thinking_signature: Some(String::new()),
+                        redacted: None,
+                    }));
+                    thinking_block_idx = Some(i);
+                    stream.push(AssistantMessageEvent::ThinkingStart {
+                        content_index: i,
+                        partial: output.clone(),
+                    });
+                    i
+                };
+                let _ = idx;
+                let vec_ref = streamed_reasoning_details.get_or_insert_with(Vec::new);
+                append_openai_reasoning_detail(vec_ref, d);
+            }
+        }
+
+        if let Some(content_delta) = delta.get("content").and_then(Value::as_str) {
+            if !content_delta.is_empty() {
+                let idx = if let Some(i) = text_block_idx {
+                    i
+                } else {
+                    let i = output.content.len();
+                    output.content.push(AssistantContentBlock::Text(TextContent {
+                        text: String::new(),
+                        text_signature: None,
+                    }));
+                    text_block_idx = Some(i);
+                    stream.push(AssistantMessageEvent::TextStart {
+                        content_index: i,
+                        partial: output.clone(),
+                    });
+                    i
+                };
+                if let Some(AssistantContentBlock::Text(t)) = output.content.get_mut(idx) {
+                    t.text.push_str(content_delta);
+                }
+                stream.push(AssistantMessageEvent::TextDelta {
+                    content_index: idx,
+                    delta: content_delta.to_string(),
                     partial: output.clone(),
                 });
             }
@@ -1858,6 +1965,7 @@ async fn run_completions_stream(
                         id: tc_id.unwrap_or("").to_string(),
                         name: fn_name.to_string(),
                         arguments: init_args,
+                        arguments_error: None,
                         thought_signature: None,
                         namespace: None,
                     }));
@@ -1865,22 +1973,13 @@ async fn run_completions_stream(
                     tc_scratches.push(ToolCallScratch {
                         block_idx,
                         stream_index: s_idx,
-                        partial_args: if custom_prop.is_none() {
-                            Some(String::new())
-                        } else {
-                            None
+                        input: match custom_prop {
+                            Some(prop) => ToolCallInput::Custom {
+                                prop,
+                                buffer: GrammarToolInputJsonBuffer::default(),
+                            },
+                            None => ToolCallInput::Json(ToolCallArgumentsStream::new()),
                         },
-                        custom_json_buffer: if custom_prop.is_some() {
-                            Some(GrammarToolInputJsonBuffer {
-                                input: String::new(),
-                                started: false,
-                                closed: false,
-                            })
-                        } else {
-                            None
-                        },
-                        custom_input_prop: custom_prop,
-                        custom_input_val: String::new(),
                     });
                     if let Some(i) = s_idx {
                         by_stream_index.insert(i, new_si);
@@ -1898,6 +1997,7 @@ async fn run_completions_stream(
                 };
 
                 let block_idx = tc_scratches[scratch_idx].block_idx;
+                let mut resolved_name = String::new();
                 if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
                     if tc.id.is_empty() {
                         if let Some(id) = tc_id {
@@ -1910,6 +2010,7 @@ async fn run_completions_stream(
                     if tc.name.is_empty() && !fn_name.is_empty() {
                         tc.name = fn_name.to_string();
                     }
+                    resolved_name = tc.name.clone();
                 }
                 if let Some(i) = s_idx {
                     if tc_scratches[scratch_idx].stream_index.is_none() {
@@ -1917,41 +2018,55 @@ async fn run_completions_stream(
                         by_stream_index.insert(i, scratch_idx);
                     }
                 }
+                if tc_delta.get("custom").is_some()
+                    && tc_delta.get("function").is_none()
+                    && !matches!(tc_scratches[scratch_idx].input, ToolCallInput::Custom { .. })
+                {
+                    let prop = grammar_props
+                        .get(&resolved_name)
+                        .cloned()
+                        .unwrap_or_else(|| "input".to_string());
+                    if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
+                        let mut map = IndexMap::new();
+                        map.insert(prop.clone(), Value::String(String::new()));
+                        tc.arguments = map;
+                    }
+                    tc_scratches[scratch_idx].input = ToolCallInput::Custom {
+                        prop,
+                        buffer: GrammarToolInputJsonBuffer::default(),
+                    };
+                }
 
                 let mut emitted_delta = String::new();
-                if let Some(arg_delta) = tc_delta
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(Value::as_str)
-                {
-                    emitted_delta = arg_delta.to_string();
-                    let next_partial = {
-                        let s = &mut tc_scratches[scratch_idx];
-                        let buf = s.partial_args.get_or_insert_with(String::new);
-                        buf.push_str(arg_delta);
-                        buf.clone()
-                    };
-                    let parsed = parse_streaming_json(Some(&next_partial));
-                    if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
-                        tc.arguments = parsed;
+                match &mut tc_scratches[scratch_idx].input {
+                    ToolCallInput::Json(args_stream) => {
+                        if let Some(arg_delta) = tc_delta
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            emitted_delta = arg_delta.to_string();
+                            let parsed = args_stream.append(arg_delta);
+                            if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
+                                tc.arguments = parsed;
+                            }
+                        }
                     }
-                } else if let Some(custom_delta) = tc_delta
-                    .get("custom")
-                    .and_then(|c| c.get("input"))
-                    .and_then(Value::as_str)
-                {
-                    let scratch = &mut tc_scratches[scratch_idx];
-                    if let (Some(prop), Some(jbuf)) =
-                        (scratch.custom_input_prop.clone(), scratch.custom_json_buffer.as_mut())
-                    {
-                        scratch.custom_input_val.push_str(custom_delta);
-                        emitted_delta =
-                            append_grammar_tool_input_json_delta(jbuf, &prop, &scratch.custom_input_val, false)?
-                                .unwrap_or_default();
-                        if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
-                            let mut map = IndexMap::new();
-                            map.insert(prop, Value::String(scratch.custom_input_val.clone()));
-                            tc.arguments = map;
+                    ToolCallInput::Custom { prop, buffer } => {
+                        if let Some(custom_delta) = tc_delta
+                            .get("custom")
+                            .and_then(|c| c.get("input"))
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            emitted_delta =
+                                append_grammar_tool_input_json_delta(buffer, prop, custom_delta)?.unwrap_or_default();
+                            if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
+                                let mut map = IndexMap::new();
+                                map.insert(prop.clone(), Value::String(buffer.input.clone()));
+                                tc.arguments = map;
+                            }
                         }
                     }
                 }
@@ -1961,30 +2076,6 @@ async fn run_completions_stream(
                     delta: emitted_delta,
                     partial: output.clone(),
                 });
-            }
-        }
-
-        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
-            for d in details {
-                let idx = if let Some(i) = thinking_block_idx {
-                    i
-                } else {
-                    let i = output.content.len();
-                    output.content.push(AssistantContentBlock::Thinking(ThinkingContent {
-                        thinking: String::new(),
-                        thinking_signature: Some(String::new()),
-                        redacted: None,
-                    }));
-                    thinking_block_idx = Some(i);
-                    stream.push(AssistantMessageEvent::ThinkingStart {
-                        content_index: i,
-                        partial: output.clone(),
-                    });
-                    i
-                };
-                let _ = idx;
-                let vec_ref = streamed_reasoning_details.get_or_insert_with(Vec::new);
-                append_openai_reasoning_detail(vec_ref, d);
             }
         }
     }
@@ -2016,21 +2107,23 @@ async fn run_completions_stream(
             partial: output.clone(),
         });
     }
-    for mut scratch in tc_scratches {
-        if let (Some(prop), Some(ref mut jbuf)) =
-            (scratch.custom_input_prop.take(), scratch.custom_json_buffer.as_mut())
-        {
-            if let Some(delta) = append_grammar_tool_input_json_delta(jbuf, &prop, &scratch.custom_input_val, true)? {
-                stream.push(AssistantMessageEvent::ToolCallDelta {
-                    content_index: scratch.block_idx,
-                    delta,
-                    partial: output.clone(),
-                });
+    for scratch in tc_scratches {
+        match scratch.input {
+            ToolCallInput::Custom { prop, mut buffer } => {
+                if let Some(delta) = close_grammar_tool_input_json(&mut buffer, &prop, None)? {
+                    stream.push(AssistantMessageEvent::ToolCallDelta {
+                        content_index: scratch.block_idx,
+                        delta,
+                        partial: output.clone(),
+                    });
+                }
             }
-        } else if let Some(ref pa) = scratch.partial_args {
-            let parsed = parse_streaming_json(Some(pa));
-            if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(scratch.block_idx) {
-                tc.arguments = parsed;
+            ToolCallInput::Json(args_stream) => {
+                let parsed = args_stream.finish();
+                if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(scratch.block_idx) {
+                    tc.arguments = parsed.arguments;
+                    tc.arguments_error = parsed.arguments_error;
+                }
             }
         }
         if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get(scratch.block_idx) {

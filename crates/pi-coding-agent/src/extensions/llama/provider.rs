@@ -11,6 +11,7 @@ use crate::extensions::llama::client::{
 };
 use pi_ai::api::llama_cpp_classify_lazy::llama_cpp_classify_api;
 use pi_ai::api::openai_completions_lazy::openai_completions_api;
+use pi_ai::api::typesafe_system_one_lazy::typesafe_system_one_api;
 use pi_ai::auth::types::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthCheck, AuthContext, AuthPrompt, AuthResult, AuthType,
     Credential, ModelAuth, ProviderAuth, ProviderAuthInteraction,
@@ -137,23 +138,57 @@ fn zero_cost() -> ModelCost {
     }
 }
 
+fn is_decision_model(model: &LlamaModelInfo) -> bool {
+    model
+        .architecture
+        .as_ref()
+        .and_then(|a| a.output_modalities.as_ref())
+        .is_some_and(|mods| mods.iter().any(|m| m == "decisions"))
+}
+
+fn is_chat_model(model: &LlamaModelInfo) -> bool {
+    !is_decision_model(model)
+        || model
+            .architecture
+            .as_ref()
+            .and_then(|a| a.output_modalities.as_ref())
+            .is_some_and(|mods| mods.iter().any(|m| m == "text"))
+}
+
+fn is_llama_classifier_api(api: &str) -> bool {
+    api == KnownClassifierApi::LlamaCppClassify.as_str() || api == KnownClassifierApi::TypesafeSystemOne.as_str()
+}
+
 fn to_pi_classifier_model(
     model: &LlamaModelInfo,
     server_url: &str,
     cached_context_window: Option<i64>,
-) -> ClassifierModel {
-    ClassifierModel {
+) -> Result<ClassifierModel> {
+    let decision = is_decision_model(model);
+    let (api, base_url) = if decision {
+        (
+            KnownClassifierApi::TypesafeSystemOne.as_str().to_string(),
+            llama_inference_url(server_url)?,
+        )
+    } else {
+        (
+            KnownClassifierApi::LlamaCppClassify.as_str().to_string(),
+            server_url.to_string(),
+        )
+    };
+    Ok(ClassifierModel {
         id: model.id.clone(),
         name: model.id.clone(),
-        api: KnownClassifierApi::LlamaCppClassify.as_str().to_string(),
+        api,
         provider: LLAMA_PROVIDER_ID.to_string(),
-        base_url: server_url.to_string(),
+        base_url,
         input: vec![ModelModality::Text],
         input_limits: None,
         context_window: context_window_of(model, cached_context_window),
         cost: zero_cost(),
         headers: None,
-    }
+        compat: None,
+    })
 }
 
 fn to_pi_model(
@@ -206,6 +241,7 @@ fn to_pi_model(
         max_tokens: context_window,
         headers: None,
         sampling_params: None,
+        sampling_params_by_thinking_level: None,
         compat: Some(ModelCompat::from(OpenAICompletionsCompat {
             supports_store: Some(false),
             supports_developer_role: Some(false),
@@ -333,7 +369,8 @@ struct LlamaProvider {
     auth: ProviderAuth,
     catalog: Arc<Mutex<CatalogState>>,
     streams: ProviderStreams,
-    classifier: ProviderClassifier,
+    fallback_classifier: ProviderClassifier,
+    decision_classifier: ProviderClassifier,
 }
 
 impl Provider for LlamaProvider {
@@ -381,8 +418,7 @@ impl Provider for LlamaProvider {
                             restored.push(m.clone());
                         }
                         AnyModel::Classifier(c)
-                            if c.provider == LLAMA_PROVIDER_ID
-                                && c.api == KnownClassifierApi::LlamaCppClassify.as_str() =>
+                            if c.provider == LLAMA_PROVIDER_ID && is_llama_classifier_api(&c.api) =>
                         {
                             cached_context_windows.insert(c.id.clone(), c.context_window);
                             restored_classifiers.push(c.clone());
@@ -433,8 +469,10 @@ impl Provider for LlamaProvider {
                 .filter(|m| model_is_selectable(m, router_autoload))
                 .collect();
 
-            let mut refreshed = Vec::with_capacity(selectable.len());
-            for model in &selectable {
+            let chat_selectable: Vec<&LlamaModelInfo> =
+                selectable.iter().copied().filter(|m| is_chat_model(m)).collect();
+            let mut refreshed = Vec::with_capacity(chat_selectable.len());
+            for model in &chat_selectable {
                 let cached = cached_context_windows.get(&model.id).copied();
                 if model.status.value != LlamaModelStatus::Loaded {
                     refreshed.push(to_pi_model(model, &server_url, None, cached)?);
@@ -448,10 +486,14 @@ impl Provider for LlamaProvider {
                     refreshed.push(to_pi_model(model, &server_url, Some(&props), cached)?);
                 }
             }
-            let refreshed_classifiers: Vec<ClassifierModel> = selectable
-                .iter()
-                .map(|m| to_pi_classifier_model(m, &server_url, cached_context_windows.get(&m.id).copied()))
-                .collect();
+            let mut refreshed_classifiers = Vec::with_capacity(selectable.len());
+            for m in &selectable {
+                refreshed_classifiers.push(to_pi_classifier_model(
+                    m,
+                    &server_url,
+                    cached_context_windows.get(&m.id).copied(),
+                )?);
+            }
 
             if context.signal.aborted() {
                 return Ok(());
@@ -504,7 +546,12 @@ impl Provider for LlamaProvider {
         context: &ClassifierContext,
         options: Option<ClassifierOptions>,
     ) -> Option<BoxFuture<ClassifierResult>> {
-        Some(self.classifier.classify(model, context, options))
+        let runner = if model.api == KnownClassifierApi::TypesafeSystemOne.as_str() {
+            &self.decision_classifier
+        } else {
+            &self.fallback_classifier
+        };
+        Some(runner.classify(model, context, options))
     }
 }
 
@@ -525,8 +572,10 @@ impl LlamaProviderController {
         let mut classifiers = Vec::new();
         for model in catalog {
             if model_is_selectable(model, options.router_autoload) {
-                models.push(to_pi_model(model, server_url, None, None)?);
-                classifiers.push(to_pi_classifier_model(model, server_url, None));
+                if is_chat_model(model) {
+                    models.push(to_pi_model(model, server_url, None, None)?);
+                }
+                classifiers.push(to_pi_classifier_model(model, server_url, None)?);
             }
         }
         let mut guard = self.catalog.lock().unwrap_or_else(|e| e.into_inner());
@@ -545,7 +594,8 @@ pub fn create_llama_provider() -> LlamaProviderController {
         },
         catalog: Arc::clone(&catalog),
         streams: openai_completions_api(),
-        classifier: llama_cpp_classify_api(),
+        fallback_classifier: llama_cpp_classify_api(),
+        decision_classifier: typesafe_system_one_api(),
     });
     LlamaProviderController { provider, catalog }
 }

@@ -42,7 +42,7 @@ fn build_wait_tool(started: Arc<Notify>, release: Arc<Notify>) -> AgentTool {
         name: "wait".to_string(),
         label: "Wait".to_string(),
         description: "Wait for a release signal".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

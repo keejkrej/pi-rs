@@ -37,9 +37,13 @@ pub struct GrepToolDetails {
 }
 
 /// Pluggable operations for the grep tool.
+/// Search runs local ripgrep; override the tool's `execute` for remote search.
 pub trait GrepOperations: Send + Sync {
     fn is_directory(&self, absolute_path: &str) -> BoxFuture<pi_js::Result<bool>>;
-    fn read_file(&self, absolute_path: &str) -> BoxFuture<pi_js::Result<String>>;
+    /// Deprecated and ignored: context lines come directly from ripgrep.
+    fn read_file(&self, _absolute_path: &str) -> BoxFuture<pi_js::Result<String>> {
+        Box::pin(async { Ok(String::new()) })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -117,7 +121,7 @@ pub fn grep_tool_schema() -> Schema {
             "glob",
             t::string().optional().with(
                 "description",
-                "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'",
+                "Filter files by glob pattern, relative to path, e.g. '*.ts', 'src/**/*.ts' or '**/*.spec.ts'. A pattern without '/' matches file names at any depth",
             ),
         ),
         (

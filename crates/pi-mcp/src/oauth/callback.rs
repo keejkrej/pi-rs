@@ -3,6 +3,7 @@
 #![allow(dead_code, unused_variables)]
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -48,7 +49,7 @@ pub struct OAuthCallbackServer {
 
 struct OAuthCallbackServerInner {
     redirect_url: String,
-    path: String,
+    paths: Vec<String>,
     timeout_ms: i64,
     render_page: Option<Arc<dyn Fn(&OAuthCallbackPage) -> String + Send + Sync>>,
     pending: Mutex<IndexMap<String, PendingOAuthCallback>>,
@@ -59,6 +60,7 @@ struct OAuthCallbackServerInner {
 struct PendingOAuthCallback {
     tx: tokio::sync::oneshot::Sender<Result<OAuthCallback>>,
     timer: pi_js::time::Timeout,
+    path: Option<String>,
 }
 
 fn plain_text(page: &OAuthCallbackPage) -> String {
@@ -77,6 +79,15 @@ impl OAuthCallbackServer {
     }
 
     pub async fn listen(options: Option<OAuthCallbackServerOptions>) -> Result<Self> {
+        Self::listen_with_extra_paths(options, Vec::new()).await
+    }
+
+    // PORT: Additive constructor with `extra_paths` so `OAuthCallbackServerOptions` keeps all
+    // existing struct-literal callers compiling.
+    pub async fn listen_with_extra_paths(
+        options: Option<OAuthCallbackServerOptions>,
+        extra_paths: Vec<String>,
+    ) -> Result<Self> {
         let options = options.unwrap_or_default();
         let host = options.host.unwrap_or_else(|| "127.0.0.1".to_string());
         let redirect_host = options.redirect_host.unwrap_or_else(|| host.clone());
@@ -96,12 +107,14 @@ impl OAuthCallbackServer {
             redirect_host
         };
         let redirect_url = format!("http://{formatted_host}:{}{path}", addr.port());
+        let mut paths = vec![path];
+        paths.extend(extra_paths);
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let server = Self {
             inner: Arc::new(OAuthCallbackServerInner {
                 redirect_url,
-                path,
+                paths,
                 timeout_ms,
                 render_page: options.render_page,
                 pending: Mutex::new(IndexMap::new()),
@@ -112,6 +125,7 @@ impl OAuthCallbackServer {
 
         let srv_for_loop = server.clone();
         let handle = tokio::spawn(async move {
+            let mut conns = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
                     biased;
@@ -120,13 +134,14 @@ impl OAuthCallbackServer {
                             break;
                         }
                     }
+                    Some(_) = conns.join_next(), if !conns.is_empty() => {}
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else {
                             break;
                         };
                         let srv = srv_for_loop.clone();
                         let mut conn_shutdown = shutdown_rx.clone();
-                        tokio::spawn(async move {
+                        conns.spawn(async move {
                             let io = hyper_util::rt::TokioIo::new(stream);
                             let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                                 let srv = srv.clone();
@@ -147,12 +162,27 @@ impl OAuthCallbackServer {
                     }
                 }
             }
+            // Wait briefly for in-flight HTTP responses to flush, then drop unused keep-alive /
+            // preconnect sockets so `close()` returns immediately (#11311).
+            if !conns.is_empty() {
+                let _ = tokio::time::timeout(Duration::from_millis(50), async {
+                    while conns.join_next().await.is_some() {}
+                })
+                .await;
+                conns.shutdown().await;
+            }
         });
         *server.inner.serve_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
         Ok(server)
     }
 
     pub async fn wait_for_callback(&self, state: &str) -> Result<OAuthCallback> {
+        self.wait_for_callback_on_path(state, None).await
+    }
+
+    /// Wait for the authorization response with `state`. With `path`, a response on another path fails,
+    /// so a server-specific redirect URI can tell authorization servers apart (RFC 9700 section 4.4.2.2).
+    pub async fn wait_for_callback_on_path(&self, state: &str, path: Option<&str>) -> Result<OAuthCallback> {
         let rx = {
             let mut pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
             if pending.contains_key(state) {
@@ -171,7 +201,14 @@ impl OAuthCallbackServer {
                     let _ = entry.tx.send(Err(Error::msg("OAuth callback timed out")));
                 }
             });
-            pending.insert(state.to_string(), PendingOAuthCallback { tx, timer });
+            pending.insert(
+                state.to_string(),
+                PendingOAuthCallback {
+                    tx,
+                    timer,
+                    path: path.map(str::to_string),
+                },
+            );
             rx
         };
         rx.await
@@ -225,7 +262,7 @@ impl OAuthCallbackServer {
                 },
             );
         };
-        if url.path() != self.inner.path {
+        if !self.inner.paths.iter().any(|p| p == url.path()) {
             return self.reply(
                 404,
                 &OAuthCallbackPage::Err {
@@ -255,6 +292,21 @@ impl OAuthCallbackServer {
             );
         };
         entry.timer.clear();
+
+        if let Some(ref expected_path) = entry.path
+            && url.path() != expected_path
+        {
+            let _ = entry.tx.send(Err(Error::msg(
+                "The authorization response arrived on another redirect URI",
+            )));
+            return self.reply(
+                400,
+                &OAuthCallbackPage::Err {
+                    message: "Unexpected redirect URI".to_string(),
+                    details: None,
+                },
+            );
+        }
 
         if let Some(error) = query_param("error").filter(|s| !s.is_empty()) {
             let description = query_param("error_description").unwrap_or(error);

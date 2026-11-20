@@ -45,6 +45,7 @@ fn make_assistant_message(text: &str, stop_reason: StopReason, error_message: Op
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -167,6 +168,7 @@ async fn create_retry_session(
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     if delay_message_end_ms > 0 {
         session.bind_extensions(ExtensionBindings::default()).await.unwrap();
@@ -371,6 +373,7 @@ async fn retries_provider_network_error_failures() {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -414,7 +417,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -550,6 +553,7 @@ async fn prompt_waits_for_full_agent_loop_when_retry_produces_tool_calls() {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     session.prompt("Test", None).await.unwrap();

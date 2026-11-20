@@ -141,19 +141,28 @@ fn parse_options(directive: &str) -> pi_js::Result<CodemodeSourceOptions> {
 }
 
 /// Split an optional first-line `// @options: {...}` from the script. Throws
-/// [`CodemodeSourceError`] for empty input and invalid options.
+/// [`CodemodeSourceError`] for empty input, invalid options, and an options line that is not the
+/// first line, which would otherwise be ignored without notice.
 pub fn parse_codemode_source(input: &str) -> pi_js::Result<ParsedCodemodeSource> {
     if pi_js::str16::trim(input).is_empty() {
         return Err(source_error(
             r#"Expected JavaScript source text (non-empty). Provide JS only, optionally with a first line `// @options: {"max_output_tokens": 1000}`."#,
         ));
     }
+    let mut lines = input.split('\n');
+    let raw_first_line = lines.next().unwrap_or("");
+    if let Some(misplaced) = lines.enumerate().find_map(|(idx, line)| {
+        pi_js::str16::trim_start(line)
+            .starts_with(CODEMODE_OPTIONS_PREFIX)
+            .then_some(idx + 1)
+    }) {
+        return Err(source_error(format!(
+            "The {CODEMODE_OPTIONS_PREFIX} line must be the first line of the input; found one on line {}",
+            misplaced + 1
+        )));
+    }
     let newline = input.find('\n');
-    let first_line = match newline {
-        Some(idx) => &input[..idx],
-        None => input,
-    };
-    let first_line = first_line.strip_suffix('\r').unwrap_or(first_line);
+    let first_line = raw_first_line.strip_suffix('\r').unwrap_or(raw_first_line);
     let trimmed = pi_js::str16::trim_start(first_line);
     if !trimmed.starts_with(CODEMODE_OPTIONS_PREFIX) {
         return Ok(ParsedCodemodeSource {

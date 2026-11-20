@@ -14,8 +14,9 @@ use pi_ai::compat::{get_model, stream_simple};
 use pi_ai::env_api_keys::{find_env_keys, get_env_api_key};
 use pi_ai::models::get_supported_thinking_levels;
 use pi_ai::types::{
-    CacheRetention, Context, Message, ModelCompat, ModelInput, ModelThinkingLevel, SimpleStreamOptions, StreamOptions,
-    ThinkingFormat, ThinkingLevel, UserMessage, UserMessageContent,
+    AnthropicMessagesCompat, CacheRetention, Context, Message, Model, ModelCompat, ModelCost, ModelInput,
+    ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingFormat, ThinkingLevel, UserMessage,
+    UserMessageContent,
 };
 use pi_js::Error;
 use pi_js::env::testing::EnvGuard;
@@ -233,8 +234,35 @@ fn exposes_distinct_native_effort_levels_for_glm_and_kimi() {
 }
 
 #[tokio::test]
-async fn keeps_toggle_only_messages_models_on_budget_based_thinking() {
-    let model = get_model("fireworks", "accounts/fireworks/models/nemotron-3-ultra-nvfp4").expect("nemotron");
+async fn keeps_non_adaptive_messages_models_on_budget_based_thinking() {
+    // Use a fixed fixture: the live catalog no longer lists toggle-only Messages models.
+    let model = Model {
+        r#type: None,
+        id: "accounts/fireworks/models/test-toggle-reasoner".to_owned(),
+        name: "Test Toggle Reasoner".to_owned(),
+        api: "anthropic-messages".to_owned(),
+        provider: "fireworks".to_owned(),
+        base_url: "https://api.fireworks.ai/inference".to_owned(),
+        reasoning: true,
+        thinking_level_map: None,
+        prompt_cache: None,
+        input: vec![ModelInput::Text],
+        input_limits: None,
+        cost: ModelCost::default(),
+        context_window: 131_072,
+        max_tokens: 131_072,
+        headers: None,
+        sampling_params: None,
+        compat: Some(ModelCompat::AnthropicMessages(AnthropicMessagesCompat {
+            allow_empty_signature: Some(true),
+            send_session_affinity_headers: Some(true),
+            supports_eager_tool_input_streaming: Some(false),
+            supports_cache_control_on_tools: Some(false),
+            supports_long_cache_retention: Some(false),
+            ..Default::default()
+        })),
+        sampling_params_by_thinking_level: None,
+    };
     let compat = model
         .compat
         .as_ref()
@@ -278,7 +306,7 @@ fn resolves_fireworks_api_key_from_environment() {
 
 #[test]
 fn sets_fireworks_specific_compat_for_session_affinity_and_tool_fields() {
-    let model = get_model("fireworks", "accounts/fireworks/models/nemotron-3-ultra-nvfp4").expect("nemotron");
+    let model = get_model("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash").expect("deepseek-v4p1-flash");
     let compat = model
         .compat
         .as_ref()

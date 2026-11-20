@@ -1,21 +1,23 @@
 mod support;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use bytes::Bytes;
 use indexmap::IndexMap;
 use pi_js::BoxFuture;
+use pi_js::abort::AbortController;
 use pi_js::fetch::testing::{chunked_response, mock_fetch};
 use pi_js::fetch::{Headers, Request, Response};
 use pi_mcp::auth_provider::McpFetchInit;
 use pi_mcp::transports::streamable_http::{
-    ConsumeSseOptions, SseEvent, StreamableHttpReconnectOptions, consume_sse_stream,
+    ConsumeSseOptions, McpHttpError, SseEvent, StreamableHttpReconnectOptions, consume_sse_stream,
 };
 use pi_mcp::{
     AuthProvider, LATEST_PROTOCOL_VERSION, McpAuthRequiredError, McpClient, McpClientOptions, McpFetch,
-    McpSessionExpiredError, StreamableHttpTransport, StreamableHttpTransportOptions, Tool, UnauthorizedContext,
+    McpRequestOptions, McpSessionExpiredError, McpTransport, StreamableHttpTransport, StreamableHttpTransportOptions,
+    Tool, UnauthorizedContext,
 };
 use pretty_assertions::assert_eq;
 use serde_json::{Value, from_value, json};
@@ -898,5 +900,455 @@ async fn classifies_an_expired_established_session() {
         "expected McpSessionExpiredError, got {err}"
     );
     client.close().await.unwrap();
+    servers.close().await;
+}
+
+#[tokio::test]
+async fn recognizes_cr_lf_and_crlf_line_endings_including_crlf_split_across_chunks() {
+    let parse = |chunks: Vec<String>| async move {
+        let response = chunked_response(200, &[], chunks);
+        let stream = response.body_stream().expect("body stream");
+        let events = Arc::new(Mutex::new(Vec::<SseEvent>::new()));
+        let cb = events.clone();
+        consume_sse_stream(
+            stream,
+            ConsumeSseOptions {
+                max_event_bytes: None,
+                on_event: Arc::new(move |ev| cb.lock().unwrap().push(ev)),
+                on_id: None,
+                on_retry: None,
+            },
+        )
+        .await
+        .expect("consume_sse_stream");
+        events.lock().unwrap().clone()
+    };
+
+    let expected = vec![
+        SseEvent {
+            event: None,
+            data: "a\nb".to_string(),
+            id: Some("1".to_string()),
+        },
+        SseEvent {
+            event: None,
+            data: "c".to_string(),
+            id: None,
+        },
+    ];
+    for separator in ["\n", "\r\n", "\r"] {
+        let text = ["id: 1", "data: a", "data: b", "", "data: c", "", ""].join(separator);
+        assert_eq!(parse(vec![text.clone()]).await, expected);
+        let single_chars: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+        assert_eq!(parse(single_chars).await, expected);
+    }
+    assert_eq!(
+        parse(vec![
+            "id: 1\rdata: a\r\ndata: b\n\r".to_string(),
+            "\ndata: c\r\r".to_string(),
+        ])
+        .await,
+        expected
+    );
+}
+
+#[tokio::test]
+async fn dispatches_cr_terminated_events_while_stream_stays_open() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    let stream_inner = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|b| (Ok::<Bytes, pi_js::Error>(b), rx))
+    });
+    let response = Response::from_stream(200, Headers::new(), stream_inner);
+    let stream = response.body_stream().unwrap();
+
+    let (ev_tx, ev_rx) = tokio::sync::oneshot::channel::<SseEvent>();
+    let ev_tx_slot = Arc::new(Mutex::new(Some(ev_tx)));
+    let task = tokio::spawn(async move {
+        let _ = consume_sse_stream(
+            stream,
+            ConsumeSseOptions {
+                max_event_bytes: None,
+                on_event: Arc::new(move |ev| {
+                    if let Some(sender) = ev_tx_slot.lock().unwrap().take() {
+                        let _ = sender.send(ev);
+                    }
+                }),
+                on_id: None,
+                on_retry: None,
+            },
+        )
+        .await;
+    });
+    tx.send(Bytes::from("data: first\r\r")).unwrap();
+    let event = ev_rx.await.expect("event before stream close");
+    assert_eq!(
+        event,
+        SseEvent {
+            event: None,
+            data: "first".to_string(),
+            id: None,
+        }
+    );
+    drop(tx);
+    let _ = task.await;
+}
+
+// #11729: a failed stream must be cancelled, not left open.
+#[tokio::test]
+async fn cancels_the_stream_when_an_event_exceeds_limit() {
+    struct CancelGuard(Arc<AtomicBool>);
+    impl Drop for CancelGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = CancelGuard(cancelled.clone());
+    let s = futures::stream::unfold((0usize, Some(guard)), |(step, guard)| async move {
+        if step == 0 {
+            let chunk = Bytes::from(format!("data: {}\n\n", "x".repeat(512)));
+            Some((Ok::<Bytes, pi_js::Error>(chunk), (1, guard)))
+        } else {
+            let _hold = guard;
+            std::future::pending::<()>().await;
+            None
+        }
+    });
+    let response = Response::from_stream(200, Headers::new(), s);
+    let err = consume_sse_stream(
+        response.body_stream().unwrap(),
+        ConsumeSseOptions {
+            max_event_bytes: Some(128),
+            on_event: Arc::new(|_| {}),
+            on_id: None,
+            on_retry: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("MCP SSE event exceeds 128 bytes"));
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+// #11335
+#[tokio::test]
+async fn applies_max_message_bytes_to_json_responses() {
+    async fn send_bytes(description_bytes: usize) -> pi_js::Result<Vec<pi_mcp::JsonRpcMessage>> {
+        let body = pi_js::json::stringify(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "tools": [{ "name": "echo", "description": "x".repeat(description_bytes), "inputSchema": {} }] }
+        }));
+        let body_arc = body;
+        let fetch: McpFetch = Arc::new(move |_, _| {
+            let b = body_arc.clone();
+            Box::pin(async move {
+                let mut h = Headers::new();
+                h.set("content-type", "application/json");
+                Ok(Response::new(200, h, b))
+            })
+        });
+        let transport = StreamableHttpTransport::new(StreamableHttpTransportOptions {
+            url: "http://127.0.0.1/mcp".to_string(),
+            headers: None,
+            fetch: Some(fetch),
+            open_get_stream: Some(false),
+            max_message_bytes: Some(512),
+            auth_provider: None,
+            reconnect: None,
+        });
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let cb = messages.clone();
+        let _u = transport.on_message(Arc::new(move |m| cb.lock().unwrap().push(m.clone())));
+        transport.start().await?;
+        let req: pi_mcp::JsonRpcMessage =
+            from_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
+        let res = transport.send(req).await;
+        let _ = transport.close().await;
+        res?;
+        Ok(messages.lock().unwrap().clone())
+    }
+
+    assert_eq!(send_bytes(32).await.unwrap().len(), 1);
+    let err = send_bytes(2048).await.unwrap_err();
+    assert!(err.to_string().contains("MCP JSON response exceeds 512 bytes"));
+}
+
+#[tokio::test]
+async fn decodes_json_responses_split_inside_bom_and_multibyte_character() {
+    let text = format!(
+        "\u{FEFF}{}",
+        pi_js::json::stringify(&json!({ "jsonrpc": "2.0", "id": 1, "result": { "text": "é€" } }))
+    );
+    let single_bytes: Vec<String> = Vec::new();
+    let _ = single_bytes;
+    let raw_bytes = text.into_bytes();
+    let fetch: McpFetch = Arc::new(move |_, _| {
+        let bytes = raw_bytes.clone();
+        Box::pin(async move {
+            let chunks: Vec<pi_js::Result<Bytes>> = bytes.into_iter().map(|b| Ok(Bytes::from(vec![b]))).collect();
+            let mut h = Headers::new();
+            h.set("content-type", "application/json");
+            Ok(Response::from_stream(200, h, futures::stream::iter(chunks)))
+        })
+    });
+    let transport = StreamableHttpTransport::new(StreamableHttpTransportOptions {
+        url: "http://127.0.0.1/mcp".to_string(),
+        headers: None,
+        fetch: Some(fetch),
+        open_get_stream: Some(false),
+        max_message_bytes: None,
+        auth_provider: None,
+        reconnect: None,
+    });
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let cb = messages.clone();
+    let _u = transport.on_message(Arc::new(move |m| cb.lock().unwrap().push(m.clone())));
+    transport.start().await.unwrap();
+    let req: pi_mcp::JsonRpcMessage = from_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
+    transport.send(req).await.unwrap();
+    transport.close().await.unwrap();
+    let expected: pi_mcp::JsonRpcMessage =
+        from_value(json!({ "jsonrpc": "2.0", "id": 1, "result": { "text": "é€" } })).unwrap();
+    assert_eq!(*messages.lock().unwrap(), vec![expected]);
+}
+
+#[tokio::test]
+async fn reads_only_an_excerpt_of_http_error_bodies_and_cancels_the_rest() {
+    struct CancelGuard(Arc<AtomicBool>);
+    impl Drop for CancelGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard_flag = cancelled.clone();
+    let fetch: McpFetch = Arc::new(move |_, _| {
+        let flag = guard_flag.clone();
+        Box::pin(async move {
+            let guard = CancelGuard(flag);
+            let s = futures::stream::unfold(guard, |guard| async move {
+                Some((Ok::<Bytes, pi_js::Error>(Bytes::from("x".repeat(1024))), guard))
+            });
+            Ok(Response::from_stream(500, Headers::new(), s))
+        })
+    });
+    let transport = StreamableHttpTransport::new(StreamableHttpTransportOptions {
+        url: "http://127.0.0.1/mcp".to_string(),
+        headers: None,
+        fetch: Some(fetch),
+        open_get_stream: Some(false),
+        max_message_bytes: None,
+        auth_provider: None,
+        reconnect: None,
+    });
+    transport.start().await.unwrap();
+    let req: pi_mcp::JsonRpcMessage = from_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
+    let err = transport.send(req).await.unwrap_err();
+    transport.close().await.unwrap();
+    let http_err = err.downcast_ref::<McpHttpError>().expect("McpHttpError");
+    assert_eq!(http_err.body.len(), 8 * 1024);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+// #10598
+#[tokio::test]
+async fn does_not_retry_requests_cancelled_while_authorization_was_recovering() {
+    let token = Arc::new(Mutex::new("old".to_string()));
+    let executed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut servers = TestServers::new();
+    let tok_srv = token.clone();
+    let _ = tok_srv;
+    let exec_srv = executed.clone();
+    let (url, _) = start_server(&mut servers, move |req, reqs| {
+        let exec = exec_srv.clone();
+        Box::pin(async move {
+            if req.method != "POST" {
+                return protocol_handler(req, reqs, None).await;
+            }
+            let message = req.body_json().unwrap_or(Value::Null);
+            let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+            if method == "tools/call" && req.header("authorization") == Some("Bearer old") {
+                return TestResponse::with_headers(401, &[("www-authenticate", "Bearer")], "");
+            }
+            if method == "tools/call"
+                && let Some(name) = message
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(Value::as_str)
+            {
+                exec.lock().unwrap().push(name.to_string());
+            }
+            protocol_handler(req, reqs, Some(message)).await
+        })
+    })
+    .await;
+
+    let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let (all_tx, all_rx) = tokio::sync::watch::channel(false);
+
+    struct BlockingAuth {
+        token: Arc<Mutex<String>>,
+        gate_rx: tokio::sync::watch::Receiver<bool>,
+        refreshes: Arc<AtomicUsize>,
+        waiting: Arc<AtomicUsize>,
+        all_tx: tokio::sync::watch::Sender<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthProvider for BlockingAuth {
+        async fn token(&self) -> pi_js::Result<Option<String>> {
+            Ok(Some(self.token.lock().unwrap().clone()))
+        }
+
+        fn on_unauthorized(&self, _context: UnauthorizedContext) -> Option<BoxFuture<pi_js::Result<()>>> {
+            let mut rx = self.gate_rx.clone();
+            let token = self.token.clone();
+            let refreshes = self.refreshes.clone();
+            let waiting = self.waiting.clone();
+            let all_tx = self.all_tx.clone();
+            Some(Box::pin(async move {
+                if refreshes
+                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    // Single refresh transitions token once gate opens.
+                }
+                if waiting.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                    let _ = all_tx.send(true);
+                }
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                *token.lock().unwrap() = "new".to_string();
+                Ok(())
+            }))
+        }
+    }
+
+    let client = Arc::new(default_client());
+    client
+        .connect(Arc::new(StreamableHttpTransport::new(StreamableHttpTransportOptions {
+            url,
+            headers: None,
+            fetch: None,
+            open_get_stream: Some(false),
+            max_message_bytes: None,
+            auth_provider: Some(Arc::new(BlockingAuth {
+                token: token.clone(),
+                gate_rx,
+                refreshes: refreshes.clone(),
+                waiting,
+                all_tx,
+            })),
+            reconnect: None,
+        })))
+        .await
+        .unwrap();
+
+    let ctrl = AbortController::new();
+    let aborted = tokio::spawn({
+        let c = client.clone();
+        let sig = ctrl.signal();
+        async move {
+            c.call_tool(
+                "aborted",
+                None,
+                Some(McpRequestOptions {
+                    signal: Some(sig),
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
+    });
+    let timed_out = tokio::spawn({
+        let c = client.clone();
+        async move {
+            c.call_tool(
+                "timed-out",
+                None,
+                Some(McpRequestOptions {
+                    timeout_ms: Some(200),
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
+    });
+    let kept = tokio::spawn({
+        let c = client.clone();
+        async move { c.call_tool("kept", None, None).await }
+    });
+
+    let mut all_watch = all_rx;
+    while !*all_watch.borrow() {
+        all_watch.changed().await.unwrap();
+    }
+    ctrl.abort(None);
+    assert_eq!(aborted.await.unwrap().unwrap_err().name(), "AbortError");
+    assert_eq!(timed_out.await.unwrap().unwrap_err().name(), "McpTimeoutError");
+    let _ = gate_tx.send(true);
+    let kept_res = kept.await.unwrap().unwrap();
+    assert_eq!(
+        kept_res,
+        from_value(json!({ "content": [{ "type": "text", "text": "hello" }] })).unwrap()
+    );
+    assert_eq!(*executed.lock().unwrap(), vec!["kept".to_string()]);
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    client.close().await.unwrap();
+    servers.close().await;
+}
+
+// #10565
+#[tokio::test]
+async fn closes_session_with_last_requests_token_without_asking_auth_provider() {
+    let mut servers = TestServers::new();
+    let (url, requests) = start_server(&mut servers, |req, reqs| Box::pin(protocol_handler(req, reqs, None))).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    struct CountingAuth(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl AuthProvider for CountingAuth {
+        async fn token(&self) -> pi_js::Result<Option<String>> {
+            let n = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Some(format!("token-{n}")))
+        }
+    }
+
+    let client = default_client();
+    client
+        .connect(Arc::new(StreamableHttpTransport::new(StreamableHttpTransportOptions {
+            url,
+            headers: None,
+            fetch: None,
+            open_get_stream: Some(false),
+            max_message_bytes: None,
+            auth_provider: Some(Arc::new(CountingAuth(calls.clone()))),
+            reconnect: None,
+        })))
+        .await
+        .unwrap();
+
+    let before = calls.load(Ordering::SeqCst);
+    client.close().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+
+    let reqs = requests.lock().unwrap();
+    let deletes: Vec<&RecordedRequest> = reqs.iter().filter(|r| r.method == "DELETE").collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(
+        deletes[0].headers.get("authorization").and_then(|v| v.to_str().ok()),
+        Some(format!("Bearer token-{before}").as_str())
+    );
+    assert_eq!(
+        deletes[0].headers.get("mcp-session-id").and_then(|v| v.to_str().ok()),
+        Some("session-1")
+    );
+    drop(reqs);
     servers.close().await;
 }

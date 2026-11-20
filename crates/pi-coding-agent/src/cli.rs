@@ -16,6 +16,10 @@ pub mod setup;
 pub mod startup_ui;
 // @generated-mods end
 
+pub mod auth_login;
+pub mod auth_logout;
+pub mod auth_terminal;
+
 use std::process::ExitCode;
 
 use crate::core::extensions::types::InlineExtension;

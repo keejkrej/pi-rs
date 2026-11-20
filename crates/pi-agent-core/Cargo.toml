@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 pi-js.workspace = true
+pi-schema.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

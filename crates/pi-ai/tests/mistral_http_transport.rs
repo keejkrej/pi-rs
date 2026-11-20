@@ -8,6 +8,7 @@ use pi_ai::api::mistral_conversations::{
     MistralOptions, MistralPromptMode, MistralReasoningEffort, MistralToolChoice, stream_with_options,
 };
 use pi_ai::providers::mistral_models::mistral_models;
+use pi_ai::utils::identity::format_user_agent;
 use pi_ai::utils::transcript::normalize_context;
 use pi_ai::{
     AssistantContentBlock, AssistantMessage, Context, FetchFunction, ImageContent, JsonObject, Message, Model,
@@ -22,12 +23,7 @@ use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 
 fn pi_user_agent() -> String {
-    format!(
-        "pi ({} {}; {})",
-        pi_js::env::platform(),
-        pi_js::env::os_release(),
-        pi_js::env::arch()
-    )
+    format_user_agent(None)
 }
 
 fn create_sse_response(events: &[Value], extra_headers: &[(&str, &str)]) -> Response {
@@ -292,6 +288,7 @@ async fn serializes_assistant_thinking_tool_calls_and_tool_results_for_replay() 
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "abc123456".to_owned(),
@@ -305,6 +302,7 @@ async fn serializes_assistant_thinking_tool_calls_and_tool_results_for_replay() 
                 nested_calls: None,
                 is_error: false,
                 timestamp: 2,
+                duration_ms: None,
             }),
         ],
         tools: None,
@@ -781,7 +779,7 @@ async fn aborts_while_waiting_for_an_sse_chunk() {
 }
 
 #[tokio::test]
-async fn applies_the_request_timeout_while_waiting_for_an_sse_chunk() {
+async fn applies_the_request_timeout_while_waiting_for_response_headers() {
     let model = mistral_model("mistral-large-latest");
     let context = Context {
         system_prompt: None,
@@ -791,13 +789,12 @@ async fn applies_the_request_timeout_while_waiting_for_an_sse_chunk() {
         })],
         tools: None,
     };
-    let fetch_fn: FetchFunction = Arc::new(|_req| {
+    let fetch_fn: FetchFunction = Arc::new(|req| {
         Box::pin(async move {
-            Ok(Response::from_stream(
-                200,
-                Headers::from_pairs([("content-type", "text/event-stream")]),
-                futures::stream::pending::<Result<Bytes>>(),
-            ))
+            if let Some(sig) = req.signal.as_ref() {
+                sig.cancelled().await;
+            }
+            Err(pi_js::Error::msg("aborted"))
         })
     });
 
@@ -816,13 +813,81 @@ async fn applies_the_request_timeout_while_waiting_for_an_sse_chunk() {
         .await;
 
     assert_eq!(message.stop_reason, StopReason::Error);
-    assert!(
-        message
-            .error_message
-            .as_deref()
-            .is_some_and(|m| m.to_ascii_lowercase().contains("timeout")),
-        "expected timeout error, got: {:?}",
-        message.error_message
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Mistral response headers timed out after 5ms")
+    );
+}
+
+// Regression test for #10609: an active stream must not be cut off after timeout_ms.
+#[tokio::test]
+async fn does_not_abort_an_active_stream_that_lasts_longer_than_the_request_timeout() {
+    let model = mistral_model("mistral-large-latest");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![Message::User(UserMessage {
+            content: "hello".into(),
+            timestamp: 1,
+        })],
+        tools: None,
+    };
+    let thinking_event = json!({
+        "choices": [{
+            "index": 0,
+            "delta": { "content": [{ "type": "thinking", "thinking": [{ "type": "text", "text": "x" }] }] }
+        }]
+    });
+    let fetch_fn: FetchFunction = Arc::new(move |_req| {
+        let ev = thinking_event.clone();
+        Box::pin(async move {
+            let stream = futures::stream::unfold(0usize, move |step| {
+                let ev = ev.clone();
+                async move {
+                    if step < 5 {
+                        let chunk = format!("data: {}\n\n", pi_js::json::stringify(&ev));
+                        let _ = pi_js::time::sleep(10, None).await;
+                        Some((Ok::<Bytes, pi_js::Error>(Bytes::from(chunk)), step + 1))
+                    } else if step == 5 {
+                        let tail = format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            pi_js::json::stringify(&create_terminal_event("stop"))
+                        );
+                        Some((Ok(Bytes::from(tail)), step + 1))
+                    } else {
+                        None
+                    }
+                }
+            });
+            Ok(Response::from_stream(
+                200,
+                Headers::from_pairs([("content-type", "text/event-stream")]),
+                stream,
+            ))
+        })
+    });
+
+    let opts = MistralOptions {
+        base: StreamOptions {
+            api_key: Some("test".to_owned()),
+            fetch: Some(fetch_fn),
+            timeout_ms: Some(20),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let message = stream_with_options(&model, &normalize_context(&context), Some(opts))
+        .result()
+        .await;
+
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        message.content,
+        vec![AssistantContentBlock::Thinking(ThinkingContent {
+            thinking: "xxxxx".to_owned(),
+            thinking_signature: None,
+            redacted: None,
+        })]
     );
 }
 

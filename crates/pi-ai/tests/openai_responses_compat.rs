@@ -36,7 +36,13 @@ fn sys_hi_context() -> pi_ai::types::TranscriptContext {
 async fn capture_headers(
     mut opts: ApiStreamOptions,
     model: &Model,
-) -> (Option<String>, Option<String>, Option<String>, Option<Value>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+) {
     let captured_headers = Arc::new(Mutex::new(None::<Headers>));
     let ch_c = captured_headers.clone();
     let captured_payload = Arc::new(Mutex::new(None::<Value>));
@@ -65,16 +71,17 @@ async fn capture_headers(
     let headers = captured_headers.lock().unwrap().take().unwrap();
     let payload = captured_payload.lock().unwrap().take();
     (
-        headers.get("session_id"),
+        headers.get("session-id"),
         headers.get("x-client-request-id"),
         headers.get("x-session-id"),
         payload,
+        headers.get("session_id"),
     )
 }
 
 #[tokio::test]
 async fn omits_reasoning_when_no_reasoning_is_requested() {
-    let model = get_model("github-copilot", "gpt-5-mini").unwrap();
+    let model = get_model("github-copilot", "gpt-6-sol").unwrap();
     let captured = Arc::new(Mutex::new(None::<Value>));
     let cap_c = captured.clone();
 
@@ -123,7 +130,7 @@ async fn forwards_required_tool_choice() {
     });
 
     stream_openai_responses(
-        &get_model("openai", "gpt-5.4").unwrap(),
+        &get_model("openai", "gpt-5.6-luna").unwrap(),
         &context,
         Some(
             ApiStreamOptions {
@@ -149,10 +156,8 @@ async fn forwards_required_tool_choice() {
 
     let payload = captured.lock().unwrap().take().unwrap();
     assert_eq!(payload.get("tool_choice"), Some(&json!("required")));
-    assert_eq!(
-        payload.get("tools").and_then(Value::as_array).unwrap()[0].get("name"),
-        Some(&json!("ping"))
-    );
+    assert_eq!(payload["input"][0]["type"], json!("additional_tools"));
+    assert_eq!(payload["input"][0]["tools"][0]["name"], json!("ping"));
 }
 
 #[tokio::test]
@@ -314,7 +319,7 @@ async fn omits_reasoning_effort_for_openai_models_when_off_is_unsupported() {
 #[tokio::test]
 async fn sets_cache_affinity_headers_for_official_and_proxy_requests_with_session_id() {
     let official_model = get_model("openai", "gpt-5.4").unwrap();
-    let (sid, req_id, _, _) = capture_headers(
+    let (sid, req_id, _, _, legacy_sid) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-123".to_owned()),
@@ -326,6 +331,7 @@ async fn sets_cache_affinity_headers_for_official_and_proxy_requests_with_sessio
     )
     .await;
     assert_eq!(sid.as_deref(), Some("session-123"));
+    assert!(legacy_sid.is_none());
     assert_eq!(req_id.as_deref(), Some("session-123"));
 
     let proxy_model = Model {
@@ -333,7 +339,7 @@ async fn sets_cache_affinity_headers_for_official_and_proxy_requests_with_sessio
         base_url: "https://proxy.example.com/v1".to_owned(),
         ..official_model
     };
-    let (p_sid, p_req_id, _, _) = capture_headers(
+    let (p_sid, p_req_id, _, _, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-123".to_owned()),
@@ -351,7 +357,7 @@ async fn sets_cache_affinity_headers_for_official_and_proxy_requests_with_sessio
 #[tokio::test]
 async fn clamps_prompt_cache_key_to_openais_64_character_limit() {
     let model = get_model("openai", "gpt-5.4").unwrap();
-    let (_, _, _, payload) = capture_headers(
+    let (_, _, _, payload, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("x".repeat(67)),
@@ -379,7 +385,7 @@ async fn uses_openrouter_and_nosession_session_affinity_formats() {
         session_affinity_format: Some(SessionAffinityFormat::OpenRouter),
         ..Default::default()
     }));
-    let (sid, cid, xsid, payload) = capture_headers(
+    let (sid, cid, xsid, payload, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-proxy".to_owned()),
@@ -402,7 +408,7 @@ async fn uses_openrouter_and_nosession_session_affinity_formats() {
         base_url: "https://openrouter.ai/api/v1".to_owned(),
         ..base.clone()
     };
-    let (sid, cid, xsid, payload) = capture_headers(
+    let (sid, cid, xsid, payload, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-openrouter".to_owned()),
@@ -427,7 +433,7 @@ async fn uses_openrouter_and_nosession_session_affinity_formats() {
         session_affinity_format: Some(SessionAffinityFormat::OpenAINosession),
         ..Default::default()
     }));
-    let (sid, cid, xsid, payload) = capture_headers(
+    let (sid, cid, xsid, payload, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-proxy".to_owned()),
@@ -451,7 +457,7 @@ async fn uses_openrouter_and_nosession_session_affinity_formats() {
         Some(ModelCompat::OpenAIResponses(c))
             if c.session_affinity_format == Some(SessionAffinityFormat::OpenAINosession)
     ));
-    let (sid, cid, xsid, payload) = capture_headers(
+    let (sid, cid, xsid, payload, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-opencode".to_owned()),
@@ -475,10 +481,10 @@ async fn uses_openrouter_and_nosession_session_affinity_formats() {
 async fn lets_explicit_headers_override_and_omits_headers_when_cache_retention_is_none() {
     let model = get_model("openai", "gpt-5.4").unwrap();
     let mut headers: ProviderHeaders = indexmap::IndexMap::new();
-    headers.insert("session_id".to_owned(), Some("override-session".to_owned()));
+    headers.insert("session-id".to_owned(), Some("override-session".to_owned()));
     headers.insert("x-client-request-id".to_owned(), Some("override-request".to_owned()));
 
-    let (sid, cid, _, _) = capture_headers(
+    let (sid, cid, _, _, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 session_id: Some("session-123".to_owned()),
@@ -493,7 +499,7 @@ async fn lets_explicit_headers_override_and_omits_headers_when_cache_retention_i
     assert_eq!(sid.as_deref(), Some("override-session"));
     assert_eq!(cid.as_deref(), Some("override-request"));
 
-    let (sid, cid, _, _) = capture_headers(
+    let (sid, cid, _, _, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 cache_retention: Some(CacheRetention::None),
@@ -580,7 +586,7 @@ async fn applies_cost_multipliers_for_requested_and_returned_service_tiers() {
 #[tokio::test]
 async fn sends_and_omits_max_output_tokens_according_to_compat() {
     let base_model = get_model("openai", "gpt-5.4").unwrap();
-    let (_, _, _, p1) = capture_headers(
+    let (_, _, _, p1, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 max_tokens: Some(1024),
@@ -601,7 +607,7 @@ async fn sends_and_omits_max_output_tokens_according_to_compat() {
     compat.supports_max_output_tokens = Some(false);
     no_max_model.compat = Some(ModelCompat::OpenAIResponses(compat));
 
-    let (_, _, _, p2) = capture_headers(
+    let (_, _, _, p2, _) = capture_headers(
         ApiStreamOptions {
             base: StreamOptions {
                 max_tokens: Some(1024),

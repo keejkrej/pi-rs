@@ -274,23 +274,36 @@ pub fn has_tool_redefinitions<M: TranscriptMessage>(messages: &[M]) -> bool {
 /// Whether tool history contains a removal or same-name redeclaration that an addition-only
 /// transport cannot replay.
 pub fn has_non_additive_tool_changes<M: TranscriptMessage>(messages: &[M]) -> bool {
+    let sys: Vec<&SystemMessage> = messages.iter().filter_map(|m| m.as_system_message()).collect();
+    find_last_non_additive_tool_change(&sys).is_some()
+}
+
+/// Index in `system_messages` of the last system message with a removal or same-name redeclaration.
+fn find_last_non_additive_tool_change(system_messages: &[&SystemMessage]) -> Option<usize> {
     let mut declared: IndexSet<&str> = IndexSet::new();
-    for msg in messages {
-        let Some(sys) = msg.as_system_message() else {
-            continue;
-        };
-        if sys.tools_removed.as_ref().is_some_and(|r| !r.is_empty()) {
-            return true;
+    let mut last: Option<usize> = None;
+    for (index, message) in system_messages.iter().enumerate() {
+        if message.tools_removed.as_ref().is_some_and(|r| !r.is_empty()) {
+            last = Some(index);
         }
-        if let Some(added) = &sys.tools_added {
+        if let Some(added) = &message.tools_added {
             for tool in added {
                 if !declared.insert(tool.name.as_str()) {
-                    return true;
+                    last = Some(index);
                 }
             }
         }
     }
-    false
+    last
+}
+
+/// How a transport can express tool changes after the first request (`v1.5.2`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptToolSupport {
+    None,
+    Additions,
+    Changes,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -298,20 +311,70 @@ pub fn has_non_additive_tool_changes<M: TranscriptMessage>(messages: &[M]) -> bo
 pub struct TranscriptTools {
     /// Tools sent in the top-level request field.
     pub request_tools: Vec<Tool>,
-    /// Whether later system messages carry their own `toolsAdded` as in-place additions.
-    /// When false, `requestTools` already holds the complete current tool set.
+    /// Number of leading system messages whose tool changes `request_tools` already holds (`v1.5.2`).
+    pub folded_system_messages: usize,
+    /// PORT: Legacy `v1.0.0` field retained until Stage 2 migrates `src/api/*` to `folded_system_messages`.
     pub anchors_additions: bool,
 }
 
-/// Split tool declarations between the top-level request field and in-place additions.
-/// Transports that can anchor additions at a system message keep the initial tools at the
-/// top and load later ones where they appear; that only works when no tool was removed or
-/// redeclared, so everything else sends the current tool list.
+/// Port of `v1.5.2` `resolveTranscriptTools(messages, support)`.
+pub fn resolve_transcript_tools_with_support<M: TranscriptMessage>(
+    messages: &[M],
+    support: TranscriptToolSupport,
+) -> TranscriptTools {
+    let system_messages: Vec<&SystemMessage> = messages.iter().filter_map(|m| m.as_system_message()).collect();
+    match support {
+        TranscriptToolSupport::None => TranscriptTools {
+            request_tools: get_current_tools(messages),
+            folded_system_messages: system_messages.len(),
+            anchors_additions: false,
+        },
+        TranscriptToolSupport::Changes => TranscriptTools {
+            request_tools: Vec::new(),
+            folded_system_messages: 0,
+            anchors_additions: false,
+        },
+        TranscriptToolSupport::Additions => {
+            let initial_folded = usize::from(get_initial_system_message(messages).is_some());
+            let non_additive_folded = find_last_non_additive_tool_change(&system_messages)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let folded = initial_folded.max(non_additive_folded);
+            let request_tools = get_current_tools_from_system_messages(&system_messages[..folded]);
+            TranscriptTools {
+                request_tools,
+                folded_system_messages: folded,
+                anchors_additions: non_additive_folded == 0,
+            }
+        }
+    }
+}
+
+fn get_current_tools_from_system_messages(system_messages: &[&SystemMessage]) -> Vec<Tool> {
+    let mut tools: IndexMap<String, Tool> = IndexMap::new();
+    for sys in system_messages {
+        if let Some(removed) = &sys.tools_removed {
+            for tool_ref in removed {
+                tools.shift_remove(&tool_ref.name);
+            }
+        }
+        if let Some(added) = &sys.tools_added {
+            for tool in added {
+                tools.insert(tool.name.clone(), tool.clone());
+            }
+        }
+    }
+    tools.into_values().collect()
+}
+
+/// Legacy `v1.0.0` wrapper kept for unported Stage 1 `src/api/*` callers.
+/// Stage 2 should migrate callers to `resolve_transcript_tools_with_support`.
 pub fn resolve_transcript_tools<M: TranscriptMessage>(
     messages: &[M],
     supports_tool_additions: bool,
 ) -> TranscriptTools {
     let anchors_additions = supports_tool_additions && !has_non_additive_tool_changes(messages);
+    let system_messages: Vec<&SystemMessage> = messages.iter().filter_map(|m| m.as_system_message()).collect();
     let request_tools = if anchors_additions {
         get_initial_system_message(messages)
             .and_then(|s| s.tools_added.clone())
@@ -319,8 +382,14 @@ pub fn resolve_transcript_tools<M: TranscriptMessage>(
     } else {
         get_current_tools(messages)
     };
+    let folded_system_messages = if anchors_additions {
+        usize::from(get_initial_system_message(messages).is_some())
+    } else {
+        system_messages.len()
+    };
     TranscriptTools {
         request_tools,
+        folded_system_messages,
         anchors_additions,
     }
 }

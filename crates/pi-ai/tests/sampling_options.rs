@@ -2,10 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use indexmap::IndexMap;
 use pi_ai::compat::{stream, stream_simple};
 use pi_ai::types::{
-    ApiStreamOptions, Context, JsonObject, Message, Model, ModelCost, ModelInput, OnPayloadFn, SimpleStreamOptions,
-    StreamOptions, UserMessage, UserMessageContent,
+    ApiStreamOptions, Context, JsonObject, Message, Model, ModelCost, ModelInput, ModelThinkingLevel, OnPayloadFn,
+    SamplingParamsByThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingLevel, ThinkingLevelMap, UserMessage,
+    UserMessageContent,
 };
 use serde_json::{Map, Value, json};
 
@@ -39,6 +41,7 @@ fn make_model(api: &str, sampling_params: Option<JsonObject>) -> Model {
         headers: None,
         sampling_params,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -60,21 +63,32 @@ fn obj(val: Value) -> JsonObject {
     }
 }
 
-async fn capture_payload(model: &Model, opts: Option<StreamOptions>) -> Value {
+async fn capture_api_payload(model: &Model, opts: ApiStreamOptions) -> Value {
     let slot = Arc::new(Mutex::new(None));
-    let mut base = opts.unwrap_or_default();
-    base.api_key = Some("fake-key".to_string());
-    base.on_payload = Some(capture_hook(Arc::clone(&slot)));
-    stream(
+    let mut api_opts = opts;
+    api_opts.base.api_key = Some("fake-key".to_string());
+    api_opts.base.on_payload = Some(capture_hook(Arc::clone(&slot)));
+    stream(model, &make_context(), Some(api_opts)).result().await;
+    slot.lock().unwrap().clone().expect("Expected payload to be captured")
+}
+
+async fn capture_payload(model: &Model, opts: Option<StreamOptions>) -> Value {
+    capture_api_payload(
         model,
-        &make_context(),
-        Some(ApiStreamOptions {
-            base,
+        ApiStreamOptions {
+            base: opts.unwrap_or_default(),
             ..Default::default()
-        }),
+        },
     )
-    .result()
-    .await;
+    .await
+}
+
+async fn capture_simple_payload(model: &Model, opts: Option<SimpleStreamOptions>) -> Value {
+    let slot = Arc::new(Mutex::new(None));
+    let mut simple = opts.unwrap_or_default();
+    simple.base.api_key = Some("fake-key".to_string());
+    simple.base.on_payload = Some(capture_hook(Arc::clone(&slot)));
+    stream_simple(model, &make_context(), Some(simple)).result().await;
     slot.lock().unwrap().clone().expect("Expected payload to be captured")
 }
 
@@ -154,4 +168,123 @@ async fn passes_sampling_params_through_stream_simple_and_overrides_named_fields
     .await;
     assert!(anthropic.get("top_p").is_none());
     assert!(anthropic.get("top_k").is_none());
+}
+
+#[tokio::test]
+async fn applies_sampling_params_for_the_effective_thinking_level_over_model_defaults() {
+    let mut tmap = ThinkingLevelMap::new();
+    tmap.insert(ModelThinkingLevel::Low, None);
+    tmap.insert(ModelThinkingLevel::Medium, None);
+
+    let mut by_level: SamplingParamsByThinkingLevel = IndexMap::new();
+    by_level.insert(
+        ModelThinkingLevel::High,
+        obj(json!({ "temperature": 0.8, "top_k": 64 })),
+    );
+
+    let mut model = make_model(
+        "openai-completions",
+        Some(obj(json!({ "temperature": 1, "top_p": 0.95 }))),
+    );
+    model.reasoning = true;
+    model.thinking_level_map = Some(tmap);
+    model.sampling_params_by_thinking_level = Some(by_level);
+
+    let payload = capture_simple_payload(
+        &model,
+        Some(SimpleStreamOptions {
+            reasoning: Some(ThinkingLevel::Low),
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    assert_eq!(payload["temperature"], 0.8);
+    assert_eq!(payload["top_p"], 0.95);
+    assert_eq!(payload["top_k"], 64);
+}
+
+#[tokio::test]
+async fn applies_off_sampling_params_when_reasoning_is_disabled() {
+    let mut by_level: SamplingParamsByThinkingLevel = IndexMap::new();
+    by_level.insert(ModelThinkingLevel::Off, obj(json!({ "temperature": 0.7 })));
+
+    let mut model = make_model("openai-completions", None);
+    model.sampling_params_by_thinking_level = Some(by_level);
+
+    let payload = capture_simple_payload(&model, None).await;
+    assert_eq!(payload["temperature"], 0.7);
+}
+
+#[tokio::test]
+async fn merges_stream_option_keys_over_thinking_level_keys() {
+    let mut by_level: SamplingParamsByThinkingLevel = IndexMap::new();
+    by_level.insert(
+        ModelThinkingLevel::Low,
+        obj(json!({ "temperature": 0.6, "top_p": 0.95 })),
+    );
+
+    let mut model = make_model("openai-completions", None);
+    model.reasoning = true;
+    model.sampling_params_by_thinking_level = Some(by_level);
+
+    let payload = capture_simple_payload(
+        &model,
+        Some(SimpleStreamOptions {
+            base: StreamOptions {
+                sampling_params: Some(obj(json!({ "top_p": 0.5 }))),
+                ..Default::default()
+            },
+            reasoning: Some(ThinkingLevel::Low),
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    assert_eq!(payload["temperature"], 0.6);
+    assert_eq!(payload["top_p"], 0.5);
+}
+
+#[tokio::test]
+async fn applies_thinking_level_params_between_model_and_request_params_across_openai_apis() {
+    let mut by_level: SamplingParamsByThinkingLevel = IndexMap::new();
+    by_level.insert(ModelThinkingLevel::Low, obj(json!({ "temperature": 0.6, "top_k": 64 })));
+
+    for api in ["openai-completions", "openai-responses", "azure-openai-responses"] {
+        let mut model = make_model(api, Some(obj(json!({ "temperature": 1, "top_p": 0.95 }))));
+        model.reasoning = true;
+        model.sampling_params_by_thinking_level = Some(by_level.clone());
+
+        let opts = ApiStreamOptions {
+            base: StreamOptions {
+                sampling_params: Some(obj(json!({ "top_p": 0.5 }))),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .with_extra("reasoningEffort", json!("low"));
+
+        let payload = capture_api_payload(&model, opts).await;
+        assert_eq!(payload["temperature"], 0.6, "{api}");
+        assert_eq!(payload["top_p"], 0.5, "{api}");
+        assert_eq!(payload["top_k"], 64, "{api}");
+    }
+}
+
+#[tokio::test]
+async fn uses_medium_sampling_params_for_summary_only_responses_requests() {
+    let mut by_level: SamplingParamsByThinkingLevel = IndexMap::new();
+    by_level.insert(ModelThinkingLevel::Off, obj(json!({ "temperature": 0.7 })));
+    by_level.insert(ModelThinkingLevel::Medium, obj(json!({ "temperature": 0.8 })));
+
+    for api in ["openai-responses", "azure-openai-responses"] {
+        let mut model = make_model(api, None);
+        model.reasoning = true;
+        model.sampling_params_by_thinking_level = Some(by_level.clone());
+
+        let opts = ApiStreamOptions::default().with_extra("reasoningSummary", json!("auto"));
+        let payload = capture_api_payload(&model, opts).await;
+        assert_eq!(payload["reasoning"]["effort"], "medium", "{api}");
+        assert_eq!(payload["temperature"], 0.8, "{api}");
+    }
 }

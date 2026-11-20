@@ -14,6 +14,7 @@ fn preserves_json_compatible_detail_types() {
         nested_calls: None,
         is_error: false,
         timestamp: 1,
+        duration_ms: None,
     };
 
     let object_msg = base(Some(json!({

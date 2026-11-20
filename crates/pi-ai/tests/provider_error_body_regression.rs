@@ -45,6 +45,7 @@ fn completions_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn responses_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

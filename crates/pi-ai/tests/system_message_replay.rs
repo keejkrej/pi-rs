@@ -72,6 +72,7 @@ fn sample_transcript() -> pi_ai::types::TranscriptContext {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 13,
+                duration_ms: None,
             }),
             Message::System(SystemMessage {
                 content: SystemMessageContent::Text(String::new()),

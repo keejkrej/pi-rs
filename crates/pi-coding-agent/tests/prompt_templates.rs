@@ -209,7 +209,9 @@ fn parse_command_args_and_expand_prompt_template() {
     assert!(parse_command_args("").is_empty());
     assert_eq!(parse_command_args("a  b   c"), vec!["a", "b", "c"]);
     assert_eq!(parse_command_args("a\tb\tc"), vec!["a", "b", "c"]);
-    assert_eq!(parse_command_args("\"\" \" \""), vec![" "]);
+    assert_eq!(parse_command_args("\"\" \" \""), vec!["", " "]);
+    assert_eq!(parse_command_args("a '' c"), vec!["a", "", "c"]);
+    assert_eq!(parse_command_args("a \"\""), vec!["a", ""]);
     assert_eq!(parse_command_args("$100 @user #tag"), vec!["$100", "@user", "#tag"]);
     assert_eq!(parse_command_args("日本語 🎉 café"), vec!["日本語", "🎉", "café"]);
     assert_eq!(
@@ -221,7 +223,12 @@ fn parse_command_args_and_expand_prompt_template() {
         vec!["label-2", "Here", "is", "some", "description", "#2."]
     );
     assert_eq!(parse_command_args("a\n\n\tb  c"), vec!["a", "b", "c"]);
-    assert_eq!(parse_command_args("\"quoted \\\"text\\\"\""), vec!["quoted \\text\\"]);
+    assert_eq!(parse_command_args("\"quoted \\\"text\\\"\""), vec!["quoted \"text\""]);
+    assert_eq!(parse_command_args("'it\\'s here' next"), vec!["it's here", "next"]);
+    assert_eq!(
+        parse_command_args("why doesn't this work"),
+        vec!["why", "doesn't", "this", "work"]
+    );
     assert_eq!(parse_command_args("a b c   "), vec!["a", "b", "c"]);
     assert_eq!(parse_command_args("   a b c"), vec!["a", "b", "c"]);
 

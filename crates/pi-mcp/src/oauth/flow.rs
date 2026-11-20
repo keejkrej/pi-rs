@@ -24,9 +24,10 @@ use crate::oauth::errors::{
 };
 use crate::oauth::types::{
     AuthorizationServerMetadata, OAuthClientInformation, OAuthClientInformationFull, OAuthClientInformationMixed,
-    OAuthClientMetadata, OAuthDiscoveryState, OAuthTokens, parse_client_information, parse_oauth_tokens,
+    OAuthClientMetadata, OAuthDiscoveryState, OAuthTokens, is_http_url, parse_client_information, parse_oauth_tokens,
 };
 use crate::protocol::jsonrpc::to_error;
+use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Body, Headers, Request};
 use pi_js::{BoxFuture, Error, Result};
 
@@ -107,7 +108,7 @@ fn set_url_query_param(url: &mut url::Url, key: &str, value: &str) {
     url.query_pairs_mut().clear().extend_pairs(pairs);
 }
 
-fn clone_oauth_error(error: &Error) -> Error {
+pub(crate) fn clone_oauth_error(error: &Error) -> Error {
     if let Some(e) = error.downcast_ref::<OAuthError>() {
         return Error::typed("OAuthError", e.clone());
     }
@@ -156,12 +157,27 @@ pub enum InvalidateCredentialsKind {
     Discovery,
 }
 
+/// A Client ID Metadata Document: an https URL used as `client_id`, and a redirect URI it lists.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthClientMetadataDocument {
+    pub url: String,
+    pub redirect_url: String,
+}
+
 #[async_trait]
 pub trait OAuthClientProvider: Send + Sync {
     fn redirect_url(&self) -> String;
     fn client_metadata(&self) -> &OAuthClientMetadata;
-    fn client_metadata_url(&self) -> Option<&str> {
-        None
+    /// Client ID Metadata Document to identify as instead of registering dynamically, or `None` to
+    /// register. Called when no client information is stored; the document is not stored. `metadata` is
+    /// `None` when the authorization server has none; check `client_id_metadata_document_supported`.
+    fn client_metadata_document(
+        &self,
+        metadata: Option<&AuthorizationServerMetadata>,
+    ) -> Result<Option<OAuthClientMetadataDocument>> {
+        let _ = metadata;
+        Ok(None)
     }
     async fn state(&self) -> Result<Option<String>> {
         Ok(None)
@@ -210,6 +226,19 @@ pub struct OAuthFlowOptions {
     pub skip_refresh: Option<bool>,
 }
 
+// PORT: Additive options struct so existing `OAuthFlowOptions` struct literals keep compiling cleanly.
+#[derive(Clone, Default)]
+pub struct OAuthFlowExtraOptions {
+    /// Aborts every request of the flow. Requests have no time limit of their own; combine with a timeout as needed.
+    pub signal: Option<AbortSignal>,
+    /// Only refresh the stored tokens: return `REDIRECT` instead of registering a client or preparing an
+    /// authorization request, so a pending authorization (its `state` and PKCE verifier) stays usable.
+    pub refresh_only: Option<bool>,
+    /// With `authorizationCode`: the redirect URI the authorization request used. The exchange fails before
+    /// sending the code when the flow would send another one (RFC 6749 section 4.1.3 requires the same).
+    pub authorization_redirect_url: Option<String>,
+}
+
 /// `"AUTHORIZED" | "REDIRECT"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OAuthFlowResult {
@@ -233,6 +262,7 @@ pub struct TokenRequestOptions {
     pub resource: Option<String>,
     pub add_client_authentication: Option<AddClientAuthentication>,
     pub fetch: Option<McpFetch>,
+    pub signal: Option<AbortSignal>,
 }
 
 #[derive(Clone)]
@@ -257,6 +287,7 @@ pub struct RegisterClientOptions {
     pub client_metadata: OAuthClientMetadata,
     pub scope: Option<String>,
     pub fetch: Option<McpFetch>,
+    pub signal: Option<AbortSignal>,
 }
 
 #[derive(Clone)]
@@ -266,6 +297,7 @@ pub struct ExchangeAuthorizationCodeOptions {
     pub resource: Option<String>,
     pub add_client_authentication: Option<AddClientAuthentication>,
     pub fetch: Option<McpFetch>,
+    pub signal: Option<AbortSignal>,
     pub code: String,
     pub code_verifier: String,
     pub redirect_url: String,
@@ -278,6 +310,7 @@ pub struct RefreshAuthorizationOptions {
     pub resource: Option<String>,
     pub add_client_authentication: Option<AddClientAuthentication>,
     pub fetch: Option<McpFetch>,
+    pub signal: Option<AbortSignal>,
     pub refresh_token: String,
 }
 
@@ -288,6 +321,18 @@ struct Pkce {
 
 fn loopback(hostname: &str) -> bool {
     matches!(hostname, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+/// The OpenID Connect `application_type` for `redirect_uris` (MCP SEP-837). Without one, OpenID Connect servers
+/// assume `web`, which rejects http loopback redirect URIs. Loopback hosts and custom schemes are native (RFC 8252).
+fn application_type(redirect_uris: &[String]) -> &'static str {
+    let native = redirect_uris.iter().any(|uri| {
+        let Ok(url) = url::Url::parse(uri) else {
+            return false;
+        };
+        !is_http_url(&url) || loopback(url.host_str().unwrap_or(""))
+    });
+    if native { "native" } else { "web" }
 }
 
 fn secure_endpoint(value: &str) -> Result<url::Url> {
@@ -391,6 +436,10 @@ pub async fn start_authorization(
             .and_then(|u| u.join("/authorize"))
             .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?
     };
+    // Callers open this URL with the platform URL handler, which also launches files and custom protocols.
+    if !is_http_url(&url) {
+        return Err(Error::msg(format!("Invalid authorization endpoint {url}")));
+    }
 
     let Pkce { verifier, challenge } = pkce().await?;
     set_url_query_param(&mut url, "response_type", "code");
@@ -476,7 +525,7 @@ async fn token_request(
             method: Some("POST".to_string()),
             headers: Some(headers),
             body: Some(Body::Text(body_str)),
-            signal: None,
+            signal: options.signal.clone(),
         }),
     )
     .await?;
@@ -532,10 +581,14 @@ pub async fn register_client(
     headers.set("content-type", "application/json");
 
     let mut body_val = serde_json::to_value(&options.client_metadata).unwrap_or_else(|_| Value::Object(Map::new()));
-    if let Value::Object(ref mut obj) = body_val
-        && let Some(scope) = options.scope.as_deref().filter(|s| !s.is_empty())
-    {
-        obj.insert("scope".to_string(), Value::String(scope.to_string()));
+    if let Value::Object(ref mut obj) = body_val {
+        if !obj.contains_key("application_type") {
+            let derived = application_type(&options.client_metadata.redirect_uris);
+            obj.insert("application_type".to_string(), Value::String(derived.to_string()));
+        }
+        if let Some(scope) = options.scope.as_deref().filter(|s| !s.is_empty()) {
+            obj.insert("scope".to_string(), Value::String(scope.to_string()));
+        }
     }
     let body_json = pi_js::json::stringify(&body_val);
 
@@ -546,7 +599,7 @@ pub async fn register_client(
             method: Some("POST".to_string()),
             headers: Some(headers),
             body: Some(Body::Text(body_json)),
-            signal: None,
+            signal: options.signal,
         }),
     )
     .await?;
@@ -577,6 +630,7 @@ pub async fn exchange_authorization_code(
         resource: options.resource,
         add_client_authentication: options.add_client_authentication,
         fetch: options.fetch,
+        signal: options.signal,
     };
     token_request(authorization_server_url, &token_options, params).await
 }
@@ -594,6 +648,7 @@ pub async fn refresh_authorization(
         resource: options.resource,
         add_client_authentication: options.add_client_authentication,
         fetch: options.fetch,
+        signal: options.signal,
     };
     let mut tokens = token_request(authorization_server_url, &token_options, params).await?;
     if tokens.refresh_token.is_none() {
@@ -630,7 +685,19 @@ pub fn step_up_scope(granted: Option<&str>, challenged: Option<&str>) -> Option<
     Some(scopes.into_iter().collect::<Vec<_>>().join(" "))
 }
 
-async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions) -> Result<OAuthFlowResult> {
+/// What a flow used, for deciding what to invalidate after it failed.
+#[derive(Default)]
+struct FlowUse {
+    /// `client_id` of the stored client the flow used; `None` when none was stored.
+    stored_client_id: Option<String>,
+}
+
+async fn run_flow(
+    provider: &dyn OAuthClientProvider,
+    options: &OAuthFlowOptions,
+    extra: &OAuthFlowExtraOptions,
+    use_state: &mut FlowUse,
+) -> Result<OAuthFlowResult> {
     let metadata_url = options
         .authorization_server_metadata_url
         .as_ref()
@@ -655,6 +722,7 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                             fetch: options.fetch.clone(),
                             protocol_version: None,
                             skip_issuer_validation: options.skip_issuer_validation,
+                            signal: extra.signal.clone(),
                         }),
                     )
                     .await?
@@ -670,6 +738,7 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                     authorization_server_metadata_url: metadata_url.clone(),
                     fetch: options.fetch.clone(),
                     skip_issuer_validation: options.skip_issuer_validation,
+                    signal: extra.signal.clone(),
                 }),
             )
             .await?;
@@ -715,56 +784,84 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                 .map(String::from)
         });
 
-    let client = match provider.client_information().await? {
+    let stored = provider.client_information().await?;
+    use_state.stored_client_id = stored.as_ref().map(|c| c.client_id.clone());
+    let client_document = if stored.is_none() {
+        provider.client_metadata_document(metadata.as_ref())?
+    } else {
+        None
+    };
+    if let Some(ref doc) = client_document {
+        let parsed = url::Url::parse(&doc.url).map_err(|_| Error::msg("Invalid OAuth client metadata URL"))?;
+        if parsed.scheme() != "https" || parsed.path() == "/" {
+            return Err(Error::msg("Invalid OAuth client metadata URL"));
+        }
+    }
+    // The document's redirect URI may differ from the provider's, for example by a server-specific path.
+    let redirect_url = client_document
+        .as_ref()
+        .map(|d| d.redirect_url.clone())
+        .unwrap_or_else(|| provider.redirect_url());
+    // Checked first: another redirect URI also explains a client that is missing for the exchange.
+    if options.authorization_code.as_deref().is_some_and(|c| !c.is_empty())
+        && let Some(auth_redirect_url) = extra.authorization_redirect_url.as_deref()
+        && redirect_url != auth_redirect_url
+    {
+        return Err(Error::msg(format!(
+            "The code exchange would use the redirect URI {redirect_url}, but the authorization request used {auth_redirect_url}"
+        )));
+    }
+
+    let document_client = client_document.as_ref().map(|doc| {
+        OAuthClientInformationMixed::from(OAuthClientInformation {
+            client_id: doc.url.clone(),
+            client_secret: None,
+            client_id_issued_at: None,
+            client_secret_expires_at: None,
+        })
+    });
+    let client = match stored.or(document_client) {
         Some(existing) => existing,
         None => {
+            if extra.refresh_only.unwrap_or(false) {
+                return Ok(OAuthFlowResult::Redirect);
+            }
             if options.authorization_code.as_deref().is_some_and(|c| !c.is_empty()) {
-                return Err(Error::msg("OAuth client information is missing during code exchange"));
+                return Err(Error::msg(
+                    "OAuth client information is missing during code exchange: the authorization request's client was removed, or the client settings changed",
+                ));
             }
-            if metadata.as_ref().and_then(|m| m.client_id_metadata_document_supported) == Some(true)
-                && let Some(cmu) = provider.client_metadata_url()
-            {
-                let parsed = url::Url::parse(cmu).map_err(|_| Error::msg("Invalid OAuth client metadata URL"))?;
-                if parsed.scheme() != "https" || parsed.path() == "/" {
-                    return Err(Error::msg("Invalid OAuth client metadata URL"));
-                }
-                let client = OAuthClientInformationMixed::from(OAuthClientInformation {
-                    client_id: cmu.to_string(),
-                    client_secret: None,
-                    client_id_issued_at: None,
-                    client_secret_expires_at: None,
-                });
-                provider.save_client_information(client.clone()).await?;
-                client
-            } else {
-                let registered = register_client(
-                    &authorization_server_url,
-                    RegisterClientOptions {
-                        metadata: metadata.clone(),
-                        client_metadata: provider.client_metadata().clone(),
-                        scope: scope.clone(),
-                        fetch: options.fetch.clone(),
-                    },
-                )
-                .await?;
-                let mixed = OAuthClientInformationMixed::from(registered);
-                provider.save_client_information(mixed.clone()).await?;
-                mixed
-            }
+            let registered = register_client(
+                &authorization_server_url,
+                RegisterClientOptions {
+                    metadata: metadata.clone(),
+                    client_metadata: provider.client_metadata().clone(),
+                    scope: scope.clone(),
+                    fetch: options.fetch.clone(),
+                    signal: extra.signal.clone(),
+                },
+            )
+            .await?;
+            let mixed = OAuthClientInformationMixed::from(registered);
+            provider.save_client_information(mixed.clone()).await?;
+            mixed
         }
     };
 
     let add_client_auth = provider.add_client_authentication();
 
     if let Some(code) = options.authorization_code.as_deref().filter(|c| !c.is_empty()) {
-        // RFC 9207: never send a code from another authorization server to this one.
-        if let Some(ref meta) = metadata
-            && (options.iss.is_some() || meta.authorization_response_iss_parameter_supported == Some(true))
-            && options.iss.as_deref() != Some(meta.issuer.as_str())
-        {
+        // RFC 9207: never send a code from another authorization server to this one. Without metadata there
+        // is no issuer to compare with, so any `iss` is rejected.
+        let iss_required = metadata
+            .as_ref()
+            .and_then(|m| m.authorization_response_iss_parameter_supported)
+            == Some(true);
+        let expected_issuer = metadata.as_ref().map(|m| m.issuer.as_str());
+        if (options.iss.is_some() || iss_required) && options.iss.as_deref() != expected_issuer {
             return Err(Error::typed(
                 "OAuthIssuerMismatchError",
-                OAuthIssuerMismatchError::new(&meta.issuer, options.iss.clone()),
+                OAuthIssuerMismatchError::new(expected_issuer.map(str::to_string), options.iss.clone()),
             ));
         }
         let tokens = exchange_authorization_code(
@@ -775,9 +872,10 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                 resource,
                 add_client_authentication: add_client_auth,
                 fetch: options.fetch.clone(),
+                signal: extra.signal.clone(),
                 code: code.to_string(),
                 code_verifier: provider.code_verifier().await?,
-                redirect_url: provider.redirect_url(),
+                redirect_url,
             },
         )
         .await?;
@@ -802,6 +900,7 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                 resource: resource.clone(),
                 add_client_authentication: add_client_auth.clone(),
                 fetch: options.fetch.clone(),
+                signal: extra.signal.clone(),
                 refresh_token: refresh_tok.clone(),
             },
         )
@@ -814,7 +913,9 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
                 return Ok(OAuthFlowResult::Authorized);
             }
             Err(err) => {
-                if err.downcast_ref::<OAuthInsecureEndpointError>().is_some() {
+                if extra.signal.as_ref().is_some_and(AbortSignal::aborted)
+                    || err.downcast_ref::<OAuthInsecureEndpointError>().is_some()
+                {
                     return Err(err);
                 }
                 if let Some(oauth_err) = err.downcast_ref::<OAuthError>()
@@ -826,13 +927,17 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
         }
     }
 
+    if extra.refresh_only.unwrap_or(false) {
+        return Ok(OAuthFlowResult::Redirect);
+    }
+
     let state = provider.state().await?;
     let authorization = start_authorization(
         &authorization_server_url,
         StartAuthorizationOptions {
             metadata,
             client_information: client,
-            redirect_url: provider.redirect_url(),
+            redirect_url,
             scope,
             state,
             resource,
@@ -847,19 +952,47 @@ async fn run_flow(provider: &dyn OAuthClientProvider, options: &OAuthFlowOptions
 }
 
 pub async fn authorize_mcp(provider: &dyn OAuthClientProvider, options: OAuthFlowOptions) -> Result<OAuthFlowResult> {
-    match run_flow(provider, &options).await {
+    authorize_mcp_with_options(provider, options, OAuthFlowExtraOptions::default()).await
+}
+
+// PORT: Additive entrypoint taking `OAuthFlowExtraOptions` so existing `OAuthFlowOptions` callers compile.
+pub async fn authorize_mcp_with_options(
+    provider: &dyn OAuthClientProvider,
+    options: OAuthFlowOptions,
+    extra: OAuthFlowExtraOptions,
+) -> Result<OAuthFlowResult> {
+    let mut use_state = FlowUse::default();
+    match run_flow(provider, &options, &extra, &mut use_state).await {
         Ok(res) => Ok(res),
         Err(err) => {
             if let Some(oauth_err) = err.downcast_ref::<OAuthError>() {
                 if matches!(oauth_err.code.as_str(), "invalid_client" | "unauthorized_client") {
-                    provider.invalidate_credentials(InvalidateCredentialsKind::All).await?;
-                    return run_flow(provider, &options).await;
+                    // A refresh keeps a pending authorization's `state` and verifier: they are the user's sign-in.
+                    // A client stored meanwhile (by a sign-in that completed) is not the one the server rejected,
+                    // so it stays.
+                    if extra.refresh_only.unwrap_or(false) {
+                        let current_id = provider.client_information().await?.map(|c| c.client_id);
+                        if current_id == use_state.stored_client_id {
+                            for kind in [
+                                InvalidateCredentialsKind::Client,
+                                InvalidateCredentialsKind::Tokens,
+                                InvalidateCredentialsKind::Discovery,
+                            ] {
+                                provider.invalidate_credentials(kind).await?;
+                            }
+                        }
+                    } else {
+                        provider.invalidate_credentials(InvalidateCredentialsKind::All).await?;
+                    }
+                    let mut retry_use = FlowUse::default();
+                    return run_flow(provider, &options, &extra, &mut retry_use).await;
                 }
                 if oauth_err.code == "invalid_grant" {
                     provider
                         .invalidate_credentials(InvalidateCredentialsKind::Tokens)
                         .await?;
-                    return run_flow(provider, &options).await;
+                    let mut retry_use = FlowUse::default();
+                    return run_flow(provider, &options, &extra, &mut retry_use).await;
                 }
             }
             Err(err)

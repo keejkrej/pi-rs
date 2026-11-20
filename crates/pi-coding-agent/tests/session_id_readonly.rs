@@ -46,6 +46,7 @@ fn persist_session(sm: &SessionManager, content: &str) {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     })))
     .unwrap();
 }

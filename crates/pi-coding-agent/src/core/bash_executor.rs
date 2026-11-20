@@ -1,7 +1,6 @@
 //! Port of packages/coding-agent/src/core/bash-executor.ts
 
 use std::future::Future;
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +11,8 @@ use pi_js::text::Utf8StreamDecoder;
 pub use crate::core::tools::bash::{BashExecOptions, BashExecResult, BashOperations};
 use crate::core::tools::truncate::truncate_tail as truncate_tail_with_options;
 pub use crate::core::tools::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncatedBy, TruncationResult};
-use crate::utils::ansi::strip_ansi;
+use crate::utils::ansi::{split_incomplete_ansi_suffix, strip_ansi};
+use crate::utils::output_files::create_output_file_stream;
 use crate::utils::shell::sanitize_binary_output;
 
 pub fn truncate_tail(content: &str) -> TruncationResult {
@@ -55,10 +55,12 @@ pub async fn execute_bash_with_operations(
     struct Accumulator {
         output_chunks: Vec<String>,
         output_bytes: usize,
+        discarded_output: bool,
         temp_file_path: Option<String>,
-        temp_file: Option<std::fs::File>,
+        temp_file: Option<pi_js::fs::File>,
         total_bytes: usize,
         decoder: Utf8StreamDecoder,
+        pending_ansi: String,
         on_chunk: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     }
 
@@ -67,9 +69,7 @@ pub async fn execute_bash_with_operations(
             if self.temp_file_path.is_some() {
                 return;
             }
-            let id = hex::encode(pi_js::crypto::random_bytes(8));
-            let path = pi_js::path::join(&[&pi_js::env::tmp_dir(), &format!("pi-bash-{id}.log")]);
-            if let Ok(mut file) = std::fs::File::create(&path) {
+            if let Ok((path, mut file)) = create_output_file_stream("pi-bash", ".log") {
                 for chunk in &self.output_chunks {
                     let _ = file.write_all(chunk.as_bytes());
                 }
@@ -77,45 +77,59 @@ pub async fn execute_bash_with_operations(
                 self.temp_file = Some(file);
             }
         }
+
+        fn append_text(
+            &mut self,
+            raw_text: &str,
+            max_output_bytes: usize,
+        ) -> Option<(String, Option<Arc<dyn Fn(&str) + Send + Sync>>)> {
+            let text = sanitize_binary_output(&strip_ansi(raw_text)).replace('\r', "");
+            if text.is_empty() {
+                return None;
+            }
+            if self.total_bytes > DEFAULT_MAX_BYTES {
+                self.ensure_temp_file();
+            }
+            if let Some(ref mut file) = self.temp_file {
+                let _ = file.write_all(text.as_bytes());
+            }
+            self.output_bytes += text.len();
+            self.output_chunks.push(text.clone());
+            while self.output_bytes > max_output_bytes && self.output_chunks.len() > 1 {
+                let removed_len = self.output_chunks.drain(..1).next().map_or(0, |s| s.len());
+                self.output_bytes = self.output_bytes.saturating_sub(removed_len);
+                self.discarded_output = true;
+            }
+            Some((text, self.on_chunk.clone()))
+        }
     }
 
     let state = Arc::new(Mutex::new(Accumulator {
         output_chunks: Vec::new(),
         output_bytes: 0,
+        discarded_output: false,
         temp_file_path: None,
         temp_file: None,
         total_bytes: 0,
         decoder: Utf8StreamDecoder::new(),
+        pending_ansi: String::new(),
         on_chunk: opts.on_chunk.clone(),
     }));
 
     let state_cb = state.clone();
     let on_data: Arc<dyn Fn(&[u8]) + Send + Sync> = Arc::new(move |data: &[u8]| {
-        let on_chunk_cb;
-        let text;
-        {
+        let emitted = {
             let Ok(mut acc) = state_cb.lock() else {
                 return;
             };
             acc.total_bytes += data.len();
             let decoded = acc.decoder.decode(data, true);
-            text = sanitize_binary_output(&strip_ansi(&decoded)).replace('\r', "");
-
-            if acc.total_bytes > DEFAULT_MAX_BYTES {
-                acc.ensure_temp_file();
-            }
-            if let Some(ref mut file) = acc.temp_file {
-                let _ = file.write_all(text.as_bytes());
-            }
-            acc.output_bytes += text.len();
-            acc.output_chunks.push(text.clone());
-            while acc.output_bytes > max_output_bytes && acc.output_chunks.len() > 1 {
-                let removed_len = acc.output_chunks.drain(..1).next().map_or(0, |s| s.len());
-                acc.output_bytes = acc.output_bytes.saturating_sub(removed_len);
-            }
-            on_chunk_cb = acc.on_chunk.clone();
-        }
-        if let Some(cb) = on_chunk_cb {
+            let combined = format!("{}{decoded}", acc.pending_ansi);
+            let split = split_incomplete_ansi_suffix(&combined);
+            acc.pending_ansi = split.pending;
+            acc.append_text(&split.complete, max_output_bytes)
+        };
+        if let Some((text, Some(cb))) = emitted {
             cb(&text);
         }
     });
@@ -133,61 +147,65 @@ pub async fn execute_bash_with_operations(
         )
         .await;
 
-    let mut acc = state
-        .lock()
-        .map_err(|_| pi_js::Error::msg("bash accumulator poisoned"))?;
-    let remaining = acc.decoder.decode(&[], false);
-    if !remaining.is_empty() {
-        let tail_text = sanitize_binary_output(&strip_ansi(&remaining)).replace('\r', "");
-        if let Some(ref mut file) = acc.temp_file {
-            let _ = file.write_all(tail_text.as_bytes());
-        }
-        acc.output_chunks.push(tail_text);
-    }
-    let full_output = acc.output_chunks.join("");
-    let truncation_result = truncate_tail(&full_output);
-    if truncation_result.truncated {
-        acc.ensure_temp_file();
-    }
-    if let Some(mut file) = acc.temp_file.take() {
-        let _ = file.flush();
-    }
-    let full_output_path = acc.temp_file_path.clone();
-
-    match exec_res {
+    let cancelled = opts.signal.as_ref().is_some_and(AbortSignal::aborted);
+    let exit_code = match exec_res {
         Ok(result) => {
-            let cancelled = opts.signal.as_ref().is_some_and(AbortSignal::aborted);
-            Ok(BashResult {
-                output: if truncation_result.truncated {
-                    truncation_result.content
-                } else {
-                    full_output
-                },
-                exit_code: if cancelled {
-                    None
-                } else {
-                    result.exit_code.and_then(|c| i32::try_from(c).ok())
-                },
-                cancelled,
-                truncated: truncation_result.truncated,
-                full_output_path,
-            })
+            if cancelled {
+                None
+            } else {
+                result.exit_code.and_then(|c| i32::try_from(c).ok())
+            }
         }
         Err(err) => {
-            if opts.signal.as_ref().is_some_and(AbortSignal::aborted) {
-                return Ok(BashResult {
-                    output: if truncation_result.truncated {
-                        truncation_result.content
-                    } else {
-                        full_output
-                    },
-                    exit_code: None,
-                    cancelled: true,
-                    truncated: truncation_result.truncated,
-                    full_output_path,
-                });
+            if !cancelled {
+                if let Ok(mut acc) = state.lock()
+                    && let Some(file) = acc.temp_file.take()
+                {
+                    let _ = file.sync();
+                }
+                return Err(err);
             }
-            Err(err)
+            None
         }
+    };
+
+    let (flushed_emitted, full_output, truncation_result, discarded_output, full_output_path) = {
+        let mut acc = state
+            .lock()
+            .map_err(|_| pi_js::Error::msg("bash accumulator poisoned"))?;
+        let rest_decoded = acc.decoder.decode(&[], false);
+        let rest = format!("{}{rest_decoded}", acc.pending_ansi);
+        acc.pending_ansi.clear();
+        let flushed = acc.append_text(&rest, max_output_bytes);
+        let full_output = acc.output_chunks.join("");
+        let truncation_result = truncate_tail(&full_output);
+        if truncation_result.truncated {
+            acc.ensure_temp_file();
+        }
+        if let Some(file) = acc.temp_file.take() {
+            let _ = file.sync();
+        }
+        (
+            flushed,
+            full_output,
+            truncation_result,
+            acc.discarded_output,
+            acc.temp_file_path.clone(),
+        )
+    };
+    if let Some((text, Some(cb))) = flushed_emitted {
+        cb(&text);
     }
+
+    Ok(BashResult {
+        output: if truncation_result.truncated {
+            truncation_result.content
+        } else {
+            full_output
+        },
+        exit_code,
+        cancelled,
+        truncated: discarded_output || truncation_result.truncated,
+        full_output_path,
+    })
 }

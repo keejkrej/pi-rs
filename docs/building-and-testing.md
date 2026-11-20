@@ -54,7 +54,7 @@ All workspace unit and integration tests run offline without real LLM API keys o
 
 - **Faux providers**: `pi_ai::providers::faux` provides deterministic streaming responses, tool calls, and thinking blocks.
 - **Test seams**: `pi_js::seam` (`Guard`/`Slot`) enables thread-local overrides for HTTP transports, clipboards, browser launchers, and GUI subprocess dispatch.
-- **Fixture binaries**: Integration tests invoke `fixture-stdio-server`, `fixture-stubborn-server` (`pi-mcp`), `fixture-stale-socket-server` (`pi-client` / `pi-server`), `fixture-fake-external-editor`, and `fixture-faux-session-worker` (`pi-coding-agent`).
+- **Fixture binaries**: Integration tests invoke `fixture-stdio-server`, `fixture-stubborn-server`, `fixture-exiting-parent-server` (`pi-mcp`), `fixture-stale-socket-server` (`pi-client` / `pi-server`), `fixture-propagation-worker` (`pi-telemetry`), `fixture-fake-external-editor`, and `fixture-faux-session-worker` (`pi-coding-agent`).
 - **Headless GUI & bridge tests**: `cargo test -p pi-gui` runs `headless_gui_tests` and `bridge_integration_test` off-screen via `rune::Runtime`.
 
 Common test commands:
@@ -65,6 +65,7 @@ cargo test --workspace
 
 # Per-crate runs
 cargo test -p pi-js
+cargo test -p pi-schema
 cargo test -p pi-ai
 cargo test -p pi-agent-core
 cargo test -p pi-coding-agent

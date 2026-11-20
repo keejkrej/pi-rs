@@ -64,6 +64,7 @@ fn chat_model_cfg(id: &str, name: Option<&str>, api: Option<&str>) -> ProviderMo
         max_tokens: 8000,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     })
 }
 
@@ -338,7 +339,7 @@ async fn custom_models_merge_inheritance_validation_and_replacement() {
                 "apiKey": "test-key",
                 "api": "openai-completions",
                 "models": [{
-                    "id": "anthropic/claude-sonnet-4",
+                    "id": "anthropic/claude-sonnet-4.5",
                     "name": "Replaced",
                     "reasoning": false,
                     "input": ["text"],
@@ -352,7 +353,7 @@ async fn custom_models_merge_inheritance_validation_and_replacement() {
     let r4 = create_registry(auth, &models_path).await;
     let sonnet_models: Vec<_> = get_models_for_provider(&r4, "openrouter")
         .into_iter()
-        .filter(|m| m.id == "anthropic/claude-sonnet-4")
+        .filter(|m| m.id == "anthropic/claude-sonnet-4.5")
         .collect();
     assert_eq!(sonnet_models.len(), 1);
     assert_eq!(sonnet_models[0].base_url, "https://my-proxy.example.com/v1");
@@ -518,7 +519,7 @@ async fn compat_merging_schemas_and_model_overrides() {
                     }
                 ],
                 "modelOverrides": {
-                    "anthropic/claude-sonnet-4": {
+                    "anthropic/claude-sonnet-4.5": {
                         "name": "Proxied Sonnet",
                         "cost": { "input": 99 },
                         "samplingParams": { "top_p": 0.9 },
@@ -563,7 +564,7 @@ async fn compat_merging_schemas_and_model_overrides() {
     assert!(reg.get_error().is_none());
     assert!(reg.find("openrouter", "nonexistent/model-id").is_none());
 
-    let sonnet = reg.find("openrouter", "anthropic/claude-sonnet-4").unwrap();
+    let sonnet = reg.find("openrouter", "anthropic/claude-sonnet-4.5").unwrap();
     assert_eq!(sonnet.base_url, "https://my-proxy.example.com/v1");
     assert_eq!(sonnet.name, "Proxied Sonnet");
     assert_eq!(sonnet.cost.input, 99.0);
@@ -896,6 +897,7 @@ async fn register_provider_treats_uppercase_api_key_and_headers_as_literals() {
         max_tokens: 8000,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     })]);
 
     registry.register_provider("literal-provider", cfg).unwrap();

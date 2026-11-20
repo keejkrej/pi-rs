@@ -19,7 +19,7 @@ use crate::components::scroll_view::ScrollView;
 use crate::layout::{LayoutFrame, ScrollbarGeometry};
 use crate::terminal::Terminal;
 use crate::terminal_colors::{TerminalColorScheme, TerminalColors};
-use crate::terminal_image::{ImageProtocol, TerminalCapabilities};
+use crate::terminal_image::{ImageProtocol, TerminalCapabilities, get_kitty_image_placement_rows};
 use crate::tui::{
     Component, OverlayHandle, OverlayOptions, QueryTerminalColorsOptions, TUI, TuiBase, TuiBaseOverrides,
     TuiInputListener, TuiInputListenerResult, TuiMode, TuiMouseButton, TuiMouseDispatchResult, TuiMouseDispatchTarget,
@@ -54,11 +54,17 @@ const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES: i64 = 64 * 1024 * 1024;
 const DOUBLE_CLICK_INTERVAL_MS: i64 = 500;
 const COPY_ERROR_FLASH_DURATION_MS: i64 = 5000;
 // Regular mode delegates double-click selection to the terminal emulator. Fullscreen owns mouse selection,
-// so mirror common terminal word-selection behavior by keeping paths and kebab-case tokens whole.
+// so it uses iTerm2's default "characters considered part of a word" set:
+// https://github.com/gnachman/iTerm2/blob/7f4ff739721f95d0b93003d8701c4523a7edf261/sources/Settings/iTermPreferences.m#L743
 static TERMINAL_WORD_SELECTION_JOINERS: LazyLock<IndexSet<&'static str>> = LazyLock::new(|| {
     let mut joiners = IndexSet::new();
     joiners.insert("/");
     joiners.insert("-");
+    joiners.insert("+");
+    joiners.insert("\\");
+    joiners.insert("~");
+    joiners.insert("_");
+    joiners.insert(".");
     joiners
 });
 
@@ -809,7 +815,8 @@ impl TuiAltScreen {
             let terminal = self.terminal();
             let width = 1.max(terminal.columns());
             let document_lines: Vec<String> = self
-                .render(width as usize)
+                .base()
+                .resolve_fake_cursors(self.render(width as usize))
                 .into_iter()
                 .map(|line| OSC133_ZONE_PREFIX.replace(&line, "").into_owned())
                 .map(|line| line.replace(crate::tui::CURSOR_MARKER, ""))
@@ -844,6 +851,24 @@ impl TuiAltScreen {
         let saved = self.state().saved_capabilities.take();
         if let Some(capabilities) = saved {
             crate::terminal_image::set_capabilities(capabilities);
+        }
+    }
+
+    pub(crate) fn get_exit_restore_prefix(&self) -> String {
+        let prefix = self.base().default_exit_restore_prefix();
+        if !self.state().alt_screen_active {
+            return prefix;
+        }
+        let mouse = if self.inner.mouse_enabled { DISABLE_MOUSE } else { "" };
+        format!("{END_SYNCHRONIZED_OUTPUT}{mouse}{ENABLE_AUTOWRAP}{prefix}")
+    }
+
+    pub(crate) fn get_exit_restore_suffix(&self) -> String {
+        // Kitty keyboard flags are per screen, so the terminal pops them before the alternate screen is left.
+        if self.state().alt_screen_active {
+            format!("{EXIT_ALT_SCREEN}\x1b[?25h")
+        } else {
+            String::new()
         }
     }
 
@@ -1290,7 +1315,15 @@ impl TuiAltScreen {
         self.inner.flashes.flash(message, duration_ms);
     }
 
-    fn should_defer_viewport_input_to_overlay(&self) -> bool {
+    /// Focused overlays and components that capture viewport input receive viewport keys instead of the transcript.
+    fn should_defer_viewport_input(&self) -> bool {
+        if self
+            .base()
+            .get_focused_component()
+            .is_some_and(|c| c.captures_viewport_input())
+        {
+            return true;
+        }
         let search_overlay_focused = self
             .state()
             .active_search
@@ -1397,9 +1430,6 @@ impl TuiAltScreen {
                     data: None,
                 });
             }
-            if self.should_defer_viewport_input_to_overlay() {
-                return None;
-            }
             self.route_wheel(&wheel_event, wheel_delta);
             return Some(TuiInputListenerResult {
                 consume: Some(true),
@@ -1466,7 +1496,7 @@ impl TuiAltScreen {
                 });
             }
         }
-        if self.should_defer_viewport_input_to_overlay() {
+        if self.should_defer_viewport_input() {
             return None;
         }
         if keybindings.matches(data, "tui.altScreen.pageUp") {
@@ -2976,11 +3006,14 @@ impl TuiAltScreen {
             next_layout = crate::layout::render_layout_frame(root, width, height, req_render);
         }
 
-        let mut screen: Vec<String> = next_layout
-            .lines
-            .iter()
-            .map(|line| OSC133_ZONE_PREFIX.replace(line, "").into_owned())
-            .collect();
+        // Resolve fake cursors before highlighting and compositing, which only track SGR codes
+        let mut screen: Vec<String> = self.base().resolve_fake_cursors(
+            next_layout
+                .lines
+                .iter()
+                .map(|line| OSC133_ZONE_PREFIX.replace(line, "").into_owned())
+                .collect(),
+        );
         screen = self.apply_search_highlights(&screen, &next_layout);
         screen = self.composite_scroll_to_end_indicator(&screen, &next_layout, width);
         screen = self.base().composite_overlays(screen, width, height);
@@ -3018,11 +3051,32 @@ impl TuiAltScreen {
         };
 
         let full_redraw = prev_screen.is_empty() || prev_w != width || prev_h != height;
-        let images_need_redraw = screen.iter().enumerate().any(|(row, line)| {
-            let prev = prev_screen.get(row).map(String::as_str).unwrap_or("");
-            line.as_str() != prev
-                && (crate::terminal_image::is_image_line(line) || crate::terminal_image::is_image_line(prev))
+        let changed_rows: Vec<bool> = screen
+            .iter()
+            .enumerate()
+            .map(|(row, line)| Some(line) != prev_screen.get(row))
+            .collect();
+        let image_anchors_need_redraw = screen.iter().enumerate().any(|(row, line)| {
+            changed_rows[row]
+                && (crate::terminal_image::is_image_line(line)
+                    || crate::terminal_image::is_image_line(prev_screen.get(row).map(String::as_str).unwrap_or("")))
         });
+        let image_cells_need_redraw = !image_anchors_need_redraw
+            && image_protocol == Some(ImageProtocol::Kitty)
+            && changed_rows.iter().copied().any(|changed| changed)
+            && screen.iter().enumerate().any(|(row, line)| {
+                let Some(placement_rows) = get_kitty_image_placement_rows(line) else {
+                    return false;
+                };
+                let end_row = (row as i64 + placement_rows).min(changed_rows.len() as i64);
+                for covered_row in (row as i64)..end_row {
+                    if changed_rows[covered_row as usize] {
+                        return true;
+                    }
+                }
+                false
+            });
+        let images_need_redraw = image_anchors_need_redraw || image_cells_need_redraw;
         let redraw_images = full_redraw || images_need_redraw;
         let prepared_kitty_screen = if redraw_images && image_protocol == Some(ImageProtocol::Kitty) {
             self.prepare_kitty_screen(&screen)
@@ -3052,31 +3106,46 @@ impl TuiAltScreen {
         }
         buffer.push_str(&prepared_kitty_screen.evicted_image_deletion);
 
-        let clear_rows_before_kitty_images = redraw_images
+        // Some terminals store Kitty images in the cells they cover (WezTerm, xterm.js's image addon in Orca),
+        // so clearing or writing a covered row erases that part of the image. Draw placements after every clear
+        // and text write so nothing later intersects them. Terminals that keep images on a separate layer
+        // (Kitty, Ghostty) render the same result; text-only frames keep the interleaved output.
+        let draw_kitty_images_last = redraw_images
             && image_protocol == Some(ImageProtocol::Kitty)
-            && screen.iter().any(|l| crate::terminal_image::is_image_line(l))
-            && (pi_js::env::var("WEZTERM_PANE").is_some_and(|v| !v.is_empty())
-                || pi_js::env::var("TERM_PROGRAM")
-                    .map(|v| v.to_ascii_lowercase())
-                    .as_deref()
-                    == Some("wezterm"));
-        if clear_rows_before_kitty_images {
+            && screen.iter().any(|l| crate::terminal_image::is_image_line(l));
+        if draw_kitty_images_last {
             for row in 0..h_usize {
                 if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
                     continue;
                 }
                 buffer.push_str(&format!("\x1b[{};1H\x1b[2K", row + 1));
             }
-        }
-
-        for row in 0..h_usize {
-            if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
-                continue;
-            }
-            let line = prepared_kitty_screen.lines.get(row).map(String::as_str).unwrap_or("");
-            if clear_rows_before_kitty_images {
+            for row in 0..h_usize {
+                if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
+                    continue;
+                }
+                let line = prepared_kitty_screen.lines.get(row).map(String::as_str).unwrap_or("");
+                if crate::terminal_image::is_image_line(line) {
+                    continue;
+                }
                 buffer.push_str(&format!("\x1b[{};1H{line}", row + 1));
-            } else {
+            }
+            for row in 0..h_usize {
+                if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
+                    continue;
+                }
+                let line = prepared_kitty_screen.lines.get(row).map(String::as_str).unwrap_or("");
+                if !crate::terminal_image::is_image_line(line) {
+                    continue;
+                }
+                buffer.push_str(&format!("\x1b[{};1H{line}", row + 1));
+            }
+        } else {
+            for row in 0..h_usize {
+                if !full_redraw && !images_need_redraw && screen.get(row) == prev_screen.get(row) {
+                    continue;
+                }
+                let line = prepared_kitty_screen.lines.get(row).map(String::as_str).unwrap_or("");
                 buffer.push_str(&format!("\x1b[{};1H\x1b[2K{line}", row + 1));
             }
         }
@@ -3182,6 +3251,19 @@ impl TuiBaseOverrides for TuiAltScreenInner {
         }
     }
 
+    fn get_exit_restore_prefix(&self, base: &TuiBase) -> String {
+        self.self_weak.upgrade().map_or_else(
+            || base.default_exit_restore_prefix(),
+            |inner| TuiAltScreen { inner }.get_exit_restore_prefix(),
+        )
+    }
+
+    fn get_exit_restore_suffix(&self) -> String {
+        self.self_weak
+            .upgrade()
+            .map_or_else(String::new, |inner| TuiAltScreen { inner }.get_exit_restore_suffix())
+    }
+
     fn get_mounted_roots(&self, _base: &TuiBase) -> Vec<ComponentHandle> {
         self.self_weak
             .upgrade()
@@ -3213,6 +3295,14 @@ impl TuiBaseOverrides for TuiAltScreen {
 
     fn after_terminal_stop(&self, options: &TuiStopOptions) {
         TuiAltScreen::after_terminal_stop(self, options)
+    }
+
+    fn get_exit_restore_prefix(&self, _base: &TuiBase) -> String {
+        TuiAltScreen::get_exit_restore_prefix(self)
+    }
+
+    fn get_exit_restore_suffix(&self) -> String {
+        TuiAltScreen::get_exit_restore_suffix(self)
     }
 
     fn get_mounted_roots(&self, _base: &TuiBase) -> Vec<ComponentHandle> {

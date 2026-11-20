@@ -47,6 +47,7 @@ fn saves_custom_entries_and_includes_them_in_tree_traversal() {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: 2,
+            duration_ms: None,
         })))
         .unwrap();
 

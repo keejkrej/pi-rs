@@ -10,19 +10,20 @@ use indexmap::IndexMap;
 use pi_agent_core::{
     AfterToolCallResult, Agent, AgentContext, AgentEvent, AgentInitialState, AgentLoopTurnUpdate, AgentMessage,
     AgentOptions, AgentTool, AgentToolResult, BeforeToolCallResult, FinishTurnAction, FinishTurnDecision,
-    PrepareRequestResult, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode, set_default_stream_fn,
+    PrepareRequestResult, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode, default_agent_identity,
+    set_default_stream_fn,
 };
 use pi_ai::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, FauxAssistantMessageContent, FauxToolCallOptions,
-    JsonObject, Message, Model, StopReason, SystemMessage, SystemMessageContent, ThinkingBudgets, ToolReference,
-    ToolResultMessage, Transport, UserContentBlock, UserMessage, UserMessageContent,
-    create_assistant_message_event_stream, faux_assistant_message, faux_text, faux_tool_call,
-    get_current_system_message, to_tool_declaration,
+    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, ClientAttribution, ClientIdentity,
+    FauxAssistantMessageContent, FauxToolCallOptions, JsonObject, Message, Model, StopReason, SystemMessage,
+    SystemMessageContent, ThinkingBudgets, ToolReference, ToolResultMessage, Transport, UserAgentMode,
+    UserContentBlock, UserMessage, UserMessageContent, create_assistant_message_event_stream, faux_assistant_message,
+    faux_text, faux_tool_call, get_current_system_message, pi_attribution, to_tool_declaration,
 };
 use pi_js::Error;
 use pi_js::abort::AbortSignal;
 use pi_js::time::now_ms;
-use pi_js::vendor::typebox::t;
+use pi_schema::{Schema, obj};
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -210,7 +211,7 @@ fn make_noop_tool(name: &str) -> AgentTool {
         name: name.to_string(),
         label: name.to_string(),
         description: format!("{name} tool"),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -856,7 +857,7 @@ async fn ignores_tool_updates_after_tool_execution_settles() {
         name: "delayed_tool".to_string(),
         label: "Delayed Tool".to_string(),
         description: "Captures progress callbacks".to_string(),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -950,7 +951,7 @@ async fn ignores_settled_parallel_tool_update_while_another_tool_is_still_runnin
         name: "settled_tool".to_string(),
         label: "Settled Tool".to_string(),
         description: "Captures progress callbacks".to_string(),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -979,7 +980,7 @@ async fn ignores_settled_parallel_tool_update_while_another_tool_is_still_runnin
         name: "slow_tool".to_string(),
         label: "Slow Tool".to_string(),
         description: "Keeps the agent run active".to_string(),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1772,5 +1773,108 @@ async fn forwards_tool_and_turn_hooks_through_agent_options() {
     assert_eq!(
         *seen_model_ids.lock().unwrap(),
         vec!["prepared-model", "prepared-model"]
+    );
+}
+
+#[tokio::test]
+async fn forwards_provider_stream_event_observers_through_agent_options() {
+    let provider_events = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let events_ref = Arc::clone(&provider_events);
+
+    let agent = Agent::new(AgentOptions {
+        on_provider_stream_event: Some(Arc::new(move |data, _model| {
+            let events_ref = Arc::clone(&events_ref);
+            let data = data.clone();
+            Box::pin(async move {
+                events_ref.lock().unwrap().push(data);
+                Ok(())
+            })
+        })),
+        stream_fn: Some(Arc::new(move |model, _ctx, opts| {
+            Box::pin(async move {
+                if let Some(cb) = opts.and_then(|o| o.base.on_provider_stream_event) {
+                    cb(&json!({ "request_cost": 0.01 }), &model).await?;
+                }
+                Ok(spawn_done_stream(
+                    assistant_msg(vec![text_block("ok")], StopReason::Stop),
+                    StopReason::Stop,
+                ))
+            })
+        })),
+        ..Default::default()
+    });
+
+    agent.prompt("hello").await.expect("prompt succeeds");
+
+    assert_eq!(*provider_events.lock().unwrap(), vec![json!({ "request_cost": 0.01 })]);
+}
+
+#[tokio::test]
+async fn attributes_requests_to_pi_by_default_and_merges_configured_identity_over_it() {
+    let received = Arc::new(Mutex::new(Vec::<Option<ClientIdentity>>::new()));
+    let received_ref = Arc::clone(&received);
+
+    let agent = Agent::new(AgentOptions {
+        stream_fn: Some(Arc::new(move |_model, _ctx, opts| {
+            let received_ref = Arc::clone(&received_ref);
+            received_ref.lock().unwrap().push(opts.and_then(|o| o.base.identity));
+            Box::pin(async move {
+                Ok(spawn_done_stream(
+                    assistant_msg(vec![text_block("ok")], StopReason::Stop),
+                    StopReason::Stop,
+                ))
+            })
+        })),
+        ..Default::default()
+    });
+
+    agent.prompt("hello").await.expect("prompt 1");
+
+    let acme = ClientAttribution {
+        name: "acme".to_string(),
+        url: "https://acme.example".to_string(),
+        categories: None,
+    };
+    agent.set_identity(Some(ClientIdentity {
+        user_agent: Some(UserAgentMode::SHORT),
+        attribution: Some(Some(acme.clone())),
+        version: None,
+    }));
+    agent.prompt("hello again").await.expect("prompt 2");
+
+    agent.set_identity(Some(ClientIdentity {
+        user_agent: Some(UserAgentMode::SHORT),
+        attribution: None,
+        version: None,
+    }));
+    agent.prompt("and again").await.expect("prompt 3");
+
+    agent.set_identity(Some(ClientIdentity {
+        user_agent: Some(UserAgentMode::SHORT),
+        attribution: Some(None),
+        version: None,
+    }));
+    agent.prompt("without attribution").await.expect("prompt 4");
+
+    assert_eq!(
+        *received.lock().unwrap(),
+        vec![
+            Some(default_agent_identity()),
+            Some(ClientIdentity {
+                user_agent: Some(UserAgentMode::SHORT),
+                attribution: Some(Some(acme)),
+                version: None,
+            }),
+            Some(ClientIdentity {
+                user_agent: Some(UserAgentMode::SHORT),
+                attribution: Some(Some(pi_attribution())),
+                version: None,
+            }),
+            Some(ClientIdentity {
+                user_agent: Some(UserAgentMode::SHORT),
+                attribution: Some(None),
+                version: None,
+            }),
+        ]
     );
 }

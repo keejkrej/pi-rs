@@ -3,10 +3,11 @@
 use std::any::Any;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use pi_agent_core::types::{
     AgentMessage, AgentTool, AgentToolCallOutcome, AgentToolPrepareArgumentsFn, AgentToolResult,
     AgentToolUpdateCallback, ThinkingLevel, ToolExecutionMode,
@@ -23,9 +24,12 @@ use pi_js::{BoxFuture, Unsubscribe};
 use pi_tui::autocomplete::{AutocompleteItem, AutocompleteProvider};
 use pi_tui::components::editor::EditorTheme;
 use pi_tui::editor_component::EditorComponent;
+use pi_tui::keybindings::Keybinding;
 use pi_tui::keys::KeyId;
+use pi_tui::program_status::ProgramStatusKind;
 use pi_tui::tui::{Component, OverlayHandle, OverlayOptions, TUI};
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::core::tools::EditToolInput;
@@ -274,11 +278,59 @@ pub type CustomUiFactory = Box<
 
 pub type OverlayOptionsFn = Arc<dyn Fn() -> OverlayOptions + Send + Sync>;
 
+/// Formats the host's configured keybindings for display.
+/// Extensions should use these instead of hardcoding shortcut strings so custom user keybindings are respected.
+pub trait KeybindingHints: Send + Sync {
+    /// Configured keys for a keybinding id, for example `"ctrl+o"`. Empty when the id has no keys.
+    fn key_text(&self, keybinding: &str) -> String;
+
+    /// Configured keys followed by a description, styled as a hint, for example `"ctrl+o to expand"`.
+    fn key_hint(&self, keybinding: &str, description: &str) -> String;
+}
+
+pub(crate) fn host_key_text(keybinding: &str) -> String {
+    let binding: Keybinding = keybinding.to_string();
+    crate::modes::interactive::components::keybinding_hints::key_text(&binding)
+}
+
+pub(crate) fn host_key_hint(keybinding: &str, description: &str) -> String {
+    let binding: Keybinding = keybinding.to_string();
+    if pi_tui::get_keybindings().get_keys(keybinding).is_empty() && keybinding == "app.tools.expand" {
+        return crate::modes::interactive::components::keybinding_hints::raw_key_hint("ctrl+o", description);
+    }
+    if crate::modes::interactive::theme::theme::try_theme().is_ok() {
+        return crate::modes::interactive::components::keybinding_hints::key_hint(&binding, description);
+    }
+    let key = host_key_text(keybinding);
+    if key.is_empty() {
+        description.to_string()
+    } else {
+        format!("{key} {description}")
+    }
+}
+
+pub(crate) fn default_key_text_fn() -> Arc<dyn Fn(&str) -> String + Send + Sync> {
+    Arc::new(host_key_text)
+}
+
+pub(crate) fn default_key_hint_fn() -> Arc<dyn Fn(&str, &str) -> String + Send + Sync> {
+    Arc::new(host_key_hint)
+}
+
+/// Program status indicator configuration while an extension custom UI blocks on user input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionCustomBlockedOptions {
+    pub kind: ProgramStatusKind,
+    pub message: String,
+}
+
 #[derive(Clone, Default)]
 pub struct ExtensionCustomOptions {
     pub overlay: Option<bool>,
     pub overlay_options: Option<OverlayOptionsSource>,
     pub on_handle: Option<Arc<dyn Fn(OverlayHandle) + Send + Sync>>,
+    pub blocked: Option<ExtensionCustomBlockedOptions>,
 }
 
 #[derive(Clone)]
@@ -800,6 +852,32 @@ pub struct ToolRenderContext {
     pub expanded: bool,
     pub show_images: bool,
     pub is_error: bool,
+    /// Milliseconds the tool execution took, or `None` while running / unavailable.
+    pub duration_ms: Option<f64>,
+    /// Horizontal padding configured by `outputPad`. Renderers with `renderShell: "self"` apply it themselves.
+    pub output_pad: i64,
+    pub key_text: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub key_hint: Arc<dyn Fn(&str, &str) -> String + Send + Sync>,
+}
+
+impl ToolRenderContext {
+    pub fn key_text(&self, keybinding: &str) -> String {
+        (self.key_text)(keybinding)
+    }
+
+    pub fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        (self.key_hint)(keybinding, description)
+    }
+}
+
+impl KeybindingHints for ToolRenderContext {
+    fn key_text(&self, keybinding: &str) -> String {
+        (self.key_text)(keybinding)
+    }
+
+    fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        (self.key_hint)(keybinding, description)
+    }
 }
 
 impl Default for ToolRenderContext {
@@ -817,6 +895,10 @@ impl Default for ToolRenderContext {
             expanded: false,
             show_images: true,
             is_error: false,
+            duration_ms: None,
+            output_pad: 1,
+            key_text: default_key_text_fn(),
+            key_hint: default_key_hint_fn(),
         }
     }
 }
@@ -850,6 +932,8 @@ pub struct ToolAnnotations {
 pub struct ToolNamespace {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -861,6 +945,10 @@ pub trait ToolLoadoutBackend: Send + Sync {
     fn registered(&self) -> &[AgentTool];
     fn get_exposure(&self, name: &str) -> ToolExposure;
     fn get_namespace(&self, name: &str) -> Option<ToolNamespace>;
+    /// A tool's `prompt_guidelines`. Hidden declarations leave them out of the system prompt.
+    fn get_prompt_guidelines(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -901,9 +989,49 @@ pub type ToolExecuteFn = Arc<
         + Sync,
 >;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolReachScope {
+    All,
+    Names(Vec<String>),
+}
+
+/// Returns which tools a call with `input` may reach (`All`, or candidate names/words).
+pub type ReachesToolsFn = Arc<dyn Fn(&Value) -> ToolReachScope + Send + Sync>;
+
+struct ReachesDropGuard {
+    key_slot: Arc<AtomicUsize>,
+}
+
+static TOOL_REACHES_REGISTRY: LazyLock<Mutex<IndexMap<usize, ReachesToolsFn>>> =
+    LazyLock::new(|| Mutex::new(IndexMap::new()));
+
+impl Drop for ReachesDropGuard {
+    fn drop(&mut self) {
+        let key = self.key_slot.load(Ordering::Acquire);
+        if key != 0 {
+            TOOL_REACHES_REGISTRY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .shift_remove(&key);
+        }
+    }
+}
+
 pub type RenderCallFn = Arc<dyn Fn(Value, Theme, ToolRenderContext) -> Arc<dyn Component> + Send + Sync>;
 pub type RenderResultFn =
     Arc<dyn Fn(AgentToolResult, ToolRenderResultOptions, Theme, ToolRenderContext) -> Arc<dyn Component> + Send + Sync>;
+
+/// Subset of [`ToolDefinition`] used to render calls for a tool name.
+#[derive(Clone, Default)]
+pub struct ToolRenderers {
+    pub render_shell: Option<RenderShell>,
+    pub render_call: Option<RenderCallFn>,
+    pub render_result: Option<RenderResultFn>,
+}
+
+/// Chooses how calls to a tool are drawn, including tools that are not registered.
+pub type ToolRendererResolver =
+    Arc<dyn Fn(&str, Box<dyn FnOnce() -> Option<ToolRenderers> + Send>) -> Option<ToolRenderers> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ToolDefinition {
@@ -926,6 +1054,47 @@ pub struct ToolDefinition {
     pub execute: ToolExecuteFn,
     pub render_call: Option<RenderCallFn>,
     pub render_result: Option<RenderResultFn>,
+}
+
+impl ToolDefinition {
+    // PORT: ToolDefinition preserves existing Rust struct-literal compatibility for external crates;
+    // reaches_tools is attached via `with_reaches_tools` and tied to the `execute` Arc lifetime.
+    pub fn with_reaches_tools(mut self, reaches: ReachesToolsFn) -> Self {
+        let key_slot = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(ReachesDropGuard {
+            key_slot: Arc::clone(&key_slot),
+        });
+        let prev = Arc::clone(&self.execute);
+        let wrapped: ToolExecuteFn = Arc::new(move |id, params, signal, on_update, ctx| {
+            let _keep = Arc::clone(&guard);
+            prev(id, params, signal, on_update, ctx)
+        });
+        let key = Arc::as_ptr(&wrapped) as *const () as usize;
+        key_slot.store(key, Ordering::Release);
+        TOOL_REACHES_REGISTRY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, reaches);
+        self.execute = wrapped;
+        self
+    }
+
+    pub fn reaches_tools(&self) -> Option<ReachesToolsFn> {
+        let key = Arc::as_ptr(&self.execute) as *const () as usize;
+        TOOL_REACHES_REGISTRY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+    }
+
+    pub fn to_renderers(&self) -> ToolRenderers {
+        ToolRenderers {
+            render_shell: self.render_shell,
+            render_call: self.render_call.clone(),
+            render_result: self.render_result.clone(),
+        }
+    }
 }
 
 pub fn define_tool(tool: ToolDefinition) -> ToolDefinition {
@@ -1339,14 +1508,50 @@ impl ExtensionEvent for ProviderStreamEvent {
     type Output = ();
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BeforeAgentStartMessageType {
+    #[default]
+    User,
+    Custom,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BeforeAgentStartEvent {
+    #[serde(default)]
+    pub message_type: BeforeAgentStartMessageType,
+    #[serde(default)]
     pub prompt: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageContent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<CustomMessage>,
     pub system_prompt: String,
     pub system_prompt_options: Arc<Mutex<NormalizedBuildSystemPromptOptions>>,
+}
+
+impl Serialize for BeforeAgentStartEvent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("messageType", &self.message_type)?;
+        match self.message_type {
+            BeforeAgentStartMessageType::User => {
+                map.serialize_entry("prompt", &self.prompt)?;
+                if let Some(ref images) = self.images {
+                    map.serialize_entry("images", images)?;
+                }
+            }
+            BeforeAgentStartMessageType::Custom => {
+                if let Some(ref message) = self.message {
+                    map.serialize_entry("message", message)?;
+                }
+            }
+        }
+        map.serialize_entry("systemPrompt", &self.system_prompt)?;
+        map.serialize_entry("systemPromptOptions", &self.system_prompt_options)?;
+        map.end()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1460,7 +1665,11 @@ impl ExtensionEvent for AgentBeforeSettleEvent {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentSettledEvent {}
+#[serde(rename_all = "camelCase")]
+pub struct AgentSettledEvent {
+    #[serde(default)]
+    pub aborted: bool,
+}
 
 impl ExtensionEvent for AgentSettledEvent {
     const TYPE: &'static str = "agent_settled";
@@ -1615,6 +1824,8 @@ pub struct ToolExecutionEndEvent {
     pub tool_name: String,
     pub result: Value,
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_tool_call_id: Option<String>,
 }
@@ -2254,13 +2465,43 @@ pub struct MessageRenderOptions {
     pub output_pad: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl MessageRenderOptions {
+    pub fn key_text(&self, keybinding: &str) -> String {
+        host_key_text(keybinding)
+    }
+
+    pub fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        host_key_hint(keybinding, description)
+    }
+}
+
+impl KeybindingHints for MessageRenderOptions {
+    fn key_text(&self, keybinding: &str) -> String {
+        host_key_text(keybinding)
+    }
+
+    fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        host_key_hint(keybinding, description)
+    }
+}
+
+/// Markdown surface a transformer runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MarkdownMessageType {
     User,
     Assistant,
     AssistantThinking,
+    Custom,
+    Summary,
+    Changelog,
 }
+
+pub const DEFAULT_MARKDOWN_MESSAGE_TYPES: &[MarkdownMessageType] = &[
+    MarkdownMessageType::User,
+    MarkdownMessageType::Assistant,
+    MarkdownMessageType::AssistantThinking,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2268,14 +2509,52 @@ pub struct MarkdownTransformContext {
     pub message_type: MarkdownMessageType,
     pub is_streaming: bool,
     pub available_width: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
 }
 
 pub type MarkdownTransformer = Arc<dyn Fn(&str, MarkdownTransformContext) -> String + Send + Sync>;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownTransformerOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_types: Option<Vec<MarkdownMessageType>>,
+}
+
+/// A registered Markdown transformer and the surfaces it runs on.
+#[derive(Clone)]
+pub struct MarkdownTransformerRegistration {
+    pub transformer: MarkdownTransformer,
+    pub message_types: IndexSet<MarkdownMessageType>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryRenderOptions {
     pub expanded: bool,
+}
+
+impl EntryRenderOptions {
+    pub fn key_text(&self, keybinding: &str) -> String {
+        host_key_text(keybinding)
+    }
+
+    pub fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        host_key_hint(keybinding, description)
+    }
+}
+
+impl KeybindingHints for EntryRenderOptions {
+    fn key_text(&self, keybinding: &str) -> String {
+        host_key_text(keybinding)
+    }
+
+    fn key_hint(&self, keybinding: &str, description: &str) -> String {
+        host_key_hint(keybinding, description)
+    }
 }
 
 pub type MessageRenderer =
@@ -2459,6 +2738,8 @@ pub struct ProviderChatModelConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<IndexMap<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<pi_ai::types::SamplingParamsByThinkingLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<pi_ai::types::ModelCompat>,
 }
 
@@ -2496,6 +2777,8 @@ pub struct ProviderClassifierModelConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
     pub context_window: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compat: Option<pi_ai::types::SystemOneCompat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2523,6 +2806,7 @@ fn convert_provider_model_config(model: ProviderModelConfig) -> ComposerModelCon
             context_window: m.context_window,
             max_tokens: m.max_tokens,
             sampling_params: m.sampling_params,
+            sampling_params_by_thinking_level: m.sampling_params_by_thinking_level,
             compat: m.compat,
         }),
         ProviderModelConfig::Image(m) => ComposerModelConfig::Image(ComposerImageModelConfig {
@@ -2546,6 +2830,7 @@ fn convert_provider_model_config(model: ProviderModelConfig) -> ComposerModelCon
             cost: m.cost,
             headers: m.headers,
             context_window: m.context_window,
+            compat: m.compat,
         }),
     }
 }
@@ -2649,7 +2934,7 @@ pub struct RegisteredTool {
     pub source_info: SourceInfo,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub name: String,
@@ -2657,12 +2942,30 @@ pub struct ToolInfo {
     pub parameters: Schema,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_guidelines: Option<Vec<String>>,
+    #[serde(skip)]
+    pub reaches_tools: Option<ReachesToolsFn>,
     pub exposure: ToolExposure,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<ToolNamespace>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
     pub source_info: SourceInfo,
+}
+
+impl fmt::Debug for ToolInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolInfo")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("parameters", &self.parameters)
+            .field("prompt_guidelines", &self.prompt_guidelines)
+            .field("reaches_tools", &self.reaches_tools.as_ref().map(|_| "<fn>"))
+            .field("exposure", &self.exposure)
+            .field("namespace", &self.namespace)
+            .field("annotations", &self.annotations)
+            .field("source_info", &self.source_info)
+            .finish()
+    }
 }
 
 /// Unified stored handler invoked by `ExtensionRunner`.
@@ -2693,7 +2996,8 @@ pub struct LoadedExtension {
     pub project_trust_handlers: Arc<Mutex<Vec<(u64, ProjectTrustHandler)>>>,
     pub tools: Arc<Mutex<IndexMap<String, RegisteredTool>>>,
     pub message_renderers: Arc<Mutex<IndexMap<String, MessageRenderer>>>,
-    pub markdown_transformer: Arc<Mutex<Option<MarkdownTransformer>>>,
+    pub tool_renderers: Arc<Mutex<Vec<ToolRendererResolver>>>,
+    pub markdown_transformer: Arc<Mutex<Option<MarkdownTransformerRegistration>>>,
     pub entry_renderers: Arc<Mutex<IndexMap<String, EntryRenderer>>>,
     pub commands: Arc<Mutex<IndexMap<String, RegisteredCommand>>>,
     pub flags: Arc<Mutex<IndexMap<String, ExtensionFlag>>>,
@@ -2714,6 +3018,7 @@ impl LoadedExtension {
             project_trust_handlers: Arc::new(Mutex::new(Vec::new())),
             tools: Arc::new(Mutex::new(IndexMap::new())),
             message_renderers: Arc::new(Mutex::new(IndexMap::new())),
+            tool_renderers: Arc::new(Mutex::new(Vec::new())),
             markdown_transformer: Arc::new(Mutex::new(None)),
             entry_renderers: Arc::new(Mutex::new(IndexMap::new())),
             commands: Arc::new(Mutex::new(IndexMap::new())),
@@ -3281,13 +3586,28 @@ impl ExtensionApi {
     }
 
     pub fn register_markdown_transformer(&self, transformer: MarkdownTransformer) -> pi_js::Result<()> {
+        self.register_markdown_transformer_with_options(transformer, None)
+    }
+
+    pub fn register_markdown_transformer_with_options(
+        &self,
+        transformer: MarkdownTransformer,
+        options: Option<MarkdownTransformerOptions>,
+    ) -> pi_js::Result<()> {
         self.assert_active()?;
+        let types_vec = options
+            .and_then(|o| o.message_types)
+            .unwrap_or_else(|| DEFAULT_MARKDOWN_MESSAGE_TYPES.to_vec());
+        let message_types: IndexSet<MarkdownMessageType> = types_vec.into_iter().collect();
         *self
             .inner
             .extension
             .markdown_transformer
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(transformer);
+            .unwrap_or_else(|e| e.into_inner()) = Some(MarkdownTransformerRegistration {
+            transformer,
+            message_types,
+        });
         Ok(())
     }
 
@@ -3299,6 +3619,17 @@ impl ExtensionApi {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(custom_type.to_string(), renderer);
+        Ok(())
+    }
+
+    pub fn register_tool_renderer(&self, resolver: ToolRendererResolver) -> pi_js::Result<()> {
+        self.assert_active()?;
+        self.inner
+            .extension
+            .tool_renderers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(resolver);
         Ok(())
     }
 

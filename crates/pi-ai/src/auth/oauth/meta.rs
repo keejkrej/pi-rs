@@ -9,6 +9,7 @@ use pi_js::fetch::{Body, Headers, Request, Response, fetch};
 use pi_js::{Error, Result};
 
 use crate::auth::oauth::device_code::{OAuthDeviceCodePollResult, poll_oauth_device_code_flow};
+use crate::auth::oauth::trusted_url::trusted_http_url;
 use crate::auth::types::{AuthEvent, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential, ProviderAuthInteraction};
 
 const CLIENT_ID: &str = "1031625952748946";
@@ -54,18 +55,6 @@ fn error_detail(json: Option<&Map<String, Value>>) -> String {
     String::new()
 }
 
-fn trusted_http_url(value: Option<&Value>) -> Option<String> {
-    let s = value.and_then(Value::as_str)?;
-    if s.is_empty() {
-        return None;
-    }
-    let url = url::Url::parse(s).ok()?;
-    if url.scheme() != "https" && url.scheme() != "http" {
-        return None;
-    }
-    Some(url.to_string())
-}
-
 fn positive_number(value: Option<&Value>) -> Option<f64> {
     value.and_then(Value::as_f64).filter(|v| v.is_finite() && *v > 0.0)
 }
@@ -103,8 +92,15 @@ async fn start_device_authorization(signal: &AbortSignal) -> Result<DeviceAuthor
         .and_then(|j| j.get("user_code"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
-    let verification_uri = trusted_http_url(obj.and_then(|j| j.get("verification_uri_complete")))
-        .or_else(|| trusted_http_url(obj.and_then(|j| j.get("verification_uri"))));
+    let verification_uri = obj
+        .and_then(|j| j.get("verification_uri_complete"))
+        .and_then(Value::as_str)
+        .and_then(trusted_http_url)
+        .or_else(|| {
+            obj.and_then(|j| j.get("verification_uri"))
+                .and_then(Value::as_str)
+                .and_then(trusted_http_url)
+        });
 
     let (Some(device_code), Some(user_code), Some(verification_uri)) = (device_code, user_code, verification_uri)
     else {
@@ -222,7 +218,11 @@ async fn mint_api_key(identity_token: &str, signal: &AbortSignal) -> Result<OAut
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
     let Some(key) = api_key else {
-        let action_url = trusted_http_url(json.as_ref().and_then(|j| j.get("action_url")));
+        let action_url = json
+            .as_ref()
+            .and_then(|j| j.get("action_url"))
+            .and_then(Value::as_str)
+            .and_then(trusted_http_url);
         let suffix = action_url
             .map(|u| format!(" Complete setup at {u}"))
             .unwrap_or_default();
@@ -242,6 +242,8 @@ async fn login_meta(interaction: ProviderAuthInteraction) -> Result<OAuthCredent
         interaction.notify(AuthEvent::DeviceCode {
             user_code: device.user_code.clone(),
             verification_uri: device.verification_uri.clone(),
+            open_browser_on_confirm: None,
+            copy_code_on_confirm: None,
             interval_seconds: device.interval_seconds,
             expires_in_seconds: device.expires_in_seconds,
         });

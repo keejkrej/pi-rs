@@ -315,6 +315,19 @@ fn parses_tui_mode_flag() {
 }
 
 #[test]
+fn parses_models_ignoring_empty_entries_10334() {
+    let res = parse_args(&["--models", "gpt-4o, ,claude-sonnet,"]);
+    assert_eq!(res.models, Some(vec!["gpt-4o".to_owned(), "claude-sonnet".to_owned()]));
+}
+
+#[test]
+fn parses_no_mcp_flag() {
+    let res = parse_args(&["--no-mcp"]);
+    assert_eq!(res.no_mcp, Some(true));
+    assert!(res.unknown_flags.is_empty());
+}
+
+#[test]
 fn parses_tool_flags() {
     assert_eq!(parse_args(&["--no-tools"]).no_tools, Some(true));
     assert_eq!(parse_args(&["-nt"]).no_tools, Some(true));
@@ -344,6 +357,30 @@ fn parses_tool_flags() {
     let both2 = parse_args(&["--no-builtin-tools", "--tools", "read,bash"]);
     assert_eq!(both2.no_builtin_tools, Some(true));
     assert_eq!(both2.tools, Some(vec!["read".to_string(), "bash".to_string()]));
+
+    let mod_res = parse_args(&["-t", "+codemode,-write"]);
+    assert_eq!(mod_res.tools, Some(vec!["+codemode".to_string(), "-write".to_string()]));
+    assert!(mod_res.diagnostics.is_empty());
+
+    let mixed_res = parse_args(&["--tools", "read,+codemode"]);
+    assert_eq!(mixed_res.tools, None);
+    assert_eq!(
+        mixed_res.diagnostics,
+        vec![ArgDiagnostic {
+            r#type: ArgDiagnosticType::Error,
+            message: "--tools: tool names cannot be mixed with +name or -name entries".to_string(),
+        }]
+    );
+
+    let pattern_res = parse_args(&["-t", "+mcp__radius__*"]);
+    assert_eq!(pattern_res.tools, None);
+    assert_eq!(
+        pattern_res.diagnostics,
+        vec![ArgDiagnostic {
+            r#type: ArgDiagnosticType::Error,
+            message: "-t: +name and -name entries take exact tool names, not patterns: +mcp__radius__*".to_string(),
+        }]
+    );
 }
 
 #[test]

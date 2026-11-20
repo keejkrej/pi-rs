@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.5.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -25,6 +25,7 @@ opt-level = 3
 
 [workspace.dependencies]
 pi-js = { path = "crates/pi-js" }
+pi-schema = { path = "crates/pi-schema" }
 pi-telemetry = { path = "crates/pi-telemetry" }
 pi-chord = { path = "crates/pi-chord" }
 pi-tui = { path = "crates/pi-tui" }

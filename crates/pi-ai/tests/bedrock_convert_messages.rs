@@ -15,9 +15,9 @@ use pi_ai::api::bedrock_converse_stream::{
 };
 use pi_ai::types::{
     Api, AssistantContentBlock, AssistantMessage, BedrockCompat, CacheRetention, ConstrainedSampling,
-    ConstrainedSamplingConfig, Context, JsonObject, JsonSchemaStrict, JsonValue, KnownApi, KnownProvider, Message,
-    Model, ModelCompat, ModelCost, ModelInput, ProviderId, StopReason, StreamOptions, TextContent, Tool, ToolCall,
-    ToolResultMessage, Usage, UsageCost, UserContentBlock, UserMessage, UserMessageContent,
+    ConstrainedSamplingConfig, Context, ImageContent, JsonObject, JsonSchemaStrict, JsonValue, KnownApi, KnownProvider,
+    Message, Model, ModelCompat, ModelCost, ModelInput, ProviderId, StopReason, StreamOptions, TextContent, Tool,
+    ToolCall, ToolResultMessage, Usage, UsageCost, UserContentBlock, UserMessage, UserMessageContent,
 };
 use pi_ai::utils::transcript::normalize_context;
 use serde_json::json;
@@ -49,6 +49,7 @@ fn base_model() -> Model {
         compat: Some(ModelCompat::Bedrock(BedrockCompat {
             supports_strict_mode: Some(true),
         })),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -295,6 +296,7 @@ async fn replaces_blank_tool_result_content_with_placeholder() {
                 nested_calls: None,
                 is_error: false,
                 timestamp: 1,
+                duration_ms: None,
             })],
             tools: None,
         },
@@ -335,6 +337,7 @@ async fn skips_assistant_messages_with_only_blank_text_blocks() {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1,
+                duration_ms: None,
             })],
             tools: None,
         },
@@ -383,6 +386,7 @@ async fn removes_empty_property_names_only_from_replayed_bedrock_input() {
                     raw_stop_reason: None,
                     end_turn: None,
                     timestamp: 1,
+                    duration_ms: None,
                 }),
                 Message::ToolResult(ToolResultMessage {
                     tool_call_id: "tool-1".to_string(),
@@ -393,6 +397,7 @@ async fn removes_empty_property_names_only_from_replayed_bedrock_input() {
                     nested_calls: None,
                     is_error: false,
                     timestamp: 2,
+                    duration_ms: None,
                 }),
                 Message::User(UserMessage {
                     content: UserMessageContent::Text("Continue".to_string()),
@@ -419,4 +424,127 @@ async fn removes_empty_property_names_only_from_replayed_bedrock_input() {
         tool_arguments["edits"][1],
         json!({ "oldText": "second", "newText": "updated second", "": "" })
     );
+}
+
+// Regression for #10794: Claude rejects error tool results that contain images.
+#[tokio::test]
+async fn moves_images_of_error_tool_results_after_the_tool_results() {
+    let model = base_model();
+    let payload = capture_payload(
+        Context {
+            system_prompt: None,
+            messages: vec![
+                Message::Assistant(AssistantMessage {
+                    content: vec![
+                        AssistantContentBlock::ToolCall(ToolCall::new("call-1", "codemode", JsonObject::new())),
+                        AssistantContentBlock::ToolCall(ToolCall::new("call-2", "read", JsonObject::new())),
+                    ],
+                    api: Api::from(KnownApi::BedrockConverseStream),
+                    provider: ProviderId::from(KnownProvider::AmazonBedrock),
+                    model: model.id.clone(),
+                    response_model: None,
+                    response_id: None,
+                    provider_thinking_level: None,
+                    thinking_level: None,
+                    diagnostics: None,
+                    usage: empty_usage(),
+                    stop_reason: StopReason::ToolUse,
+                    deferred: None,
+                    error_message: None,
+                    raw_stop_reason: None,
+                    end_turn: None,
+                    timestamp: 1,
+                    duration_ms: None,
+                }),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "codemode".to_string(),
+                    content: vec![
+                        UserContentBlock::Text(TextContent::new("Script failed")),
+                        UserContentBlock::Image(ImageContent::new("AAAA", "image/png")),
+                        UserContentBlock::Text(TextContent::new("Script error")),
+                    ],
+                    details: None,
+                    usage: None,
+                    nested_calls: None,
+                    is_error: true,
+                    timestamp: 2,
+                    duration_ms: None,
+                }),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call-2".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![UserContentBlock::Image(ImageContent::new("BBBB", "image/png"))],
+                    details: None,
+                    usage: None,
+                    nested_calls: None,
+                    is_error: false,
+                    timestamp: 3,
+                    duration_ms: None,
+                }),
+            ],
+            tools: None,
+        },
+        &model,
+    )
+    .await;
+
+    let content = payload["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 4);
+    assert_eq!(
+        content[0]["toolResult"],
+        json!({
+            "toolUseId": "call-1",
+            "content": [
+                { "text": "Script failed" },
+                { "text": "(image attached after the tool results)" },
+                { "text": "Script error" },
+            ],
+            "status": "error",
+        })
+    );
+    assert_eq!(content[1]["toolResult"]["status"], json!("success"));
+    assert_eq!(content[1]["toolResult"]["content"][0]["image"]["format"], json!("png"));
+    assert_eq!(
+        content[2],
+        json!({ "text": "Images from the error result of tool call call-1 (codemode):" })
+    );
+    assert_eq!(content[3]["image"]["format"], json!("png"));
+}
+
+#[tokio::test]
+async fn keeps_images_in_error_tool_results_for_non_claude_models() {
+    let model = nova_model();
+    let payload = capture_payload(
+        Context {
+            system_prompt: None,
+            messages: vec![Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "codemode".to_string(),
+                content: vec![
+                    UserContentBlock::Text(TextContent::new("Script failed")),
+                    UserContentBlock::Image(ImageContent::new("AAAA", "image/png")),
+                ],
+                details: None,
+                usage: None,
+                nested_calls: None,
+                is_error: true,
+                timestamp: 1,
+                duration_ms: None,
+            })],
+            tools: None,
+        },
+        &model,
+    )
+    .await;
+
+    let content = payload["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["toolResult"]["toolUseId"], json!("call-1"));
+    assert_eq!(content[0]["toolResult"]["status"], json!("error"));
+    assert_eq!(
+        content[0]["toolResult"]["content"][0],
+        json!({ "text": "Script failed" })
+    );
+    assert_eq!(content[0]["toolResult"]["content"][1]["image"]["format"], json!("png"));
 }

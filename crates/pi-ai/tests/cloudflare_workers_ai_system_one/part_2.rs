@@ -24,6 +24,7 @@ fn cf_model() -> ClassifierModel {
         context_window: 32000,
         cost: ModelCost::default(),
         headers: None,
+        compat: None,
     }
 }
 
@@ -41,7 +42,11 @@ fn bool_context() -> ClassifierContext {
             },
         },
     );
-    ClassifierContext { state, questions }
+    ClassifierContext {
+        state,
+        questions,
+        images: None,
+    }
 }
 
 #[tokio::test]

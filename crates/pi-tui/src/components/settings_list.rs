@@ -8,30 +8,8 @@ use std::sync::{
 };
 
 use crate::components::input::Input;
+use crate::keybindings::get_select_page_index;
 use crate::tui::{Component, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType};
-
-/// PORT: helper mirrored from `packages/tui/src/keybindings.ts` (`getSelectPageIndex`)
-/// because `crates/pi-tui/src/keybindings.rs` is non-owned and does not expose it yet.
-fn get_select_page_index(
-    kb: &crate::keybindings::KeybindingsManager,
-    data: &str,
-    selected_index: i64,
-    item_count: i64,
-    page_size: i64,
-) -> Option<i64> {
-    if item_count <= 0 {
-        return None;
-    }
-    let direction = if kb.matches(data, "tui.select.pageUp") {
-        -1
-    } else if kb.matches(data, "tui.select.pageDown") {
-        1
-    } else {
-        return None;
-    };
-    let step = page_size.max(1);
-    Some((selected_index + direction * step).min(item_count - 1).max(0))
-}
 
 pub type SettingsLabelFn = Arc<dyn Fn(&str, bool) -> String + Send + Sync>;
 pub type SettingsTextFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
@@ -710,6 +688,10 @@ impl Component for SettingsList {
 
     fn wants_key_release(&self) -> bool {
         false
+    }
+
+    fn captures_viewport_input(&self) -> bool {
+        true
     }
 
     fn invalidate(&self) {

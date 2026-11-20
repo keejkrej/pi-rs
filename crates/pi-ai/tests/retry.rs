@@ -76,6 +76,22 @@ fn provider_retry_classification_and_delay_caps() {
         "overloaded_error",
         "520 status code (no body)",
         "524 status code (no body)",
+        // #10379
+        "The pending stream has been canceled",
+        "The pending stream has been canceled (caused by: socket closed)",
+        // #10965
+        "The service is temporarily unavailable. Please retry later.",
+        "Service unavailable: The service is temporarily unavailable.",
+        // #10996
+        "request to https://oauth2.googleapis.com/token failed, reason:",
+        "request to https://oauth2.googleapis.com/token failed, reason: connect ECONNREFUSED 127.0.0.1:9",
+        // #10920
+        "unknown: Unable to forward upstream stream",
+        "upstream_error: Upstream request failed",
+        "upstream_stream_read_error: Upstream response stream was interrupted",
+        "Upstream HTTP/2 stream failed",
+        // #11879
+        "Claude Code's stream from Anthropic was cut short after the reply had begun",
     ];
     for msg in retryable {
         assert!(is_retryable_assistant_error(&err_msg(msg)), "expected retryable: {msg}");
@@ -84,6 +100,10 @@ fn provider_retry_classification_and_delay_caps() {
     let non_retryable = [
         "429 quota exceeded",
         r#"OpenAI API error (429): {"code":"subscription_sharing_usage_limit_exceeded","message":"Usage limit reached."}"#,
+        r#"OpenAI API error (429): {"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"Usage limit reached."}"#,
+        // #11057
+        r#"401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CU503xyz"}"#,
+        "400 image exceeds 5 MB maximum: 5316784 bytes > 5242880 bytes",
     ];
     for msg in non_retryable {
         assert!(

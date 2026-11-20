@@ -8,6 +8,7 @@ use pi_ai::types::UserContentBlock;
 use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionFactory, InlineExtension, RenderShell, Theme, ToolRenderResultOptions,
 };
+use pi_coding_agent::core::tools::render_utils::format_read_line_range;
 use pi_coding_agent::core::tools::{
     create_bash_tool_definition, create_edit_tool_definition, create_find_tool_definition, create_grep_tool_definition,
     create_ls_tool_definition, create_read_tool_definition, create_write_tool_definition,
@@ -70,26 +71,9 @@ impl Extension for MinimalModeExtension {
                 theme.fg("accent", &path)
             };
 
-            let offset = args.get("offset").and_then(|v| v.as_f64());
-            let limit = args.get("limit").and_then(|v| v.as_f64());
-            if offset.is_some() || limit.is_some() {
-                let start_line = offset.unwrap_or(1.0);
-                let start_str = args
-                    .get("offset")
-                    .and_then(format_json_number)
-                    .unwrap_or_else(|| "1".to_string());
-                let end_str = match limit {
-                    Some(lim) => {
-                        let end = start_line + lim - 1.0;
-                        if end.fract() == 0.0 {
-                            format!("-{}", end as i64)
-                        } else {
-                            format!("-{end}")
-                        }
-                    }
-                    None => String::new(),
-                };
-                path_display.push_str(&theme.fg("warning", &format!(":{start_str}{end_str}")));
+            let line_range = format_read_line_range(args.get("offset"), args.get("limit"));
+            if !line_range.is_empty() {
+                path_display.push_str(&theme.fg("warning", &line_range));
             }
 
             make_text(&format!(

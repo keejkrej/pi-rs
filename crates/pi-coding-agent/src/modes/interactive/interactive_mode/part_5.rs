@@ -402,7 +402,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn restore_queued_messages_to_editor(&self, abort: bool) -> usize {
+    pub fn restore_queued_messages_to_editor(&self, abort: bool) -> usize {
         let (steering, follow_up) = self.clear_all_queues();
         let mut all_queued = steering;
         all_queued.extend(follow_up);
@@ -664,6 +664,7 @@ impl InteractiveMode {
                 steering_mode: sess.steering_mode(),
                 follow_up_mode: sess.follow_up_mode(),
                 transport: settings.get_transport(),
+                session_share_destination: settings.get_session_share_destination(),
                 http_idle_timeout_ms: settings.get_http_idle_timeout_ms(),
                 cache_warming_mode: settings.get_cache_warming_mode(),
                 thinking_level: settings
@@ -712,6 +713,7 @@ impl InteractiveMode {
             let m_st = m.clone();
             let m_fu = m.clone();
             let m_tr = m.clone();
+            let m_sd = m.clone();
             let m_ht = m.clone();
             let m_cw = m.clone();
             let m_mtc = m.clone();
@@ -796,6 +798,9 @@ impl InteractiveMode {
                 on_transport_change: Some(Arc::new(move |transport| {
                     m_tr.settings_manager().set_transport(transport);
                     m_tr.session().set_transport(transport);
+                })),
+                on_session_share_destination_change: Some(Arc::new(move |destination| {
+                    m_sd.settings_manager().set_session_share_destination(destination);
                 })),
                 on_http_idle_timeout_ms_change: Some(Arc::new(move |timeout_ms| {
                     m_ht.settings_manager().set_http_idle_timeout_ms(timeout_ms);

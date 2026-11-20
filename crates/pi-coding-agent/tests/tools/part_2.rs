@@ -260,6 +260,7 @@ impl ExtensionContextBackend for CwdOnlyBackend {
                 },
                 result: Default::default(),
                 is_error: true,
+                duration_ms: None,
             }
         })
     }

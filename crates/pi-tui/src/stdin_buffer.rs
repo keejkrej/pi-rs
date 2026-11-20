@@ -29,6 +29,15 @@ const DEFAULT_ESCAPE_TIMEOUT_MS: i64 = 10;
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
 
+// Color and program-status OSC replies, XTVersion, and Kitty graphics replies.
+// Until their header is complete, the input may be batched legacy Alt keystrokes.
+static TERMINAL_REPLY_HEADER_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\x1b(?:\](?:1[01];|4;\d{1,3};|7501;\?)|P>\||_G(?:[a-z]=\d+,)*[a-z]=\d+;)").unwrap());
+
+fn is_control_string(data: &str) -> bool {
+    data.starts_with("\x1b]") || data.starts_with("\x1bP") || data.starts_with("\x1b_")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SequenceStatus {
     Complete,
@@ -197,9 +206,25 @@ fn extract_complete_sequences(buffer: &str) -> ExtractedSequences {
         let remaining = &buffer[pos..];
 
         if remaining.starts_with(ESC) {
+            let terminal_reply = is_control_string(remaining) && TERMINAL_REPLY_HEADER_PATTERN.is_match(remaining);
             let mut matched = false;
             for (idx, ch) in remaining.char_indices() {
                 let seq_end = idx + ch.len_utf8();
+                if terminal_reply && seq_end > 2 {
+                    if ch == '\x18' || ch == '\x1a' {
+                        // CAN and SUB cancel the string, not subsequent keyboard input.
+                        pos += seq_end;
+                        matched = true;
+                        break;
+                    }
+                    if ch == '\x1b' && seq_end < remaining.len() && !remaining[seq_end..].starts_with('\\') {
+                        // A new escape sequence aborts an unterminated reply. Keep a
+                        // trailing ESC buffered until we can distinguish it from ST.
+                        pos += idx;
+                        matched = true;
+                        break;
+                    }
+                }
                 let candidate = &remaining[..seq_end];
                 match is_complete_sequence(candidate) {
                     SequenceStatus::Complete => {
@@ -466,16 +491,21 @@ impl StdinBuffer {
                     let result = extract_complete_sequences(&state.buffer);
                     state.buffer = result.remainder;
 
-                    let remaining_timeout = if !state.buffer.is_empty() {
-                        let timeout_ms = if state.buffer == ESC {
-                            self.inner.escape_timeout_ms
+                    // Only a recognizable reply header establishes a delimited string.
+                    // Flushing it would turn a delayed tail into text and an OSC's BEL
+                    // terminator into Ctrl+G (the external editor shortcut). Other input,
+                    // including Alt+] followed by text, must retain bounded recovery.
+                    let remaining_timeout =
+                        if !state.buffer.is_empty() && !TERMINAL_REPLY_HEADER_PATTERN.is_match(&state.buffer) {
+                            let timeout_ms = if state.buffer == ESC {
+                                self.inner.escape_timeout_ms
+                            } else {
+                                self.inner.timeout_ms
+                            };
+                            Some(u64::try_from(timeout_ms.max(0)).unwrap_or(0))
                         } else {
-                            self.inner.timeout_ms
+                            None
                         };
-                        Some(u64::try_from(timeout_ms.max(0)).unwrap_or(0))
-                    } else {
-                        None
-                    };
 
                     Action::Sequences {
                         sequences: result.sequences,
@@ -528,7 +558,14 @@ impl StdinBuffer {
                         state.timeout = Some(pi_js::time::set_timeout(delay, move || {
                             let flushed = buf_clone.flush();
                             for sequence in flushed {
-                                buf_clone.emit_data_sequence(&sequence);
+                                if sequence.len() > 2 && is_control_string(&sequence) {
+                                    // Recover the Alt key and reparse its tail so batched text,
+                                    // Enter, and control keys are not swallowed as one event.
+                                    buf_clone.emit_data_sequence(&sequence[..2]);
+                                    buf_clone.process(StdinBufferData::Text(&sequence[2..]));
+                                } else {
+                                    buf_clone.emit_data_sequence(&sequence);
+                                }
                             }
                         }));
                     }

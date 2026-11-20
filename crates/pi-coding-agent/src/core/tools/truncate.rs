@@ -260,7 +260,7 @@ pub struct TruncateLineResult {
     pub was_truncated: bool,
 }
 
-/// Truncate a single line to max characters, adding [truncated] suffix.
+/// Truncate a single line to max UTF-16 code units, adding `... [truncated]` suffix.
 /// Used for grep match lines.
 pub fn truncate_line(line: &str, max_chars: Option<usize>) -> TruncateLineResult {
     let max_chars = max_chars.unwrap_or(GREP_MAX_LINE_LENGTH);
@@ -271,21 +271,46 @@ pub fn truncate_line(line: &str, max_chars: Option<usize>) -> TruncateLineResult
             was_truncated: false,
         };
     }
-    // PORT: do not split surrogate pairs when slicing to UTF-16 limit (9e870f6f0 / safe Rust UTF-8 boundary)
+    let prefix = slice_head(line, max_chars);
+    TruncateLineResult {
+        text: format!("{prefix}... [truncated]"),
+        was_truncated: true,
+    }
+}
+
+/// Returns at most the first `max_units` UTF-16 code units of `text`, without splitting a surrogate pair.
+pub fn slice_head(text: &str, max_units: usize) -> &str {
     let mut units = 0usize;
     let mut end_byte = 0usize;
-    for (idx, ch) in line.char_indices() {
+    for (idx, ch) in text.char_indices() {
         let ch_units = ch.len_utf16();
-        if units + ch_units > max_chars {
+        if units + ch_units > max_units {
             break;
         }
         units += ch_units;
         end_byte = idx + ch.len_utf8();
     }
-    TruncateLineResult {
-        text: format!("{}... [truncated]", &line[..end_byte]),
-        was_truncated: true,
+    &text[..end_byte]
+}
+
+/// Returns at most the last `max_units` UTF-16 code units of `text`, without splitting a surrogate pair.
+pub fn slice_tail(text: &str, max_units: usize) -> &str {
+    if max_units == 0 {
+        return "";
     }
+    let total_units = pi_js::str16::len(text);
+    if total_units <= max_units {
+        return text;
+    }
+    let skip_units = total_units - max_units;
+    let mut units = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if units >= skip_units {
+            return &text[idx..];
+        }
+        units += ch.len_utf16();
+    }
+    ""
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

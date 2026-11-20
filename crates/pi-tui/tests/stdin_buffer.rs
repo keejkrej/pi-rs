@@ -622,3 +622,135 @@ async fn clears_pending_timeouts_on_destroy() {
 
     assert!(emitted.lock().unwrap().is_empty());
 }
+
+// ============================================================================
+// Terminal Reply Strings
+// ============================================================================
+
+#[tokio::test(start_paused = true)]
+async fn keeps_delayed_terminal_replies_intact_at_every_split_after_reply_header() {
+    let replies = [
+        ("\x1b]4;1;", "\x1b]4;1;rgb:eaea/6c6c/6d6d\x07"),
+        ("\x1b]10;", "\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+        ("\x1b]11;", "\x1b]11;rgb:0000/0000/0000\x07"),
+        ("\x1b]4;1;", "\x1b]4;1;rgb:6464/6464/4d4d\x07"),
+        ("\x1bP>|", "\x1bP>|Ghostty 1.3.1\x1b\\"),
+        ("\x1b_Gi=1;", "\x1b_Gi=1;OK\x1b\\"),
+        ("\x1b]7501;?", "\x1b]7501;?\x1b\\"),
+    ];
+
+    for (header, reply) in replies {
+        for split in header.len()..reply.len() {
+            if !reply.is_char_boundary(split) {
+                continue;
+            }
+            let (delayed_buffer, sequences, _) = setup_buffer(Some(StdinBufferOptions::default()));
+            delayed_buffer.process(StdinBufferData::Text(&reply[..split]));
+            wait_ms(5000).await;
+            let tail = format!("{}x", &reply[split..]);
+            delayed_buffer.process(StdinBufferData::Text(&tail));
+            let emitted = sequences.lock().unwrap().clone();
+            assert!(!emitted.iter().any(|sequence| matches_key(sequence, "ctrl+g")));
+            assert_eq!(emitted, vec![reply.to_string(), "x".to_string()]);
+            delayed_buffer.destroy();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn keeps_osc_reply_buffered_across_multiple_expired_sequence_timeouts() {
+    let (buffer, emitted, _) = setup_buffer(None);
+    buffer.process(StdinBufferData::Text("\x1b]4;1;rgb:eaea/6c"));
+    wait_ms(100).await;
+    assert!(emitted.lock().unwrap().is_empty());
+    buffer.process(StdinBufferData::Text("6c/6d6d"));
+    wait_ms(100).await;
+    assert!(emitted.lock().unwrap().is_empty());
+    buffer.process(StdinBufferData::Text("\x07"));
+    assert_eq!(*emitted.lock().unwrap(), vec!["\x1b]4;1;rgb:eaea/6c6c/6d6d\x07"]);
+    buffer.destroy();
+}
+
+#[tokio::test(start_paused = true)]
+async fn still_times_out_bare_string_introducers_as_alt_keys() {
+    let (buffer, emitted, _) = setup_buffer(None);
+    for prefix in ["\x1b]", "\x1bP", "\x1b_"] {
+        buffer.process(StdinBufferData::Text(prefix));
+        wait_ms(10).await;
+    }
+    assert_eq!(*emitted.lock().unwrap(), vec!["\x1b]", "\x1bP", "\x1b_"]);
+    buffer.destroy();
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovers_batched_legacy_alt_input_within_sequence_timeout() {
+    let ambiguous_inputs = [
+        "\x1b]a",
+        "\x1b]1",
+        "\x1b]10",
+        "\x1b]0;title",
+        "\x1b]4;",
+        "\x1b]4;a;",
+        "\x1bPa",
+        "\x1bP>",
+        "\x1b_a",
+        "\x1b_G",
+        "\x1b_Gi=1",
+    ];
+    for ambiguous in ambiguous_inputs {
+        let (legacy_buffer, sequences, _) = setup_buffer(Some(StdinBufferOptions::default()));
+        legacy_buffer.process(StdinBufferData::Text(ambiguous));
+        wait_ms(20).await;
+        legacy_buffer.process(StdinBufferData::Text("x\r\x03\x04"));
+        wait_ms(49).await;
+        assert!(sequences.lock().unwrap().is_empty(), "{ambiguous:?}");
+        wait_ms(1).await;
+
+        let mut expected = vec![ambiguous[..2].to_string()];
+        expected.extend(ambiguous[2..].chars().map(|c| c.to_string()));
+        expected.extend(["x", "\r", "\x03", "\x04"].into_iter().map(str::to_string));
+
+        assert_eq!(*sequences.lock().unwrap(), expected, "{ambiguous:?}");
+        assert_eq!(legacy_buffer.get_buffer(), "");
+
+        legacy_buffer.process(StdinBufferData::Text("y\r\x03\x04"));
+        let tail: Vec<String> = sequences.lock().unwrap().iter().rev().take(4).rev().cloned().collect();
+        assert_eq!(tail, vec!["y", "\r", "\x03", "\x04"]);
+        legacy_buffer.destroy();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn recognizes_reply_header_assembled_within_ambiguous_input_timeout() {
+    let (buffer, emitted, _) = setup_buffer(Some(StdinBufferOptions::default()));
+    buffer.process(StdinBufferData::Text("\x1b]1"));
+    wait_ms(5).await;
+    buffer.process(StdinBufferData::Text("0;"));
+    wait_ms(5000).await;
+    assert!(emitted.lock().unwrap().is_empty());
+    buffer.process(StdinBufferData::Text("rgb:ffff/ffff/ffff\x1b\\"));
+    assert_eq!(*emitted.lock().unwrap(), vec!["\x1b]10;rgb:ffff/ffff/ffff\x1b\\"]);
+    buffer.destroy();
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovers_from_unterminated_reply_when_new_escape_sequence_arrives() {
+    let (buffer, emitted, _) = setup_buffer(Some(StdinBufferOptions::default()));
+    buffer.process(StdinBufferData::Text("\x1b]4;1;rgb:eaea/6c"));
+    wait_ms(100).await;
+    buffer.process(StdinBufferData::Text("\x1b"));
+    wait_ms(100).await;
+    buffer.process(StdinBufferData::Text("[Ahello"));
+    assert_eq!(*emitted.lock().unwrap(), vec!["\x1b[A", "h", "e", "l", "l", "o"]);
+    buffer.destroy();
+}
+
+#[test]
+fn discards_canceled_reply_without_swallowing_subsequent_input() {
+    let (buffer, emitted, _) = setup_buffer(None);
+    for cancel in ["\x18", "\x1a"] {
+        let input = format!("\x1b]11;rgb:0000{cancel}x");
+        buffer.process(StdinBufferData::Text(&input));
+    }
+    assert_eq!(*emitted.lock().unwrap(), vec!["x", "x"]);
+}

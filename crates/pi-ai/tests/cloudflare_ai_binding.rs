@@ -138,6 +138,7 @@ async fn keeps_sdk_placeholder_auth_off_the_wire_when_paired_with_null_auth_head
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     };
 
     let context = normalize_context(&Context {

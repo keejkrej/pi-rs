@@ -18,7 +18,7 @@ fn test_model() -> Model {
         id: "test-deployment".to_owned(),
         name: "Test Deployment".to_owned(),
         api: "azure-openai-responses".to_owned(),
-        provider: "azure-openai-responses".to_owned(),
+        provider: "azure".to_owned(),
         base_url: "http://127.0.0.1:9/openai/v1".to_owned(),
         reasoning: false,
         thinking_level_map: None,
@@ -31,6 +31,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

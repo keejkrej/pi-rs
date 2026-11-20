@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use pi_ai::{Usage, UserContentBlock, faux_text};
-use pi_js::vendor::typebox::t;
 use pi_js::{Error, Result};
+use pi_schema::{Annotations, ObjOptions, StrOptions, obj_with, str_with};
 use serde_json::Value;
 
 use pi_agent_core::{AgentTool, AgentToolResult};
@@ -26,11 +26,22 @@ pub fn calculate(expression: &str) -> Result<AgentToolResult> {
 }
 
 pub fn calculate_tool() -> AgentTool {
-    let parameters = t::object([(
-        "expression",
-        t::string().with("description", "The mathematical expression to evaluate"),
-    )])
-    .with("additionalProperties", true);
+    let parameters = obj_with(
+        [(
+            "expression",
+            str_with(StrOptions {
+                annotations: Annotations {
+                    description: Some("The mathematical expression to evaluate".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )],
+        ObjOptions {
+            open: true,
+            ..Default::default()
+        },
+    );
 
     AgentTool {
         name: "calculate".to_string(),

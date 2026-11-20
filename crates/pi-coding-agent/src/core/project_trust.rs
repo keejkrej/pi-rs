@@ -341,7 +341,7 @@ pub async fn resolve_project_trusted(options: ResolveProjectTrustedOptions<'_>) 
         return ovr;
     }
     if !has_trust_requiring_project_resources(options.cwd) {
-        return true;
+        return options.trust_store.get(options.cwd).ok().flatten().unwrap_or(true);
     }
 
     if let Some(host) = options.extension_host {
@@ -375,7 +375,12 @@ pub async fn resolve_project_trusted(options: ResolveProjectTrustedOptions<'_>) 
         return decision;
     }
 
-    match options.default_project_trust.unwrap_or(DefaultProjectTrust::Ask) {
+    let default_trust = match crate::core::settings_defaults::DEFAULT_PROJECT_TRUST_MODE {
+        "always" => DefaultProjectTrust::Always,
+        "never" => DefaultProjectTrust::Never,
+        _ => DefaultProjectTrust::Ask,
+    };
+    match options.default_project_trust.unwrap_or(default_trust) {
         DefaultProjectTrust::Always => return true,
         DefaultProjectTrust::Never => return false,
         DefaultProjectTrust::Ask => {}

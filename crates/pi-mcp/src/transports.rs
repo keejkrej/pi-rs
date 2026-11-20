@@ -4,3 +4,5 @@ pub mod stdio;
 pub mod streamable_http;
 pub mod transport;
 // @generated-mods end
+pub mod lines;
+pub mod pipe;

@@ -134,6 +134,7 @@ async fn choose_planning_model(request: &ModelRouteRequest) -> &'static str {
             &ClassifierContext {
                 state: state_map,
                 questions,
+                images: None,
             },
             Some(ModelsClassifierOptions {
                 base: ClassifierOptions {

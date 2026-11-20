@@ -1,6 +1,6 @@
 # Architecture
 
-`pi-rs` mirrors the layered package structure of upstream Pi v1.0.0 in Cargo workspace crates, adds `pi-js` as a Rust-only JavaScript/Node compatibility foundation, and adds `pi-gui` as the Rune GPU desktop client.
+`pi-rs` mirrors the layered package structure of upstream Pi v1.5.2 in Cargo workspace crates, adds `pi-js` as a Rust-only JavaScript/Node compatibility foundation, and adds `pi-gui` as the Rune GPU desktop client.
 
 ## Workspace Dependency Graph
 
@@ -8,6 +8,7 @@
 flowchart TD
     pi_js["pi-js (foundation)"]
 
+    pi_schema["pi-schema"]
     pi_telemetry["pi-telemetry"]
     pi_chord["pi-chord"]
     pi_tui["pi-tui"]
@@ -26,6 +27,7 @@ flowchart TD
     pi_gui["pi-gui"]
     pi_evals["pi-evals"]
 
+    pi_schema --> pi_js
     pi_telemetry --> pi_js
     pi_chord --> pi_js
     pi_tui --> pi_js
@@ -33,11 +35,13 @@ flowchart TD
     pi_codemode --> pi_js
 
     pi_ai --> pi_js
+    pi_ai --> pi_schema
     pi_ai --> pi_telemetry
     pi_protocol --> pi_js
     pi_protocol --> pi_chord
 
     pi_agent_core --> pi_js
+    pi_agent_core --> pi_schema
     pi_agent_core --> pi_ai
     pi_agent_core --> pi_mcp
     pi_agent_core --> pi_codemode
@@ -63,6 +67,7 @@ flowchart TD
     pi_coding_agent --> pi_js
     pi_coding_agent --> pi_mcp
     pi_coding_agent --> pi_protocol
+    pi_coding_agent --> pi_schema
     pi_coding_agent --> pi_server
     pi_coding_agent --> pi_telemetry
     pi_coding_agent --> pi_tui
@@ -92,6 +97,7 @@ To avoid a dependency cycle between `pi-coding-agent` and `pi-gui`, running `pi 
 - **Insertion-ordered maps and JSON**: `pi_js::json` paired with `indexmap::{IndexMap, IndexSet}` preserves object key insertion order and JS number/float formatting (`ryu-js`).
 - **UTF-16 string indices & `Intl`**: `pi_js::str16`, `pi_js::regex`, and `pi_js::intl` mirror JS `.length`/slice indexing, JS regex character classes, and `en-US` Intl collation/segmentation (`icu_segmenter`, `icu_collator`).
 - **System & network APIs**: `pi_js::{path, fs, env, time, fetch, console, abort, seam}` match Node path/fs error codes (`ENOENT`, `EEXIST`, etc.), `WHATWG fetch` over `reqwest` + `rustls`, and thread-local test seams (`pi_js::seam`).
+- **JSON Schema validation & coercion (`pi-schema`)**: `crates/pi-schema` implements `@earendil-works/pi-schema` (eval-free Draft 2020-12 and Draft-07 compilation, loose tool-argument coercion, and schema builders), used by `pi-ai`, `pi-agent-core`, and `pi-coding-agent` alongside `crates/pi-js/src/vendor/typebox` for QuickJS TypeBox compatibility.
 - **Hand-ported npm libraries**: Byte-compatible vendor ports live directly in owning crates:
   - `crates/pi-js/src/vendor/{typebox,jsdiff}` (`typebox`, `diff`)
   - `crates/pi-ai/src/vendor/partial_json.rs` (`partial-json`)

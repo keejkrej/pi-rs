@@ -74,7 +74,7 @@ impl Token {
         }
     }
 
-    fn raw(&self) -> &str {
+    pub fn raw(&self) -> &str {
         match self {
             Token::Blockquote(t) => &t.raw,
             Token::Br(t) => &t.raw,
@@ -1688,7 +1688,7 @@ impl Lexer {
             }
 
             // em & strong
-            if let Some(tok) = stock_em_strong(src, &masked_src, &prev_char, self, rules) {
+            if let Some(tok) = tokenizer.em_strong(src, &masked_src, &prev_char) {
                 src = advance_str(src, tok.raw());
                 tokens.push(tok);
                 continue;
@@ -1725,7 +1725,7 @@ impl Lexer {
 
             // url (gfm)
             let in_link = self.inner.state.lock().expect("lexer state lock").in_link;
-            if !in_link && let Some(tok) = stock_url(src, rules) {
+            if !in_link && let Some(tok) = tokenizer.url(src) {
                 src = advance_str(src, &tok.raw);
                 tokens.push(Token::Link(tok));
                 continue;
@@ -2718,6 +2718,199 @@ fn stock_em_strong(src: &str, masked_src: &str, prev_char: &str, lexer: &Lexer, 
     None
 }
 
+const CJK_PATTERN: &str = concat!(
+    r"\u1100-\u11ff\u20a9\u2329-\u232a\u2630-\u2637\u268a-\u268f\u2e80-\u2e99\u2e9b-\u2ef3",
+    r"\u2f00-\u2fd5\u2ff0-\u303e\u3041-\u3096\u3099-\u30ff\u3105-\u312f\u3131-\u318e\u3190-\u31e5",
+    r"\u31ef-\u321e\u3220-\u3247\u3250-\ua48c\ua490-\ua4c6\ua960-\ua97c\uac00-\ud7a3\ud7b0-\ud7c6",
+    r"\ud7cb-\ud7fb\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe52\ufe54-\ufe66\ufe68-\ufe6b\uff01-\uffbe",
+    r"\uffc2-\uffc7\uffca-\uffcf\uffd2-\uffd7\uffda-\uffdc\uffe0-\uffe6\uffe8-\uffee",
+    r"\u{16fe0}-\u{16fe4}\u{16ff0}-\u{16ff6}\u{17000}-\u{18cda}\u{18cff}-\u{18d20}\u{18d80}-\u{18df2}",
+    r"\u{18e00}-\u{19191}\u{191a0}-\u{191d2}\u{1aff0}-\u{1aff3}\u{1aff5}-\u{1affb}\u{1affd}-\u{1affe}",
+    r"\u{1b000}-\u{1b128}\u{1b132}\u{1b150}-\u{1b152}\u{1b155}\u{1b164}-\u{1b168}\u{1b170}-\u{1b2fb}",
+    r"\u{1d300}-\u{1d356}\u{1d360}-\u{1d376}\u{1f1ae}\u{1f200}\u{1f202}\u{1f210}-\u{1f219}",
+    r"\u{1f21b}-\u{1f22e}\u{1f230}-\u{1f231}\u{1f237}\u{1f23b}\u{1f240}-\u{1f248}\u{1f260}-\u{1f265}",
+    r"\u{1f7da}\u{20000}-\u{3fffd}"
+);
+
+static CJK_TEST: LazyLock<EcmaRegex> = LazyLock::new(|| EcmaRegex::compile(&format!("[{CJK_PATTERN}]"), "u"));
+static PUNCTUATION_CJK: LazyLock<EcmaRegex> =
+    LazyLock::new(|| EcmaRegex::compile(&format!(r"^((?![*_])[\s\p{{P}}\p{{S}}{CJK_PATTERN}])"), "u"));
+static EM_STRONG_R_DELIM_AST_CJK_GFM: LazyLock<EcmaRegex> = LazyLock::new(|| {
+    let punct = format!(r"(?!~)[\p{{P}}\p{{S}}{CJK_PATTERN}]");
+    let punct_space = format!(r"(?!~)[\s\p{{P}}\p{{S}}{CJK_PATTERN}]");
+    let not_punct_space = format!(r"(?:[^\s\p{{P}}\p{{S}}{CJK_PATTERN}]|~)");
+    let pattern = format!(
+        r"^[^_*]*?__[^_*]*?\*[^_*]*?(?=__)|[^*]+(?=[^*])|(?!\*){punct}(\*+)(?=[\s]|$)|{not_punct_space}(\*+)(?!\*)(?={punct_space}|$)|(?!\*){punct_space}(\*+)(?={not_punct_space})|[\s](\*+)(?!\*)(?={punct})|(?!\*){punct}(\*+)(?!\*)(?={punct})|{not_punct_space}(\*+)(?={not_punct_space})"
+    );
+    EcmaRegex::compile(&pattern, "gu")
+});
+static EM_STRONG_R_DELIM_UND_CJK: LazyLock<EcmaRegex> = LazyLock::new(|| {
+    let punct = format!(r"[\p{{P}}\p{{S}}{CJK_PATTERN}]");
+    let punct_space = format!(r"[\s\p{{P}}\p{{S}}{CJK_PATTERN}]");
+    let not_punct_space = format!(r"[^\s\p{{P}}\p{{S}}{CJK_PATTERN}]");
+    let pattern = format!(
+        r"^[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)|[^_]+(?=[^_])|(?!_){punct}(_+)(?=[\s]|$)|{not_punct_space}(_+)(?!_)(?={punct_space}|$)|(?!_){punct_space}(_+)(?={not_punct_space})|[\s](_+)(?!_)(?={punct})|(?!_){punct}(_+)(?!_)(?={punct})"
+    );
+    EcmaRegex::compile(&pattern, "gu")
+});
+
+fn is_prev_char_cjk(prev_char: &str, masked_src: &str, src: &str) -> bool {
+    let mut prev_is_cjk = PUNCTUATION_CJK.test(prev_char);
+    if !prev_is_cjk && !prev_char.is_empty() {
+        let masked_u16 = pi_js::str16::len(masked_src);
+        let src_u16 = pi_js::str16::len(src);
+        if masked_u16 > src_u16 {
+            let mut idx = masked_u16 - src_u16 - 1;
+            let mut code = pi_js::str16::char_code_at(masked_src, idx).unwrap_or(0);
+            if (65024..=65038).contains(&code) && idx >= 1 {
+                idx -= 1;
+                code = pi_js::str16::char_code_at(masked_src, idx).unwrap_or(0);
+            }
+            if (code & 64512) == 56320 && idx >= 1 {
+                if let Some(cp) = pi_js::str16::code_point_at(masked_src, idx - 1)
+                    && cp > 65535
+                {
+                    if (917760..=917999).contains(&cp) {
+                        prev_is_cjk = true;
+                    } else if let Some(ch) = char::from_u32(cp) {
+                        let mut buf = [0u8; 4];
+                        prev_is_cjk = CJK_TEST.test(ch.encode_utf8(&mut buf));
+                    }
+                }
+            } else if let Some(ch) = char::from_u32(u32::from(code)) {
+                let mut buf = [0u8; 4];
+                prev_is_cjk = CJK_TEST.test(ch.encode_utf8(&mut buf));
+            }
+        }
+    }
+    prev_is_cjk
+}
+
+fn is_cjk_adjacent_to_delimiter(em: &pi_js::regex::JsMatch, clipped_masked: &str) -> bool {
+    let has_adj = (0..4).any(|i| {
+        em.captures
+            .get(i)
+            .and_then(|c| c.as_deref())
+            .is_some_and(|s| !s.is_empty())
+    });
+    if !has_adj {
+        return false;
+    }
+    let Some(first_ch) = em.matched.chars().next() else {
+        return false;
+    };
+    let mut first_buf = [0u8; 4];
+    if CJK_TEST.test(first_ch.encode_utf8(&mut first_buf)) {
+        return true;
+    }
+    let after_pos = em.index + pi_js::str16::len(&em.matched);
+    let Some(after_cp) = pi_js::str16::code_point_at(clipped_masked, after_pos) else {
+        return false;
+    };
+    let Some(after_ch) = char::from_u32(after_cp) else {
+        return false;
+    };
+    let mut after_buf = [0u8; 4];
+    CJK_TEST.test(after_ch.encode_utf8(&mut after_buf))
+}
+
+/// Port of `marked-cjk-friendly`'s `emStrong` tokenizer.
+pub fn cjk_friendly_em_strong(src: &str, masked_src: &str, prev_char: &str, lexer: &Lexer) -> Option<Token> {
+    let rules = &*GRAMMAR;
+    let m = rules.inline_gfm.em_strong_l_delim.exec(src)?;
+    let c1 = m.captures.first().and_then(|c| c.as_deref()).unwrap_or("");
+    let c2 = m.captures.get(1).and_then(|c| c.as_deref()).unwrap_or("");
+    let c3 = m.captures.get(2).and_then(|c| c.as_deref()).unwrap_or("");
+    let c4 = m.captures.get(3).and_then(|c| c.as_deref()).unwrap_or("");
+    if c1.is_empty() && c2.is_empty() && c3.is_empty() && c4.is_empty() {
+        return None;
+    }
+
+    if !c4.is_empty() && rules.other.unicode_alpha_numeric.test(prev_char) {
+        return None;
+    }
+
+    let next_char = if !c1.is_empty() { c1 } else { c3 };
+    let prev_is_cjk = is_prev_char_cjk(prev_char, masked_src, src);
+    let next_is_cjk = !next_char.is_empty() && CJK_TEST.test(next_char);
+
+    if next_char.is_empty()
+        || prev_char.is_empty()
+        || rules.inline_gfm.punctuation.test(prev_char)
+        || prev_is_cjk
+        || next_is_cjk
+    {
+        let l_length = m.matched.chars().count().saturating_sub(1);
+        let delim_char = m.matched.chars().next()?;
+        let prev_char_is_same_delimiter = prev_char.chars().count() == 1 && prev_char.starts_with(delim_char);
+        let end_reg = if delim_char == '*' {
+            &*EM_STRONG_R_DELIM_AST_CJK_GFM
+        } else {
+            &*EM_STRONG_R_DELIM_UND_CJK
+        };
+
+        let src_u16 = pi_js::str16::len(src);
+        let masked_u16 = pi_js::str16::len(masked_src);
+        let start_u16 = (masked_u16 as isize - src_u16 as isize + l_length as isize).max(0) as usize;
+        let clipped_masked = &masked_src[pi_js::str16::utf16_to_byte(masked_src, start_u16)..];
+
+        let mut delim_total = l_length as isize;
+        let mut mid_delim_total: isize = 0;
+
+        for em in end_reg.match_all(clipped_masked) {
+            let g1 = em.captures.first().and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+            let g2 = em.captures.get(1).and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+            let g3 = em.captures.get(2).and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+            let g4 = em.captures.get(3).and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+            let g5 = em.captures.get(4).and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+            let g6 = em.captures.get(5).and_then(|c| c.as_deref()).filter(|s| !s.is_empty());
+
+            let Some(r_delim) = g1.or(g2).or(g3).or(g4).or(g5).or(g6) else {
+                continue;
+            };
+            let mut r_length = r_delim.chars().count() as isize;
+            let is_cjk_adjacent = is_cjk_adjacent_to_delimiter(&em, clipped_masked);
+            let is_left_only = g3.is_some() || g4.is_some();
+            let is_both = g5.is_some() || g6.is_some();
+
+            if is_left_only && !is_cjk_adjacent {
+                delim_total += r_length;
+                continue;
+            }
+            if is_both || is_cjk_adjacent {
+                if l_length % 3 != 0 && (l_length as isize + r_length) % 3 == 0 {
+                    mid_delim_total += r_length;
+                    continue;
+                }
+                if prev_char_is_same_delimiter && is_both {
+                    break;
+                }
+            }
+
+            delim_total -= r_length;
+            if delim_total > 0 {
+                continue;
+            }
+
+            r_length = r_length.min(r_length + delim_total + mid_delim_total);
+            let last_char_u16 = em.matched.chars().next().map_or(0, char::len_utf16);
+            let raw_u16 = l_length + em.index + last_char_u16 + r_length.max(0) as usize;
+            let raw = pi_js::str16::slice(src, 0, Some(raw_u16 as i64));
+
+            if (l_length as isize).min(r_length) % 2 != 0 {
+                let text = pi_js::str16::slice(&raw, 1, Some(-1));
+                let tokens = lexer.inline_tokens(&text);
+                return Some(Token::Em(Tokens::Em { raw, text, tokens }));
+            } else {
+                let text = pi_js::str16::slice(&raw, 2, Some(-2));
+                let tokens = lexer.inline_tokens(&text);
+                return Some(Token::Strong(Tokens::Strong { raw, text, tokens }));
+            }
+        }
+    }
+    None
+}
+
 fn stock_codespan(src: &str, rules: &GrammarSet) -> Option<Tokens::Codespan> {
     let cap = rules.inline_gfm.code.exec(src)?;
     let cap2 = cap.captures.get(1).and_then(|c| c.as_deref()).unwrap_or("");
@@ -2930,6 +3123,13 @@ pub trait MarkedTokenizer: Send + Sync {
     fn lexer(&self) -> Lexer;
     fn set_lexer(&self, lexer: Lexer);
     fn del(&self, src: &str, masked_src: &str, prev_char: Option<&str>) -> Option<Tokens::Del>;
+    fn em_strong(&self, src: &str, masked_src: &str, prev_char: &str) -> Option<Token> {
+        let lexer = self.lexer();
+        stock_em_strong(src, masked_src, prev_char, &lexer, &GRAMMAR)
+    }
+    fn url(&self, src: &str) -> Option<Tokens::Link> {
+        stock_url(src, &GRAMMAR)
+    }
 }
 
 struct TokenizerInner {
@@ -2939,8 +3139,6 @@ struct TokenizerInner {
 }
 
 /// marked `Tokenizer` class.
-///
-/// PORT: `rules` and every rule method except `del` are not declared.
 #[derive(Clone)]
 pub struct Tokenizer {
     inner: Arc<TokenizerInner>,
@@ -2980,6 +3178,15 @@ impl MarkedTokenizer for Tokenizer {
     fn del(&self, src: &str, masked_src: &str, prev_char: Option<&str>) -> Option<Tokens::Del> {
         let lexer = self.lexer();
         stock_del(src, masked_src, prev_char.unwrap_or(""), &lexer, &GRAMMAR)
+    }
+
+    fn em_strong(&self, src: &str, masked_src: &str, prev_char: &str) -> Option<Token> {
+        let lexer = self.lexer();
+        stock_em_strong(src, masked_src, prev_char, &lexer, &GRAMMAR)
+    }
+
+    fn url(&self, src: &str) -> Option<Tokens::Link> {
+        stock_url(src, &GRAMMAR)
     }
 }
 

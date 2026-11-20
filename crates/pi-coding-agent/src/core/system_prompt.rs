@@ -197,7 +197,7 @@ pub fn build_system_prompt_sections(input: &BuildSystemPromptOptions) -> Result<
     } else {
         prompt_sections.insert(
             "preamble".to_owned(),
-            "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.".to_owned(),
+            "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.".to_owned(),
         );
         let visible_tools: Vec<String> = declared_tools
             .iter()
@@ -216,23 +216,20 @@ pub fn build_system_prompt_sections(input: &BuildSystemPromptOptions) -> Result<
         };
         prompt_sections.insert(
             "tools".to_owned(),
-            format!(
-                "{tools_body}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project."
-            ),
+            format!("{tools_body}\n\nAdditional tools may be available."),
         );
         prompt_sections.insert(
             "rules".to_owned(),
             build_rules(&declared_tools, &options.tool_guidelines, &options.prompt_guidelines),
         );
         let docs = format!(
-            "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+            "Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: {}
 - Additional docs: {}
 - Examples: {} (extensions, custom tools, SDK)
 - When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)",
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)
+- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.",
             get_readme_path(),
             get_docs_path(),
             get_examples_path()

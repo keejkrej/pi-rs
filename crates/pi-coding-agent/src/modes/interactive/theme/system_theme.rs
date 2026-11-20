@@ -9,7 +9,7 @@ use pi_tui::{
 };
 
 use super::theme::{ThemeAppearance, ThemeBg, ThemeColor, ThemeToken};
-use super::theme_json::ThemeColorValue;
+use super::theme_schema::ThemeColorValue;
 
 pub const SYSTEM_THEME_NAME: &str = "system";
 

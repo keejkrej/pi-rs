@@ -193,9 +193,18 @@ pub async fn wait_for_child_process(
 /// Wait for a child process to terminate without hanging on inherited stdio handles,
 /// returning both exit code and (on Unix) terminating signal.
 pub async fn wait_for_child_process_status(
+    child: Child,
+    on_stdout: Option<Box<dyn FnMut(&[u8]) + Send>>,
+    on_stderr: Option<Box<dyn FnMut(&[u8]) + Send>>,
+) -> Result<ChildProcessExit> {
+    wait_for_child_process_status_with_exit_observer(child, on_stdout, on_stderr, None).await
+}
+
+pub(crate) async fn wait_for_child_process_status_with_exit_observer(
     mut child: Child,
     on_stdout: Option<Box<dyn FnMut(&[u8]) + Send>>,
     on_stderr: Option<Box<dyn FnMut(&[u8]) + Send>>,
+    mut on_exit: Option<Box<dyn FnOnce(ChildProcessExit) + Send>>,
 ) -> Result<ChildProcessExit> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -244,6 +253,9 @@ pub async fn wait_for_child_process_status(
                 let status = status_res.map_err(|err| Error::from_io(err, "wait", None, None))?;
                 exited = true;
                 exit_status = exit_status_to_child_exit(&status);
+                if let Some(cb) = on_exit.take() {
+                    cb(exit_status);
+                }
                 if stdout_ended && stderr_ended {
                     return Ok(exit_status);
                 }

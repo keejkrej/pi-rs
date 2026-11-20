@@ -47,6 +47,7 @@ async fn ignores_invalid_resource_fields_without_dropping_valid_fields() {
             skills: None,
             prompts: Some(vec!["./prompts".to_owned()]),
             themes: None,
+            changelog_path: None,
         }
     );
 

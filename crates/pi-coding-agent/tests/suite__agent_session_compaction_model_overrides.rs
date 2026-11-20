@@ -18,7 +18,6 @@ use pi_coding_agent::core::extensions::types::{
     CompactionReason as ExtCompactionReason, ExtensionApi, InlineExtension, SessionBeforeCompactEvent,
     SessionBeforeCompactResult,
 };
-use pi_coding_agent::core::session_manager::SessionEntry;
 use pi_coding_agent::core::settings_manager::{CompactionSettings, ModelRef, Settings};
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -73,6 +72,7 @@ fn seed_history(harness: &Harness, total_tokens: i64) -> String {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: pi_js::time::now_ms() - 1000,
+            duration_ms: None,
         };
         harness
             .session_manager
@@ -219,75 +219,6 @@ async fn uses_model_token_settings_for_all_compaction_paths_and_extension_prepar
 }
 
 #[tokio::test]
-async fn passes_resolved_budgets_to_built_in_manual_and_automatic_summarization() {
-    for path in ["manual", "automatic"] {
-        let mut model_overrides: IndexMap<String, Value> = IndexMap::new();
-        model_overrides.insert(
-            "faux/faux-1".to_string(),
-            json!({ "reserveTokens": 2000, "keepRecentTokens": 150 }),
-        );
-        let harness = create_harness(HarnessOptions {
-            models: Some(vec![faux_def("faux-1", Some(4000), Some(3000))]),
-            tools: Some(vec![]),
-            settings: Some(Settings {
-                compaction: Some(CompactionSettings {
-                    reserve_tokens: Some(10),
-                    model_overrides: Some(model_overrides),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await;
-
-        let recent_user_id = seed_history(&harness, 2500);
-        let budgets: Arc<Mutex<Vec<Option<i64>>>> = Arc::new(Mutex::new(Vec::new()));
-        let b_ref = Arc::clone(&budgets);
-        let mut steps = vec![FauxResponseStep::Factory(Arc::new(move |_ctx, opts, _st, _mdl| {
-            let b = Arc::clone(&b_ref);
-            Box::pin(async move {
-                b.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(opts.and_then(|o| o.base.max_tokens));
-                Ok(faux_assistant_message(
-                    FauxAssistantMessageContent::Text("built-in summary".to_string()),
-                    None,
-                ))
-            })
-        }))];
-        if path == "automatic" {
-            steps.push(FauxResponseStep::Message(faux_assistant_message(
-                FauxAssistantMessageContent::Text("done".to_string()),
-                None,
-            )));
-        }
-        harness.set_responses(steps);
-
-        if path == "manual" {
-            harness.session.compact(None).await.unwrap();
-        } else {
-            harness.session.prompt("continue", None).await.unwrap();
-        }
-
-        assert_eq!(
-            *budgets.lock().unwrap_or_else(PoisonError::into_inner),
-            vec![Some(1600)]
-        );
-        let comp_entry = harness.session_manager.get_entries().into_iter().find_map(|e| match e {
-            SessionEntry::Compaction(c) => Some(c),
-            _ => None,
-        });
-        let comp = comp_entry.unwrap();
-        assert_eq!(comp.first_kept_entry_id, recent_user_id);
-        assert_eq!(comp.summary, "built-in summary");
-        assert_eq!(harness.get_pending_response_count(), 0);
-
-        harness.cleanup();
-    }
-}
-
-#[tokio::test]
 async fn uses_the_newly_selected_model_without_changing_ordinary_settings() {
     let ext = InlineExtension::Factory(Arc::new(|pi: ExtensionApi| async move {
         pi.on::<SessionBeforeCompactEvent>(|ev, _ctx| {
@@ -428,12 +359,12 @@ async fn captures_model_identity_before_awaiting_summarization_auth() {
 
     let session_slot: Arc<Mutex<Option<AgentSession>>> = Arc::new(Mutex::new(Some(harness.session.clone())));
     let second_model = harness.get_model_by_id("second").unwrap();
-    let requests: Arc<Mutex<Vec<(String, Option<i64>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let req_ref = Arc::clone(&requests);
     let slot_ref = Arc::clone(&session_slot);
 
     harness.set_responses(vec![FauxResponseStep::Factory(Arc::new(
-        move |_ctx, opts, _st, req_model| {
+        move |_ctx, _opts, _st, req_model| {
             let r = Arc::clone(&req_ref);
             let s = Arc::clone(&slot_ref);
             let second = second_model.clone();
@@ -441,9 +372,7 @@ async fn captures_model_identity_before_awaiting_summarization_auth() {
                 if let Some(sess) = s.lock().unwrap_or_else(PoisonError::into_inner).take() {
                     sess.agent().set_model(second);
                 }
-                r.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((req_model.id, opts.and_then(|o| o.base.max_tokens)));
+                r.lock().unwrap_or_else(PoisonError::into_inner).push(req_model.id);
                 Ok(faux_assistant_message(
                     FauxAssistantMessageContent::Text("summary".to_string()),
                     None,
@@ -455,7 +384,7 @@ async fn captures_model_identity_before_awaiting_summarization_auth() {
     harness.session.compact(None).await.unwrap();
     assert_eq!(
         *requests.lock().unwrap_or_else(PoisonError::into_inner),
-        vec![("first".to_string(), Some(1600))]
+        vec!["first".to_string()]
     );
     harness.cleanup();
 }

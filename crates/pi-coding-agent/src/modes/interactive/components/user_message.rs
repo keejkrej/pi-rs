@@ -6,7 +6,9 @@ use pi_tui::components::markdown::{DefaultTextStyle, MarkdownOptions};
 use pi_tui::{Component, Container, Markdown, MarkdownTheme, TuiMouseEvent, TuiMouseEventResult};
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
-use super::markdown_transform::{MarkdownMessageType, MarkdownTransformer, create_markdown_transform};
+use super::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic_with_meta,
+};
 
 const OSC133_ZONE_START: &str = "\x1b]133;A\x07";
 const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
@@ -16,6 +18,8 @@ struct UserMessageState {
     markdown_theme: MarkdownTheme,
     output_pad: i64,
     markdown_transformers: Vec<MarkdownTransformer>,
+    message_id: Option<String>,
+    timestamp: Option<String>,
 }
 
 struct UserMessageInner {
@@ -37,6 +41,17 @@ impl UserMessageComponent {
         output_pad: Option<i64>,
         markdown_transformers: Option<Vec<MarkdownTransformer>>,
     ) -> Self {
+        Self::new_with_meta(text, markdown_theme, output_pad, markdown_transformers, None, None)
+    }
+
+    pub fn new_with_meta(
+        text: &str,
+        markdown_theme: Option<MarkdownTheme>,
+        output_pad: Option<i64>,
+        markdown_transformers: Option<Vec<MarkdownTransformer>>,
+        message_id: Option<String>,
+        timestamp: Option<String>,
+    ) -> Self {
         let comp = Self {
             inner: Arc::new(UserMessageInner {
                 container: Container::new(),
@@ -45,6 +60,8 @@ impl UserMessageComponent {
                     markdown_theme: markdown_theme.unwrap_or_else(get_markdown_theme),
                     output_pad: output_pad.unwrap_or(1),
                     markdown_transformers: markdown_transformers.unwrap_or_default(),
+                    message_id,
+                    timestamp,
                 }),
             }),
         };
@@ -59,12 +76,14 @@ impl UserMessageComponent {
 
     fn rebuild(&self) {
         self.inner.container.clear();
-        let (markdown_theme, output_pad, transformers) = {
+        let (markdown_theme, output_pad, transformers, message_id, timestamp) = {
             let state = self.inner.state.lock().unwrap();
             (
                 state.markdown_theme.clone(),
                 state.output_pad,
                 state.markdown_transformers.clone(),
+                state.message_id.clone(),
+                state.timestamp.clone(),
             )
         };
         self.inner.container.add_child(Arc::new(Markdown::new(
@@ -82,10 +101,12 @@ impl UserMessageComponent {
             Some(MarkdownOptions {
                 preserve_ordered_list_markers: Some(true),
                 preserve_backslash_escapes: Some(true),
-                transform: Some(create_markdown_transform(
+                transform: Some(create_markdown_transform_dynamic_with_meta(
                     MarkdownMessageType::User,
-                    false,
+                    Arc::new(|| false),
                     transformers,
+                    message_id,
+                    timestamp,
                 )),
                 render_latex: None,
             }),

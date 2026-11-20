@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use pi_ai::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
+use pi_ai::utils::provider_retry::{
+    ProviderHttpError, ProviderRetryOptions, retry_provider_request, retry_provider_request_with_no_retry_statuses,
+};
 use pi_js::abort::AbortController;
 use pi_js::fetch::Headers;
 
@@ -175,5 +177,28 @@ async fn aborts_provider_requested_retry_delay() {
     ctrl.abort(None);
     let err = handle.await.unwrap().unwrap_err();
     assert!(err.is_abort());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn does_not_retry_statuses_listed_in_no_retry_statuses() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+
+    let err = retry_provider_request_with_no_retry_statuses::<String, _, _>(
+        move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            async { Err(provider_error(Some(504), &[("retry-after-ms", "0")])) }
+        },
+        ProviderRetryOptions {
+            max_retries: Some(2),
+            ..Default::default()
+        },
+        Some(&[504]),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.message().contains("504"));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

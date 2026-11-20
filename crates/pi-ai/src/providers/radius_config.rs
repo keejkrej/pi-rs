@@ -9,6 +9,7 @@ use pi_js::{Error, Result};
 
 use crate::auth::types::OAuthCredential;
 use crate::types::{Model, ModelCost, ModelInput, ThinkingLevelMap};
+use crate::utils::text::owned_slice;
 
 pub const DEFAULT_RADIUS_GATEWAY: &str = "https://radius.pi.dev";
 
@@ -102,6 +103,7 @@ pub fn get_radius_models_from_config(provider_id: &str, config: &RadiusGatewayCo
             max_tokens: model.max_tokens,
             headers: None,
             sampling_params: None,
+            sampling_params_by_thinking_level: None,
             compat: None,
         })
         .collect()
@@ -117,7 +119,7 @@ pub fn get_radius_models(provider_id: &str, credential: Option<&OAuthCredential>
 fn truncate_http_body(body: &str) -> String {
     let trimmed = pi_js::str16::trim(body);
     if pi_js::str16::len(trimmed) > 512 {
-        format!("{}…", pi_js::str16::slice(trimmed, 0, Some(512)))
+        format!("{}…", owned_slice(trimmed, 0, Some(512)))
     } else {
         trimmed.to_owned()
     }

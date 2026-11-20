@@ -58,6 +58,7 @@ pub async fn check_provider_auth(
             cli_provider: cli_provider.as_deref(),
             cli_model: Some(cli_model),
             cli_thinking: None,
+            inline_api_key: None,
             model_runtime,
         });
         if resolved.error.is_some() || resolved.model.is_none() {

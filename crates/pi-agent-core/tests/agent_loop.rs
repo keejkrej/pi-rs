@@ -20,7 +20,7 @@ use pi_ai::{
 use pi_js::Error;
 use pi_js::abort::AbortController;
 use pi_js::time::now_ms;
-use pi_js::vendor::typebox::t;
+use pi_schema::{Schema, arr, obj, str};
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -144,7 +144,7 @@ fn make_echo_tool(execution_mode: Option<ToolExecutionMode>, executed: Arc<Mutex
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode,
@@ -178,7 +178,7 @@ fn make_noop_tool() -> AgentTool {
         name: "noop".to_string(),
         label: "Noop".to_string(),
         description: "Noop tool".to_string(),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -467,6 +467,129 @@ async fn handles_tool_calls_and_results() {
     );
 }
 
+// #10549
+#[tokio::test]
+async fn records_how_long_execute_took_on_tool_result_excluding_hooks() {
+    let tool = AgentTool {
+        name: "echo".to_string(),
+        label: "Echo".to_string(),
+        description: "Echo tool".to_string(),
+        parameters: obj([("value", str())]),
+        constrained_sampling: None,
+        output_schema: None,
+        execution_mode: None,
+        prepare_arguments: None,
+        execute: Arc::new(|_id, params, _signal, _on_update| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let value = params.get("value").cloned().unwrap_or(Value::Null);
+                let text = value.as_str().unwrap_or("").to_string();
+                Ok(AgentToolResult {
+                    content: vec![UserContentBlock::Text(faux_text(&text))],
+                    details: Some(json!({ "value": value })),
+                    structured_content: None,
+                    usage: None,
+                    is_error: None,
+                    terminate: None,
+                    control: None,
+                })
+            })
+        }),
+        replay: None,
+    };
+
+    let mut cfg = base_config();
+    cfg.before_tool_call = Some(Arc::new(|ctx, _sig| {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            if ctx.tool_call.id == "blocked" {
+                Ok(Some(BeforeToolCallResult {
+                    block: Some(true),
+                    reason: Some("no".to_string()),
+                    ..Default::default()
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+    }));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = Arc::clone(&calls);
+    let stream_fn: StreamFn = Arc::new(move |_m, _ctx, _opts| {
+        let idx = calls_ref.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if idx == 0 {
+                Ok(spawn_done_stream(
+                    assistant_msg(
+                        vec![
+                            tc_block("ran", "echo", json!({ "value": "a" })),
+                            tc_block("blocked", "echo", json!({ "value": "b" })),
+                        ],
+                        StopReason::ToolUse,
+                    ),
+                    StopReason::ToolUse,
+                ))
+            } else {
+                Ok(spawn_done_stream(
+                    assistant_msg(vec![text_block("done")], StopReason::Stop),
+                    StopReason::Stop,
+                ))
+            }
+        })
+    });
+
+    let stream = agent_loop(
+        vec![user_msg("go")],
+        AgentContext {
+            messages: Vec::new(),
+            tools: Some(vec![tool]),
+        },
+        cfg,
+        None,
+        Some(stream_fn),
+    );
+    let (events, messages) = collect_stream(stream).await;
+
+    let results: Vec<&pi_ai::ToolResultMessage> = messages
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Message(Message::ToolResult(tr)) => Some(tr),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+
+    let ran = results[0];
+    let blocked = results[1];
+    let ran_duration = ran.duration_ms.expect("ran tool result should record duration_ms");
+    assert!(ran_duration >= 25, "expected duration_ms >= 25, got {ran_duration}");
+    assert!(ran_duration < 120, "expected duration_ms < 120, got {ran_duration}");
+
+    assert!(blocked.is_error);
+    assert_eq!(blocked.duration_ms, None);
+    let blocked_json = pi_js::json::parse(&pi_js::json::stringify(blocked)).expect("serialize blocked tool result");
+    assert!(blocked_json.get("durationMs").is_none());
+
+    let mut end_durations = Vec::new();
+    for ev in &events {
+        if let AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            duration_ms,
+            ..
+        } = ev
+        {
+            end_durations.push((tool_call_id.clone(), *duration_ms));
+            if tool_call_id == "blocked" {
+                let ev_json = pi_js::json::parse(&pi_js::json::stringify(ev)).expect("serialize tool_execution_end");
+                assert!(ev_json.get("durationMs").is_none());
+            }
+        }
+    }
+    assert!(end_durations.contains(&("ran".to_string(), Some(ran_duration))));
+    assert!(end_durations.contains(&("blocked".to_string(), None)));
+}
+
 #[tokio::test]
 async fn does_not_execute_tool_calls_from_length_truncated_assistant_message() {
     let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -584,12 +707,12 @@ async fn executes_mutated_before_tool_call_args_without_revalidation() {
 async fn prepares_tool_arguments_for_validation() {
     let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
     let executed_ref = Arc::clone(&executed);
-    let replace_schema = t::object([("oldText", t::string()), ("newText", t::string())]);
+    let replace_schema = obj([("oldText", str()), ("newText", str())]);
     let tool = AgentTool {
         name: "edit".to_string(),
         label: "Edit".to_string(),
         description: "Edit tool".to_string(),
-        parameters: t::object([("edits", t::array(replace_schema))]),
+        parameters: obj([("edits", arr(replace_schema))]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -675,7 +798,7 @@ async fn emits_tool_execution_end_in_completion_order_but_persists_tool_results_
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -886,7 +1009,7 @@ async fn answers_every_tool_call_of_sequential_batch_aborted_mid_batch() {
         name: "slow".to_string(),
         label: "Slow".to_string(),
         description: "Slow tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: Some(ToolExecutionMode::Sequential),
@@ -982,7 +1105,7 @@ async fn answers_every_tool_call_of_parallel_batch_aborted_while_calls_are_prepa
         name: "slow".to_string(),
         label: "Slow".to_string(),
         description: "Slow tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1091,7 +1214,7 @@ async fn forces_sequential_execution_when_one_tool_has_execution_mode_sequential
         name: "slow".to_string(),
         label: "Slow".to_string(),
         description: "Slow tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: Some(ToolExecutionMode::Sequential),
@@ -1118,7 +1241,7 @@ async fn forces_sequential_execution_when_one_tool_has_execution_mode_sequential
         name: "fast".to_string(),
         label: "Fast".to_string(),
         description: "Fast tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -2343,9 +2466,9 @@ async fn run_tool_call_validates_runs_hooks_and_manages_structured_content() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo tool".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: obj([("value", str())]),
         constrained_sampling: None,
-        output_schema: Some(t::object([("value", t::string())]).to_value()),
+        output_schema: Some(obj([("value", str())]).to_value()),
         execution_mode: None,
         prepare_arguments: None,
         execute: Arc::new(|_id, params, _sig, on_update| {
@@ -2381,7 +2504,7 @@ async fn run_tool_call_validates_runs_hooks_and_manages_structured_content() {
         name: "failing".to_string(),
         label: "Failing".to_string(),
         description: "Returns an error result".to_string(),
-        parameters: t::object(std::iter::empty::<(&str, _)>()),
+        parameters: obj([] as [(&str, Schema); 0]),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

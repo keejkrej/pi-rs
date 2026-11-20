@@ -43,6 +43,7 @@ fn base_model(base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -80,6 +81,7 @@ async fn compaction_forwards_resolved_enterprise_base_url_through_stream_wrapper
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1500,
+        duration_ms: None,
     })))
     .unwrap();
 
@@ -125,6 +127,7 @@ async fn compaction_forwards_resolved_enterprise_base_url_through_stream_wrapper
                     raw_stop_reason: None,
                     end_turn: None,
                     timestamp: 0,
+                    duration_ms: None,
                 },
             });
             Ok(stream)
@@ -238,6 +241,7 @@ impl Provider for MockEnterpriseCopilotProvider {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 0,
+                duration_ms: None,
             },
         });
         stream
@@ -278,6 +282,7 @@ async fn compaction_resolves_enterprise_base_url_through_model_runtime_stream_si
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1500,
+        duration_ms: None,
     })))
     .unwrap();
 

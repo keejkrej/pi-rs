@@ -181,9 +181,15 @@ async fn handle_chatgpt_callback(
 
 async fn start_callback_server(expected_state: &str) -> Result<ChatGptCallbackServer> {
     let host = callback_host();
-    let listener = TcpListener::bind((host.as_str(), CALLBACK_PORT))
-        .await
-        .map_err(|e| Error::msg(format!("Failed to listen on {host}:{CALLBACK_PORT}: {e}")))?;
+    let listener = TcpListener::bind((host.as_str(), CALLBACK_PORT)).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            Error::msg(format!(
+                "Port {CALLBACK_PORT} is in use, probably by an unfinished login in another pi session or by the Codex CLI. Cancel that login and try again."
+            ))
+        } else {
+            Error::msg(format!("Failed to listen on {host}:{CALLBACK_PORT}: {e}"))
+        }
+    })?;
 
     let (tx, rx) = oneshot::channel();
     let shutdown = CancellationToken::new();
@@ -381,6 +387,11 @@ async fn login_openai_chatgpt(
     interaction: ProviderAuthInteraction,
     options: Option<LoginOptions>,
 ) -> Result<OAuthCredential> {
+    let agent_name_hint = options
+        .as_ref()
+        .and_then(|o| o.agent_name.as_deref())
+        .unwrap_or(AGENT_NAME_HINT)
+        .to_owned();
     let device_id = options.and_then(|o| o.get_device_id).map(|f| f());
     let host_id = agent_host_id(device_id.as_deref())?;
     let pkce = crate::auth::oauth::pkce::generate_pkce().await?;
@@ -389,22 +400,13 @@ async fn login_openai_chatgpt(
     let state = random_value();
     let nonce = random_value();
 
-    let mut callback = match start_callback_server(&state).await {
-        Ok(cb) => Some(cb),
-        Err(err) => {
-            interaction.notify(AuthEvent::Info {
-                message: format!("Could not listen on {REDIRECT_URI}; paste the final redirect URL to continue. {err}"),
-                links: None,
-            });
-            None
-        }
-    };
+    let mut callback = start_callback_server(&state).await?;
 
     let mut auth_url = url::Url::parse(AUTHORIZE_URL).map_err(|e| Error::msg(e.to_string()))?;
     auth_url
         .query_pairs_mut()
         .append_pair("client_id", DYNAMIC_CLIENT_ID)
-        .append_pair("agent_name_hint", AGENT_NAME_HINT)
+        .append_pair("agent_name_hint", &agent_name_hint)
         .append_pair("ext_agent_host_id", &host_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", REDIRECT_URI)
@@ -441,29 +443,23 @@ async fn login_openai_chatgpt(
         authorization_result_from_manual_input(&input, &expected_state_for_manual)
     };
 
-    let result: Result<AuthorizationResult> = if let Some(ref mut cb) = callback {
-        let rx = cb.result_rx.take();
-        let cb_fut = async move {
-            match rx {
-                Some(rx) => match rx.await {
-                    Ok(res) => res,
-                    Err(_) => Err(Error::msg("OAuth callback server closed")),
-                },
-                None => Err(Error::msg("OAuth callback receiver missing")),
-            }
-        };
-        tokio::select! {
-            res = cb_fut => res,
-            res = manual_fut => res,
+    let rx = callback.result_rx.take();
+    let cb_fut = async move {
+        match rx {
+            Some(rx) => match rx.await {
+                Ok(res) => res,
+                Err(_) => Err(Error::msg("OAuth callback server closed")),
+            },
+            None => Err(Error::msg("OAuth callback receiver missing")),
         }
-    } else {
-        manual_fut.await
+    };
+    let result: Result<AuthorizationResult> = tokio::select! {
+        res = cb_fut => res,
+        res = manual_fut => res,
     };
 
     manual_abort.abort(None);
-    if let Some(cb) = callback.as_ref() {
-        cb.close_all();
-    }
+    callback.close_all();
 
     let auth_res = match result {
         Ok(res) => res,

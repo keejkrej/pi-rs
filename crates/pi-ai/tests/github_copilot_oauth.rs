@@ -79,6 +79,7 @@ impl AuthInteraction for TestCopilotInteraction {
                 verification_uri,
                 interval_seconds,
                 expires_in_seconds,
+                ..
             } => (self.on_device_code)(RecordedDeviceCode {
                 user_code,
                 verification_uri,

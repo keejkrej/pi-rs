@@ -40,6 +40,7 @@ pub fn opencode_provider() -> Arc<dyn Provider + Send + Sync> {
     );
 
     let mut classifiers = IndexMap::new();
+    // OpenCode Zen serves TypeSafe's System One protocol at /inference/systemone/v1/systemone.
     classifiers.insert("typesafe-system-one".to_owned(), typesafe_system_one_api());
 
     build_provider(CreateProviderOptions {

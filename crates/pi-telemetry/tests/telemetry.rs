@@ -6,10 +6,11 @@ use std::task::Poll;
 
 use indexmap::IndexMap;
 use pi_telemetry::{
-    AttributeValue, InMemoryTelemetryContext, NOOP_TELEMETRY_CONTEXT, SpanAttributes, SpanOptions, SpanStatus,
-    SpanValue, TelemetryAttributeCardinality, TelemetryAttributeDefinition, TelemetryContext,
-    TelemetryEventAttributeDefinition, TelemetryEventDefinition, TelemetryParentDefinition, TelemetrySchemaDefinition,
-    TelemetrySpan, TelemetrySpanDefinition, TelemetrySpanStatusDefault, TelemetrySpanStatusDefinition,
+    AttributeValue, InMemoryTelemetryContext, NOOP_TELEMETRY_CONTEXT, NOOP_TELEMETRY_METRICS,
+    NOOP_TELEMETRY_PROPAGATION, SpanAttributes, SpanLink, SpanOptions, SpanStatus, SpanStatusError, SpanValue,
+    TelemetryAttributeCardinality, TelemetryAttributeDefinition, TelemetryContext, TelemetryEventAttributeDefinition,
+    TelemetryEventDefinition, TelemetryParentDefinition, TelemetrySchemaDefinition, TelemetrySpan,
+    TelemetrySpanDefinition, TelemetrySpanStatusDefault, TelemetrySpanStatusDefinition,
     TelemetryStartAttributeDefinition, create_typed_span_starter, define_telemetry_schema,
 };
 
@@ -76,7 +77,11 @@ mod telemetry_schemas {
             },
         );
 
-        let definition = TelemetrySchemaDefinition { version: 1, spans };
+        let definition = TelemetrySchemaDefinition {
+            version: 1,
+            spans,
+            metrics: None,
+        };
         let schema = define_telemetry_schema(definition.clone());
         assert_eq!(schema, definition);
 
@@ -126,6 +131,7 @@ mod telemetry_schemas {
         let operation_schema = define_telemetry_schema(TelemetrySchemaDefinition {
             version: 1,
             spans: op_spans,
+            metrics: None,
         });
 
         let mut req_start_attrs = IndexMap::new();
@@ -171,6 +177,7 @@ mod telemetry_schemas {
         let request_schema = define_telemetry_schema(TelemetrySchemaDefinition {
             version: 3,
             spans: req_spans,
+            metrics: None,
         });
 
         let telemetry_context = InMemoryTelemetryContext::new();
@@ -227,8 +234,6 @@ mod telemetry_schemas {
             Some(&AttributeValue::String("cached".to_string()))
         );
 
-        // PORT: JS Proxy `unreadable(schemas)` and `@ts-expect-error` compile-time checks are N/A in Rust.
-
         let mut sync_attrs = SpanAttributes::new();
         sync_attrs.insert("kind".to_string(), AttributeValue::String("write".to_string()));
         let sync_err = start_span
@@ -267,6 +272,7 @@ mod telemetry_schemas {
 }
 
 mod noop_telemetry_context {
+    use pi_telemetry::{TelemetryMetrics, TelemetryPropagation};
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -280,10 +286,7 @@ mod noop_telemetry_context {
         let first_span_cb = Arc::clone(&first_span);
 
         let mut fut = NOOP_TELEMETRY_CONTEXT.start_span(
-            SpanOptions {
-                name: "first".to_string(),
-                attributes: None,
-            },
+            SpanOptions::new("first"),
             Arc::new(move |span| {
                 let admitted_cb = Arc::clone(&admitted_cb);
                 let first_span_cb = Arc::clone(&first_span_cb);
@@ -292,10 +295,7 @@ mod noop_telemetry_context {
                     *first_span_cb.lock().unwrap() = Some(Arc::clone(&span));
                     let child = span
                         .start_span(
-                            SpanOptions {
-                                name: "child".to_string(),
-                                attributes: None,
-                            },
+                            SpanOptions::new("child"),
                             Arc::new(|child_span| Box::pin(async move { Ok(Box::new(child_span) as SpanValue) })),
                         )
                         .await
@@ -318,18 +318,24 @@ mod noop_telemetry_context {
         };
         let value = result.expect("noop span should resolve");
         assert_eq!(value.downcast_ref::<i64>().copied(), Some(42));
-        assert!(first_span.lock().unwrap().is_some());
-        // PORT: `Object.isFrozen(firstSpan)` is N/A in Rust; `NoopTelemetryContext` is an immutable Copy unit struct.
+
+        let captured = first_span.lock().unwrap().clone().expect("expected first span");
+        let root_metrics = NOOP_TELEMETRY_CONTEXT.metrics().expect("noop metrics");
+        let root_prop = NOOP_TELEMETRY_CONTEXT.propagation().expect("noop propagation");
+        assert!(Arc::ptr_eq(&captured.metrics().unwrap(), &root_metrics));
+        assert!(Arc::ptr_eq(&captured.propagation().unwrap(), &root_prop));
+        assert!(Arc::ptr_eq(
+            &NOOP_TELEMETRY_METRICS.counter("a", None),
+            &root_metrics.counter("b", None),
+        ));
+        assert!(NOOP_TELEMETRY_PROPAGATION.inject(&NOOP_TELEMETRY_CONTEXT).is_none());
     }
 
     #[tokio::test]
     async fn preserves_synchronous_and_asynchronous_rejection_values() {
         let sync_err = NOOP_TELEMETRY_CONTEXT
             .start_span(
-                SpanOptions {
-                    name: "sync".to_string(),
-                    attributes: None,
-                },
+                SpanOptions::new("sync"),
                 Arc::new(|_span| Box::pin(async { Err(Box::new(PlainError { kind: "sync" }) as SpanValue) })),
             )
             .await
@@ -341,10 +347,7 @@ mod noop_telemetry_context {
 
         let async_err = NOOP_TELEMETRY_CONTEXT
             .start_span(
-                SpanOptions {
-                    name: "async".to_string(),
-                    attributes: None,
-                },
+                SpanOptions::new("async"),
                 Arc::new(|_span| {
                     Box::pin(async {
                         tokio::task::yield_now().await;
@@ -361,31 +364,41 @@ mod noop_telemetry_context {
     }
 
     #[tokio::test]
-    async fn does_not_inspect_or_retain_telemetry_payloads() {
+    async fn ignores_typed_recording_payloads() {
         let mut start_attrs = SpanAttributes::new();
-        start_attrs.insert(
-            "secret".to_string(),
-            AttributeValue::String("prompt content".to_string()),
-        );
-        // PORT: JS Proxy `unreadable()` traps are N/A for Rust typed structs.
+        start_attrs.insert("kind".to_string(), AttributeValue::String("test".to_string()));
         let result = NOOP_TELEMETRY_CONTEXT
             .start_span(
                 SpanOptions {
                     name: "operation".to_string(),
                     attributes: Some(start_attrs),
+                    links: None,
                 },
                 Arc::new(|span| {
                     Box::pin(async move {
-                        let mut attrs = SpanAttributes::new();
-                        attrs.insert("secret".to_string(), AttributeValue::String("content".to_string()));
-                        span.add_event("event", Some(attrs.clone()));
-                        span.set_attributes(attrs);
-                        span.set_status(SpanStatus::Ok);
-                        Ok(Box::new(()) as SpanValue)
+                        let mut ev_attrs = SpanAttributes::new();
+                        ev_attrs.insert("count".to_string(), AttributeValue::Number(1.0));
+                        span.add_event("event", Some(ev_attrs));
+
+                        let mut set_attrs = SpanAttributes::new();
+                        set_attrs.insert("complete".to_string(), AttributeValue::Boolean(true));
+                        span.set_attributes(set_attrs);
+
+                        span.set_status(SpanStatus::Error {
+                            error: Some(SpanStatusError {
+                                name: "Expected".to_string(),
+                                message: "test".to_string(),
+                            }),
+                        });
+                        span.add_link(SpanLink::new(
+                            Arc::clone(&span) as Arc<dyn TelemetryContext + Send + Sync>
+                        ));
+                        Ok(Box::new(42_i64) as SpanValue)
                     })
                 }),
             )
-            .await;
-        assert!(result.is_ok());
+            .await
+            .expect("noop span should resolve");
+        assert_eq!(result.downcast_ref::<i64>().copied(), Some(42));
     }
 }

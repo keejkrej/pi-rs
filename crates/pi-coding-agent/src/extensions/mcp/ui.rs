@@ -6,14 +6,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::extensions::types::{ExtensionCommandContext, KeybindingsManager, NotifyType, Theme};
-use crate::extensions::wire::{DynamicBorder, get_select_list_theme, key_hint};
+use crate::extensions::wire::{AuthUrlComponent, DynamicBorder, get_select_list_theme, key_hint};
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result, Unsubscribe};
 use pi_tui::components::input::Input;
 use pi_tui::components::select_list::{SelectItem, SelectList};
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
-use pi_tui::hyperlink;
 use pi_tui::tui::{Component, Container, Focusable, TUI};
 use pi_tui::utils::{truncate_to_width, visible_width};
 
@@ -40,7 +39,7 @@ pub trait McpUi: Send + Sync {
         build: Arc<dyn Fn() -> McpMenu + Send + Sync>,
         subscribe: Option<McpSubscribeFn>,
     ) -> Option<String>;
-    fn status(&self, title: &str, message: &str);
+    fn status(&self, title: &str, message: &str, on_cancel: Option<Arc<dyn Fn() + Send + Sync>>);
     async fn redirect_url(&self, title: &str, authorization_url: &str, signal: AbortSignal) -> Option<String>;
 }
 
@@ -71,9 +70,15 @@ fn frame(theme: &Theme, title: &str, body: Vec<Arc<dyn Component>>, footer: Opti
     container
 }
 
+#[derive(Clone)]
+enum ViewInputHandler {
+    Component(Arc<dyn Component>),
+    Callback(Arc<dyn Fn(&str) + Send + Sync>),
+}
+
 struct McpManagerViewState {
     content: Container,
-    input_handler: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    input_handler: Option<ViewInputHandler>,
     input_target: Option<Arc<dyn Focusable>>,
     focused: bool,
 }
@@ -115,7 +120,7 @@ impl McpManagerView {
     fn set_content(
         &self,
         content: Container,
-        input_handler: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+        input_handler: Option<ViewInputHandler>,
         input_target: Option<Arc<dyn Focusable>>,
     ) {
         {
@@ -150,6 +155,13 @@ impl Focusable for McpManagerView {
 }
 
 impl Component for McpManagerView {
+    fn captures_viewport_input(&self) -> bool {
+        match &self.state.lock().unwrap_or_else(|e| e.into_inner()).input_handler {
+            Some(ViewInputHandler::Component(comp)) => comp.captures_viewport_input(),
+            _ => false,
+        }
+    }
+
     fn render(&self, width: usize) -> Vec<String> {
         let content = self.state.lock().unwrap_or_else(|e| e.into_inner()).content.clone();
         content
@@ -172,8 +184,10 @@ impl Component for McpManagerView {
             .unwrap_or_else(|e| e.into_inner())
             .input_handler
             .clone();
-        if let Some(h) = handler {
-            h(data);
+        match handler {
+            Some(ViewInputHandler::Component(comp)) => comp.handle_input(data),
+            Some(ViewInputHandler::Callback(f)) => f(data),
+            None => {}
         }
         self.tui.request_render(None);
     }
@@ -259,11 +273,11 @@ impl McpUi for McpManagerView {
                     let footer = key_hint("tui.select.cancel", &menu.cancel_label, &this.theme);
                     this.set_content(
                         frame(&this.theme, &menu.title, body, Some(&footer)),
-                        Some(Arc::new(move |data| {
+                        Some(ViewInputHandler::Callback(Arc::new(move |data| {
                             if kb.matches(data, "tui.select.cancel") {
                                 finish_cancel(None);
                             }
-                        })),
+                        }))),
                         None,
                     );
                     return;
@@ -289,10 +303,11 @@ impl McpUi for McpManagerView {
                 list.set_on_select(Some(Arc::new(move |item| f_sel(Some(item.value.clone())))));
                 let f_can = Arc::clone(&finish);
                 list.set_on_cancel(Some(Arc::new(move || f_can(None))));
-                body.push(Arc::new(list.clone()));
+                let list_comp: Arc<dyn Component> = Arc::new(list);
+                body.push(Arc::clone(&list_comp));
                 this.set_content(
                     frame(&this.theme, &menu.title, body, Some(&footer)),
-                    Some(Arc::new(move |data| list.handle_input(data))),
+                    Some(ViewInputHandler::Component(list_comp)),
                     None,
                 );
             })
@@ -313,25 +328,31 @@ impl McpUi for McpManagerView {
         rx.await.ok().flatten()
     }
 
-    fn status(&self, title: &str, message: &str) {
-        self.set_content(
-            frame(
-                &self.theme,
-                title,
-                vec![
-                    Arc::new(Spacer::new(Some(1))),
-                    Arc::new(Text::new(
-                        Some(&self.theme.fg("muted", message)),
-                        Some(1),
-                        Some(0),
-                        None,
-                    )),
-                ],
+    fn status(&self, title: &str, message: &str, on_cancel: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let body: Vec<Arc<dyn Component>> = vec![
+            Arc::new(Spacer::new(Some(1))),
+            Arc::new(Text::new(
+                Some(&self.theme.fg("muted", message)),
+                Some(1),
+                Some(0),
                 None,
-            ),
-            None,
-            None,
-        );
+            )),
+        ];
+        if let Some(cancel_cb) = on_cancel {
+            let kb = self.keybindings.clone();
+            let footer = key_hint("tui.select.cancel", "cancel", &self.theme);
+            self.set_content(
+                frame(&self.theme, title, body, Some(&footer)),
+                Some(ViewInputHandler::Callback(Arc::new(move |data| {
+                    if kb.matches(data, "tui.select.cancel") {
+                        cancel_cb();
+                    }
+                }))),
+                None,
+            );
+        } else {
+            self.set_content(frame(&self.theme, title, body, None), None, None);
+        }
     }
 
     async fn redirect_url(&self, title: &str, authorization_url: &str, signal: AbortSignal) -> Option<String> {
@@ -352,11 +373,7 @@ impl McpUi for McpManagerView {
         let _guard = signal.on_abort(move |_| f_abort(None));
 
         let input = Input::new(None);
-        let click_hint = if pi_js::env::platform() == "darwin" {
-            "Cmd+click to open"
-        } else {
-            "Ctrl+click to open"
-        };
+        let link = AuthUrlComponent::new(Arc::clone(&self.tui), authorization_url);
         let body: Vec<Arc<dyn Component>> = vec![
             Arc::new(Spacer::new(Some(1))),
             Arc::new(Text::new(
@@ -369,22 +386,7 @@ impl McpUi for McpManagerView {
                 Some(0),
                 None,
             )),
-            Arc::new(Text::new(
-                Some(
-                    &self
-                        .theme
-                        .fg("accent", &hyperlink(authorization_url, authorization_url)),
-                ),
-                Some(1),
-                Some(0),
-                None,
-            )),
-            Arc::new(Text::new(
-                Some(&self.theme.fg("dim", &hyperlink(click_hint, authorization_url))),
-                Some(1),
-                Some(0),
-                None,
-            )),
+            Arc::new(link.clone()),
             Arc::new(Spacer::new(Some(1))),
             Arc::new(Text::new(
                 Some(&self.theme.fg(
@@ -407,7 +409,7 @@ impl McpUi for McpManagerView {
         let inp_handler = input.clone();
         self.set_content(
             frame(&self.theme, title, body, Some(&footer)),
-            Some(Arc::new(move |data| {
+            Some(ViewInputHandler::Callback(Arc::new(move |data| {
                 if kb.matches(data, "tui.select.confirm") {
                     let val = pi_js::str16::trim(&inp_handler.get_value()).to_string();
                     if !val.is_empty() {
@@ -419,8 +421,19 @@ impl McpUi for McpManagerView {
                     finish(None);
                     return;
                 }
+                if kb.matches(data, "app.message.copy") {
+                    let link_copy = link.clone();
+                    let copy_override =
+                        crate::modes::interactive::components::login_dialog::current_copy_to_clipboard_override();
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            link_copy.copy_with_override(copy_override).await;
+                        });
+                    }
+                    return;
+                }
                 inp_handler.handle_input(data);
-            })),
+            }))),
             Some(Arc::new(input)),
         );
 

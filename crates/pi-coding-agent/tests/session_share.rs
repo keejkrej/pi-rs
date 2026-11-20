@@ -242,3 +242,140 @@ async fn share_session_exports_for_share_and_reports_unconfigured_radius_offline
         "errors: {errs:?}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn forces_gist_sharing_without_checking_radius_authentication_10870() {
+    use pi_js::env::testing::EnvGuard;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let args_file = bin_dir.path().join("gh-args.txt");
+    let html_file = bin_dir.path().join("gh-html.txt");
+    let gh_path = bin_dir.path().join("gh");
+    std::fs::write(
+        &gh_path,
+        "#!/bin/sh\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi\nif [ \"$1\" = \"gist\" ] && [ \"$2\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"$GH_ARGS_FILE\"\n  cat \"$4\" > \"$GH_HTML_FILE\"\n  printf 'https://gist.github.com/test/forced-gist\\n'\n  exit 0\nfi\nexit 1\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&gh_path, perms).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{old_path}", bin_dir.path().to_string_lossy());
+    let _path_guard = EnvGuard::set("PATH", Some(&new_path));
+    let _args_guard = EnvGuard::set("GH_ARGS_FILE", Some(args_file.to_string_lossy().as_ref()));
+    let _html_guard = EnvGuard::set("GH_HTML_FILE", Some(html_file.to_string_lossy().as_ref()));
+
+    struct ForcedGistSession {
+        radius_checks: Arc<AtomicUsize>,
+    }
+
+    impl ShareSession for ForcedGistSession {
+        fn system_prompt(&self) -> String {
+            String::new()
+        }
+        fn state_tools(&self) -> Vec<ShareToolSummary> {
+            Vec::new()
+        }
+        fn export_session_jsonl(
+            &self,
+            file_path: &str,
+            _trailing_entries_fn: Arc<dyn Fn(Option<&str>, &str) -> Vec<Value> + Send + Sync>,
+        ) -> pi_js::Result<()> {
+            std::fs::write(file_path, "{}\n").map_err(|e| pi_js::Error::msg(e.to_string()))
+        }
+        fn export_to_html(&self, html_path: &str, _theme_name: &str) -> pi_js::BoxFuture<pi_js::Result<()>> {
+            let p = html_path.to_owned();
+            Box::pin(async move { std::fs::write(&p, "html").map_err(|e| pi_js::Error::msg(e.to_string())) })
+        }
+        fn session_share_destination(&self) -> SessionShareDestination {
+            SessionShareDestination::Gist
+        }
+        fn has_radius_provider(&self) -> bool {
+            self.radius_checks.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        fn get_radius_auth_token(&self, _min_oauth_validity_ms: i64) -> pi_js::BoxFuture<Option<String>> {
+            self.radius_checks.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Some("tok".to_owned()) })
+        }
+    }
+
+    struct LocalNoopTerminal;
+
+    #[async_trait::async_trait]
+    impl pi_tui::terminal::Terminal for LocalNoopTerminal {
+        fn start(
+            &self,
+            _on_input: pi_tui::terminal::TerminalInputHandler,
+            _on_resize: pi_tui::terminal::TerminalResizeHandler,
+        ) {
+        }
+        fn stop(&self) {}
+        async fn drain_input(&self, _max_ms: Option<i64>, _idle_ms: Option<i64>) {}
+        fn write(&self, _data: &str) {}
+        fn columns(&self) -> i64 {
+            80
+        }
+        fn rows(&self) -> i64 {
+            24
+        }
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+        fn move_by(&self, _lines: i64) {}
+        fn hide_cursor(&self) {}
+        fn show_cursor(&self) {}
+        fn clear_line(&self) {}
+        fn clear_from_cursor(&self) {}
+        fn clear_screen(&self) {}
+        fn set_title(&self, _title: &str) {}
+        fn set_progress(&self, _active: bool) {}
+    }
+
+    init_theme(Some("dark"), Some(false));
+    let radius_checks = Arc::new(AtomicUsize::new(0));
+    let statuses = Arc::new(Mutex::new(Vec::<String>::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let status_c = Arc::clone(&statuses);
+    let err_c = Arc::clone(&errors);
+    let editor: Arc<dyn Component> = Arc::new(pi_tui::Text::new(None, None, None, None));
+    let ui: Arc<dyn TUI + Send + Sync> = Arc::new(pi_tui::TuiMainScreen::new(Arc::new(LocalNoopTerminal), None, None));
+    let editor_container = Container::new();
+    editor_container.add_child(Arc::clone(&editor));
+
+    share_session(&SessionShareContext {
+        session: Arc::new(ForcedGistSession {
+            radius_checks: Arc::clone(&radius_checks),
+        }),
+        ui,
+        editor_container,
+        editor,
+        show_status: Arc::new(move |msg| status_c.lock().unwrap().push(msg.to_owned())),
+        show_error: Arc::new(move |msg| err_c.lock().unwrap().push(msg.to_owned())),
+    })
+    .await;
+
+    assert_eq!(radius_checks.load(Ordering::SeqCst), 0);
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "errors: {:?}",
+        *errors.lock().unwrap()
+    );
+    let recorded_args: Vec<String> = std::fs::read_to_string(&args_file)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(&recorded_args[..3], &["gist", "create", "--public=false"]);
+    assert_eq!(std::fs::read_to_string(&html_file).unwrap(), "html");
+    let status_joined = statuses.lock().unwrap().join("\n");
+    assert!(
+        status_joined.contains("forced-gist"),
+        "expected forced-gist viewer URL in statuses: {status_joined}"
+    );
+}

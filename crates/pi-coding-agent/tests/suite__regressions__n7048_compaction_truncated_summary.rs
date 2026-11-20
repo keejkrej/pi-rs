@@ -43,6 +43,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -80,6 +81,7 @@ async fn does_not_persist_a_length_limited_summary() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1500,
+        duration_ms: None,
     })))
     .unwrap();
 
@@ -115,6 +117,7 @@ async fn does_not_persist_a_length_limited_summary() {
                     raw_stop_reason: None,
                     end_turn: None,
                     timestamp: 0,
+                    duration_ms: None,
                 },
             });
             Ok(stream)

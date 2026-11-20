@@ -22,7 +22,7 @@ use crate::protocol::types::{
     ListResourceTemplatesResult, ListResourcesResult, ProgressNotification, ReadResourceResult, Resource,
     ResourceTemplate, Root, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, SupportedProtocolVersion, Tool,
 };
-use crate::transports::transport::McpTransport;
+use crate::transports::transport::{McpTransport, McpTransportSendOptions};
 
 const DEFAULT_REQUEST_TIMEOUT_MS: i64 = 30_000;
 const MAX_LIST_PAGES: i64 = 1_000;
@@ -89,6 +89,8 @@ struct PendingRequest {
     timer: Option<Timeout>,
     signal: Option<AbortSignal>,
     on_abort: Option<ListenerGuard>,
+    /// Aborted when the request settles, so the transport does not dispatch (or retry) it afterwards.
+    send_controller: AbortController,
     cancellable: bool,
     on_progress: Option<Arc<dyn Fn(ProgressNotification) + Send + Sync>>,
     progress_token: Option<JsonRpcId>,
@@ -286,18 +288,13 @@ fn validate_read_resource_result(value: &Value) -> Result<ReadResourceResult> {
 }
 
 /// `content` is required by the spec, but servers that only return `structuredContent` omit it (the SDK defaults it too).
+/// `structuredContent` may be any JSON value, as MCP 2026-07-28 allows.
 fn validate_call_tool_result(value: &Value) -> Result<CallToolResult> {
     let Some(obj) = value.as_object() else {
         return Err(Error::typed("McpError", invalid("Invalid MCP tools/call result")));
     };
     if obj.get("content").is_some_and(|v| !v.is_array()) {
         return Err(Error::typed("McpError", invalid("Invalid MCP tools/call result")));
-    }
-    if obj.get("structuredContent").is_some_and(|v| !v.is_object()) {
-        return Err(Error::typed(
-            "McpError",
-            invalid("Invalid MCP tools/call structured content"),
-        ));
     }
     serde_json::from_value::<CallToolResult>(value.clone())
         .map_err(|_| Error::typed("McpError", invalid("Invalid MCP tools/call result")))
@@ -799,7 +796,7 @@ impl McpClient {
             return Err(Error::typed(McpAbortError::NAME, McpAbortError::new(None)));
         }
 
-        let (id, timeout_ms, progress_token, rx) = {
+        let (id, timeout_ms, progress_token, send_signal, rx) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let raw_id = state.next_request_id;
             state.next_request_id += 1;
@@ -810,12 +807,15 @@ impl McpClient {
                 .or(self.inner.options.request_timeout_ms)
                 .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
             let (tx, rx) = tokio::sync::oneshot::channel();
+            let send_controller = AbortController::new();
+            let send_signal = send_controller.signal();
             let entry = PendingRequest {
                 outcome: Some(tx),
                 timeout_ms,
                 timer: None,
                 signal: options.signal.clone(),
                 on_abort: None,
+                send_controller,
                 cancellable: method != "initialize",
                 on_progress: options.on_progress.clone(),
                 progress_token: progress_token.clone(),
@@ -824,7 +824,7 @@ impl McpClient {
             if let Some(token) = &progress_token {
                 state.progress_requests.insert(token.clone(), id.clone());
             }
-            (id, timeout_ms, progress_token, rx)
+            (id, timeout_ms, progress_token, send_signal, rx)
         };
 
         let request_params = if let Some(token) = &progress_token {
@@ -909,7 +909,15 @@ impl McpClient {
         let this_for_send = self.clone();
         let id_for_send = id.clone();
         tokio::spawn(async move {
-            if let Err(err) = transport.send(JsonRpcMessage::Request(message)).await {
+            if let Err(err) = transport
+                .send_with_options(
+                    JsonRpcMessage::Request(message),
+                    McpTransportSendOptions {
+                        signal: Some(send_signal),
+                    },
+                )
+                .await
+            {
                 this_for_send.cancel_pending(id_for_send, err, false, None);
             }
         });
@@ -1231,14 +1239,18 @@ impl McpClient {
     }
 
     fn remove_pending(&self, id: &JsonRpcId) -> Option<PendingRequest> {
-        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut entry = state.pending.shift_remove(id)?;
+        let mut entry = {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = state.pending.shift_remove(id)?;
+            if let Some(token) = &entry.progress_token {
+                state.progress_requests.shift_remove(token);
+            }
+            entry
+        };
         if let Some(timer) = entry.timer.take() {
             timer.clear();
         }
-        if let Some(token) = &entry.progress_token {
-            state.progress_requests.shift_remove(token);
-        }
+        entry.send_controller.abort(None);
         Some(entry)
     }
 
@@ -1252,6 +1264,7 @@ impl McpClient {
             if let Some(timer) = entry.timer.take() {
                 timer.clear();
             }
+            entry.send_controller.abort(None);
             if let Some(outcome) = entry.outcome.take() {
                 let _ = outcome.send(Err(to_error(&error)));
             }
@@ -1285,6 +1298,7 @@ impl McpClient {
             if let Some(timer) = entry.timer.take() {
                 timer.clear();
             }
+            entry.send_controller.abort(None);
             if let Some(outcome) = entry.outcome.take() {
                 let _ = outcome.send(Err(to_error(&error)));
             }

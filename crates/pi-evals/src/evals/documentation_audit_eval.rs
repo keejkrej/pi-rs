@@ -90,6 +90,55 @@ fn collect_markdown_pages(root: &str, current_rel: &str, out: &mut Vec<String>) 
     Ok(())
 }
 
+fn verify_audit_run(run: &crate::report::HarnessRun, documentation_path: &str, source_root: &str) -> Result<()> {
+    let calls = tool_calls(run);
+    let read_paths: Vec<String> = calls
+        .iter()
+        .filter(|c| c.name() == "read" && c.is_ok())
+        .filter_map(|c| c.arguments()?.get("path")?.as_str())
+        .map(|p| pi_js::path::resolve(&[p]))
+        .collect();
+    if !read_paths.iter().any(|p| p == documentation_path) {
+        return Err(Error::msg(format!(
+            "Audit did not read documentation page: {documentation_path}"
+        )));
+    }
+    let sep = pi_js::path::sep();
+    let escaped_prefix = format!("..{sep}");
+    let read_source = read_paths.iter().any(|read_path| {
+        let rel = pi_js::path::relative(source_root, read_path);
+        !rel.is_empty() && !rel.starts_with(&escaped_prefix) && rel != ".." && !pi_js::path::is_absolute(&rel)
+    });
+    if !read_source {
+        return Err(Error::msg(format!(
+            "Audit did not read any implementation source under {source_root}"
+        )));
+    }
+
+    let audit_calls: Vec<_> = calls.into_iter().filter(|c| c.name() == TOOL_NAME).collect();
+    if audit_calls.len() != 1 {
+        return Err(Error::msg(format!(
+            "Expected 1 {TOOL_NAME} call, got {}",
+            audit_calls.len()
+        )));
+    }
+    let audit_call = &audit_calls[0];
+    if !audit_call.is_ok() {
+        return Err(Error::msg(format!("{TOOL_NAME} call did not succeed")));
+    }
+    let args = audit_call.arguments();
+    let verdict = args.and_then(|m| m.get("verdict")).and_then(Value::as_str);
+    let explanation = args.and_then(|m| m.get("explanation")).and_then(Value::as_str);
+    if verdict != Some("match") {
+        return Err(Error::msg(
+            explanation
+                .unwrap_or("Documentation audit verdict was not \"match\"")
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns the documentation-audit host suite checking every markdown doc page against implementation source.
 pub fn suite() -> Result<EvalSuite> {
     let repo_root = repository_root();
@@ -148,56 +197,7 @@ pub fn suite() -> Result<EvalSuite> {
                             None,
                             signal,
                             Some(move |run: &crate::report::HarnessRun| {
-                                let calls = tool_calls(run);
-                                let read_paths: Vec<String> = calls
-                                    .iter()
-                                    .filter(|c| c.name() == "read" && c.is_ok())
-                                    .filter_map(|c| c.arguments()?.get("path")?.as_str())
-                                    .map(|p| pi_js::path::resolve(&[p]))
-                                    .collect();
-                                if !read_paths.contains(&documentation_path) {
-                                    return Err(Error::msg(format!(
-                                        "Audit did not read documentation page: {documentation_path}"
-                                    )));
-                                }
-                                let sep = pi_js::path::sep();
-                                let escaped_prefix = format!("..{sep}");
-                                let read_source = read_paths.iter().any(|read_path| {
-                                    let rel = pi_js::path::relative(&source_root, read_path);
-                                    !rel.is_empty()
-                                        && !rel.starts_with(&escaped_prefix)
-                                        && rel != ".."
-                                        && !pi_js::path::is_absolute(&rel)
-                                });
-                                if !read_source {
-                                    return Err(Error::msg(format!(
-                                        "Audit did not read any implementation source under {source_root}"
-                                    )));
-                                }
-
-                                let audit_calls: Vec<_> =
-                                    calls.into_iter().filter(|c| c.name() == TOOL_NAME).collect();
-                                if audit_calls.len() != 1 {
-                                    return Err(Error::msg(format!(
-                                        "Expected 1 {TOOL_NAME} call, got {}",
-                                        audit_calls.len()
-                                    )));
-                                }
-                                let audit_call = &audit_calls[0];
-                                if !audit_call.is_ok() {
-                                    return Err(Error::msg(format!("{TOOL_NAME} call did not succeed")));
-                                }
-                                let args = audit_call.arguments();
-                                let verdict = args.and_then(|m| m.get("verdict")).and_then(Value::as_str);
-                                let explanation = args.and_then(|m| m.get("explanation")).and_then(Value::as_str);
-                                if verdict != Some("match") {
-                                    return Err(Error::msg(
-                                        explanation
-                                            .unwrap_or("Documentation audit verdict was not \"match\"")
-                                            .to_string(),
-                                    ));
-                                }
-                                Ok(())
+                                verify_audit_run(run, &documentation_path, &source_root)
                             }),
                         )
                         .await
@@ -212,4 +212,108 @@ pub fn suite() -> Result<EvalSuite> {
         kind: EvalSuiteKind::Audit,
         cases,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::{HarnessRun, NormalizedSession, TranscriptEvent};
+    use indexmap::IndexMap;
+
+    fn read_events(id: &str, path: &str) -> Vec<TranscriptEvent> {
+        let mut args = IndexMap::new();
+        args.insert("path".to_string(), Value::String(path.to_string()));
+        vec![
+            TranscriptEvent::ToolCall {
+                id: id.to_string(),
+                name: "read".to_string(),
+                arguments: Some(args),
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                metadata: None,
+            },
+            TranscriptEvent::ToolResult {
+                tool_call_id: id.to_string(),
+                name: Some("read".to_string()),
+                content: Some(Value::String("ok".to_string())),
+                error: None,
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                metadata: None,
+            },
+        ]
+    }
+
+    fn audit_events(verdict: &str, explanation: &str) -> Vec<TranscriptEvent> {
+        let mut args = IndexMap::new();
+        args.insert("verdict".to_string(), Value::String(verdict.to_string()));
+        args.insert("explanation".to_string(), Value::String(explanation.to_string()));
+        vec![
+            TranscriptEvent::ToolCall {
+                id: "audit-1".to_string(),
+                name: TOOL_NAME.to_string(),
+                arguments: Some(args),
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                metadata: None,
+            },
+            TranscriptEvent::ToolResult {
+                tool_call_id: "audit-1".to_string(),
+                name: Some(TOOL_NAME.to_string()),
+                content: Some(Value::String("Documentation audit submitted.".to_string())),
+                error: None,
+                started_at: None,
+                finished_at: None,
+                duration_ms: None,
+                metadata: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn verify_audit_run_requires_doc_page_source_read_and_match_verdict() {
+        let doc_path = pi_js::path::resolve(&["/repo/crates/pi-coding-agent/package/docs/prompt-templates.md"]);
+        let src_root = pi_js::path::resolve(&["/repo/crates/pi-coding-agent/src"]);
+        let src_file = pi_js::path::resolve(&["/repo/crates/pi-coding-agent/src/core/prompt_templates.rs"]);
+
+        let mut events = read_events("r1", &doc_path);
+        events.extend(audit_events("match", "All claims match."));
+        let missing_src = HarnessRun {
+            session: NormalizedSession {
+                events: events.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = verify_audit_run(&missing_src, &doc_path, &src_root).unwrap_err();
+        assert!(err.to_string().contains("implementation source"), "{err}");
+
+        let mut valid_events = read_events("r1", &doc_path);
+        valid_events.extend(read_events("r2", &src_file));
+        valid_events.extend(audit_events("match", "Verified against prompt_templates.rs."));
+        let valid_run = HarnessRun {
+            session: NormalizedSession {
+                events: valid_events,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        verify_audit_run(&valid_run, &doc_path, &src_root).unwrap();
+
+        let mut mismatch_events = read_events("r1", &doc_path);
+        mismatch_events.extend(read_events("r2", &src_file));
+        mismatch_events.extend(audit_events("mismatch", "Mismatch in prompt_templates.rs."));
+        let mismatch_run = HarnessRun {
+            session: NormalizedSession {
+                events: mismatch_events,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = verify_audit_run(&mismatch_run, &doc_path, &src_root).unwrap_err();
+        assert_eq!(err.to_string(), "Mismatch in prompt_templates.rs.");
+    }
 }

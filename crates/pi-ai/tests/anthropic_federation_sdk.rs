@@ -143,6 +143,7 @@ fn anthropic_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

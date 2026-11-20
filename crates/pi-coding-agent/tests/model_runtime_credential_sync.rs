@@ -44,6 +44,7 @@ fn test_model(provider: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

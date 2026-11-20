@@ -43,7 +43,7 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
     let sonnet55 = get_model("anthropic", "claude-sonnet-5-5").unwrap();
     assert_eq!(sonnet55.cost.input, 2.0);
     assert_eq!(sonnet55.cost.output, 10.0);
-    assert_eq!(sonnet55.cost.cache_read, 0.2);
+    assert_eq!(sonnet55.cost.cache_read, 0.1);
     assert_eq!(sonnet55.cost.cache_write, 2.5);
     let cs55 = sonnet55.compat.as_ref().unwrap().as_anthropic_messages().unwrap();
     assert_eq!(cs55.supports_temperature, Some(false));
@@ -73,7 +73,6 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
     assert!(!get_supported_thinking_levels(&sonnet45).contains(&ModelThinkingLevel::Max));
 
     for model_id in [
-        "gpt-5.5",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -81,9 +80,13 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
         "gpt-6-sol",
         "gpt-6-luna",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
     ] {
         let m = get_model("openai-codex", model_id).unwrap();
-        assert!(get_supported_thinking_levels(&m).contains(&ModelThinkingLevel::XHigh));
+        assert!(
+            get_supported_thinking_levels(&m).contains(&ModelThinkingLevel::XHigh),
+            "{model_id}"
+        );
     }
 
     for model_id in [
@@ -92,6 +95,7 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
         "gpt-5.6-luna",
         "gpt-6-sol",
         "gpt-6-luna",
+        "gpt-6.1-terra",
     ] {
         let m = get_model("openai", model_id).unwrap();
         assert_eq!(
@@ -119,7 +123,7 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
             ],
         ),
         (
-            "azure-openai-responses",
+            "azure",
             vec![
                 ModelThinkingLevel::Low,
                 ModelThinkingLevel::Medium,
@@ -151,10 +155,25 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
         );
     }
 
-    for (model_id, input_c, output_c, cr, cw) in [
-        ("gpt-6-sol", 2.0, 10.0, 0.2, 2.5),
-        ("gpt-6-luna", 0.1, 0.5, 0.01, 0.125),
-        ("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5),
+    for prov in ["openai", "azure", "openai-codex"] {
+        let terra = get_model(prov, "gpt-6.1-terra").unwrap();
+        let tmap = terra.thinking_level_map.as_ref().unwrap();
+        assert_eq!(tmap.get(&ModelThinkingLevel::Off), Some(&Some("none".to_owned())));
+        assert_eq!(
+            tmap.get(&ModelThinkingLevel::Minimal),
+            Some(&if prov == "openai-codex" {
+                Some("low".to_owned())
+            } else {
+                None
+            })
+        );
+    }
+
+    for (model_id, input_c, output_c, cr, cw, codex_ctx) in [
+        ("gpt-6-sol", 2.0, 10.0, 0.2, 2.5, 272_000),
+        ("gpt-6-luna", 0.1, 0.5, 0.01, 0.125, 272_000),
+        ("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5, 500_000),
+        ("gpt-6.1-terra", 1.0, 5.0, 0.05, 1.25, 500_000),
     ] {
         for provider in ["openai", "openai-codex"] {
             let m = get_model(provider, model_id).unwrap();
@@ -167,7 +186,10 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
             assert_eq!(tier.input_tokens_above, 272000);
             assert_eq!(tier.input, input_c * 2.0);
             assert_eq!(tier.output, output_c * 1.5);
-            assert_eq!(m.context_window, 272000);
+            assert_eq!(
+                m.context_window,
+                if provider == "openai-codex" { codex_ctx } else { 272000 }
+            );
             assert_eq!(m.max_tokens, 128000);
             let rc = m.compat.as_ref().unwrap().as_openai_responses().unwrap();
             assert_eq!(rc.supports_additional_tools, Some(true));
@@ -175,6 +197,10 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
             assert_eq!(rc.supports_open_ai_grammar_tools, Some(true));
             assert_eq!(rc.supports_tool_search, Some(true));
         }
+    }
+
+    for model_id in ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"] {
+        assert_eq!(get_model("azure", model_id).unwrap().context_window, 1_050_000);
     }
 
     assert_eq!(
@@ -195,15 +221,6 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
     );
     assert_eq!(
         get_supported_thinking_levels(&get_model("deepseek", "deepseek-flash").unwrap()),
-        vec![
-            ModelThinkingLevel::Off,
-            ModelThinkingLevel::Low,
-            ModelThinkingLevel::High,
-            ModelThinkingLevel::Max
-        ]
-    );
-    assert_eq!(
-        get_supported_thinking_levels(&get_model("opencode-go", "deepseek-v4-flash").unwrap()),
         vec![
             ModelThinkingLevel::Off,
             ModelThinkingLevel::Low,
@@ -254,6 +271,10 @@ fn supported_thinking_levels_across_anthropic_openai_codex_and_catalog_providers
             ModelThinkingLevel::High,
             ModelThinkingLevel::Max
         ]
+    );
+    assert!(
+        !get_supported_thinking_levels(&get_model("kimi-coding", "kimi-for-coding-highspeed").unwrap())
+            .contains(&ModelThinkingLevel::Off)
     );
     assert_eq!(
         get_supported_thinking_levels(&get_model("opencode", "grok-build-0.1").unwrap()),

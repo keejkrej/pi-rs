@@ -43,7 +43,11 @@ async fn lists_jev_separately_and_classifies_with_runtime_resolved_auth() {
             },
         },
     );
-    let context = ClassifierContext { state, questions };
+    let context = ClassifierContext {
+        state,
+        questions,
+        images: None,
+    };
 
     let unconfigured = runtime.classify(&jev, &context, None).await;
     assert_eq!(unconfigured.stop_reason, ClassifierStopReason::Error);

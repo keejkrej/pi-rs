@@ -132,6 +132,8 @@ async fn uses_gateway_endpoints_directly_for_device_login() {
             verification_uri: "https://radius-ui.example/pair".to_owned(),
             interval_seconds: Some(5.0),
             expires_in_seconds: Some(600.0),
+            copy_code_on_confirm: None,
+            open_browser_on_confirm: None,
         }]
     );
     assert_eq!(
@@ -187,6 +189,74 @@ async fn refreshes_directly_through_the_gateway_without_discovery() {
     assert_eq!(cred.access, "new-access");
     assert_eq!(cred.refresh, "new-refresh");
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rejects_an_authorization_endpoint_that_is_not_an_http_s_url() {
+    let _guard = mock_fetch(|_req| {
+        Box::pin(async move {
+            Ok(json_response(
+                &json!({ "authorizationEndpoint": "file:///tmp/payload.app" }),
+                200,
+            ))
+        })
+    });
+    let events = Arc::new(Mutex::new(Vec::<AuthEvent>::new()));
+    let ev_c = Arc::clone(&events);
+    let oauth = create_radius_oauth(RadiusOAuthOptions {
+        name: "Radius".to_owned(),
+        gateway: GATEWAY.to_owned(),
+    });
+    let interaction = Arc::new(TestRadiusInteraction {
+        login_method: "browser".to_owned(),
+        signal: AbortSignal::never(),
+        on_notify: Arc::new(move |ev| ev_c.lock().unwrap().push(ev)),
+    });
+
+    let err = oauth
+        .login(ProviderAuthInteraction::new(interaction, AbortSignal::never()), None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains(&format!("Invalid Radius OAuth config from {GATEWAY}"))
+    );
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rejects_a_device_verification_uri_that_is_not_an_http_s_url() {
+    let _guard = mock_fetch(|_req| {
+        Box::pin(async move {
+            Ok(json_response(
+                &json!({
+                    "device_code": "device-code",
+                    "user_code": "ABCD-1234",
+                    "verification_uri": "file:///tmp/payload.app",
+                    "expires_in": 600,
+                }),
+                200,
+            ))
+        })
+    });
+    let events = Arc::new(Mutex::new(Vec::<AuthEvent>::new()));
+    let ev_c = Arc::clone(&events);
+    let oauth = create_radius_oauth(RadiusOAuthOptions {
+        name: "Radius".to_owned(),
+        gateway: GATEWAY.to_owned(),
+    });
+    let interaction = Arc::new(TestRadiusInteraction {
+        login_method: "device-code".to_owned(),
+        signal: AbortSignal::never(),
+        on_notify: Arc::new(move |ev| ev_c.lock().unwrap().push(ev)),
+    });
+
+    let err = oauth
+        .login(ProviderAuthInteraction::new(interaction, AbortSignal::never()), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Untrusted verification_uri"));
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

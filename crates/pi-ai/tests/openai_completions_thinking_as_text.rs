@@ -61,6 +61,7 @@ fn build_model(base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: Some(ModelCompat::OpenAICompletions(thinking_as_text_model_compat())),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn build_assistant(content: Vec<AssistantContentBlock>) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     }
 }
 

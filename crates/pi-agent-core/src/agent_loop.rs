@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::StreamExt;
 use futures::future::join_all;
 use pi_ai::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, EventStream, FauxAssistantMessageContent,
-    JsonObject, Message, SimpleStreamOptions, StopReason, StreamOptions, SystemMessage, SystemMessageContent, Tool,
-    ToolCall, ToolResultMessage, ToolStateChanges, faux_assistant_message, faux_text, get_current_tools,
-    get_tool_state_changes, normalize_context, to_tool_declaration, validate_tool_arguments,
+    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, ClientIdentity, Context, EventStream,
+    FauxAssistantMessageContent, JsonObject, Message, SimpleStreamOptions, StopReason, StreamOptions, SystemMessage,
+    SystemMessageContent, Tool, ToolCall, ToolResultMessage, ToolStateChanges, faux_assistant_message, faux_text,
+    get_current_tools, get_tool_state_changes, merge_two_client_identities, normalize_context, pi_attribution,
+    to_tool_declaration, validate_tool_arguments,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::time::now_ms;
@@ -23,6 +24,16 @@ use crate::types::{
     BeforeToolCallFn, FinishTurnAction, FinishTurnContext, PrepareNextTurnContext, PrepareRequestContext, StreamFn,
     ThinkingLevel, ToolExecutionMode,
 };
+
+/// Request identity of agent loops: `pi-ai`'s defaults with provider attribution to pi.
+///
+/// [`AgentLoopConfig::identity`] overrides this field by field.
+pub fn default_agent_identity() -> ClientIdentity {
+    ClientIdentity {
+        attribution: Some(Some(pi_attribution())),
+        ..Default::default()
+    }
+}
 
 /// Event stream emitted by [`agent_loop`] and [`agent_loop_continue`].
 pub type AgentEventStream = EventStream<AgentEvent, Vec<AgentMessage>>;
@@ -587,24 +598,36 @@ async fn stream_assistant_response(
         config.api_key.clone()
     };
 
+    let identity = merge_two_client_identities(Some(&default_agent_identity()), config.identity.as_ref());
     let stream_options = SimpleStreamOptions {
         base: StreamOptions {
             temperature: config.temperature,
+            sampling_params: config.sampling_params.clone(),
             max_tokens: config.max_tokens,
             api_key,
             cache_retention: config.cache_retention,
             session_id: config.session_id.clone(),
+            disable_continuation: config.disable_continuation,
             transport: config.transport,
+            timeout_ms: config.timeout_ms,
+            websocket_connect_timeout_ms: config.websocket_connect_timeout_ms,
+            max_retries: config.max_retries,
             max_retry_delay_ms: config.max_retry_delay_ms,
+            telemetry: config.telemetry.clone(),
+            telemetry_context: config.telemetry_context.clone(),
+            fetch: config.fetch.clone(),
+            env: config.env.clone(),
+            identity,
             metadata: config.metadata.clone(),
             headers: config.headers.clone(),
             on_payload: config.on_payload.clone(),
+            on_response: config.on_response.clone(),
+            on_provider_stream_event: config.on_provider_stream_event.clone(),
             signal: signal.cloned(),
-            ..Default::default()
         },
-        tool_choice: None,
+        tool_choice: config.tool_choice,
         reasoning: request_thinking_level.to_ai_thinking_level(),
-        deferred: None,
+        deferred: config.deferred.clone(),
         thinking_budgets: config.thinking_budgets.clone(),
     };
 
@@ -906,6 +929,7 @@ async fn execute_tool_calls_sequential(
             tool_name: tc.name.clone(),
             result: outcome.result,
             is_error: outcome.is_error,
+            duration_ms: outcome.duration_ms,
         })
         .await;
         emit(AgentEvent::MessageStart {
@@ -1006,6 +1030,7 @@ async fn execute_tool_calls_parallel(
                     tool_name: outcome.tool_call.name,
                     result: outcome.result,
                     is_error: outcome.is_error,
+                    duration_ms: outcome.duration_ms,
                 })
                 .await;
                 (idx, tr, term)
@@ -1143,7 +1168,14 @@ async fn execute_prepared_tool_call(
         }) as AgentToolUpdateCallback
     });
 
+    let started_at = tokio::time::Instant::now();
     let exec_result = (tool.execute)(tc.id.clone(), args, signal.cloned(), gated_update).await;
+    let duration_ms = Some(
+        (started_at.elapsed().as_secs_f64() * 1000.0)
+            .round()
+            .max(0.0)
+            .min(i64::MAX as f64) as i64,
+    );
     accepting_updates.store(false, Ordering::SeqCst);
 
     match exec_result {
@@ -1153,12 +1185,14 @@ async fn execute_prepared_tool_call(
                 tool_call: AgentToolCall::from(tc),
                 result,
                 is_error,
+                duration_ms,
             }
         }
         Err(err) => AgentToolCallOutcome {
             tool_call: AgentToolCall::from(tc),
             result: AgentToolResult::text(err.message()),
             is_error: true,
+            duration_ms,
         },
     }
 }
@@ -1248,6 +1282,7 @@ async fn fail_tool_calls_from_truncated_message(
             tool_name: tc.name.clone(),
             result: outcome.result,
             is_error: true,
+            duration_ms: outcome.duration_ms,
         })
         .await;
         emit(AgentEvent::MessageStart {
@@ -1310,6 +1345,7 @@ fn error_outcome(tc: &ToolCall, message: impl Into<String>) -> AgentToolCallOutc
         tool_call: AgentToolCall::from(tc),
         result: AgentToolResult::text(message),
         is_error: true,
+        duration_ms: None,
     }
 }
 
@@ -1321,6 +1357,7 @@ fn make_tool_result_message(outcome: &AgentToolCallOutcome) -> ToolResultMessage
         details: outcome.result.details.clone(),
         nested_calls: None,
         is_error: outcome.is_error,
+        duration_ms: outcome.duration_ms,
         usage: outcome.result.usage.clone(),
         timestamp: now_ms(),
     }

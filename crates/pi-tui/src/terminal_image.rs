@@ -113,6 +113,7 @@ pub struct KittyImagePlacement {
     pub transmission_generation: i64,
     pub transmission_bytes: i64,
     pub estimated_decoded_bytes: i64,
+    pub rows: i64,
     pub sequence: String,
     pub replacement_line: String,
 }
@@ -193,6 +194,9 @@ static KITTY_PLACEMENT_CONTROL_KEYS: LazyLock<IndexSet<&'static str>> = LazyLock
 static KITTY_IMAGE_METADATA: LazyLock<Mutex<IndexMap<i64, RegisteredKittyImageMetadata>>> =
     LazyLock::new(|| Mutex::new(IndexMap::new()));
 static KITTY_TRANSMISSION_GENERATION: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
+// Tallest registered image. Bounds backward searches for image lines above a
+// viewport: no image line further up than this can reach into it.
+static MAX_KITTY_IMAGE_ROWS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 pub fn get_cell_dimensions() -> CellDimensions {
     *CELL_DIMENSIONS.lock().unwrap()
@@ -209,6 +213,8 @@ static KITTY_MORE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|,)m=1(?:,|$)").expect("KITTY_MORE_RE compiles"));
 static KITTY_CROP_KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[yhr]=").expect("KITTY_CROP_KEY_RE compiles"));
+static KITTY_ROWS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|,)r=(\d+)(?:,|$)").expect("KITTY_ROWS_RE compiles"));
 
 fn env_non_empty(key: &str) -> bool {
     pi_js::env::var(key).is_some_and(|v| !v.is_empty())
@@ -287,6 +293,35 @@ fn detect_capabilities_from_environment(tmux_forwards_hyperlink: &dyn Fn() -> bo
         };
     }
 
+    // Herdr forwards OSC 8 hyperlinks and supports the Kitty graphics protocol. Check it before
+    // outer-terminal detection because variables like KITTY_WINDOW_ID can leak into its panes.
+    if term_program == "herdr" {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: has_true_color_hint,
+            hyperlinks: true,
+        };
+    }
+
+    if term_program == "rex" {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    // Orca supports Kitty graphics but only advertises it through ORCA_IMAGE_PROTOCOL. Require
+    // both signals so Orca releases predating that advertisement keep the text fallback instead
+    // of reserving image rows that nothing renders.
+    if term_program == "orca" && pi_js::env::var("ORCA_IMAGE_PROTOCOL").as_deref() == Some("kitty") {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
     if env_non_empty("KITTY_WINDOW_ID") || term_program == "kitty" {
         return TerminalCapabilities {
             images: Some(ImageProtocol::Kitty),
@@ -337,7 +372,11 @@ fn detect_capabilities_from_environment(tmux_forwards_hyperlink: &dyn Fn() -> bo
         };
     }
 
-    if term_program == "alacritty" || term_program == "vscode" || term_program == "zed" {
+    // Alacritty does not set TERM_PROGRAM. It sets TERM=alacritty when its terminfo entry is
+    // installed (otherwise xterm-256color) and ALACRITTY_WINDOW_ID on Unix and macOS.
+    let is_alacritty =
+        term_program == "alacritty" || term.starts_with("alacritty") || env_non_empty("ALACRITTY_WINDOW_ID");
+    if is_alacritty || term_program == "vscode" || term_program == "zed" {
         return TerminalCapabilities {
             images: None,
             true_color: true,
@@ -578,6 +617,8 @@ pub fn register_kitty_image_metadata(metadata: KittyImageMetadata) {
     let transmission_generation = *generation;
     drop(generation);
 
+    MAX_KITTY_IMAGE_ROWS.fetch_max(metadata.rows, std::sync::atomic::Ordering::Relaxed);
+
     let mut map = KITTY_IMAGE_METADATA.lock().unwrap();
     map.shift_remove(&metadata.image_id);
     map.insert(
@@ -596,14 +637,33 @@ pub fn register_kitty_image_metadata(metadata: KittyImageMetadata) {
     }
 }
 
-fn get_registered_kitty_image_metadata(line: &str) -> Option<RegisteredKittyImageMetadata> {
-    let controls = KITTY_APC_RE.captures(line)?.get(1)?.as_str();
+/// Return the row height of the tallest Kitty image registered so far.
+pub fn get_max_kitty_image_rows() -> i64 {
+    MAX_KITTY_IMAGE_ROWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn get_registered_kitty_image_metadata_from_controls(controls: &str) -> Option<RegisteredKittyImageMetadata> {
     if controls.is_empty() {
         return None;
     }
     let image_id_str = KITTY_ID_RE.captures(controls)?.get(1)?.as_str();
     let image_id = pi_js::num::parse_int(image_id_str, Some(10)) as i64;
     KITTY_IMAGE_METADATA.lock().unwrap().get(&image_id).copied()
+}
+
+fn get_registered_kitty_image_metadata(line: &str) -> Option<RegisteredKittyImageMetadata> {
+    let controls = KITTY_APC_RE.captures(line)?.get(1)?.as_str();
+    get_registered_kitty_image_metadata_from_controls(controls)
+}
+
+fn get_explicit_kitty_image_rows(controls: &str) -> Option<i64> {
+    let value = KITTY_ROWS_RE.captures(controls)?.get(1)?.as_str();
+    let rows = pi_js::num::parse_int(value, Some(10)) as i64;
+    (rows > 0).then_some(rows)
+}
+
+fn get_kitty_image_rows_from_controls(controls: &str, fallback_rows: i64) -> i64 {
+    get_explicit_kitty_image_rows(controls).unwrap_or(fallback_rows)
 }
 
 pub fn get_kitty_image_metadata(line: &str) -> Option<KittyImageMetadata> {
@@ -617,13 +677,22 @@ pub fn get_kitty_image_metadata(line: &str) -> Option<KittyImageMetadata> {
     })
 }
 
+/// Read the number of rows covered by an image placement without scanning its payload.
+pub fn get_kitty_image_placement_rows(line: &str) -> Option<i64> {
+    let controls = KITTY_APC_RE.captures(line)?.get(1)?.as_str();
+    if let Some(explicit_rows) = get_explicit_kitty_image_rows(controls) {
+        return Some(explicit_rows);
+    }
+    get_registered_kitty_image_metadata_from_controls(controls).map(|m| m.rows)
+}
+
 /// Build a placement-only command for an image line emitted by [`render_image`].
 pub fn get_kitty_image_placement(line: &str) -> Option<KittyImagePlacement> {
     let caps = KITTY_APC_RE.captures(line)?;
     let full_match = caps.get(0)?;
     let match_index = full_match.start();
     let match_controls = caps.get(1)?.as_str();
-    let metadata = get_registered_kitty_image_metadata(line)?;
+    let metadata = get_registered_kitty_image_metadata_from_controls(match_controls)?;
 
     let mut command_start = match_index;
     let mut command_controls = match_controls;
@@ -659,6 +728,7 @@ pub fn get_kitty_image_placement(line: &str) -> Option<KittyImagePlacement> {
         transmission_generation: metadata.transmission_generation,
         transmission_bytes: (transmission_end - match_index) as i64,
         estimated_decoded_bytes: metadata.width_px * metadata.height_px * 4,
+        rows: get_kitty_image_rows_from_controls(match_controls, metadata.rows),
         sequence: sequence.clone(),
         replacement_line: format!("{}{}{}", &line[..match_index], sequence, &line[transmission_end..]),
     })

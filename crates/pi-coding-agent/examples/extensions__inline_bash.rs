@@ -62,6 +62,7 @@ impl Extension for InlineBashExtension {
                                 signal: None,
                                 timeout: Some(TIMEOUT_MS),
                                 cwd: None,
+                                max_buffer: None,
                             }),
                         )
                         .await

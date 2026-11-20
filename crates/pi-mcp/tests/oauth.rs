@@ -5,16 +5,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use indexmap::IndexMap;
+use pi_js::abort::AbortController;
 use pi_js::fetch::{Headers, Request, Response};
 use pi_js::{BoxFuture, Error};
 use pi_mcp::auth_provider::McpFetchInit;
+use pi_mcp::oauth::discovery::DiscoverAuthorizationServerMetadataOptions;
+use pi_mcp::oauth::flow::{RegisterClientOptions, StartAuthorizationOptions, authorize_mcp_with_options};
 use pi_mcp::oauth::provider::McpOAuthProviderClientMetadata;
 use pi_mcp::oauth::{
     AuthorizationServerMetadata, McpOAuthAuthorizationRequiredError, McpOAuthProvider, McpOAuthProviderOptions,
     McpOAuthStateStore, MemoryOAuthStateStore, OAuthCallbackPage, OAuthCallbackServer, OAuthCallbackServerOptions,
-    OAuthClientInformationMixed, OAuthClientMetadata, OAuthClientProvider, OAuthDiscoveryState, OAuthFlowOptions,
-    OAuthFlowResult, OAuthInsecureEndpointError, OAuthIssuerMismatchError, OAuthTokens, adapt_oauth_provider,
-    authorize_mcp, discover_authorization_server_metadata,
+    OAuthClientInformationMixed, OAuthClientMetadata, OAuthClientProvider, OAuthDiscoveryState, OAuthFlowExtraOptions,
+    OAuthFlowOptions, OAuthFlowResult, OAuthInsecureEndpointError, OAuthIssuerMismatchError, OAuthTokens,
+    adapt_oauth_provider, authorize_mcp, discover_authorization_server_metadata, register_client, start_authorization,
 };
 use pi_mcp::{
     McpClient, McpClientOptions, McpFetch, StreamableHttpTransport, StreamableHttpTransportOptions, Tool,
@@ -813,6 +816,9 @@ async fn exchanges_a_code_only_when_its_iss_parameter_names_the_authorization_se
         .listen(move |req, _| {
             let codes = codes_cb.clone();
             Box::pin(async move {
+                if req.method != "POST" {
+                    return support::helpers::TestResponse::empty(404);
+                }
                 let form = parse_form(&req.body_text());
                 codes
                     .lock()
@@ -823,7 +829,7 @@ async fn exchanges_a_code_only_when_its_iss_parameter_names_the_authorization_se
         })
         .await;
 
-    let exchange = |code: &str, iss: Option<&str>, iss_parameter_supported: bool| {
+    let exchange = |code: &str, iss: Option<&str>, iss_parameter_supported: bool, with_metadata: bool| {
         let origin = origin.clone();
         let code = code.to_string();
         let iss = iss.map(str::to_string);
@@ -831,17 +837,22 @@ async fn exchanges_a_code_only_when_its_iss_parameter_names_the_authorization_se
             let provider = TestOAuthProvider::new("http://127.0.0.1/callback");
             provider.set_client(Some(from_value(json!({ "client_id": "client" })).unwrap()));
             provider.set_verifier(Some("verifier".to_string()));
-            let metadata: AuthorizationServerMetadata = from_value(json!({
-                "issuer": origin,
-                "authorization_endpoint": format!("{origin}/authorize"),
-                "token_endpoint": format!("{origin}/token"),
-                "response_types_supported": ["code"],
-                "authorization_response_iss_parameter_supported": iss_parameter_supported
-            }))
-            .unwrap();
+            let metadata = if with_metadata {
+                let parsed: AuthorizationServerMetadata = from_value(json!({
+                    "issuer": origin,
+                    "authorization_endpoint": format!("{origin}/authorize"),
+                    "token_endpoint": format!("{origin}/token"),
+                    "response_types_supported": ["code"],
+                    "authorization_response_iss_parameter_supported": iss_parameter_supported
+                }))
+                .unwrap();
+                Some(parsed)
+            } else {
+                None
+            };
             provider.set_discovery(Some(OAuthDiscoveryState {
                 authorization_server_url: origin.clone(),
-                authorization_server_metadata: Some(metadata),
+                authorization_server_metadata: metadata,
                 resource_metadata: None,
                 resource_metadata_url: None,
             }));
@@ -853,31 +864,45 @@ async fn exchanges_a_code_only_when_its_iss_parameter_names_the_authorization_se
     };
 
     assert!(
-        exchange("other", Some("https://attacker.example"), false)
+        exchange("other", Some("https://attacker.example"), false, true)
             .await
             .unwrap_err()
             .downcast_ref::<OAuthIssuerMismatchError>()
             .is_some()
     );
     assert!(
-        exchange("missing", None, true)
+        exchange("missing", None, true, true)
             .await
             .unwrap_err()
             .downcast_ref::<OAuthIssuerMismatchError>()
             .is_some()
     );
     assert_eq!(
-        exchange("matching", Some(&origin), true).await.unwrap(),
+        exchange("matching", Some(&origin), true, true).await.unwrap(),
         OAuthFlowResult::Authorized
     );
     // Servers that do not promise the parameter may omit it.
     assert_eq!(
-        exchange("omitted", None, false).await.unwrap(),
+        exchange("omitted", None, false, true).await.unwrap(),
+        OAuthFlowResult::Authorized
+    );
+    // Without metadata there is no issuer to compare with, so a server cannot skip the check by hiding it.
+    let err_unverifiable = exchange("unverifiable", Some("https://attacker.example"), false, false)
+        .await
+        .unwrap_err();
+    let mismatch = err_unverifiable
+        .downcast_ref::<OAuthIssuerMismatchError>()
+        .expect("OAuthIssuerMismatchError");
+    assert_eq!(mismatch.expected, None);
+    assert_eq!(mismatch.received.as_deref(), Some("https://attacker.example"));
+
+    assert_eq!(
+        exchange("no-metadata", None, false, false).await.unwrap(),
         OAuthFlowResult::Authorized
     );
     assert_eq!(
         *codes.lock().unwrap(),
-        vec!["matching".to_string(), "omitted".to_string()]
+        vec!["matching".to_string(), "omitted".to_string(), "no-metadata".to_string(),]
     );
     servers.close().await;
 }
@@ -975,4 +1000,301 @@ async fn rejects_invalid_and_non_hierarchical_discovery_urls_with_type_error() {
         .await
         .unwrap_err();
     assert_eq!(info_err.name(), "TypeError");
+}
+
+// #10493
+#[tokio::test]
+async fn registers_with_application_type_derived_from_redirect_uris_unless_set() {
+    let mut servers = TestServers::new();
+    let bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let bodies_cb = bodies.clone();
+    let origin = servers
+        .listen(move |req, _| {
+            let bodies = bodies_cb.clone();
+            Box::pin(async move {
+                let mut metadata = req.body_json().unwrap_or(serde_json::Value::Null);
+                bodies.lock().unwrap().push(metadata.clone());
+                if let serde_json::Value::Object(ref mut map) = metadata {
+                    map.insert("client_id".to_string(), json!("client"));
+                }
+                support::helpers::TestResponse::json(201, &metadata)
+            })
+        })
+        .await;
+
+    let register = |redirect_uris: Vec<&str>, application_type: Option<&str>| {
+        let origin = origin.clone();
+        let redirect_uris: Vec<String> = redirect_uris.into_iter().map(str::to_string).collect();
+        let application_type = application_type.map(str::to_string);
+        async move {
+            register_client(
+                &origin,
+                RegisterClientOptions {
+                    metadata: None,
+                    client_metadata: OAuthClientMetadata {
+                        redirect_uris,
+                        application_type,
+                        ..Default::default()
+                    },
+                    scope: None,
+                    fetch: None,
+                    signal: None,
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    register(vec!["http://127.0.0.1:1234/callback"], None).await;
+    register(vec!["http://[::1]/callback"], None).await;
+    register(vec!["com.example.app:/callback"], None).await;
+    register(vec!["https://app.example/callback"], None).await;
+    register(vec!["http://localhost/callback"], Some("web")).await;
+
+    let types: Vec<Option<String>> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b.get("application_type").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            Some("native".to_string()),
+            Some("native".to_string()),
+            Some("native".to_string()),
+            Some("web".to_string()),
+            Some("web".to_string()),
+        ]
+    );
+    servers.close().await;
+}
+
+#[tokio::test]
+async fn rejects_non_http_authorization_endpoints() {
+    let endpoints = [
+        "file://attacker.example/share/x.exe",
+        "search-ms:query=x",
+        "ms-msdt:/id",
+    ];
+    let current_endpoint = Arc::new(Mutex::new(String::new()));
+    let endpoint_cb = current_endpoint.clone();
+    let mut servers = TestServers::new();
+    let origin = servers
+        .listen(move |_req, server_origin| {
+            let val = endpoint_cb.lock().unwrap().clone();
+            Box::pin(async move {
+                support::helpers::TestResponse::json(
+                    200,
+                    &json!({
+                        "issuer": server_origin,
+                        "authorization_endpoint": val,
+                        "token_endpoint": format!("{server_origin}/token"),
+                        "response_types_supported": ["code"],
+                    }),
+                )
+            })
+        })
+        .await;
+
+    for value in endpoints {
+        *current_endpoint.lock().unwrap() = value.to_string();
+        let disc_err = discover_authorization_server_metadata(
+            &origin,
+            Some(DiscoverAuthorizationServerMetadataOptions::default()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            disc_err.to_string().contains("Invalid authorization endpoint"),
+            "unexpected discovery error: {disc_err}"
+        );
+
+        let metadata: AuthorizationServerMetadata = serde_json::from_value(json!({
+            "issuer": origin,
+            "authorization_endpoint": value,
+            "token_endpoint": format!("{origin}/token"),
+            "response_types_supported": ["code"],
+        }))
+        .unwrap();
+        let start_err = start_authorization(
+            &origin,
+            StartAuthorizationOptions {
+                metadata: Some(metadata),
+                client_information: from_value(json!({ "client_id": "client" })).unwrap(),
+                redirect_url: "http://127.0.0.1/callback".to_string(),
+                scope: None,
+                state: None,
+                resource: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            start_err.to_string().contains("Invalid authorization endpoint"),
+            "unexpected start error: {start_err}"
+        );
+    }
+    servers.close().await;
+}
+
+// #10565
+#[tokio::test]
+async fn stops_when_its_signal_aborts_without_falling_back_to_a_redirect() {
+    let stalled = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stalled_cb = stalled.clone();
+    let stalled_notify = Arc::new(tokio::sync::Notify::new());
+    let notify_cb = stalled_notify.clone();
+    let mut servers = TestServers::new();
+    let origin = servers
+        .listen(move |req, server_origin| {
+            let path = Url::parse(&format!("{server_origin}{}", req.uri))
+                .unwrap()
+                .path()
+                .to_string();
+            stalled_cb.lock().unwrap().push(path);
+            notify_cb.notify_waiters();
+            Box::pin(async {
+                std::future::pending::<()>().await;
+                unreachable!();
+            })
+        })
+        .await;
+
+    let run = |provider: Arc<TestOAuthProvider>| {
+        let origin = origin.clone();
+        let stalled = stalled.clone();
+        let notify = stalled_notify.clone();
+        async move {
+            let ctrl = AbortController::new();
+            let sig = ctrl.signal();
+            let before = stalled.lock().unwrap().len();
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            let prov = provider.clone();
+            let handle = tokio::spawn(async move {
+                authorize_mcp_with_options(
+                    prov.as_ref(),
+                    default_flow_options(format!("{origin}/mcp")),
+                    OAuthFlowExtraOptions {
+                        signal: Some(sig),
+                        ..Default::default()
+                    },
+                )
+                .await
+            });
+            loop {
+                if stalled.lock().unwrap().len() >= before + 1 {
+                    break;
+                }
+                notified.as_mut().await;
+                notified.set(notify.notified());
+            }
+            ctrl.abort(None);
+            let err = handle.await.unwrap().unwrap_err();
+            assert_eq!(err.name(), "AbortError");
+            assert!(provider.authorization_url().is_none());
+            stalled.lock().unwrap().last().cloned().unwrap()
+        }
+    };
+
+    // Discovery.
+    assert_eq!(
+        run(Arc::new(TestOAuthProvider::new("http://127.0.0.1/callback"))).await,
+        "/.well-known/oauth-protected-resource/mcp"
+    );
+
+    // Refresh stall does not fall back to authorization redirect.
+    let refreshing = Arc::new(TestOAuthProvider::new("http://127.0.0.1/callback"));
+    refreshing.set_client(Some(from_value(json!({ "client_id": "client" })).unwrap()));
+    refreshing.set_token_set(Some(
+        from_value(json!({ "access_token": "a1", "refresh_token": "r1", "token_type": "Bearer" })).unwrap(),
+    ));
+    refreshing.set_discovery(Some(OAuthDiscoveryState {
+        authorization_server_url: origin.clone(),
+        authorization_server_metadata: Some(
+            from_value(json!({
+                "issuer": origin,
+                "authorization_endpoint": format!("{origin}/authorize"),
+                "token_endpoint": format!("{origin}/token"),
+                "response_types_supported": ["code"],
+            }))
+            .unwrap(),
+        ),
+        resource_metadata: None,
+        resource_metadata_url: None,
+    }));
+    assert_eq!(run(refreshing).await, "/token");
+    servers.close().await;
+}
+
+// #11311
+#[tokio::test]
+async fn closes_while_browser_keeps_an_unused_connection_open() {
+    let callback = OAuthCallbackServer::listen(None).await.unwrap();
+    let url = Url::parse(callback.redirect_url()).unwrap();
+    let spare = tokio::net::TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .expect("connect spare keep-alive socket");
+
+    let (cb_res, resp) = tokio::join!(callback.wait_for_callback("s1"), async {
+        tokio::task::yield_now().await;
+        pi_js::fetch::fetch(Request::new(
+            "GET",
+            format!("{}?code=abc&state=s1", callback.redirect_url()),
+        ))
+        .await
+        .unwrap()
+    });
+    assert_eq!(
+        resp.text().await.unwrap(),
+        "Authorization complete. You may close this window."
+    );
+    assert_eq!(cb_res.unwrap().code, "abc");
+
+    let close_res = tokio::time::timeout(Duration::from_secs(2), callback.close()).await;
+    assert!(close_res.is_ok(), "callback.close() timed out with unused open socket");
+    close_res.unwrap().unwrap();
+    drop(spare);
+}
+
+// #10302
+#[tokio::test]
+async fn rejects_a_response_on_another_path_than_expected() {
+    let callback = OAuthCallbackServer::listen_with_extra_paths(None, vec!["/callback/server-id".to_string()])
+        .await
+        .unwrap();
+    let origin = Url::parse(callback.redirect_url())
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+
+    let mixed_up = tokio::spawn({
+        let cb = callback.clone();
+        async move { cb.wait_for_callback_on_path("s1", Some("/callback/server-id")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let wrong = pi_js::fetch::fetch(Request::new("GET", format!("{origin}/callback?code=abc&state=s1")))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 400);
+    let wrong_err = mixed_up.await.unwrap().unwrap_err();
+    assert!(wrong_err.to_string().contains("arrived on another redirect URI"));
+
+    let (ok_res, right) = tokio::join!(
+        callback.wait_for_callback_on_path("s2", Some("/callback/server-id")),
+        async {
+            tokio::task::yield_now().await;
+            pi_js::fetch::fetch(Request::new(
+                "GET",
+                format!("{origin}/callback/server-id?code=abc&state=s2"),
+            ))
+            .await
+            .unwrap()
+        }
+    );
+    assert_eq!(right.status(), 200);
+    assert_eq!(ok_res.unwrap().code, "abc");
+    callback.close().await.unwrap();
 }

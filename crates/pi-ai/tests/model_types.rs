@@ -37,6 +37,7 @@ fn chat_model(provider: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -216,6 +217,7 @@ async fn stored_and_fetched_models_work_cleanly_in_refresh() {
         credentials: None,
         models_store: Some(models_store.clone()),
         auth_context: None,
+        identity: None,
     }));
     let chat_streams = ProviderStreams {
         stream: Arc::new(|_, _, _| AssistantMessageEventStream::new()),

@@ -12,6 +12,22 @@ const INDENT: &str = "  ";
 pub const DEFAULT_INPUT_SCHEMA_MAX_CHARS: i64 = 16_000;
 /// Local `$ref` expansions per rendered schema, so shared definitions cannot blow up the output.
 const MAX_REF_EXPANSIONS: i64 = 32;
+/// JSON Schema keywords with a number or string value shown as `@keyword value` property tags.
+const TAG_KEYWORDS: &[&str] = &[
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minItems",
+    "maxItems",
+];
+/// Longest property tag; longer ones (large defaults, long patterns) are left out.
+const MAX_TAG_CHARS: usize = 80;
 
 /// TypeScript types for MCP results, from the MCP `CallToolResult` schema, so `CallToolResult<T>`
 /// declarations can refer to them.
@@ -149,8 +165,6 @@ pub fn render_declarations(options: RenderDeclarationsOptions) -> String {
 
 /// One tool as a member of the `tools` object: `name(args: T): Promise<R>;` with the
 /// name as the identifier scripts use. Input types longer than `inputMaxChars` render as `unknown`.
-/// Tools whose output schema is an MCP `CallToolResult` render as `Promise<CallToolResult<T>>`,
-/// which needs [`MCP_TYPESCRIPT_PREAMBLE`].
 pub fn render_tool_signature(tool: &CodemodeTool, options: Option<RenderToolSignatureOptions>) -> String {
     let max_chars = options
         .and_then(|o| o.input_max_chars)
@@ -211,17 +225,8 @@ pub fn mcp_structured_content_schema(schema: Option<&CodemodeJsonSchema>) -> Opt
     }
 }
 
-/// The type a tool call resolves to: `CallToolResult<T>` for MCP output schemas (needs
-/// [`MCP_TYPESCRIPT_PREAMBLE`]), the schema's type otherwise, and `unknown` without a schema.
+/// The type a tool call resolves to: the output schema's type, and `unknown` without a schema.
 pub fn render_tool_output_type(schema: Option<&CodemodeJsonSchema>) -> String {
-    if let Some(structured) = mcp_structured_content_schema(schema) {
-        let ty = schema_to_type(&structured, None);
-        return if ty == "unknown" {
-            "CallToolResult".to_string()
-        } else {
-            format!("CallToolResult<{ty}>")
-        };
-    }
     match schema {
         None => "unknown".to_string(),
         Some(schema) => schema_to_type(schema, None),
@@ -299,23 +304,34 @@ fn union(types: &[String]) -> String {
 }
 
 /// Convert a JSON Schema to a TypeScript type expression: objects on one line (`{ a: string; b?: number; }`) with properties sorted by name,
-/// or one property per line with `//` comments when a property has a description; `Array<T>` for
-/// arrays. Local references (`#/$defs/...`, `#/definitions/...`) resolve against `schema`;
-/// recursive and remote references render as `unknown`. A result longer than `maxChars` renders as
-/// `unknown`.
+/// or one property per line with `//` comments when a property has a description or constraints the
+/// type cannot express (`// @integer @minimum 1 @default 20`); `Array<T>` for arrays. Local references
+/// (`#/$defs/...`, `#/definitions/...`) resolve against `schema`; recursive and remote references
+/// render as `unknown`. A result longer than `maxChars` is rendered again without the constraint tags,
+/// and renders as `unknown` if it is still too long.
 pub fn schema_to_type(schema: &CodemodeJsonSchema, options: Option<SchemaToTypeOptions>) -> String {
-    let mut context = SchemaContext {
-        root: schema.clone(),
-        resolving: IndexSet::new(),
-        expansions: 0,
+    let render = |tags: bool| {
+        let mut context = SchemaContext {
+            root: schema.clone(),
+            resolving: IndexSet::new(),
+            expansions: 0,
+            tags,
+        };
+        to_type(schema, &mut context)
     };
-    let ty = to_type(schema, &mut context);
-    if let Some(max_chars) = options.and_then(|o| o.max_chars)
-        && (pi_js::str16::len(&ty) as i64) > max_chars
-    {
-        return "unknown".to_string();
+    let ty = render(true);
+    let Some(max_chars) = options.and_then(|o| o.max_chars) else {
+        return ty;
+    };
+    if (pi_js::str16::len(&ty) as i64) <= max_chars {
+        return ty;
     }
-    ty
+    let untagged = render(false);
+    if (pi_js::str16::len(&untagged) as i64) <= max_chars {
+        untagged
+    } else {
+        "unknown".to_string()
+    }
 }
 
 struct SchemaContext {
@@ -323,6 +339,8 @@ struct SchemaContext {
     /// References being expanded on the current path, to stop at recursive types.
     resolving: IndexSet<String>,
     expansions: i64,
+    /// Whether property comments include constraint tags.
+    tags: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -365,13 +383,42 @@ enum RefTarget<'a> {
     Map(SchemaMap<'a>),
 }
 
-fn resolve_ref_inner<'a>(r#ref: &str, root: &'a CodemodeJsonSchema) -> Option<RefTarget<'a>> {
+fn decode_pointer_segments(r#ref: &str) -> Option<Vec<String>> {
     if r#ref != "#" && !r#ref.starts_with("#/") {
         return None;
     }
     let rest = r#ref.get(2..).unwrap_or("");
-    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
+    let mut keys = Vec::new();
+    for segment in rest.split('/').filter(|s| !s.is_empty()) {
+        // Schemas come from tools and MCP servers: a malformed escape names nothing instead of failing the caller.
+        let decoded = pi_js::uri::decode_uri_component(segment).ok()?;
+        keys.push(decoded.replace("~1", "/").replace("~0", "~"));
+    }
+    Some(keys)
+}
+
+/// The subschema a local `$ref` (`#`, `#/$defs/Item`) names in `root`, or `None` for remote
+/// references and references that name nothing. Pointer segments are URI-decoded and JSON Pointer
+/// unescaped (`~1` is `/`, `~0` is `~`).
+pub fn resolve_schema_ref(r#ref: &str, root: &Value) -> Option<CodemodeJsonSchema> {
+    let keys = decode_pointer_segments(r#ref)?;
+    let mut current = root;
+    for key in keys {
+        let Value::Object(obj) = current else {
+            return None;
+        };
+        current = obj.get(&key)?;
+    }
+    match current {
+        Value::Bool(b) => Some(CodemodeJsonSchema::Boolean(*b)),
+        Value::Object(map) => Some(json_map_to_schema(map)),
+        _ => None,
+    }
+}
+
+fn resolve_ref_inner<'a>(r#ref: &str, root: &'a CodemodeJsonSchema) -> Option<RefTarget<'a>> {
+    let keys = decode_pointer_segments(r#ref)?;
+    if keys.is_empty() {
         return Some(match root {
             CodemodeJsonSchema::Boolean(b) => RefTarget::Bool(*b),
             CodemodeJsonSchema::Object(m) => RefTarget::Map(SchemaMap::Index(m)),
@@ -384,9 +431,7 @@ fn resolve_ref_inner<'a>(r#ref: &str, root: &'a CodemodeJsonSchema) -> Option<Re
     }
 
     let mut current = Cursor::Root(root);
-    for segment in segments {
-        let decoded = pi_js::uri::decode_uri_component(segment).ok()?;
-        let key = decoded.replace("~1", "/").replace("~0", "~");
+    for key in keys {
         let next = match current {
             Cursor::Root(CodemodeJsonSchema::Object(m)) => m.get(&key)?,
             Cursor::Root(CodemodeJsonSchema::Boolean(_)) => return None,
@@ -556,6 +601,162 @@ fn description_of(property: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\r' | '\n' | '\u{2028}' | '\u{2029}')
+}
+
+fn escape_line_terminators(tag: &str) -> String {
+    let mut out = String::with_capacity(tag.len());
+    for c in tag.chars() {
+        if is_line_terminator(c) {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_lower_bound(keyword: &str) -> bool {
+    matches!(keyword, "minimum" | "exclusiveMinimum" | "minLength" | "minItems")
+}
+
+fn is_upper_bound(keyword: &str) -> bool {
+    matches!(keyword, "maximum" | "exclusiveMaximum" | "maxLength" | "maxItems")
+}
+
+fn normalize_constraint_branch(branch: &serde_json::Map<String, Value>) -> IndexMap<String, Value> {
+    let mut map: IndexMap<String, Value> = branch.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    // Draft-04 and OpenAPI 3.0 make `minimum`/`maximum` exclusive with a boolean `exclusiveMinimum`/`exclusiveMaximum`.
+    if map.get("exclusiveMinimum") == Some(&Value::Bool(true)) {
+        if let Some(min_val) = map.get("minimum").cloned() {
+            map.insert("exclusiveMinimum".to_string(), min_val);
+        } else {
+            map.shift_remove("exclusiveMinimum");
+        }
+        map.shift_remove("minimum");
+    }
+    if map.get("exclusiveMaximum") == Some(&Value::Bool(true)) {
+        if let Some(max_val) = map.get("maximum").cloned() {
+            map.insert("exclusiveMaximum".to_string(), max_val);
+        } else {
+            map.shift_remove("exclusiveMaximum");
+        }
+        map.shift_remove("maximum");
+    }
+    map
+}
+
+fn has_integer_type(schema: &IndexMap<String, Value>) -> bool {
+    match schema.get("type") {
+        Some(Value::String(s)) => s == "integer",
+        Some(Value::Array(items)) => items.iter().any(|item| item.as_str() == Some("integer")),
+        _ => false,
+    }
+}
+
+/// Constraints of a property that its TypeScript type cannot express, as JSDoc-style tags:
+/// `@integer @minimum 1 @maximum 100 @default 20`. Empty when there are none.
+fn constraint_tags(schema: &Value) -> String {
+    let Some(property) = schema.as_object() else {
+        return String::new();
+    };
+    // Optional fields such as Pydantic's `int | None` keep their constraints in the non-null branch.
+    // The branch's constraints apply together with the property's, so both are read.
+    let variants = property
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .or_else(|| property.get("oneOf").and_then(Value::as_array));
+    let non_null: Vec<&Value> = variants
+        .map(|items| {
+            items
+                .iter()
+                .filter(|variant| {
+                    variant
+                        .as_object()
+                        .and_then(|obj| obj.get("type"))
+                        .and_then(Value::as_str)
+                        != Some("null")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut branches = vec![property];
+    if non_null.len() == 1
+        && let Some(branch) = non_null[0].as_object()
+    {
+        branches.push(branch);
+    }
+    let schemas: Vec<IndexMap<String, Value>> = branches.into_iter().map(normalize_constraint_branch).collect();
+
+    let mut tags: Vec<String> = Vec::new();
+    if schemas.iter().any(has_integer_type) {
+        tags.push("@integer".to_string());
+    }
+    for &keyword in TAG_KEYWORDS {
+        if is_lower_bound(keyword) || is_upper_bound(keyword) {
+            let mut best: Option<f64> = None;
+            for branch in &schemas {
+                if let Some(num) = branch.get(keyword).and_then(Value::as_f64) {
+                    best = Some(match best {
+                        None => num,
+                        Some(cur) if is_lower_bound(keyword) => cur.max(num),
+                        Some(cur) => cur.min(num),
+                    });
+                }
+            }
+            if let Some(num) = best {
+                tags.push(format!("@{keyword} {}", pi_js::json::number_to_string(num)));
+            }
+            continue;
+        }
+        #[derive(PartialEq, Eq, Hash)]
+        enum UniqueVal {
+            Num(String),
+            Str(String),
+        }
+        let mut seen: IndexSet<UniqueVal> = IndexSet::new();
+        for branch in &schemas {
+            match branch.get(keyword) {
+                Some(Value::Number(n)) => {
+                    if let Some(f) = n.as_f64() {
+                        seen.insert(UniqueVal::Num(pi_js::json::number_to_string(f)));
+                    }
+                }
+                Some(Value::String(s)) => {
+                    seen.insert(UniqueVal::Str(s.clone()));
+                }
+                _ => {}
+            }
+        }
+        for val in seen {
+            match val {
+                UniqueVal::Num(s) | UniqueVal::Str(s) => tags.push(format!("@{keyword} {s}")),
+            }
+        }
+    }
+    if schemas
+        .iter()
+        .any(|branch| branch.get("uniqueItems") == Some(&Value::Bool(true)))
+    {
+        tags.push("@uniqueItems".to_string());
+    }
+    // Annotations, unlike constraints, come from the property itself.
+    if let Some(default_val) = property.get("default")
+        && !default_val.is_null()
+    {
+        tags.push(format!("@default {}", pi_js::json::stringify(default_val)));
+    }
+    if property.get("deprecated") == Some(&Value::Bool(true)) {
+        tags.push("@deprecated".to_string());
+    }
+    tags.into_iter()
+        .filter(|tag| pi_js::str16::len(tag) <= MAX_TAG_CHARS)
+        .map(|tag| escape_line_terminators(&tag))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn object_type_map(schema: SchemaMap<'_>, context: &mut SchemaContext) -> String {
     let empty_props = serde_json::Map::new();
     let properties = schema
@@ -603,19 +804,33 @@ fn object_type_map(schema: SchemaMap<'_>, context: &mut SchemaContext) -> String
     if members.is_empty() {
         return "{}".to_string();
     }
-    let has_descriptions = names.iter().any(|name| !description_of(&properties[name]).is_empty());
-    if !has_descriptions {
+    let comments: Vec<Vec<String>> = names
+        .iter()
+        .map(|name| {
+            let prop = &properties[name];
+            let mut comment_lines: Vec<String> = description_of(prop)
+                .split(is_line_terminator)
+                .map(pi_js::str16::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            if context.tags {
+                let tags = constraint_tags(prop);
+                if !tags.is_empty() {
+                    comment_lines.push(tags);
+                }
+            }
+            comment_lines
+        })
+        .collect();
+    if comments.iter().all(Vec::is_empty) {
         return format!("{{ {} }}", members.join(" "));
     }
 
     let mut lines = vec!["{".to_string()];
-    for (index, name) in names.iter().enumerate() {
-        let desc = description_of(&properties[name]).replace("\r\n", "\n");
-        for line in desc.split('\n') {
-            let trimmed = pi_js::str16::trim(line);
-            if !trimmed.is_empty() {
-                lines.push(format!("{INDENT}// {trimmed}"));
-            }
+    for (index, comment) in comments.iter().enumerate() {
+        for line in comment {
+            lines.push(format!("{INDENT}// {line}"));
         }
         lines.push(format!(
             "{INDENT}{}",

@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Once, OnceLock};
 
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
@@ -16,41 +16,51 @@ use tokio::sync::Mutex;
 use url::Url;
 
 use crate::api::constrained_sampling::{
-    UnsupportedStrictSchemaKeywordCheck, get_json_schema_tool_parameters, resolve_json_schema_strict_sampling,
+    UnsupportedStrictSchemaKeywordCheck, get_json_schema_tool_parameters, prefers_json_schema_strict_sampling,
+    resolve_json_schema_strict_sampling,
 };
 use crate::api::lazy::lazy_stream;
 use crate::api::simple_options::{adjust_max_tokens_for_thinking, build_base_options, clamp_max_tokens_to_context};
-use crate::api::transform_messages::transform_messages;
+use crate::api::strict_tool_limits::{
+    has_exceeded_strict_tool_limits, is_strict_tool_limit_error_message, mark_strict_tool_limits_exceeded,
+};
+use crate::api::transform_messages::{split_error_tool_result_images, transform_messages};
 use crate::env_api_keys::{
     ANTHROPIC_FEDERATION_RULE_ID_ENV, ANTHROPIC_IDENTITY_TOKEN_FILE_ENV, ANTHROPIC_ORGANIZATION_ID_ENV,
     ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, ANTHROPIC_WORKSPACE_ID_ENV,
 };
 use crate::models::calculate_cost;
+use crate::session_resources::register_session_resource_cleanup;
 use crate::types::{
     AnthropicAllowedFallbackModel, AnyModel, ApiStreamOptions, AssistantContentBlock, AssistantMessage,
-    AssistantMessageEvent, CacheRetention, FetchFunction, JsonObject, JsonValue, Message, Model, ModelCompat,
-    ModelThinkingLevel, ProviderEnv, ProviderHeaders, ProviderResponse, ProviderStreams, SessionAffinityFormat,
-    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall,
-    ToolChoice, ToolResultMessage, TranscriptContext, Usage, UsageCost, UserContentBlock, UserMessageContent,
+    AssistantMessageEvent, CacheRetention, FetchFunction, ImageContent, JsonObject, JsonValue, Message, Model,
+    ModelCompat, ModelThinkingLevel, ProviderEnv, ProviderHeaders, ProviderResponse, ProviderStreams,
+    SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, ThinkingLevel,
+    Tool, ToolCall, ToolChoice, ToolResultMessage, TranscriptContext, Usage, UsageCost, UserContentBlock,
+    UserMessageContent,
 };
 use crate::utils::abort_signals::combine_abort_signals;
-use crate::utils::diagnostics::{AssistantMessageDiagnostic, append_assistant_message_diagnostic};
-use crate::utils::error_body::safe_json_stringify;
+use crate::utils::diagnostics::{AssistantMessageDiagnostic, DiagnosticErrorInfo, append_assistant_message_diagnostic};
+use crate::utils::error_body::{normalize_provider_error, safe_json_stringify, with_cause_detail};
 use crate::utils::event_stream::AssistantMessageEventStream;
+use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
-use crate::utils::json_parse::{parse_json_with_repair, parse_streaming_json};
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
+use crate::utils::json_parse::parse_json_with_repair;
+use crate::utils::openrouter_cost::{
+    OpenRouterCostDetails, OpenRouterUsageAccounting, apply_openrouter_reported_cost, is_openrouter_model,
+};
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{get_system_message_text, render_system_message_update};
-use crate::utils::transcript::{
-    get_current_tools, get_declared_tools, get_initial_system_message, has_tool_redefinitions, resolve_transcript,
-};
+use crate::utils::transcript::{get_current_tools, get_initial_system_message, resolve_transcript};
 
 use crate::api::github_copilot_headers::{build_copilot_dynamic_headers, has_copilot_vision_input};
 
-const CLAUDE_CODE_VERSION: &str = "2.1.280";
+const CLAUDE_CODE_VERSION: &str = "2.1.322";
 
 const CLAUDE_CODE_TOOLS: [&str; 17] = [
     "Read",
@@ -77,7 +87,8 @@ const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 const SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str = "mid-conversation-output-config-2026-07-01";
 const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
-const MID_CONVERSATION_TOOL_CHANGES_BETA: &str = "mid-conversation-tool-changes-2026-07-01";
+const INLINE_TOOLS_BETA: &str = "inline-tools-2026-09-15";
+const MESSAGE_THREADS_BETA: &str = "message-threads-2026-08-12";
 
 const GRANT_TYPE_JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const TOKEN_ENDPOINT: &str = "/v1/oauth/token";
@@ -416,6 +427,7 @@ struct ResolvedAnthropicCompat<'a> {
     supports_mid_convo_system_messages: bool,
     supports_mid_convo_tool_changes: bool,
     supports_mid_convo_effort: bool,
+    supports_message_threads: bool,
     force_adaptive_thinking: bool,
     allowed_fallback_models: Option<&'a [AnthropicAllowedFallbackModel]>,
 }
@@ -478,6 +490,10 @@ fn get_anthropic_compat<'a>(model: &'a Model) -> ResolvedAnthropicCompat<'a> {
             .and_then(anthropic_compat)
             .and_then(|c| c.supports_mid_convo_effort)
             .unwrap_or(false),
+        supports_message_threads: c
+            .and_then(anthropic_compat)
+            .and_then(|c| c.supports_message_threads)
+            .unwrap_or_else(|| model.provider == "anthropic" && model.base_url.contains("api.anthropic.com")),
         force_adaptive_thinking: c
             .and_then(anthropic_compat)
             .and_then(|c| c.force_adaptive_thinking)
@@ -486,6 +502,225 @@ fn get_anthropic_compat<'a>(model: &'a Model) -> ResolvedAnthropicCompat<'a> {
             .and_then(anthropic_compat)
             .and_then(|c| c.allowed_fallback_models.as_deref()),
     }
+}
+
+#[derive(Clone, Debug)]
+struct ThreadEntry {
+    prefix_count: usize,
+    prefix_hash: String,
+    reply_id: String,
+}
+
+#[derive(Clone, Debug)]
+enum ThreadStateValue {
+    Entry(ThreadEntry),
+    Off,
+}
+
+const MAX_THREAD_STATE_ENTRIES: usize = 10_000;
+
+static THREAD_STATE: LazyLock<std::sync::Mutex<IndexMap<String, ThreadStateValue>>> =
+    LazyLock::new(|| std::sync::Mutex::new(IndexMap::new()));
+static THREAD_CLEANUP_REGISTERED: Once = Once::new();
+
+fn ensure_thread_cleanup_registered() {
+    THREAD_CLEANUP_REGISTERED.call_once(|| {
+        let _ = register_session_resource_cleanup(|session_id| {
+            let mut guard = THREAD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match session_id {
+                Some(id) => {
+                    guard.shift_remove(id);
+                }
+                None => guard.clear(),
+            }
+        });
+    });
+}
+
+fn set_thread_state(session_id: &str, value: ThreadStateValue) {
+    ensure_thread_cleanup_registered();
+    let mut guard = THREAD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.shift_remove(session_id);
+    guard.insert(session_id.to_string(), value);
+    while guard.len() > MAX_THREAD_STATE_ENTRIES {
+        guard.shift_remove_index(0);
+    }
+}
+
+fn is_new_thread_error(code: &str) -> bool {
+    matches!(
+        code,
+        "thread_not_found" | "thread_already_continued" | "thread_continue_in_flight" | "thread_fingerprint_mismatch"
+    )
+}
+
+fn normalize_thread_messages_value(messages: &[Value]) -> Value {
+    fn walk(val: &Value) -> Value {
+        match val {
+            Value::Array(arr) => Value::Array(arr.iter().map(walk).collect()),
+            Value::Object(map) => {
+                let mut out = Map::new();
+                for (k, v) in map {
+                    if k == "cache_control" {
+                        continue;
+                    }
+                    if k == "content"
+                        && let Some(s) = v.as_str()
+                    {
+                        let mut blk = Map::new();
+                        blk.insert("type".to_string(), Value::String("text".to_string()));
+                        blk.insert("text".to_string(), Value::String(s.to_string()));
+                        out.insert(k.clone(), Value::Array(vec![Value::Object(blk)]));
+                        continue;
+                    }
+                    out.insert(k.clone(), walk(v));
+                }
+                Value::Object(out)
+            }
+            other => other.clone(),
+        }
+    }
+    Value::Array(messages.iter().map(walk).collect())
+}
+
+fn hash_thread_prefix(model: &Model, params: &Map<String, Value>, messages: &[Value]) -> String {
+    let settings = Value::Array(vec![
+        Value::String(model.provider.clone()),
+        Value::String(model.base_url.clone()),
+        params.get("model").cloned().unwrap_or(Value::Null),
+        params.get("system").cloned().unwrap_or(Value::Null),
+        params.get("tools").cloned().unwrap_or(Value::Null),
+        params.get("thinking").cloned().unwrap_or(Value::Null),
+        params.get("output_config").cloned().unwrap_or(Value::Null),
+        params.get("tool_choice").cloned().unwrap_or(Value::Null),
+        params.get("betas").cloned().unwrap_or(Value::Null),
+        params.get("fallbacks").cloned().unwrap_or(Value::Null),
+    ]);
+    let conversation = normalize_thread_messages_value(messages);
+    let combined = format!(
+        "{}{}",
+        pi_js::json::stringify(&settings),
+        pi_js::json::stringify(&conversation)
+    );
+    short_hash(&combined)
+}
+
+#[derive(Clone, Debug)]
+struct PreparedThreadRequest {
+    session_id: String,
+    body: Map<String, Value>,
+}
+
+fn create_thread_request(session_id: &str, params: &Map<String, Value>) -> PreparedThreadRequest {
+    let mut body = params.clone();
+    body.insert("thread".to_string(), serde_json::json!({ "type": "create" }));
+    PreparedThreadRequest {
+        session_id: session_id.to_string(),
+        body,
+    }
+}
+
+fn prepare_thread_request(
+    model: &Model,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Option<PreparedThreadRequest> {
+    ensure_thread_cleanup_registered();
+    let messages = params.get("messages").and_then(Value::as_array)?;
+    let state = {
+        let mut guard = THREAD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.get(session_id) {
+            Some(ThreadStateValue::Off) => return None,
+            Some(ThreadStateValue::Entry(entry)) => {
+                if messages.len() > entry.prefix_count
+                    && hash_thread_prefix(model, params, &messages[..entry.prefix_count]) == entry.prefix_hash
+                {
+                    let cloned = entry.clone();
+                    guard.shift_remove(session_id);
+                    Some(cloned)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    };
+
+    if let Some(entry) = state {
+        let mut body = params.clone();
+        body.shift_remove("system");
+        body.shift_remove("tools");
+        body.insert(
+            "messages".to_string(),
+            Value::Array(messages[entry.prefix_count..].to_vec()),
+        );
+        body.insert(
+            "thread".to_string(),
+            serde_json::json!({
+                "type": "continue",
+                "previous_message_id": entry.reply_id,
+            }),
+        );
+        return Some(PreparedThreadRequest {
+            session_id: session_id.to_string(),
+            body,
+        });
+    }
+
+    Some(create_thread_request(session_id, params))
+}
+
+fn record_thread_reply(
+    model: &Model,
+    thread: &PreparedThreadRequest,
+    params: &Map<String, Value>,
+    output: &AssistantMessage,
+    is_oauth: bool,
+    allow_empty_signature: bool,
+) {
+    let Some(reply_id) = output.response_id.as_deref() else {
+        return;
+    };
+    if output.response_model.is_some() {
+        return;
+    }
+    let single_reply = [Message::Assistant(output.clone())];
+    let transformed = transform_messages(&single_reply, model, Some(&normalize_tool_call_id));
+    let mut dummy_has_preferred = false;
+    let converted = convert_messages(
+        &transformed,
+        is_oauth,
+        None,
+        allow_empty_signature,
+        None,
+        None,
+        &mut dummy_has_preferred,
+    )
+    .unwrap_or(ConvertedAnthropicMessages {
+        messages: Vec::new(),
+        assistant_levels: IndexMap::new(),
+    });
+    let reply_messages: Vec<Value> = converted
+        .messages
+        .into_iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+        .collect();
+    let mut prefix: Vec<Value> = params
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    prefix.extend(reply_messages);
+    let prefix_count = prefix.len();
+    let prefix_hash = hash_thread_prefix(model, params, &prefix);
+    set_thread_state(
+        &thread.session_id,
+        ThreadStateValue::Entry(ThreadEntry {
+            prefix_count,
+            prefix_hash,
+            reply_id: reply_id.to_string(),
+        }),
+    );
 }
 
 fn resolve_cache_retention(cache_retention: Option<CacheRetention>, env: Option<&ProviderEnv>) -> CacheRetention {
@@ -862,12 +1097,22 @@ fn build_request_headers(
     session_id: Option<&str>,
     federation_token: Option<&str>,
     betas: &[String],
+    identity: Option<&ClientIdentity>,
 ) -> (Headers, bool) {
     let mut headers = Headers::new();
+    let target = ClientIdentityTarget {
+        provider: &model.provider,
+        base_url: &model.base_url,
+    };
+    let is_oauth_call =
+        model.provider != "github-copilot" && federation_token.is_none() && api_key.is_some_and(is_oauth_token);
+    if !is_oauth_call {
+        apply_raw_header_layer(&mut headers, &get_identity_headers(target, identity));
+    }
+
     headers.set("accept", "application/json");
     headers.set("content-type", "application/json");
     headers.set("anthropic-version", "2023-06-01");
-    headers.set("user-agent", &get_pi_user_agent());
     headers.set("anthropic-dangerous-direct-browser-access", "true");
 
     let mut is_oauth = false;
@@ -968,12 +1213,17 @@ fn should_use_fine_grained_tool_streaming_beta(model: &Model, context: &Transcri
     !get_current_tools(&context.messages).is_empty() && !get_anthropic_compat(model).supports_eager_tool_input_streaming
 }
 
+struct BetaFeatureFlags {
+    is_oauth: bool,
+    native_tool_changes: bool,
+    message_threads: bool,
+}
+
 fn get_beta_features(
     model: &Model,
     context: &TranscriptContext,
-    is_oauth: bool,
-    native_tool_changes: bool,
     options: &AnthropicOptions,
+    flags: BetaFeatureFlags,
 ) -> Vec<String> {
     let mut has_configured = false;
     let mut configured_value: Option<String> = None;
@@ -1011,7 +1261,7 @@ fn get_beta_features(
 
     let compat = get_anthropic_compat(model);
     let mut set = IndexSet::new();
-    if is_oauth {
+    if flags.is_oauth {
         set.insert("claude-code-20250219".to_string());
         set.insert(OAUTH_API_BETA_HEADER.to_string());
     }
@@ -1032,10 +1282,24 @@ fn get_beta_features(
         set.insert(MID_CONVERSATION_OUTPUT_CONFIG_BETA.to_string());
         set.insert(THINKING_BINDING_CONTROLS_BETA.to_string());
     }
-    if native_tool_changes {
-        set.insert(MID_CONVERSATION_TOOL_CHANGES_BETA.to_string());
+    if flags.native_tool_changes {
+        set.insert(INLINE_TOOLS_BETA.to_string());
+    }
+    if flags.message_threads {
+        set.insert(MESSAGE_THREADS_BETA.to_string());
     }
     set.into_iter().collect()
+}
+
+fn convert_image_block(img: &ImageContent) -> Value {
+    serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": img.mime_type,
+            "data": img.data,
+        }
+    })
 }
 
 fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
@@ -1058,14 +1322,7 @@ fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
                 "type": "text",
                 "text": sanitize_surrogates(&t.text),
             }),
-            UserContentBlock::Image(img) => serde_json::json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img.mime_type,
-                    "data": img.data,
-                }
-            }),
+            UserContentBlock::Image(img) => convert_image_block(img),
         })
         .collect();
 
@@ -1085,11 +1342,11 @@ fn convert_content_blocks(content: &[UserContentBlock]) -> Value {
     Value::Array(blocks)
 }
 
-fn convert_tool_result(msg: &ToolResultMessage) -> Value {
+fn convert_tool_result_with_content(msg: &ToolResultMessage, content: &[UserContentBlock]) -> Value {
     serde_json::json!({
         "type": "tool_result",
         "tool_use_id": msg.tool_call_id,
-        "content": convert_content_blocks(&msg.content),
+        "content": convert_content_blocks(content),
         "is_error": msg.is_error,
     })
 }
@@ -1112,14 +1369,22 @@ struct ConvertedAnthropicMessages {
     assistant_levels: IndexMap<usize, AnthropicEffort>,
 }
 
+#[derive(Clone, Copy)]
+struct AnthropicInlineToolConfig {
+    supports_eager_tool_input_streaming: bool,
+    supports_strict_tools: bool,
+    disable_preferred_strict_tools: bool,
+}
+
 fn convert_messages(
     transformed_messages: &[Message],
     is_oauth: bool,
     cache_control: Option<&Value>,
     allow_empty_signature: bool,
     managed_provider: Option<&str>,
-    native_tool_changes: bool,
-) -> ConvertedAnthropicMessages {
+    inline_tools: Option<AnthropicInlineToolConfig>,
+    has_preferred_strict_tools: &mut bool,
+) -> Result<ConvertedAnthropicMessages> {
     let mut params: Vec<Value> = Vec::new();
     let mut assistant_levels: IndexMap<usize, AnthropicEffort> = IndexMap::new();
     let mut pending_system_messages: Vec<Value> = Vec::new();
@@ -1137,9 +1402,15 @@ fn convert_messages(
                         "text": sanitize_surrogates(&text),
                     }));
                 }
-                if native_tool_changes {
+                if let Some(cfg) = inline_tools {
+                    let added = sys.tools_added.as_deref().unwrap_or(&[]);
+                    let redefined: IndexSet<&str> = added.iter().map(|t| t.name.as_str()).collect();
                     if let Some(removed) = &sys.tools_removed {
                         for tool in removed {
+                            // A new definition under the same name replaces the old one, so no removal is needed.
+                            if redefined.contains(tool.name.as_str()) {
+                                continue;
+                            }
                             let name = if is_oauth {
                                 to_claude_code_name(&tool.name)
                             } else {
@@ -1151,18 +1422,22 @@ fn convert_messages(
                             }));
                         }
                     }
-                    if let Some(added) = &sys.tools_added {
-                        for tool in added {
-                            let name = if is_oauth {
-                                to_claude_code_name(&tool.name)
-                            } else {
-                                tool.name.clone()
-                            };
-                            blocks.push(serde_json::json!({
-                                "type": "tool_addition",
-                                "tool": { "type": "tool_reference", "name": name },
-                            }));
-                        }
+                    let (definitions, added_has_preferred) = convert_tools(
+                        added,
+                        is_oauth,
+                        cfg.supports_eager_tool_input_streaming,
+                        cfg.supports_strict_tools,
+                        None,
+                        cfg.disable_preferred_strict_tools,
+                    )?;
+                    if added_has_preferred {
+                        *has_preferred_strict_tools = true;
+                    }
+                    for definition in definitions {
+                        blocks.push(serde_json::json!({
+                            "type": "tool_addition",
+                            "tool": { "type": "tool_definition", "definition": definition },
+                        }));
                     }
                 }
                 if !blocks.is_empty() {
@@ -1196,14 +1471,7 @@ fn convert_messages(
                                     }))
                                 }
                             }
-                            UserContentBlock::Image(img) => Some(serde_json::json!({
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": img.mime_type,
-                                    "data": img.data,
-                                },
-                            })),
+                            UserContentBlock::Image(img) => Some(convert_image_block(img)),
                         })
                         .collect();
                     if !filtered_blocks.is_empty() {
@@ -1215,7 +1483,6 @@ fn convert_messages(
                 }
             },
             Message::Assistant(assistant) => {
-                params.append(&mut pending_system_messages);
                 let mut blocks: Vec<Value> = Vec::new();
                 for block in &assistant.content {
                     match block {
@@ -1280,6 +1547,8 @@ fn convert_messages(
                     }
                 }
                 if !blocks.is_empty() {
+                    // Hold pending system updates past empty assistant blocks (#11091).
+                    params.append(&mut pending_system_messages);
                     let message_index = params.len();
                     params.push(serde_json::json!({
                         "role": "assistant",
@@ -1298,16 +1567,27 @@ fn convert_messages(
             }
             Message::ToolResult(_) => {
                 let mut tool_results: Vec<Value> = Vec::new();
+                // Anthropic rejects error tool results with non-text content; images follow tool_results (#10794).
+                let mut error_images: Vec<Value> = Vec::new();
                 let mut j = i;
                 while j < transformed_messages.len() {
                     if let Message::ToolResult(tr) = &transformed_messages[j] {
-                        tool_results.push(convert_tool_result(tr));
+                        let split = split_error_tool_result_images(tr);
+                        let content_slice = split.as_ref().map(|s| s.content.as_slice()).unwrap_or(&tr.content);
+                        tool_results.push(convert_tool_result_with_content(tr, content_slice));
+                        if let Some(split) = split {
+                            error_images.push(serde_json::json!({ "type": "text", "text": split.caption }));
+                            for img in split.images {
+                                error_images.push(convert_image_block(&img));
+                            }
+                        }
                         j += 1;
                     } else {
                         break;
                     }
                 }
                 i = j - 1;
+                tool_results.extend(error_images);
                 params.push(serde_json::json!({
                     "role": "user",
                     "content": tool_results,
@@ -1347,10 +1627,10 @@ fn convert_messages(
         }
     }
 
-    ConvertedAnthropicMessages {
+    Ok(ConvertedAnthropicMessages {
         messages: params,
         assistant_levels,
-    }
+    })
 }
 
 fn insert_thinking_level_messages(converted: ConvertedAnthropicMessages, active_effort: AnthropicEffort) -> Vec<Value> {
@@ -1417,16 +1697,26 @@ fn convert_tools(
     supports_eager_tool_input_streaming: bool,
     supports_strict_tools: bool,
     cache_control: Option<&Value>,
-) -> Result<Vec<Value>> {
+    disable_preferred_strict_tools: bool,
+) -> Result<(Vec<Value>, bool)> {
     if tools.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
 
     let check: UnsupportedStrictSchemaKeywordCheck<'_> = &is_anthropic_strict_unsupported_keyword;
     let mut converted = Vec::with_capacity(tools.len());
+    let mut has_preferred_strict_tools = false;
 
     for (index, tool) in tools.iter().enumerate() {
-        let strict = resolve_json_schema_strict_sampling(tool, supports_strict_tools, Some(check))?;
+        let preferred = prefers_json_schema_strict_sampling(tool);
+        let strict = if disable_preferred_strict_tools && preferred {
+            None
+        } else {
+            resolve_json_schema_strict_sampling(tool, supports_strict_tools, Some(check))?
+        };
+        if strict == Some(true) && preferred {
+            has_preferred_strict_tools = true;
+        }
         let parameters = get_json_schema_tool_parameters(tool, strict)?;
         let param_value = parameters.to_value();
         let param_obj = param_value.as_object();
@@ -1446,6 +1736,15 @@ fn convert_tools(
                 for (k, v) in o {
                     input_schema_map.insert(k.clone(), v.clone());
                 }
+            }
+        } else if let Some(o) = param_obj {
+            // Keep shared definitions so property $refs still resolve. Other root keywords stay out:
+            // Anthropic rejects root anyOf/oneOf/allOf with a 400.
+            if let Some(defs) = o.get("$defs") {
+                input_schema_map.insert("$defs".to_string(), defs.clone());
+            }
+            if let Some(defs) = o.get("definitions") {
+                input_schema_map.insert("definitions".to_string(), defs.clone());
             }
         }
         input_schema_map.insert("type".to_string(), Value::String("object".to_string()));
@@ -1478,7 +1777,7 @@ fn convert_tools(
         converted.push(Value::Object(tool_obj));
     }
 
-    Ok(converted)
+    Ok((converted, has_preferred_strict_tools))
 }
 
 fn deferred_tool_placeholder() -> Value {
@@ -1490,12 +1789,24 @@ fn deferred_tool_placeholder() -> Value {
     })
 }
 
+struct BuildParamsFlags {
+    disable_preferred_strict_tools: bool,
+    message_threads: bool,
+}
+
+struct BuiltParams {
+    params: Map<String, Value>,
+    has_preferred_strict_tools: bool,
+    provider_thinking_level: Option<String>,
+}
+
 fn build_params(
     model: &Model,
     context: &TranscriptContext,
     is_oauth: bool,
     options: &AnthropicOptions,
-) -> Result<Value> {
+    flags: BuildParamsFlags,
+) -> Result<BuiltParams> {
     let (_, cache_control) = get_cache_control(model, options.base.cache_retention, options.base.env.as_ref());
     let compat = get_anthropic_compat(model);
     let initial_system_message = get_initial_system_message(&context.messages);
@@ -1503,7 +1814,7 @@ fn build_params(
 
     let transformed = transform_messages(&context.messages, model, Some(&normalize_tool_call_id));
     let conversation_messages = if initial_system_message.is_some() {
-        &transformed[1..]
+        transformed.get(1..).unwrap_or(&[])
     } else {
         &transformed[..]
     };
@@ -1513,25 +1824,50 @@ fn build_params(
         .unwrap_or(&[]);
     let native_tool_changes = compat.supports_mid_convo_system_messages
         && compat.supports_mid_convo_tool_changes
-        && !initial_tools.is_empty()
-        && !has_tool_redefinitions(&context.messages);
+        && !initial_tools.is_empty();
+
+    let off_disabled_in_map = model
+        .thinking_level_map
+        .as_ref()
+        .and_then(|m| m.get(&ModelThinkingLevel::Off))
+        .is_some_and(Option::is_none);
+    let thinking_disabled = model.reasoning && options.thinking_enabled == Some(false) && !off_disabled_in_map;
+    // Effort cannot change between messages while thinking is disabled, so "off" sends no effort markers.
+    let effort_messages = compat.supports_mid_convo_effort && !thinking_disabled;
+
+    let mut has_preferred_strict_tools = false;
+    let inline_tools = native_tool_changes.then_some(AnthropicInlineToolConfig {
+        supports_eager_tool_input_streaming: compat.supports_eager_tool_input_streaming,
+        supports_strict_tools: compat.supports_strict_tools,
+        disable_preferred_strict_tools: flags.disable_preferred_strict_tools,
+    });
 
     let converted = convert_messages(
         conversation_messages,
         is_oauth,
         cache_control.as_ref(),
         compat.allow_empty_signature,
-        if compat.supports_mid_convo_effort {
+        if effort_messages {
             Some(model.provider.as_str())
         } else {
             None
         },
-        native_tool_changes,
-    );
+        inline_tools,
+        &mut has_preferred_strict_tools,
+    )?;
 
     let active_effort = options.effort.unwrap_or(AnthropicEffort::High);
-    let beta_features = get_beta_features(model, context, is_oauth, native_tool_changes, options);
-    let messages_val = if compat.supports_mid_convo_effort {
+    let beta_features = get_beta_features(
+        model,
+        context,
+        options,
+        BetaFeatureFlags {
+            is_oauth,
+            native_tool_changes,
+            message_threads: flags.message_threads,
+        },
+    );
+    let messages_val = if effort_messages {
         insert_thinking_level_messages(converted, active_effort)
     } else {
         converted.messages
@@ -1604,48 +1940,44 @@ fn build_params(
     };
 
     if native_tool_changes {
-        let initial_names: IndexSet<&str> = initial_tools.iter().map(|t| t.name.as_str()).collect();
-        let later_tools: Vec<Tool> = get_declared_tools(&context.messages)
-            .into_iter()
-            .filter(|t| !initial_names.contains(t.name.as_str()))
-            .collect();
-
-        let mut all_tools = convert_tools(
+        // Initial tools stay active with the cache breakpoint on the last one, followed by the
+        // placeholder. Later tools are defined by value in `tool_addition` blocks and withdrawn
+        // by `tool_removal`, so the cached prefix survives every tool change.
+        let (mut all_tools, initial_preferred) = convert_tools(
             initial_tools,
             is_oauth,
             compat.supports_eager_tool_input_streaming,
             compat.supports_strict_tools,
             tool_cache_control,
+            flags.disable_preferred_strict_tools,
         )?;
-        all_tools.push(deferred_tool_placeholder());
-        for mut later in convert_tools(
-            &later_tools,
-            is_oauth,
-            compat.supports_eager_tool_input_streaming,
-            compat.supports_strict_tools,
-            None,
-        )? {
-            if let Some(obj) = later.as_object_mut() {
-                obj.insert("defer_loading".to_string(), Value::Bool(true));
-            }
-            all_tools.push(later);
+        if initial_preferred {
+            has_preferred_strict_tools = true;
         }
+        all_tools.push(deferred_tool_placeholder());
         params.insert("tools".to_string(), Value::Array(all_tools));
     } else {
         let tools = get_current_tools(&context.messages);
         if !tools.is_empty() {
-            let converted_tools = convert_tools(
+            let (converted_tools, tools_preferred) = convert_tools(
                 &tools,
                 is_oauth,
                 compat.supports_eager_tool_input_streaming,
                 compat.supports_strict_tools,
                 tool_cache_control,
+                flags.disable_preferred_strict_tools,
             )?;
+            if tools_preferred {
+                has_preferred_strict_tools = true;
+            }
             params.insert("tools".to_string(), Value::Array(converted_tools));
         }
     }
 
-    if compat.supports_mid_convo_effort {
+    if thinking_disabled {
+        // No effort is sent, so the model default applies. Anthropic rejects `block_binding` with disabled thinking.
+        params.insert("thinking".to_string(), serde_json::json!({ "type": "disabled" }));
+    } else if effort_messages {
         let display = options
             .thinking_display
             .unwrap_or(AnthropicThinkingDisplay::Summarized)
@@ -1658,50 +1990,40 @@ fn build_params(
                 "block_binding": { "prefix_mismatch_behavior": "drop_block" },
             }),
         );
-        params.insert("output_config".to_string(), serde_json::json!({ "effort": "high" }));
-    } else if model.reasoning {
-        if options.thinking_enabled == Some(true) {
-            let display = options
-                .thinking_display
-                .unwrap_or(AnthropicThinkingDisplay::Summarized)
-                .as_str();
-            if compat.force_adaptive_thinking {
+        // Top-level effort stays fixed at "low" so org caps don't reject requests; per-reply markers set the level.
+        params.insert("output_config".to_string(), serde_json::json!({ "effort": "low" }));
+    } else if model.reasoning && options.thinking_enabled == Some(true) {
+        let display = options
+            .thinking_display
+            .unwrap_or(AnthropicThinkingDisplay::Summarized)
+            .as_str();
+        if compat.force_adaptive_thinking {
+            params.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": "adaptive",
+                    "display": display,
+                }),
+            );
+            if let Some(effort) = options.effort {
                 params.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": display,
-                    }),
-                );
-                if let Some(effort) = options.effort {
-                    params.insert(
-                        "output_config".to_string(),
-                        serde_json::json!({ "effort": effort.as_str() }),
-                    );
-                }
-            } else {
-                let budget = match options.thinking_budget_tokens {
-                    Some(b) if b != 0 => b,
-                    _ => 1024,
-                };
-                params.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget,
-                        "display": display,
-                    }),
+                    "output_config".to_string(),
+                    serde_json::json!({ "effort": effort.as_str() }),
                 );
             }
-        } else if options.thinking_enabled == Some(false) {
-            let off_disabled_in_map = model
-                .thinking_level_map
-                .as_ref()
-                .and_then(|m| m.get(&ModelThinkingLevel::Off))
-                .is_some_and(Option::is_none);
-            if !off_disabled_in_map {
-                params.insert("thinking".to_string(), serde_json::json!({ "type": "disabled" }));
-            }
+        } else {
+            let budget = match options.thinking_budget_tokens {
+                Some(b) if b != 0 => b,
+                _ => 1024,
+            };
+            params.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                    "display": display,
+                }),
+            );
         }
     }
 
@@ -1725,7 +2047,11 @@ fn build_params(
         }
     }
 
-    Ok(Value::Object(params))
+    Ok(BuiltParams {
+        params,
+        has_preferred_strict_tools,
+        provider_thinking_level: effort_messages.then(|| active_effort.as_str().to_string()),
+    })
 }
 
 #[derive(Default)]
@@ -1909,6 +2235,13 @@ fn map_stop_reason(reason: &str, stop_details: Option<&Value>) -> Result<(StopRe
     }
 }
 
+struct OpenBlock {
+    content_index: usize,
+    arguments: Option<ToolCallArgumentsStream>,
+}
+
+type OpenBlocks = IndexMap<usize, OpenBlock>;
+
 fn apply_anthropic_event(
     event: &Value,
     model: &Model,
@@ -1916,8 +2249,7 @@ fn apply_anthropic_event(
     is_oauth: bool,
     current_tools: &[Tool],
     output: &mut AssistantMessage,
-    block_indices: &mut IndexMap<usize, usize>,
-    partial_jsons: &mut IndexMap<usize, String>,
+    open_blocks: &mut OpenBlocks,
     input_transformations: &mut Option<Vec<Value>>,
     event_stream: &AssistantMessageEventStream,
 ) -> Result<()> {
@@ -1993,7 +2325,13 @@ fn apply_anthropic_event(
                     let text = cb.get("text").and_then(Value::as_str).unwrap_or("").to_string();
                     let content_index = output.content.len();
                     output.content.push(AssistantContentBlock::Text(TextContent::new(text)));
-                    block_indices.insert(sse_index, content_index);
+                    open_blocks.insert(
+                        sse_index,
+                        OpenBlock {
+                            content_index,
+                            arguments: None,
+                        },
+                    );
                     event_stream.push(AssistantMessageEvent::TextStart {
                         content_index,
                         partial: output.clone(),
@@ -2008,7 +2346,13 @@ fn apply_anthropic_event(
                         thinking_signature: Some(sig),
                         redacted: None,
                     }));
-                    block_indices.insert(sse_index, content_index);
+                    open_blocks.insert(
+                        sse_index,
+                        OpenBlock {
+                            content_index,
+                            arguments: None,
+                        },
+                    );
                     event_stream.push(AssistantMessageEvent::ThinkingStart {
                         content_index,
                         partial: output.clone(),
@@ -2022,7 +2366,13 @@ fn apply_anthropic_event(
                         thinking_signature: Some(data),
                         redacted: Some(true),
                     }));
-                    block_indices.insert(sse_index, content_index);
+                    open_blocks.insert(
+                        sse_index,
+                        OpenBlock {
+                            content_index,
+                            arguments: None,
+                        },
+                    );
                     event_stream.push(AssistantMessageEvent::ThinkingStart {
                         content_index,
                         partial: output.clone(),
@@ -2046,11 +2396,17 @@ fn apply_anthropic_event(
                         id,
                         name,
                         arguments,
+                        arguments_error: None,
                         thought_signature: None,
                         namespace: None,
                     }));
-                    block_indices.insert(sse_index, content_index);
-                    partial_jsons.insert(content_index, String::new());
+                    open_blocks.insert(
+                        sse_index,
+                        OpenBlock {
+                            content_index,
+                            arguments: Some(ToolCallArgumentsStream::new()),
+                        },
+                    );
                     event_stream.push(AssistantMessageEvent::ToolCallStart {
                         content_index,
                         partial: output.clone(),
@@ -2061,9 +2417,10 @@ fn apply_anthropic_event(
         }
         "content_block_delta" => {
             let sse_index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let Some(&content_index) = block_indices.get(&sse_index) else {
+            let Some(open) = open_blocks.get_mut(&sse_index) else {
                 return Ok(());
             };
+            let content_index = open.content_index;
             let Some(delta) = event.get("delta").and_then(Value::as_object) else {
                 return Ok(());
             };
@@ -2093,10 +2450,10 @@ fn apply_anthropic_event(
                 }
                 "input_json_delta" => {
                     let partial_delta = delta.get("partial_json").and_then(Value::as_str).unwrap_or("");
-                    if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(content_index) {
-                        let buf = partial_jsons.entry(content_index).or_default();
-                        buf.push_str(partial_delta);
-                        tc.arguments = parse_streaming_json(Some(buf));
+                    if let Some(args) = open.arguments.as_mut()
+                        && let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(content_index)
+                    {
+                        tc.arguments = args.append(partial_delta);
                         event_stream.push(AssistantMessageEvent::ToolCallDelta {
                             content_index,
                             delta: partial_delta.to_string(),
@@ -2117,30 +2474,44 @@ fn apply_anthropic_event(
         }
         "content_block_stop" => {
             let sse_index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let Some(content_index) = block_indices.shift_remove(&sse_index) else {
+            let Some(mut open) = open_blocks.swap_remove(&sse_index) else {
                 return Ok(());
             };
-            match output.content.get_mut(content_index) {
-                Some(AssistantContentBlock::Text(t)) => {
-                    let content = t.text.clone();
+            let content_index = open.content_index;
+            enum StopBlock {
+                Text(String),
+                Thinking(String),
+                ToolCall(ToolCall),
+            }
+            let stop_block = match output.content.get_mut(content_index) {
+                Some(AssistantContentBlock::Text(t)) => Some(StopBlock::Text(t.text.clone())),
+                Some(AssistantContentBlock::Thinking(th)) => Some(StopBlock::Thinking(th.thinking.clone())),
+                Some(AssistantContentBlock::ToolCall(tc)) => {
+                    if let Some(args) = open.arguments.take() {
+                        let parsed = args.finish();
+                        tc.arguments = parsed.arguments;
+                        tc.arguments_error = parsed.arguments_error;
+                    }
+                    Some(StopBlock::ToolCall(tc.clone()))
+                }
+                None => None,
+            };
+            match stop_block {
+                Some(StopBlock::Text(content)) => {
                     event_stream.push(AssistantMessageEvent::TextEnd {
                         content_index,
                         content,
                         partial: output.clone(),
                     });
                 }
-                Some(AssistantContentBlock::Thinking(th)) => {
-                    let content = th.thinking.clone();
+                Some(StopBlock::Thinking(content)) => {
                     event_stream.push(AssistantMessageEvent::ThinkingEnd {
                         content_index,
                         content,
                         partial: output.clone(),
                     });
                 }
-                Some(AssistantContentBlock::ToolCall(tc)) => {
-                    let buf = partial_jsons.shift_remove(&content_index).unwrap_or_default();
-                    tc.arguments = parse_streaming_json(Some(&buf));
-                    let tool_call = tc.clone();
+                Some(StopBlock::ToolCall(tool_call)) => {
                     event_stream.push(AssistantMessageEvent::ToolCallEnd {
                         content_index,
                         tool_call,
@@ -2198,6 +2569,36 @@ fn apply_anthropic_event(
             output.usage.total_tokens =
                 output.usage.input + output.usage.output + output.usage.cache_read + output.usage.cache_write;
             calculate_cost(&AnyModel::Chat(usage_model.clone()), &mut output.usage);
+            if is_openrouter_model(model)
+                && let Some(usage) = event.get("usage").and_then(Value::as_object)
+            {
+                let cost = usage.get("cost").and_then(Value::as_f64);
+                let is_byok = usage.get("is_byok").and_then(Value::as_bool).unwrap_or(false);
+                let cost_details =
+                    usage
+                        .get("cost_details")
+                        .and_then(Value::as_object)
+                        .map(|d| OpenRouterCostDetails {
+                            upstream_inference_cost: d.get("upstream_inference_cost").and_then(Value::as_f64),
+                            upstream_inference_prompt_cost: d
+                                .get("upstream_inference_prompt_cost")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(f64::NAN),
+                            upstream_inference_completions_cost: d
+                                .get("upstream_inference_completions_cost")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(f64::NAN),
+                            server_tool_cost: d.get("server_tool_cost").and_then(Value::as_f64),
+                        });
+                apply_openrouter_reported_cost(
+                    &mut output.usage,
+                    &OpenRouterUsageAccounting {
+                        cost,
+                        is_byok,
+                        cost_details,
+                    },
+                );
+            }
         }
         _ => {}
     }
@@ -2227,8 +2628,7 @@ async fn iterate_and_process_sse(
     let mut state = SseDecoderState::default();
     let mut saw_message_start = false;
     let mut saw_message_end = false;
-    let mut block_indices = IndexMap::new();
-    let mut partial_jsons = IndexMap::new();
+    let mut open_blocks = OpenBlocks::new();
 
     let mut handle_sse = |sse: ServerSentEvent| -> Result<Option<Value>> {
         if sse.event.as_deref() == Some("error") {
@@ -2276,8 +2676,7 @@ async fn iterate_and_process_sse(
                         is_oauth,
                         current_tools,
                         output,
-                        &mut block_indices,
-                        &mut partial_jsons,
+                        &mut open_blocks,
                         input_transformations,
                         event_stream,
                     )?;
@@ -2300,8 +2699,7 @@ async fn iterate_and_process_sse(
                     is_oauth,
                     current_tools,
                     output,
-                    &mut block_indices,
-                    &mut partial_jsons,
+                    &mut open_blocks,
                     input_transformations,
                     event_stream,
                 )?;
@@ -2321,8 +2719,7 @@ async fn iterate_and_process_sse(
                     is_oauth,
                     current_tools,
                     output,
-                    &mut block_indices,
-                    &mut partial_jsons,
+                    &mut open_blocks,
                     input_transformations,
                     event_stream,
                 )?;
@@ -2341,8 +2738,7 @@ async fn iterate_and_process_sse(
                 is_oauth,
                 current_tools,
                 output,
-                &mut block_indices,
-                &mut partial_jsons,
+                &mut open_blocks,
                 input_transformations,
                 event_stream,
             )?;
@@ -2377,6 +2773,290 @@ fn format_api_status_error(status: u16, body: &str) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
+struct AnthropicApiErrorDetails {
+    status: u16,
+    error_type: Option<String>,
+    error_code: Option<String>,
+    message: String,
+}
+
+fn parse_anthropic_api_error_details(status: u16, body: &str, message: String) -> AnthropicApiErrorDetails {
+    let parsed = pi_js::json::parse(body).ok();
+    let error_obj = parsed.as_ref().and_then(|v| v.get("error").or(Some(v)));
+    let error_type = error_obj
+        .and_then(|e| e.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let error_code = error_obj
+        .and_then(|e| e.get("details"))
+        .and_then(|d| d.get("error_code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    AnthropicApiErrorDetails {
+        status,
+        error_type,
+        error_code,
+        message,
+    }
+}
+
+fn extract_anthropic_api_error_details(
+    err: &Error,
+    last_api_error: &Arc<std::sync::Mutex<Option<AnthropicApiErrorDetails>>>,
+) -> Option<AnthropicApiErrorDetails> {
+    if let Some(captured) = last_api_error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Some(captured);
+    }
+    let norm = normalize_provider_error(err);
+    let status = norm.status?;
+    let body = norm.body.as_deref().unwrap_or("");
+    Some(parse_anthropic_api_error_details(status, body, norm.message))
+}
+
+async fn send_anthropic_request(
+    body_map: Map<String, Value>,
+    custom_client: Option<&AnthropicClient>,
+    model: &Model,
+    options: &AnthropicOptions,
+    copilot_dynamic_headers: Option<&IndexMap<String, String>>,
+    cache_session_id: Option<&str>,
+    federation_token: Option<&str>,
+    used_federation: bool,
+    last_api_error: &Arc<std::sync::Mutex<Option<AnthropicApiErrorDetails>>>,
+) -> Result<Response> {
+    {
+        let mut slot = last_api_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
+    }
+
+    if let Some(client) = custom_client {
+        let client_owned = client.clone();
+        let params_for_retry = Value::Object(body_map);
+        let signal_for_retry = options.base.signal.clone();
+        let timeout_ms = options.base.timeout_ms;
+        let last_err_slot = Arc::clone(last_api_error);
+        return retry_provider_request(
+            move || {
+                let c = client_owned.clone();
+                let p = params_for_retry.clone();
+                let s = signal_for_retry.clone();
+                let slot = Arc::clone(&last_err_slot);
+                async move {
+                    let req_opts = AnthropicClientRequestOptions {
+                        signal: s,
+                        timeout_ms,
+                        max_retries: 0,
+                    };
+                    let resp = c.create_beta_messages(p, req_opts).await?;
+                    if !resp.ok() {
+                        let status = resp.status();
+                        let resp_headers = resp.headers().clone();
+                        let body = resp.text().await.unwrap_or_default();
+                        let msg = format_api_status_error(status, &body);
+                        *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(parse_anthropic_api_error_details(status, &body, msg.clone()));
+                        return Err(ProviderHttpError::new(Some(status), Some(resp_headers), msg).into_js_error());
+                    }
+                    Ok(resp)
+                }
+            },
+            ProviderRetryOptions {
+                max_retries: options.base.max_retries,
+                max_retry_delay_ms: options.base.max_retry_delay_ms,
+                signal: options.base.signal.clone(),
+            },
+        )
+        .await;
+    }
+
+    let mut body_obj = body_map;
+    let betas: Vec<String> = body_obj
+        .shift_remove("betas")
+        .and_then(|v| match v {
+            Value::Array(arr) => Some(arr.into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
+            Value::String(s) => Some(vec![s]),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let body_json = pi_js::json::stringify(&Value::Object(body_obj));
+
+    let (headers, _) = build_request_headers(
+        model,
+        options.base.api_key.as_deref(),
+        options.base.headers.as_ref(),
+        copilot_dynamic_headers,
+        cache_session_id,
+        federation_token,
+        &betas,
+        options.base.identity.as_ref(),
+    );
+
+    let base_trimmed = model.base_url.trim_end_matches('/');
+    let url_str = format!("{base_trimmed}/v1/messages?beta=true");
+    let _parsed =
+        Url::parse(&url_str).map_err(|e| Error::msg(format!("Invalid Anthropic baseUrl \"{url_str}\": {e}")))?;
+
+    let custom_fetch = options.base.fetch.clone();
+    let caller_signal = options.base.signal.clone();
+    let timeout_ms = options.base.timeout_ms;
+    let last_err_slot = Arc::clone(last_api_error);
+
+    retry_provider_request(
+        move || {
+            let url = url_str.clone();
+            let hdrs = headers.clone();
+            let body = body_json.clone();
+            let fetch_fn = custom_fetch.clone();
+            let sig = caller_signal.clone();
+            let slot = Arc::clone(&last_err_slot);
+            async move {
+                let timeout_sig = timeout_ms.map(AbortSignal::timeout);
+                let op_sig = combine_abort_signals([sig.as_ref(), timeout_sig.as_ref()]);
+                let mut req = Request::post(&url).with_headers(hdrs).body(Body::Text(body));
+                if let Some(combined) = &op_sig.signal {
+                    req = req.signal(combined.clone());
+                }
+                let resp_res = match fetch_fn {
+                    Some(f) => f(req).await,
+                    None => pi_js::fetch::fetch(req).await,
+                };
+                let resp = match resp_res {
+                    Ok(r) => r,
+                    Err(err) => {
+                        if sig.as_ref().is_some_and(|s| s.aborted()) {
+                            return Err(err);
+                        }
+                        return Err(ProviderHttpError::new(None, None, err.to_string()).into_js_error());
+                    }
+                };
+                if !resp.ok() {
+                    let status = resp.status();
+                    let resp_headers = resp.headers().clone();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    if status == 401 && used_federation {
+                        invalidate_federation_cache().await;
+                    }
+                    let msg = format_api_status_error(status, &err_body);
+                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(parse_anthropic_api_error_details(status, &err_body, msg.clone()));
+                    return Err(ProviderHttpError::new(Some(status), Some(resp_headers), msg).into_js_error());
+                }
+                Ok(resp)
+            }
+        },
+        ProviderRetryOptions {
+            max_retries: options.base.max_retries,
+            max_retry_delay_ms: options.base.max_retry_delay_ms,
+            signal: options.base.signal.clone(),
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_thread_request(
+    thread: PreparedThreadRequest,
+    params: &Map<String, Value>,
+    custom_client: Option<&AnthropicClient>,
+    model: &Model,
+    options: &AnthropicOptions,
+    copilot_dynamic_headers: Option<&IndexMap<String, String>>,
+    cache_session_id: Option<&str>,
+    federation_token: Option<&str>,
+    used_federation: bool,
+    last_api_error: &Arc<std::sync::Mutex<Option<AnthropicApiErrorDetails>>>,
+    output: &mut AssistantMessage,
+) -> Result<(Response, Option<PreparedThreadRequest>)> {
+    match send_anthropic_request(
+        thread.body.clone(),
+        custom_client,
+        model,
+        options,
+        copilot_dynamic_headers,
+        cache_session_id,
+        federation_token,
+        used_federation,
+        last_api_error,
+    )
+    .await
+    {
+        Ok(response) => Ok((response, Some(thread))),
+        Err(err) => {
+            if options.base.signal.as_ref().is_some_and(AbortSignal::aborted) {
+                return Err(err);
+            }
+            let Some(api_err) = extract_anthropic_api_error_details(&err, last_api_error) else {
+                return Err(err);
+            };
+            let error_code = api_err.error_code.as_deref();
+            let start_new_thread = error_code.is_some_and(is_new_thread_error);
+            let threads_unsupported = error_code == Some("thread_unsupported_request")
+                || (error_code.is_none() && api_err.status == 400 && api_err.message.contains("thread"));
+            if !start_new_thread && !threads_unsupported {
+                return Err(err);
+            }
+            let mut details = JsonObject::new();
+            details.insert(
+                "reason".to_string(),
+                JsonValue::String(
+                    error_code
+                        .map(str::to_string)
+                        .unwrap_or_else(|| api_err.status.to_string()),
+                ),
+            );
+            append_assistant_message_diagnostic(
+                output,
+                AssistantMessageDiagnostic {
+                    r#type: "anthropic_thread_fallback".to_string(),
+                    timestamp: pi_js::time::now_ms(),
+                    error: Some(DiagnosticErrorInfo {
+                        name: None,
+                        message: api_err.message,
+                        stack: None,
+                        code: None,
+                    }),
+                    details: Some(details),
+                },
+            );
+            if start_new_thread {
+                let created = create_thread_request(&thread.session_id, params);
+                let response = send_anthropic_request(
+                    created.body.clone(),
+                    custom_client,
+                    model,
+                    options,
+                    copilot_dynamic_headers,
+                    cache_session_id,
+                    federation_token,
+                    used_federation,
+                    last_api_error,
+                )
+                .await?;
+                return Ok((response, Some(created)));
+            }
+            let response = send_anthropic_request(
+                params.clone(),
+                custom_client,
+                model,
+                options,
+                copilot_dynamic_headers,
+                cache_session_id,
+                federation_token,
+                used_federation,
+                last_api_error,
+            )
+            .await?;
+            set_thread_state(&thread.session_id, ThreadStateValue::Off);
+            Ok((response, None))
+        }
+    }
+}
+
 async fn run_anthropic_stream(
     model: Model,
     normalized_context: TranscriptContext,
@@ -2385,11 +3065,23 @@ async fn run_anthropic_stream(
     output: &mut AssistantMessage,
     event_stream: &AssistantMessageEventStream,
 ) -> Result<()> {
-    let custom_client = options.client.clone();
+    let custom_client = options.client.as_ref();
+    let compat = get_anthropic_compat(&model);
     let mut is_oauth = false;
     let mut federation_token: Option<String> = None;
     let mut copilot_dynamic_headers: Option<IndexMap<String, String>> = None;
-    let mut cache_session_id: Option<String> = None;
+
+    let cache_retention = resolve_cache_retention(options.base.cache_retention, options.base.env.as_ref());
+    let cache_session_id: Option<String> = if cache_retention == CacheRetention::None {
+        None
+    } else {
+        options.base.session_id.clone()
+    };
+    let thread_session_id: Option<String> = if compat.supports_message_threads {
+        cache_session_id.clone()
+    } else {
+        None
+    };
 
     if custom_client.is_none() {
         let api_key = options.base.api_key.as_deref();
@@ -2419,144 +3111,129 @@ async fn run_anthropic_stream(
             let has_images = has_copilot_vision_input(&normalized_context.messages);
             copilot_dynamic_headers = Some(build_copilot_dynamic_headers(&normalized_context.messages, has_images));
         }
-
-        let retention = resolve_cache_retention(options.base.cache_retention, env);
-        if retention != CacheRetention::None {
-            cache_session_id = options.base.session_id.clone();
-        }
-    }
-
-    let mut params = build_params(&model, &normalized_context, is_oauth, &options)?;
-    if let Some(on_payload) = &options.base.on_payload {
-        if let Some(next_params) = on_payload(params.clone(), &model).await? {
-            let mut next_obj = next_params.as_object().cloned().unwrap_or_default();
-            next_obj.insert("stream".to_string(), Value::Bool(true));
-            params = Value::Object(next_obj);
-        }
     }
 
     let used_federation = federation_token.is_some();
+    let last_api_error = Arc::new(std::sync::Mutex::new(None));
+    let mut disable_preferred_strict_tools = has_exceeded_strict_tool_limits(options.base.session_id.as_deref());
 
-    let response = if let Some(client) = custom_client {
-        let params_for_retry = params.clone();
-        let signal_for_retry = options.base.signal.clone();
-        let timeout_ms = options.base.timeout_ms;
-        retry_provider_request(
-            move || {
-                let c = client.clone();
-                let p = params_for_retry.clone();
-                let s = signal_for_retry.clone();
-                async move {
-                    let req_opts = AnthropicClientRequestOptions {
-                        signal: s,
-                        timeout_ms,
-                        max_retries: 0,
-                    };
-                    let resp = c.create_beta_messages(p, req_opts).await?;
-                    if !resp.ok() {
-                        let status = resp.status();
-                        let resp_headers = resp.headers().clone();
-                        let body = resp.text().await.unwrap_or_default();
-                        return Err(ProviderHttpError::new(
-                            Some(status),
-                            Some(resp_headers),
-                            format_api_status_error(status, &body),
-                        )
-                        .into_js_error());
-                    }
-                    Ok(resp)
-                }
-            },
-            ProviderRetryOptions {
-                max_retries: options.base.max_retries,
-                max_retry_delay_ms: options.base.max_retry_delay_ms,
-                signal: options.base.signal.clone(),
-            },
-        )
-        .await?
-    } else {
-        let mut body_obj = params.as_object().cloned().unwrap_or_default();
-        let betas: Vec<String> = body_obj
-            .shift_remove("betas")
-            .and_then(|v| match v {
-                Value::Array(arr) => Some(arr.into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
-                Value::String(s) => Some(vec![s]),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let body_json = pi_js::json::stringify(&Value::Object(body_obj));
+    let response: Response;
+    let params_map: Map<String, Value>;
+    let thread: Option<PreparedThreadRequest>;
 
-        let (headers, _) = build_request_headers(
+    loop {
+        if options.base.signal.as_ref().is_some_and(AbortSignal::aborted) {
+            return Err(Error::msg("Request was aborted"));
+        }
+        let built = build_params(
             &model,
-            options.base.api_key.as_deref(),
-            options.base.headers.as_ref(),
-            copilot_dynamic_headers.as_ref(),
-            cache_session_id.as_deref(),
-            federation_token.as_deref(),
-            &betas,
-        );
+            &normalized_context,
+            is_oauth,
+            &options,
+            BuildParamsFlags {
+                disable_preferred_strict_tools,
+                message_threads: thread_session_id.is_some(),
+            },
+        )?;
+        if let Some(level) = built.provider_thinking_level {
+            output.provider_thinking_level = Some(level);
+        }
+        let mut next_params_map = built.params;
+        if let Some(on_payload) = &options.base.on_payload {
+            if let Some(next_params) = on_payload(Value::Object(next_params_map.clone()), &model).await? {
+                let mut next_obj = next_params.as_object().cloned().unwrap_or_default();
+                next_obj.insert("stream".to_string(), Value::Bool(true));
+                next_params_map = next_obj;
+            }
+        }
 
-        let base_trimmed = model.base_url.trim_end_matches('/');
-        let url_str = format!("{base_trimmed}/v1/messages?beta=true");
-        let _parsed =
-            Url::parse(&url_str).map_err(|e| Error::msg(format!("Invalid Anthropic baseUrl \"{url_str}\": {e}")))?;
+        let prepared = if let Some(ref ts_id) = thread_session_id
+            && options.base.disable_continuation != Some(true)
+        {
+            prepare_thread_request(&model, ts_id, &next_params_map)
+        } else {
+            None
+        };
 
-        let custom_fetch = options.base.fetch.clone();
-        let caller_signal = options.base.signal.clone();
-        let timeout_ms = options.base.timeout_ms;
+        let send_res = match prepared {
+            Some(prep) => {
+                send_thread_request(
+                    prep,
+                    &next_params_map,
+                    custom_client,
+                    &model,
+                    &options,
+                    copilot_dynamic_headers.as_ref(),
+                    cache_session_id.as_deref(),
+                    federation_token.as_deref(),
+                    used_federation,
+                    &last_api_error,
+                    output,
+                )
+                .await
+            }
+            None => send_anthropic_request(
+                next_params_map.clone(),
+                custom_client,
+                &model,
+                &options,
+                copilot_dynamic_headers.as_ref(),
+                cache_session_id.as_deref(),
+                federation_token.as_deref(),
+                used_federation,
+                &last_api_error,
+            )
+            .await
+            .map(|r| (r, None)),
+        };
 
-        retry_provider_request(
-            move || {
-                let url = url_str.clone();
-                let hdrs = headers.clone();
-                let body = body_json.clone();
-                let fetch_fn = custom_fetch.clone();
-                let sig = caller_signal.clone();
-                async move {
-                    let timeout_sig = timeout_ms.map(AbortSignal::timeout);
-                    let op_sig = combine_abort_signals([sig.as_ref(), timeout_sig.as_ref()]);
-                    let mut req = Request::post(&url).with_headers(hdrs).body(Body::Text(body));
-                    if let Some(combined) = &op_sig.signal {
-                        req = req.signal(combined.clone());
-                    }
-                    let resp_res = match fetch_fn {
-                        Some(f) => f(req).await,
-                        None => pi_js::fetch::fetch(req).await,
-                    };
-                    let resp = match resp_res {
-                        Ok(r) => r,
-                        Err(err) => {
-                            if sig.as_ref().is_some_and(|s| s.aborted()) {
-                                return Err(err);
-                            }
-                            return Err(ProviderHttpError::new(None, None, err.to_string()).into_js_error());
-                        }
-                    };
-                    if !resp.ok() {
-                        let status = resp.status();
-                        let resp_headers = resp.headers().clone();
-                        let err_body = resp.text().await.unwrap_or_default();
-                        if status == 401 && used_federation {
-                            invalidate_federation_cache().await;
-                        }
-                        return Err(ProviderHttpError::new(
-                            Some(status),
-                            Some(resp_headers),
-                            format_api_status_error(status, &err_body),
-                        )
-                        .into_js_error());
-                    }
-                    Ok(resp)
+        match send_res {
+            Ok((resp, used_thread)) => {
+                response = resp;
+                params_map = next_params_map;
+                thread = used_thread;
+                break;
+            }
+            Err(err) => {
+                if options.base.signal.as_ref().is_some_and(AbortSignal::aborted)
+                    || disable_preferred_strict_tools
+                    || !built.has_preferred_strict_tools
+                {
+                    return Err(err);
                 }
-            },
-            ProviderRetryOptions {
-                max_retries: options.base.max_retries,
-                max_retry_delay_ms: options.base.max_retry_delay_ms,
-                signal: options.base.signal.clone(),
-            },
-        )
-        .await?
-    };
+                let Some(api_err) = extract_anthropic_api_error_details(&err, &last_api_error) else {
+                    return Err(err);
+                };
+                if api_err.status != 400
+                    || api_err.error_type.as_deref() != Some("invalid_request_error")
+                    || !is_strict_tool_limit_error_message(&api_err.message)
+                {
+                    return Err(err);
+                }
+                disable_preferred_strict_tools = true;
+                mark_strict_tool_limits_exceeded(options.base.session_id.as_deref());
+                let mut details = JsonObject::new();
+                details.insert(
+                    "reason".to_string(),
+                    JsonValue::String("strict_tool_limits_exceeded".to_string()),
+                );
+                append_assistant_message_diagnostic(
+                    output,
+                    AssistantMessageDiagnostic {
+                        r#type: "anthropic_strict_tools_fallback".to_string(),
+                        timestamp: pi_js::time::now_ms(),
+                        error: Some(DiagnosticErrorInfo {
+                            name: None,
+                            message: api_err.message,
+                            stack: None,
+                            code: None,
+                        }),
+                        details: Some(details),
+                    },
+                );
+            }
+        }
+    }
 
     if let Some(on_response) = &options.base.on_response {
         on_response(
@@ -2601,6 +3278,10 @@ async fn run_anthropic_stream(
         return Err(Error::msg(
             output.error_message.as_deref().unwrap_or("An unknown error occurred"),
         ));
+    }
+
+    if let Some(ref th) = thread {
+        record_thread_reply(&model, th, &params_map, output, is_oauth, compat.allow_empty_signature);
     }
 
     if let Some(transformations) = input_transformations {
@@ -2656,18 +3337,6 @@ pub fn stream_with_options(
     let current_tools = get_current_tools(&normalized_context.messages);
     let options_owned = options.unwrap_or_default();
 
-    let provider_thinking_level = if compat.supports_mid_convo_effort {
-        Some(match options_owned.effort.unwrap_or(AnthropicEffort::High) {
-            AnthropicEffort::Low => "low".to_string(),
-            AnthropicEffort::Medium => "medium".to_string(),
-            AnthropicEffort::High => "high".to_string(),
-            AnthropicEffort::XHigh => "xhigh".to_string(),
-            AnthropicEffort::Max => "max".to_string(),
-        })
-    } else {
-        None
-    };
-
     tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
@@ -2676,7 +3345,7 @@ pub fn stream_with_options(
             model: model_owned.id.clone(),
             response_model: None,
             response_id: None,
-            provider_thinking_level,
+            provider_thinking_level: None,
             thinking_level: None,
             diagnostics: None,
             usage: Usage {
@@ -2695,6 +3364,7 @@ pub fn stream_with_options(
             raw_stop_reason: None,
             end_turn: None,
             timestamp: pi_js::time::now_ms(),
+            duration_ms: None,
         };
 
         let signal = options_owned.base.signal.clone();
@@ -2714,7 +3384,7 @@ pub fn stream_with_options(
             } else {
                 StopReason::Error
             };
-            let err_msg = err.to_string();
+            let err_msg = with_cause_detail(&err);
             output.error_message = Some(if err_msg.is_empty() {
                 safe_json_stringify(&Value::String(err_msg))
             } else {

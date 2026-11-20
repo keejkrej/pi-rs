@@ -87,8 +87,7 @@ use serde_json::{Map, Value};
 
 use crate::core::extensions::types::{RenderShell, ToolDefinition};
 use crate::core::tools::edit_diff::{
-    apply_edits_to_normalized_content, apply_replacements_to_original, create_edit_patch, generate_diff_string,
-    normalize_to_lf,
+    apply_edits_to_normalized_content, apply_replacements_to_original, generate_edit_diff, normalize_to_lf,
 };
 use crate::core::tools::file_mutation_queue::with_file_mutation_queue;
 use crate::core::tools::path_utils::resolve_to_cwd;
@@ -98,6 +97,19 @@ use crate::core::tools::tool_definition_wrapper::{
     strict_prefer_sampling, wrap_tool_definition,
 };
 use crate::utils::text::split_bom;
+
+static DIFF_ERROR_SLOT: std::sync::LazyLock<pi_js::seam::Slot<Arc<dyn Fn() -> Option<String> + Send + Sync>>> =
+    std::sync::LazyLock::new(pi_js::seam::Slot::new);
+
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    pub fn override_diff_error(func: impl Fn() -> Option<String> + Send + Sync + 'static) -> pi_js::seam::Guard {
+        let cb: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(func);
+        DIFF_ERROR_SLOT.set(Arc::new(cb))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolSystemPromptContribution {
@@ -191,12 +203,10 @@ pub fn validate_edit_input(input: &EditToolInput) -> Result<(), pi_js::Error> {
 
 pub fn edit_tool_system_prompt_contribution() -> ToolSystemPromptContribution {
     ToolSystemPromptContribution {
-        prompt_snippet: "Replace exact text in a file (supports multiple non-overlapping edits per call)".to_string(),
+        prompt_snippet: "Make precise file edits with exact text replacement, including multiple disjoint edits in one call".to_string(),
         prompt_guidelines: vec![
-            "Use edit for precise, targeted modifications to existing files. Prefer multiple entries in `edits` over multiple sequential edit calls on the same file.".to_string(),
-            "Each `oldText` must match the original file exactly, including whitespace, indentation, and newlines.".to_string(),
-            "Include enough surrounding context in each `oldText` so it matches uniquely within the file.".to_string(),
-            "Edits are all matched against the original file before any replacement is applied and must not overlap.".to_string(),
+            "Use edit for targeted changes. Batch changes to one file in a single call.".to_string(),
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.".to_string(),
         ],
     }
 }
@@ -247,13 +257,12 @@ pub async fn compute_edits_diff(
         }
     };
 
-    let diff_res = generate_diff_string(&normalized, &applied.new_content, None);
-    let patch = create_edit_patch(path, &normalized, &applied.new_content);
+    let edit_diff = generate_edit_diff(path, &normalized, &applied.new_content, &applied.replacements, None);
 
     EditDiffPreview::Success {
-        diff: diff_res.diff,
-        first_changed_line: diff_res.first_changed_line,
-        patch,
+        diff: edit_diff.diff,
+        first_changed_line: edit_diff.first_changed_line,
+        patch: edit_diff.patch,
     }
 }
 
@@ -320,8 +329,25 @@ pub fn create_edit_tool_definition(cwd: &str, options: Option<EditToolOptions>) 
                         .collect();
 
                     let applied = apply_edits_to_normalized_content(&normalized, &pairs, &display_path)?;
-                    let updated_body = apply_replacements_to_original(content, &applied.replacements);
-                    let final_content = format!("{bom}{updated_body}");
+                    // Diff before writing, so diff computation cannot fail after the write.
+                    if let Some(hook) = DIFF_ERROR_SLOT.get()
+                        && let Some(err) = hook()
+                    {
+                        return Err(pi_js::Error::msg(err));
+                    }
+                    let edit_diff = generate_edit_diff(
+                        &display_path,
+                        &normalized,
+                        &applied.new_content,
+                        &applied.replacements,
+                        None,
+                    );
+                    let final_content = if content == normalized {
+                        format!("{bom}{}", applied.new_content)
+                    } else {
+                        let updated_body = apply_replacements_to_original(content, &applied.replacements);
+                        format!("{bom}{updated_body}")
+                    };
 
                     if signal.as_ref().is_some_and(|s| s.aborted()) {
                         return Err(pi_js::Error::msg("Operation aborted"));
@@ -333,12 +359,10 @@ pub fn create_edit_tool_definition(cwd: &str, options: Option<EditToolOptions>) 
                         return Err(pi_js::Error::msg("Operation aborted"));
                     }
 
-                    let diff_res = generate_diff_string(&normalized, &applied.new_content, None);
-                    let patch = create_edit_patch(&display_path, &normalized, &applied.new_content);
                     let details_val = serde_json::to_value(&serde_json::json!({
-                        "diff": diff_res.diff,
-                        "firstChangedLine": diff_res.first_changed_line,
-                        "patch": patch,
+                        "diff": edit_diff.diff,
+                        "firstChangedLine": edit_diff.first_changed_line,
+                        "patch": edit_diff.patch,
                     }))
                     .ok();
 

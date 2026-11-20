@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+pub use super::super::session_share::SessionShareDestination;
 use crate::core::http_dispatcher::{HTTP_IDLE_TIMEOUT_CHOICES, format_http_idle_timeout_ms};
 use crate::core::settings_manager::{CACHE_WARMING_MODES, QuietStartup as CoreQuietStartup, QuietStartupHeader};
 pub use crate::core::settings_manager::{
@@ -247,6 +248,7 @@ pub struct SettingsConfig {
     pub steering_mode: SteeringMode,
     pub follow_up_mode: SteeringMode,
     pub transport: Transport,
+    pub session_share_destination: SessionShareDestination,
     pub http_idle_timeout_ms: u64,
     pub cache_warming_mode: CacheWarmingMode,
     pub thinking_level: ModelThinkingLevel,
@@ -293,6 +295,7 @@ impl Default for SettingsConfig {
             steering_mode: SteeringMode::OneAtATime,
             follow_up_mode: SteeringMode::OneAtATime,
             transport: Transport::Sse,
+            session_share_destination: SessionShareDestination::Auto,
             http_idle_timeout_ms: 300_000,
             cache_warming_mode: CacheWarmingMode::Off,
             thinking_level: ModelThinkingLevel::Medium,
@@ -337,6 +340,7 @@ pub struct SettingsCallbacks {
     pub on_steering_mode_change: Option<Arc<dyn Fn(SteeringMode) + Send + Sync>>,
     pub on_follow_up_mode_change: Option<Arc<dyn Fn(SteeringMode) + Send + Sync>>,
     pub on_transport_change: Option<Arc<dyn Fn(Transport) + Send + Sync>>,
+    pub on_session_share_destination_change: Option<Arc<dyn Fn(SessionShareDestination) + Send + Sync>>,
     pub on_http_idle_timeout_ms_change: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     pub on_cache_warming_mode_change: Option<Arc<dyn Fn(CacheWarmingMode) + Send + Sync>>,
     pub on_model_thinking_level_change: Option<Arc<dyn Fn(&str, &str, ModelThinkingLevel) + Send + Sync>>,
@@ -991,6 +995,22 @@ impl SettingsSelectorComponent {
                 submenu: None,
             },
             SettingItem {
+                id: "share-destination".to_string(),
+                label: "Session share destination".to_string(),
+                description: Some(
+                    "Where to upload sessions with /share (auto prefers Radius when authenticated, otherwise GitHub Gist)"
+                        .to_string(),
+                ),
+                current_value: match config.session_share_destination {
+                    SessionShareDestination::Auto => "auto",
+                    SessionShareDestination::Gist => "gist",
+                    SessionShareDestination::Radius => "radius",
+                }
+                .to_string(),
+                values: Some(vec!["auto".to_string(), "gist".to_string(), "radius".to_string()]),
+                submenu: None,
+            },
+            SettingItem {
                 id: "http-idle-timeout".to_string(),
                 label: "HTTP idle timeout".to_string(),
                 description: Some(
@@ -1457,7 +1477,7 @@ impl SettingsSelectorComponent {
             (
                 "show-hardware-cursor",
                 "Show hardware cursor",
-                "Show the terminal cursor while still positioning it for IME support",
+                "Use the terminal cursor instead of Pi's drawn cursor",
                 config.show_hardware_cursor.to_string(),
                 vec!["true".to_string(), "false".to_string()],
             ),
@@ -1471,7 +1491,7 @@ impl SettingsSelectorComponent {
             (
                 "output-padding",
                 "Output padding",
-                "Horizontal padding for user messages, assistant messages, and thinking",
+                "Horizontal padding for messages, tool output, and command output",
                 config.output_pad.to_string(),
                 vec!["0".to_string(), "1".to_string()],
             ),
@@ -1583,6 +1603,19 @@ impl SettingsSelectorComponent {
                     && let Some(ref f) = cb.on_transport_change
                 {
                     f(tr);
+                }
+            }
+            "share-destination" => {
+                let dest = match new_value {
+                    "auto" => Some(SessionShareDestination::Auto),
+                    "gist" => Some(SessionShareDestination::Gist),
+                    "radius" => Some(SessionShareDestination::Radius),
+                    _ => None,
+                };
+                if let Some(dest) = dest
+                    && let Some(ref f) = cb.on_session_share_destination_change
+                {
+                    f(dest);
                 }
             }
             "http-idle-timeout" => {

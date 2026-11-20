@@ -58,15 +58,6 @@ fn hello_context() -> pi_ai::types::TranscriptContext {
 
 #[test]
 fn applies_copilot_specific_adaptive_thinking_effort_overrides() {
-    let opus47 = get_builtin_model("github-copilot", "claude-opus-4.7").expect("claude-opus-4.7");
-    let map47 = opus47.thinking_level_map.as_ref().expect("thinking_level_map");
-    assert_eq!(map47.get(&ModelThinkingLevel::Minimal), Some(&Some("low".to_owned())));
-    assert_eq!(map47.get(&ModelThinkingLevel::XHigh), Some(&Some("xhigh".to_owned())));
-    assert_eq!(map47.get(&ModelThinkingLevel::Max), Some(&Some("max".to_owned())));
-    let levels47 = get_supported_thinking_levels(&opus47);
-    assert!(levels47.contains(&ModelThinkingLevel::XHigh));
-    assert!(levels47.contains(&ModelThinkingLevel::Max));
-
     let opus5 = get_builtin_model("github-copilot", "claude-opus-5").expect("claude-opus-5");
     assert_eq!(opus5.api, "anthropic-messages");
     assert_eq!(opus5.context_window, 1_000_000);
@@ -212,6 +203,7 @@ fn dynamic_copilot_header_helpers_infer_initiator_and_vision() {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 2,
+        duration_ms: None,
     });
 
     assert_eq!(infer_copilot_initiator(&[]), "user");

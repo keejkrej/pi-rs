@@ -430,6 +430,7 @@ async fn phase_call(
                     id: call_template.id,
                     name: call_template.name,
                     arguments: to_pi_map(&cur_args),
+                    arguments_error: call_template.arguments_error,
                     thought_signature: call_template.thought_signature,
                     namespace: call_template.namespace,
                 };
@@ -622,6 +623,7 @@ fn validate_args(tool: &ToolRegistration, call: &ToolCall, args: JsonObject) -> 
         id: call.id.clone(),
         name: call.name.clone(),
         arguments: to_pi_map(&args),
+        arguments_error: call.arguments_error.clone(),
         thought_signature: call.thought_signature.clone(),
         namespace: call.namespace.clone(),
     };
@@ -1182,6 +1184,7 @@ pub async fn append_tool_result(
         nested_calls: None,
         is_error: result.is_error.unwrap_or(false),
         timestamp,
+        duration_ms: None,
     });
     if let Some(ref usage) = result.usage {
         record_usage(tx, conversation_id, UsageBucket::Tools, &call.name, usage).await?;

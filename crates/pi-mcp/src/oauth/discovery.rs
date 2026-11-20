@@ -17,6 +17,7 @@ use crate::oauth::types::{
     parse_authorization_server_metadata, parse_protected_resource_metadata,
 };
 use crate::protocol::types::LATEST_PROTOCOL_VERSION;
+use pi_js::abort::AbortSignal;
 use pi_js::fetch::{Headers, Request, Response};
 use pi_js::{Error, Result};
 
@@ -40,6 +41,7 @@ pub struct DiscoverProtectedResourceMetadataOptions {
     pub resource_metadata_url: Option<String>,
     pub protocol_version: Option<String>,
     pub fetch: Option<McpFetch>,
+    pub signal: Option<AbortSignal>,
 }
 
 #[derive(Clone, Default)]
@@ -47,6 +49,7 @@ pub struct DiscoverAuthorizationServerMetadataOptions {
     pub fetch: Option<McpFetch>,
     pub protocol_version: Option<String>,
     pub skip_issuer_validation: Option<bool>,
+    pub signal: Option<AbortSignal>,
 }
 
 #[derive(Clone, Default)]
@@ -56,6 +59,7 @@ pub struct DiscoverOAuthServerInfoOptions {
     pub authorization_server_metadata_url: Option<url::Url>,
     pub fetch: Option<McpFetch>,
     pub skip_issuer_validation: Option<bool>,
+    pub signal: Option<AbortSignal>,
 }
 
 fn default_fetch() -> McpFetch {
@@ -129,7 +133,7 @@ pub async fn discover_protected_resource_metadata(
             .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?
     };
 
-    let mut response = fetch_metadata(&first_url, &fetch, version).await?;
+    let mut response = fetch_metadata(&first_url, &fetch, version, options.signal.clone()).await?;
     if options.resource_metadata_url.is_none()
         && server.path() != "/"
         && is_discovery_miss(i64::from(response.status()))
@@ -138,7 +142,7 @@ pub async fn discover_protected_resource_metadata(
         let root_url = server
             .join("/.well-known/oauth-protected-resource")
             .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
-        response = fetch_metadata(&root_url, &fetch, version).await?;
+        response = fetch_metadata(&root_url, &fetch, version, options.signal.clone()).await?;
     }
     if !response.ok() {
         let status = response.status();
@@ -190,7 +194,7 @@ pub async fn discover_authorization_server_metadata(
     let version = options.protocol_version.as_deref().unwrap_or(LATEST_PROTOCOL_VERSION);
 
     for entry in build_authorization_server_discovery_urls(authorization_server_url)? {
-        let response = fetch_metadata(&entry.url, &fetch, version).await?;
+        let response = fetch_metadata(&entry.url, &fetch, version, options.signal.clone()).await?;
         if !response.ok() {
             let status = response.status();
             discard(Some(&response));
@@ -211,7 +215,7 @@ pub async fn discover_authorization_server_metadata(
             if trim_slash(&metadata.issuer) != trim_slash(expected) {
                 return Err(Error::typed(
                     "OAuthIssuerMismatchError",
-                    OAuthIssuerMismatchError::new(expected, Some(metadata.issuer)),
+                    OAuthIssuerMismatchError::new(Some(expected.to_string()), Some(metadata.issuer)),
                 ));
             }
         }
@@ -231,6 +235,7 @@ pub async fn discover_oauth_server_info(
             resource_metadata_url: options.resource_metadata_url.as_ref().map(|u| u.to_string()),
             protocol_version: None,
             fetch: options.fetch.clone(),
+            signal: options.signal.clone(),
         }),
     )
     .await
@@ -246,7 +251,7 @@ pub async fn discover_oauth_server_info(
 
     if let Some(ref url) = options.authorization_server_metadata_url {
         let fetch = options.fetch.unwrap_or_else(default_fetch);
-        let response = fetch_metadata(url, &fetch, LATEST_PROTOCOL_VERSION).await?;
+        let response = fetch_metadata(url, &fetch, LATEST_PROTOCOL_VERSION, options.signal.clone()).await?;
         if !response.ok() {
             let status = response.status();
             discard(Some(&response));
@@ -281,6 +286,7 @@ pub async fn discover_oauth_server_info(
             fetch: options.fetch,
             protocol_version: None,
             skip_issuer_validation: options.skip_issuer_validation,
+            signal: options.signal,
         }),
     )
     .await?;
@@ -354,7 +360,12 @@ fn field(header: &str, name: &str) -> Option<String> {
     if val.is_empty() { None } else { Some(val.to_string()) }
 }
 
-async fn fetch_metadata(url: &url::Url, fetch: &McpFetch, protocol_version: &str) -> Result<Response> {
+async fn fetch_metadata(
+    url: &url::Url,
+    fetch: &McpFetch,
+    protocol_version: &str,
+    signal: Option<AbortSignal>,
+) -> Result<Response> {
     let mut headers = Headers::new();
     headers.set("Accept", "application/json");
     headers.set("MCP-Protocol-Version", protocol_version);
@@ -364,7 +375,7 @@ async fn fetch_metadata(url: &url::Url, fetch: &McpFetch, protocol_version: &str
             method: None,
             headers: Some(headers),
             body: None,
-            signal: None,
+            signal,
         }),
     )
     .await

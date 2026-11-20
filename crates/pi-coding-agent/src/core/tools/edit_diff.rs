@@ -1,7 +1,11 @@
 //! Port of packages/coding-agent/src/core/tools/edit-diff.ts (`7fbbd5f4a` + `#8544` fixes)
 
 use pi_js::vendor::jsdiff::diff::line::diff_lines;
-use pi_js::vendor::jsdiff::patch::create::{CreatePatchOptions, FILE_HEADERS_ONLY, create_two_files_patch};
+use pi_js::vendor::jsdiff::patch::create::{
+    CreatePatchOptions, FILE_HEADERS_ONLY, StructuredPatchOptions, create_two_files_patch, format_patch,
+    structured_patch,
+};
+use pi_js::vendor::jsdiff::types::{StructuredPatch, StructuredPatchHunk};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FuzzyMatchResult {
@@ -32,6 +36,14 @@ pub struct AppliedEdits {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffResult {
     pub diff: String,
+    pub first_changed_line: Option<usize>,
+}
+
+/// Display diff and unified patch of an edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditDiff {
+    pub diff: String,
+    pub patch: String,
     pub first_changed_line: Option<usize>,
 }
 
@@ -528,4 +540,289 @@ pub fn create_edit_patch(file_path: &str, old_content: &str, new_content: &str) 
     opts.context = Some(4.0);
     opts.header_options = Some(FILE_HEADERS_ONLY);
     create_two_files_patch(file_path, file_path, old_content, new_content, None, None, Some(opts))
+}
+
+const DIFF_WINDOW_MARGIN_LINES: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+struct DiffWindow {
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+    old_line: usize,
+    new_line: usize,
+}
+
+fn line_start_before(text: &str, offset: usize) -> usize {
+    let clamped = offset.min(text.len());
+    if clamped == 0 {
+        return 0;
+    }
+    text.as_bytes()[..clamped]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1)
+}
+
+fn line_end_after(text: &str, offset: usize) -> usize {
+    let clamped = offset.min(text.len());
+    if clamped >= text.len() {
+        return text.len();
+    }
+    text.as_bytes()[clamped..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(text.len(), |pos| clamped + pos + 1)
+}
+
+fn count_line_feeds(text: &str) -> usize {
+    text.bytes().filter(|&b| b == b'\n').count()
+}
+
+fn count_line_feeds_range(text: &str, start: usize, end: usize) -> usize {
+    text.as_bytes()[start.min(text.len())..end.min(text.len())]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+}
+
+fn get_diff_windows(base_content: &str, replacements: &[TextReplacement]) -> Vec<DiffWindow> {
+    let mut sorted: Vec<&TextReplacement> = replacements.iter().collect();
+    sorted.sort_by_key(|r| r.match_index);
+
+    let mut windows: Vec<DiffWindow> = Vec::new();
+    let mut offset_delta: isize = 0;
+    let mut line_delta: isize = 0;
+    let mut cursor_offset = 0usize;
+    let mut cursor_line = 0usize;
+
+    for rep in sorted {
+        let match_start = rep.match_index.min(base_content.len());
+        let match_end = rep.match_index.saturating_add(rep.match_length).min(base_content.len());
+
+        let mut start = line_start_before(base_content, match_start);
+        for _ in 0..DIFF_WINDOW_MARGIN_LINES {
+            if start == 0 {
+                break;
+            }
+            start = line_start_before(base_content, start - 1);
+        }
+
+        let mut end = match_end;
+        for i in 0..=DIFF_WINDOW_MARGIN_LINES {
+            if end >= base_content.len() {
+                break;
+            }
+            let probe = if i == 0 {
+                match_end.saturating_sub(1).max(match_start)
+            } else {
+                end
+            };
+            end = line_end_after(base_content, probe);
+        }
+
+        let rep_offset_delta = rep.new_text.len() as isize - (match_end - match_start) as isize;
+        let rep_line_delta = count_line_feeds(&rep.new_text) as isize
+            - count_line_feeds_range(base_content, match_start, match_end) as isize;
+        let last_merged = windows.last_mut().filter(|prev| start <= prev.old_end);
+        if let Some(prev) = last_merged {
+            prev.old_end = prev.old_end.max(end);
+            prev.new_end = (prev.old_end as isize + offset_delta + rep_offset_delta).max(0) as usize;
+        } else {
+            cursor_line += count_line_feeds_range(base_content, cursor_offset, start);
+            cursor_offset = start;
+            let new_start = (start as isize + offset_delta).max(0) as usize;
+            let new_end = (end as isize + offset_delta + rep_offset_delta).max(0) as usize;
+            let new_line = (cursor_line as isize + line_delta).max(0) as usize;
+            windows.push(DiffWindow {
+                old_start: start,
+                old_end: end,
+                new_start,
+                new_end,
+                old_line: cursor_line,
+                new_line,
+            });
+        }
+        offset_delta += rep_offset_delta;
+        line_delta += rep_line_delta;
+    }
+
+    windows
+}
+
+fn format_window_display_diff(
+    old_content: &str,
+    new_content: &str,
+    old_start_line: usize,
+    new_start_line: usize,
+    line_num_width: usize,
+    context: usize,
+) -> (Vec<String>, Option<usize>) {
+    let parts = diff_lines(old_content, new_content, None);
+    let mut output: Vec<String> = Vec::new();
+    let mut old_line_num = old_start_line;
+    let mut new_line_num = new_start_line;
+    let mut last_was_change = false;
+    let mut first_changed_line: Option<usize> = None;
+
+    for idx in 0..parts.len() {
+        let part = &parts[idx];
+        let mut raw_lines: Vec<&str> = part.value.split('\n').collect();
+        if raw_lines.last() == Some(&"") {
+            raw_lines.pop();
+        }
+
+        if part.added || part.removed {
+            if first_changed_line.is_none() {
+                first_changed_line = Some(new_line_num);
+            }
+            for line in &raw_lines {
+                if part.added {
+                    output.push(format!("+{new_line_num:>line_num_width$} {line}"));
+                    new_line_num += 1;
+                } else {
+                    output.push(format!("-{old_line_num:>line_num_width$} {line}"));
+                    old_line_num += 1;
+                }
+            }
+            last_was_change = true;
+        } else {
+            let next_part_is_change = parts.get(idx + 1).is_some_and(|next| next.added || next.removed);
+            if last_was_change && next_part_is_change {
+                if raw_lines.len() > context.saturating_mul(2) {
+                    for line in &raw_lines[..context] {
+                        output.push(format!(" {old_line_num:>line_num_width$} {line}"));
+                        old_line_num += 1;
+                        new_line_num += 1;
+                    }
+                    let skipped = raw_lines.len() - context * 2;
+                    output.push(format!(" {:>line_num_width$} ...", ""));
+                    old_line_num += skipped;
+                    new_line_num += skipped;
+                    for line in &raw_lines[raw_lines.len() - context..] {
+                        output.push(format!(" {old_line_num:>line_num_width$} {line}"));
+                        old_line_num += 1;
+                        new_line_num += 1;
+                    }
+                } else {
+                    for line in &raw_lines {
+                        output.push(format!(" {old_line_num:>line_num_width$} {line}"));
+                        old_line_num += 1;
+                        new_line_num += 1;
+                    }
+                }
+            } else if last_was_change || next_part_is_change {
+                let mut lines_to_show = raw_lines.clone();
+                let mut skip_start = 0usize;
+                let mut skip_end = 0usize;
+                if !last_was_change {
+                    skip_start = raw_lines.len().saturating_sub(context);
+                    lines_to_show = raw_lines[skip_start..].to_vec();
+                }
+                if !next_part_is_change && lines_to_show.len() > context {
+                    skip_end = lines_to_show.len() - context;
+                    lines_to_show.truncate(context);
+                }
+                if skip_start > 0 {
+                    output.push(format!(" {:>line_num_width$} ...", ""));
+                    old_line_num += skip_start;
+                    new_line_num += skip_start;
+                }
+                for line in &lines_to_show {
+                    output.push(format!(" {old_line_num:>line_num_width$} {line}"));
+                    old_line_num += 1;
+                    new_line_num += 1;
+                }
+                if skip_end > 0 {
+                    output.push(format!(" {:>line_num_width$} ...", ""));
+                    old_line_num += skip_end;
+                    new_line_num += skip_end;
+                }
+            } else {
+                old_line_num += raw_lines.len();
+                new_line_num += raw_lines.len();
+            }
+            last_was_change = false;
+        }
+    }
+
+    (output, first_changed_line)
+}
+
+/// Diff an edit only around its replacements, returning display diff, unified patch, and first changed line.
+pub fn generate_edit_diff(
+    path: &str,
+    base_content: &str,
+    new_content: &str,
+    replacements: &[TextReplacement],
+    context_lines: Option<usize>,
+) -> EditDiff {
+    if replacements.is_empty() {
+        let diff_res = generate_diff_string(base_content, new_content, context_lines);
+        let patch = create_edit_patch(path, base_content, new_content);
+        return EditDiff {
+            diff: diff_res.diff,
+            patch,
+            first_changed_line: diff_res.first_changed_line,
+        };
+    }
+
+    let context = context_lines.unwrap_or(4);
+    let max_line_num = (count_line_feeds(base_content) + 1)
+        .max(count_line_feeds(new_content) + 1)
+        .max(1);
+    let line_num_width = max_line_num.to_string().len();
+    let skip_marker = format!(" {:>line_num_width$} ...", "");
+    let mut output: Vec<String> = Vec::new();
+    let mut hunks: Vec<StructuredPatchHunk> = Vec::new();
+    let mut first_changed_line: Option<usize> = None;
+
+    for w in get_diff_windows(base_content, replacements) {
+        let old_slice = &base_content[w.old_start..w.old_end];
+        let new_slice = &new_content[w.new_start..w.new_end];
+        let (mut shown_lines, shown_first) = format_window_display_diff(
+            old_slice,
+            new_slice,
+            w.old_line + 1,
+            w.new_line + 1,
+            line_num_width,
+            context,
+        );
+        if first_changed_line.is_none() {
+            first_changed_line = shown_first;
+        }
+        if output.last().is_some_and(|l| l == &skip_marker) && shown_lines.first().is_some_and(|l| l == &skip_marker) {
+            shown_lines.remove(0);
+        }
+        output.extend(shown_lines);
+
+        let patch_opts = StructuredPatchOptions {
+            context: Some(context as f64),
+            ..Default::default()
+        };
+        let window_patch = structured_patch(path, path, old_slice, new_slice, None, None, Some(patch_opts));
+        for mut hunk in window_patch.hunks {
+            hunk.old_start += w.old_line as f64;
+            hunk.new_start += w.new_line as f64;
+            hunks.push(hunk);
+        }
+    }
+
+    let patch = format_patch(
+        &StructuredPatch {
+            old_file_name: Some(path.to_string()),
+            new_file_name: Some(path.to_string()),
+            old_header: None,
+            new_header: None,
+            hunks,
+            index: None,
+        },
+        Some(FILE_HEADERS_ONLY),
+    );
+    EditDiff {
+        diff: output.join("\n"),
+        patch,
+        first_changed_line,
+    }
 }

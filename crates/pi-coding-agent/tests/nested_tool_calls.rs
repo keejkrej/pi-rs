@@ -32,6 +32,7 @@ fn make_usage(input: i64, cost: f64) -> Usage {
             cache_read: 0.0,
             cache_write: 0.0,
             total: cost,
+            total_from_provider: None,
         },
     }
 }
@@ -41,7 +42,9 @@ fn empty_tool(name: &str, mode: Option<ToolExecutionMode>, execute: AgentToolExe
         name: name.to_owned(),
         label: name.to_owned(),
         description: name.to_owned(),
-        parameters: pi_js::json::parse_as::<Schema>(r#"{"type":"object","properties":{}}"#).unwrap(),
+        parameters: pi_js::json::parse_as::<Schema>(r#"{"type":"object","properties":{}}"#)
+            .unwrap()
+            .into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: mode,
@@ -86,6 +89,7 @@ impl NestedToolCallHost for MockHost {
                 tool_call: tool_call.clone(),
                 result: AgentToolResult::text(format!("Tool {} not found", tool_call.name)),
                 is_error: true,
+                duration_ms: None,
             };
         };
 
@@ -111,12 +115,14 @@ impl NestedToolCallHost for MockHost {
                     tool_call,
                     result,
                     is_error: is_err,
+                    duration_ms: None,
                 }
             }
             Err(err) => AgentToolCallOutcome {
                 tool_call,
                 result: AgentToolResult::text(err.to_string()),
                 is_error: true,
+                duration_ms: None,
             },
         }
     }

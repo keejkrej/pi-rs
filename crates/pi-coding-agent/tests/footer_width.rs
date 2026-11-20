@@ -28,6 +28,7 @@ fn make_usage(input: i64, output: i64, total_cost: f64) -> Usage {
             cache_read: 0.0,
             cache_write: 0.0,
             total: total_cost,
+            total_from_provider: None,
         },
     }
 }

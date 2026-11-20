@@ -23,8 +23,8 @@ use serde_json::Value;
 
 pub use super::system_theme::SYSTEM_THEME_NAME;
 use super::system_theme::{SystemThemeInput, generate_system_theme_colors, terminal_appearance};
-use super::theme_json::ThemeColorValue;
-pub use super::theme_json::ValidatedThemeJson as ThemeJson;
+use super::theme_schema::ThemeColorValue;
+pub use super::theme_schema::ValidatedThemeJson as ThemeJson;
 
 pub type ThemeJsonValidator = Arc<dyn Fn(&str, &Value) -> pi_js::Result<ThemeJson> + Send + Sync>;
 
@@ -1063,7 +1063,7 @@ static BUILTIN_THEMES: OnceLock<(ThemeJson, ThemeJson)> = OnceLock::new();
 
 fn parse_builtin_theme_str(label: &str, raw: &str) -> ThemeJson {
     let val: Value = pi_js::json::parse(strip_bom(raw)).unwrap_or(Value::Null);
-    super::theme_json::validate_theme_json(label, &val).unwrap_or_else(|_| ThemeJson {
+    super::theme_schema::validate_theme_json(label, &val).unwrap_or_else(|_| ThemeJson {
         schema: None,
         name: label.to_string(),
         appearance: None,
@@ -1251,8 +1251,8 @@ fn create_theme(
     )?;
     let (fg_colors, bg_colors) = split_theme_colors(&resolved_colors);
     let appearance = theme_json.appearance.map(|a| match a {
-        super::theme_json::ThemeJsonAppearance::Dark => ThemeAppearance::Dark,
-        super::theme_json::ThemeJsonAppearance::Light => ThemeAppearance::Light,
+        super::theme_schema::ThemeJsonAppearance::Dark => ThemeAppearance::Dark,
+        super::theme_schema::ThemeJsonAppearance::Light => ThemeAppearance::Light,
     });
     Theme::from_token_maps(
         &fg_colors,

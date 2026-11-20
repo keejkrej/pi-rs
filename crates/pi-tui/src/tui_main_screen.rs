@@ -627,13 +627,15 @@ impl TuiBaseOverrides for TuiMainScreen {
         };
 
         // Render all components to get new lines
+        // Resolve fake cursors before compositing so overlays and line slicing see plain SGR codes
         // Drop OSC 133 markers: the terminal reads 133;A as a new shell prompt, which ends program status (OSC 7501)
         let render_width = usize::try_from(width.max(0)).unwrap_or(0);
-        let mut new_lines: Vec<String> = self
-            .render(render_width)
-            .into_iter()
-            .map(|line| strip_osc133_zone_prefix(&line))
-            .collect();
+        let mut new_lines = self.base().resolve_fake_cursors(
+            self.render(render_width)
+                .into_iter()
+                .map(|line| strip_osc133_zone_prefix(&line))
+                .collect(),
+        );
 
         // Composite overlays into the rendered lines (before differential compare)
         if self.has_overlay_entries() {

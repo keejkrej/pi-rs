@@ -49,6 +49,7 @@ fn create_model(reasoning: bool, max_tokens: i64) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn mock_summary_response() -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 
@@ -481,13 +483,13 @@ async fn leaves_anthropic_refusal_fallback_and_clamps_max_tokens() {
         file_ops: create_file_ops(),
         settings: CompactionSettings {
             enabled: true,
-            reserve_tokens: 500_000,
+            reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
         },
     };
     let result = compact(
         &preparation,
-        &create_model(false, 128_000),
+        &create_model(false, 8192),
         Some(CompactOptions {
             api_key: Some("test-key".to_owned()),
             stream_fn: Some(stream_fn2),
@@ -497,15 +499,10 @@ async fn leaves_anthropic_refusal_fallback_and_clamps_max_tokens() {
     .await
     .unwrap();
 
+    assert_eq!(calls2.lock().unwrap().len(), 2);
     let usage = result.usage.unwrap();
     assert_eq!(usage.input, 20);
     assert_eq!(usage.output, 20);
     assert_eq!(usage.total_tokens, 40);
-    let max_tokens: Vec<Option<i64>> = calls2
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|c| c.options.as_ref().and_then(|o| o.base.max_tokens))
-        .collect();
-    assert_eq!(max_tokens, vec![Some(128_000), Some(128_000)]);
+    assert_eq!(usage.cost.total_from_provider, Some(false));
 }

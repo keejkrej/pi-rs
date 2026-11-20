@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::JsonValue;
 use crate::utils::diagnostics::format_thrown_value;
 use crate::utils::provider_retry::ProviderHttpError;
+use crate::utils::text::owned_slice;
 
 pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4000;
+const MAX_CAUSE_DEPTH: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,15 +116,91 @@ pub fn normalize_sdk_error(info: &SdkErrorInfo) -> NormalizedProviderError {
     }
 }
 
+fn unwrap_error_source<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a (dyn std::error::Error + 'static)> {
+    if let Some(js) = err.downcast_ref::<pi_js::Error>() {
+        return match js {
+            pi_js::Error::Js(j) => j.cause.as_deref().map(|e| e as &(dyn std::error::Error + 'static)),
+            pi_js::Error::Typed(_, inner) => inner.source(),
+            pi_js::Error::Node(n) => std::error::Error::source(n),
+            pi_js::Error::Abort(_) | pi_js::Error::Exit(_) => None,
+        };
+    }
+    err.source()
+}
+
+pub fn with_cause_detail(error: &pi_js::Error) -> String {
+    let base_message = format_thrown_value(error);
+    let mut deepest: Option<&(dyn std::error::Error + 'static)> = None;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = unwrap_error_source(error);
+    for _ in 0..MAX_CAUSE_DEPTH {
+        let Some(err) = current else {
+            break;
+        };
+        deepest = Some(err);
+        current = unwrap_error_source(err);
+    }
+    let Some(deepest_err) = deepest else {
+        return base_message;
+    };
+
+    let mut detail = deepest_err.to_string().trim().to_owned();
+    let code = deepest_err
+        .downcast_ref::<pi_js::Error>()
+        .and_then(|e| e.code().map(str::to_owned))
+        .or_else(|| {
+            deepest_err
+                .downcast_ref::<pi_js::error::JsError>()
+                .and_then(|e| e.code.clone())
+        })
+        .or_else(|| {
+            deepest_err
+                .downcast_ref::<pi_js::error::NodeError>()
+                .map(|e| e.code.clone())
+        });
+    if detail.is_empty()
+        && let Some(js) = deepest_err.downcast_ref::<pi_js::Error>()
+    {
+        detail = js.name().to_owned();
+    }
+    if let Some(c) = code
+        && !detail.contains(&c)
+    {
+        detail = if detail.is_empty() {
+            c
+        } else {
+            format!("{detail} ({c})")
+        };
+    }
+    if detail.is_empty() || base_message.contains(&detail) {
+        return base_message;
+    }
+    if base_message.is_empty() {
+        detail
+    } else {
+        format!("{base_message}: {detail}")
+    }
+}
+
 pub fn normalize_provider_error(error: &pi_js::Error) -> NormalizedProviderError {
     if let Some(sdk) = error.downcast_ref::<SdkErrorInfo>() {
-        return normalize_sdk_error(sdk);
+        let mut norm = normalize_sdk_error(sdk);
+        if norm.status.is_none() && norm.body.is_none() {
+            norm.message = with_cause_detail(error);
+        }
+        return norm;
     }
     if let Some(http) = error.downcast_ref::<ProviderHttpError>() {
+        let message = if http.status.is_none() {
+            with_cause_detail(error)
+        } else {
+            http.message.clone()
+        };
         return NormalizedProviderError {
             status: http.status,
             body: None,
-            message: http.message.clone(),
+            message,
             message_carries_body: true,
         };
     }
@@ -130,7 +208,7 @@ pub fn normalize_provider_error(error: &pi_js::Error) -> NormalizedProviderError
     NormalizedProviderError {
         status: None,
         body: None,
-        message: format_thrown_value(error),
+        message: with_cause_detail(error),
         message_carries_body: true,
     }
 }
@@ -157,7 +235,7 @@ pub fn truncate_error_text(text: &str, max_chars: usize) -> String {
     if total_chars <= max_chars {
         return text.to_string();
     }
-    let head = pi_js::str16::slice(text, 0, Some(max_chars as i64));
+    let head = owned_slice(text, 0, Some(max_chars));
     format!("{head}... [truncated {} chars]", total_chars - max_chars)
 }
 

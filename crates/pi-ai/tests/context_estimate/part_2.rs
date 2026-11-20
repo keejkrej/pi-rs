@@ -37,6 +37,7 @@ fn create_assistant(timestamp: i64, total_tokens: i64) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp,
+        duration_ms: None,
     }
 }
 
@@ -59,7 +60,34 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
+}
+
+// Regression for #10497: large new inputs need more room than chars/4 allows.
+#[test]
+fn reserves_3_5_characters_per_token_for_new_text_when_limiting_output() {
+    let context = normalize_context(&Context {
+        system_prompt: None,
+        messages: vec![
+            Message::Assistant(create_assistant(100, 2_000)),
+            Message::User(UserMessage {
+                content: UserMessageContent::Text("x".repeat(3_500)),
+                timestamp: 200,
+            }),
+        ],
+        tools: None,
+    });
+
+    let est = estimate_context_tokens(&context);
+    assert_eq!(est.tokens, 3_000);
+    assert_eq!(est.usage_tokens, 2_000);
+    assert_eq!(est.trailing_tokens, 1_000);
+    assert_eq!(est.last_usage_index, Some(0));
+    assert_eq!(
+        build_base_options(&test_model(), &context, None, None).max_tokens,
+        Some(2_904)
+    );
 }
 
 #[test]
@@ -81,14 +109,14 @@ fn ignores_stale_assistant_usage_after_newer_message_inserted_before_it() {
     });
 
     let est = estimate_context_tokens(&context);
-    assert_eq!(est.tokens, 1_005);
+    assert_eq!(est.tokens, 1_149);
     assert_eq!(est.usage_tokens, 0);
-    assert_eq!(est.trailing_tokens, 1_005);
+    assert_eq!(est.trailing_tokens, 1_149);
     assert_eq!(est.last_usage_index, None);
 
     assert_eq!(
         build_base_options(&test_model(), &context, None, None).max_tokens,
-        Some(4_899)
+        Some(4_755)
     );
 }
 
@@ -116,8 +144,8 @@ fn uses_assistant_usage_again_after_response_to_inserted_context() {
     });
 
     let est = estimate_context_tokens(&context);
-    assert_eq!(est.tokens, 2_001);
+    assert_eq!(est.tokens, 2_002);
     assert_eq!(est.usage_tokens, 2_000);
-    assert_eq!(est.trailing_tokens, 1);
+    assert_eq!(est.trailing_tokens, 2);
     assert_eq!(est.last_usage_index, Some(3));
 }

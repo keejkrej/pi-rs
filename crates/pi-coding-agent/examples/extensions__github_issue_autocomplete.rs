@@ -62,6 +62,7 @@ async fn resolve_github_repo(pi: &ExtensionApi, cwd: &str) -> Result<String, Str
                 signal: None,
                 timeout: Some(5_000),
                 cwd: Some(cwd.to_string()),
+                max_buffer: None,
             }),
         )
         .await
@@ -148,6 +149,7 @@ impl IssueLoader {
                             signal: None,
                             timeout: Some(5_000),
                             cwd: Some(self.cwd.clone()),
+                            max_buffer: None,
                         }),
                     )
                     .await

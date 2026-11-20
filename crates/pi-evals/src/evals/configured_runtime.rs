@@ -94,18 +94,6 @@ fn model_fields(model: &Model) -> ModelFields {
     }
 }
 
-/// Loads an offline [`ModelRuntime`] configured from an isolated agent directory.
-pub async fn load_configured_model_runtime(agent_dir: &str) -> Result<ModelRuntime> {
-    ModelRuntime::create(CreateModelRuntimeOptions {
-        models_path: Some(Some(pi_js::path::join(&[agent_dir, "models.json"]))),
-        auth_path: Some(pi_js::path::join(&[agent_dir, "auth.json"])),
-        models_store_path: Some(pi_js::path::join(&[agent_dir, "models-store.json"])),
-        allow_model_network: Some(false),
-        ..Default::default()
-    })
-    .await
-}
-
 /// Refreshes `runtime`, checks configuration health, and runs a completion probe for `scenario`.
 pub async fn inspect_provider(runtime: &ModelRuntime, scenario: ProviderScenario) -> Result<ProviderRuntimeOutput> {
     runtime

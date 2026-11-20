@@ -81,6 +81,7 @@ fn test_chat_model(id: &str) -> ProviderModelConfig {
         max_tokens: 1000,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     })
 }
 
@@ -522,6 +523,7 @@ async fn transforms_fully_assembled_headers_once_without_forwarding_transform() 
                     max_tokens: 1000,
                     sampling_params: None,
                     compat: None,
+                    sampling_params_by_thinking_level: None,
                 })]),
                 ..Default::default()
             },
@@ -649,8 +651,8 @@ async fn forwards_cancellation_to_extension_oauth_refresh() {
 
     let captured = refresh_signal.lock().unwrap().clone().expect("refresh signal");
     ctrl.abort(Some(AbortReason::error("Error", "cancelled")));
-    assert!(captured.aborted());
-    assert_eq!(captured.reason(), Some(AbortReason::error("Error", "cancelled")));
+    // A started refresh may already have rotated the refresh token and must be persisted (#11812).
+    assert!(!captured.aborted());
 }
 
 #[tokio::test]

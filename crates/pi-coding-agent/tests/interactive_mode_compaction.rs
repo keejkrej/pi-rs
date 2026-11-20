@@ -926,6 +926,7 @@ fn uses_the_cache_miss_notice_setting_for_compaction_and_branch_summary_costs() 
             cache_read: 0.03,
             cache_write: 0.065,
             total: 0.125,
+            total_from_provider: None,
         },
     };
     let entries = vec![
@@ -1004,6 +1005,7 @@ fn renders_each_compaction_cost_after_its_summary() {
             cache_read: 0.03,
             cache_write: 0.04,
             total: 0.1,
+            total_from_provider: None,
         },
     };
     let previous_usage = Usage {
@@ -1020,6 +1022,7 @@ fn renders_each_compaction_cost_after_its_summary() {
             cache_read: 0.003,
             cache_write: 0.004,
             total: 0.01,
+            total_from_provider: None,
         },
     };
     let entries = vec![
@@ -1090,6 +1093,7 @@ async fn renders_retained_entries_and_appends_the_latest_summary_cost_at_the_bot
             cache_read: 0.03,
             cache_write: 0.065,
             total: 0.125,
+            total_from_provider: None,
         },
     };
     let latest = SessionEntry::Compaction(CompactionEntry {

@@ -10,9 +10,9 @@ use pi_tui::{
     CombinedAutocompleteProvider, Component, Container, SlashCommand, Spacer, Text, set_capability_overrides,
 };
 
-use crate::modes::interactive::components::armin_3d_lazy::play_pi_logo_3d;
 use crate::modes::interactive::components::custom_editor::{CustomEditor, CustomEditorOptions};
 use crate::modes::interactive::components::dynamic_border::DynamicBorder;
+use crate::modes::interactive::components::easter_egg_3d_lazy::play_pi_logo_3d;
 use crate::modes::interactive::components::footer::{FooterComponent, ReadonlyFooterDataProvider};
 use crate::modes::interactive::components::keybinding_hints::{key_hint, key_text, raw_key_hint};
 use crate::modes::interactive::components::mermaid::MermaidTransformerOptions;
@@ -803,7 +803,19 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) fn show_startup_notices_if_needed(&self) {
+    #[doc(hidden)]
+    pub fn set_startup_notices_for_test(
+        &self,
+        changelog_markdown: Option<String>,
+        extension_changelog_updates: Vec<ExtensionChangelogUpdate>,
+    ) {
+        let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.startup_notices_shown = false;
+        st.changelog_markdown = changelog_markdown;
+        st.extension_changelog_updates = extension_changelog_updates;
+    }
+
+    pub fn show_startup_notices_if_needed(&self) {
         let (changelog_md, ext_updates) = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.startup_notices_shown {

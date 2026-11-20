@@ -27,10 +27,12 @@ pub fn set_image_transcoder(transcoder: Option<ImageTranscoder>) {
 
 fn to_png(base64_data: &str, mime_type: &str) -> Option<String> {
     let transcoder = IMAGE_TRANSCODER.lock().unwrap().clone()?;
-    if let Some(cached) = PNG_CACHE.lock().unwrap().shift_remove(base64_data) {
+    {
         let mut cache = PNG_CACHE.lock().unwrap();
-        cache.insert(base64_data.to_string(), cached.clone());
-        return cached;
+        if let Some(cached) = cache.shift_remove(base64_data) {
+            cache.insert(base64_data.to_string(), cached.clone());
+            return cached;
+        }
     }
     let png = transcoder(base64_data, mime_type);
     let mut cache = PNG_CACHE.lock().unwrap();

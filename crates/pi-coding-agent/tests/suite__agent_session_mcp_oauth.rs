@@ -208,6 +208,7 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
         }),
         source: "test".to_string(),
         scope: None,
+        override_path: None,
     };
     let notifications = Arc::new(Mutex::new(Vec::<String>::new()));
     let opened = Arc::new(Mutex::new(Vec::<url::Url>::new()));
@@ -229,6 +230,7 @@ async fn setup(browser: BrowserBehavior, oauth: Option<McpOAuthConfig>) -> OAuth
                         servers: vec![entry_c.clone()],
                         auto_enable_codemode: None,
                         errors: vec![],
+                        project_config: None,
                     })),
                     credentials: Some(creds),
                     open_url: Some(Arc::new(move |url_str| {
@@ -611,6 +613,7 @@ async fn uses_credentials_from_pi_mcp_login_on_the_next_turn() {
             cwd: agent_dir.clone(),
             agent_dir: agent_dir.clone(),
             credentials: Some(McpOAuthCredentialStore::new(Some(backend_dyn), None)),
+            provider_token: None,
             open_url: Some(Arc::new(|url_str| {
                 let u = url_str.to_string();
                 tokio::spawn(async move {

@@ -20,11 +20,14 @@ use crate::config::CONFIG_DIR_NAME;
 use crate::core::output_guard::is_stdout_taken_over;
 use crate::core::pi_manifest::{PiManifest, read_pi_manifest};
 use crate::core::settings_manager::{PackageFilterSource, PackageSource, Settings, SettingsManager};
-use crate::core::source_info::{BUILTIN_PATH_PREFIX, PathMetadata as SourcePathMetadata, SourceOrigin, SourceScope};
+use crate::core::source_info::{
+    BUILTIN_PATH_PREFIX, PathMetadata as SourcePathMetadata, SourceOrigin, SourceScope, get_resource_path_key,
+};
 use crate::utils::child_process::{SpawnProcessOptions, spawn_process, spawn_process_sync, wait_for_child_process};
 use crate::utils::git::{GitSource, parse_git_url};
 use crate::utils::paths::{
-    PathInputOptions, canonicalize_path, is_local_path, mark_path_ignored_by_cloud_sync, resolve_path,
+    PathInputOptions, canonicalize_path, get_path_comparison_key, is_local_path, is_path_within,
+    mark_path_ignored_by_cloud_sync, normalize_path, paths_equal, resolve_path,
 };
 use crate::utils::text::strip_bom;
 use crate::vendor::minimatch::minimatch;
@@ -44,7 +47,8 @@ static REMOTE_COMMIT_RE: LazyLock<Regex> =
 static REMOTE_HEAD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^([0-9a-f]{40})\s+HEAD$").expect("valid regex"));
 
-pub(crate) fn is_offline_mode_enabled() -> bool {
+/// Whether `PI_OFFLINE` is set; package installs and updates then skip all network access.
+pub fn is_offline_mode_enabled() -> bool {
     let Some(value) = pi_js::env::var("PI_OFFLINE") else {
         return false;
     };
@@ -114,6 +118,14 @@ pub struct ResolvedResource {
     pub metadata: PathMetadata,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInstallFailure {
+    pub source: String,
+    pub scope: SourceScope,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedPaths {
@@ -121,6 +133,8 @@ pub struct ResolvedPaths {
     pub skills: Vec<ResolvedResource>,
     pub prompts: Vec<ResolvedResource>,
     pub themes: Vec<ResolvedResource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_failures: Option<Vec<PackageInstallFailure>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +152,7 @@ pub enum ProgressEventType {
     Progress,
     Complete,
     Error,
+    Result,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -283,6 +298,8 @@ struct NpmUpdateTarget {
     source: String,
     scope: InstalledSourceScope,
     parsed: NpmSource,
+    installed_version: Option<String>,
+    target_version: Option<String>,
 }
 
 #[derive(Clone)]
@@ -290,6 +307,15 @@ struct GitUpdateTarget {
     source: String,
     scope: InstalledSourceScope,
     parsed: GitSource,
+}
+
+#[derive(Clone)]
+struct UpdatedPackage {
+    source: String,
+    scope: InstalledSourceScope,
+    pkg_type: PackageUpdateType,
+    from: Option<String>,
+    to: Option<String>,
 }
 
 #[derive(Clone)]
@@ -772,6 +798,38 @@ fn collect_resource_files(dir: &str, kind: ResourceKind) -> Vec<String> {
     }
 }
 
+fn has_manifest_resource_fields(manifest: &PiManifest) -> bool {
+    manifest.extensions.is_some()
+        || manifest.skills.is_some()
+        || manifest.prompts.is_some()
+        || manifest.themes.is_some()
+}
+
+fn is_path_inside(parent: &str, child: &str) -> bool {
+    is_path_within(parent, child) && !paths_equal(parent, child)
+}
+
+fn resolve_package_changelog_path(package_root: &str, manifest: Option<&PiManifest>) -> Option<String> {
+    let changelog_path = manifest
+        .and_then(|m| m.changelog_path.as_deref())
+        .unwrap_or("CHANGELOG.md");
+    if changelog_path.is_empty() {
+        return None;
+    }
+    let resolved_path = resolve(&[package_root, changelog_path]);
+    if !exists(&resolved_path) {
+        return None;
+    }
+    let canonical_root = canonicalize_path(package_root);
+    let canonical_changelog = canonicalize_path(&resolved_path);
+    if !is_path_inside(&canonical_root, &canonical_changelog) {
+        return None;
+    }
+    stat(&resolved_path)
+        .ok()
+        .and_then(|s| s.is_file().then_some(resolved_path))
+}
+
 fn matches_any_pattern(file_path: &str, patterns: &[String], base_dir: &str) -> bool {
     let rel = to_posix_path(&relative(base_dir, file_path));
     let name = basename(file_path, None);
@@ -783,7 +841,7 @@ fn matches_any_pattern(file_path: &str, patterns: &[String], base_dir: &str) -> 
     let parent_dir_posix = parent_dir.as_ref().map(|pd| to_posix_path(pd));
 
     patterns.iter().any(|pattern| {
-        let norm = to_posix_path(pattern);
+        let norm = to_posix_path(&normalize_path(pattern, PathInputOptions::default()));
         if minimatch(&rel, &norm, None) || minimatch(&name, &norm, None) || minimatch(&file_path_posix, &norm, None) {
             return true;
         }
@@ -803,7 +861,7 @@ fn normalize_exact_pattern(pattern: &str) -> String {
         .strip_prefix("./")
         .or_else(|| pattern.strip_prefix(".\\"))
         .unwrap_or(pattern);
-    to_posix_path(stripped)
+    to_posix_path(&normalize_path(stripped, PathInputOptions::default()))
 }
 
 fn matches_any_exact_pattern(file_path: &str, patterns: &[String], base_dir: &str) -> bool {
@@ -1151,7 +1209,8 @@ impl DefaultPackageManager {
         }
 
         let package_sources = self.dedupe_packages(all_packages)?;
-        self.resolve_package_sources(&package_sources, &mut accumulator, on_missing.as_ref())
+        let install_failures = self
+            .resolve_package_sources(&package_sources, &mut accumulator, on_missing.as_ref())
             .await?;
 
         let global_base_dir = self.inner.agent_dir.clone();
@@ -1232,7 +1291,9 @@ impl DefaultPackageManager {
             );
         }
 
-        Ok(Self::to_resolved_paths(accumulator))
+        let mut resolved = Self::to_resolved_paths(accumulator);
+        resolved.install_failures = Some(install_failures);
+        Ok(resolved)
     }
 
     pub async fn resolve_extension_sources(
@@ -1273,9 +1334,12 @@ impl DefaultPackageManager {
             .filter(|s| !s.starts_with(BUILTIN_PATH_PREFIX))
             .map(|s| (PackageSource::String(s.clone()), scope))
             .collect();
-        self.resolve_package_sources(&pkg_sources, &mut accumulator, None)
+        let install_failures = self
+            .resolve_package_sources(&pkg_sources, &mut accumulator, None)
             .await?;
-        Ok(Self::to_resolved_paths(accumulator))
+        let mut resolved = Self::to_resolved_paths(accumulator);
+        resolved.install_failures = Some(install_failures);
+        Ok(resolved)
     }
 
     pub fn list_configured_packages(&self) -> Result<Vec<ConfiguredPackage>> {
@@ -1421,6 +1485,8 @@ impl DefaultPackageManager {
                     source: entry.source.clone(),
                     scope: entry.scope,
                     parsed: npm,
+                    installed_version: None,
+                    target_version: None,
                 }),
                 ParsedSource::Git(git) => git_candidates.push(GitUpdateTarget {
                     source: entry.source.clone(),
@@ -1434,9 +1500,12 @@ impl DefaultPackageManager {
         let check_results = run_with_concurrency(
             npm_candidates
                 .into_iter()
-                .map(|entry| async move {
-                    let should = self.should_update_npm_source(&entry.parsed, entry.scope).await;
-                    Ok((entry, should))
+                .map(|mut entry| async move {
+                    let (should_update, installed_version, target_version) =
+                        self.should_update_npm_source(&entry.parsed, entry.scope).await;
+                    entry.installed_version = installed_version;
+                    entry.target_version = target_version;
+                    Ok((entry, should_update))
                 })
                 .collect(),
             UPDATE_CHECK_CONCURRENCY,
@@ -1445,16 +1514,19 @@ impl DefaultPackageManager {
 
         let mut user_npm_updates = Vec::new();
         let mut project_npm_updates = Vec::new();
+        let mut npm_updates = Vec::new();
         for (entry, should_update) in check_results {
             if !should_update {
                 continue;
             }
             match entry.scope {
-                InstalledSourceScope::User => user_npm_updates.push(entry),
-                InstalledSourceScope::Project => project_npm_updates.push(entry),
+                InstalledSourceScope::User => user_npm_updates.push(entry.clone()),
+                InstalledSourceScope::Project => project_npm_updates.push(entry.clone()),
             }
+            npm_updates.push(entry);
         }
 
+        let git_updates = Arc::new(Mutex::new(Vec::<UpdatedPackage>::new()));
         let user_fut = async {
             if !user_npm_updates.is_empty() {
                 self.update_npm_batch(&user_npm_updates, InstalledSourceScope::User)
@@ -1471,20 +1543,43 @@ impl DefaultPackageManager {
                 Ok(())
             }
         };
+        let git_candidates_ref = &git_candidates;
         let git_fut = async {
-            if git_candidates.is_empty() {
+            if git_candidates_ref.is_empty() {
                 return Ok(());
             }
-            let tasks: Vec<_> = git_candidates
-                .into_iter()
-                .map(|entry| async move {
-                    self.with_progress(
-                        ProgressAction::Update,
-                        &entry.source,
-                        &format!("Updating {}...", entry.source),
-                        || async { self.update_git(&entry.parsed, SourceScope::from(entry.scope)).await },
-                    )
-                    .await
+            let tasks: Vec<_> = git_candidates_ref
+                .iter()
+                .map(|entry| {
+                    let git_updates = Arc::clone(&git_updates);
+                    async move {
+                        self.with_progress(
+                            ProgressAction::Update,
+                            &entry.source,
+                            &format!("Updating {}...", entry.source),
+                            || async {
+                                let target_dir =
+                                    self.get_git_install_path(&entry.parsed, SourceScope::from(entry.scope))?;
+                                let from = self.get_git_head(&target_dir).await;
+                                self.update_git(&entry.parsed, SourceScope::from(entry.scope)).await?;
+                                let to = self.get_git_head(&target_dir).await;
+                                if from != to {
+                                    git_updates
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .push(UpdatedPackage {
+                                            source: entry.source.clone(),
+                                            scope: entry.scope,
+                                            pkg_type: PackageUpdateType::Git,
+                                            from,
+                                            to,
+                                        });
+                                }
+                                Ok(())
+                            },
+                        )
+                        .await
+                    }
                 })
                 .collect();
             let _ = run_with_concurrency(tasks, GIT_UPDATE_CONCURRENCY).await?;
@@ -1492,20 +1587,98 @@ impl DefaultPackageManager {
         };
 
         futures::future::try_join3(user_fut, proj_fut, git_fut).await?;
+
+        let mut updated: Vec<UpdatedPackage> = Vec::new();
+        for entry in &npm_updates {
+            if let Ok(installed_path) = self.get_managed_npm_install_path(&entry.parsed, SourceScope::from(entry.scope))
+            {
+                let to = if exists(&installed_path) {
+                    self.get_installed_npm_version(&installed_path)
+                } else {
+                    None
+                };
+                if to != entry.installed_version {
+                    updated.push(UpdatedPackage {
+                        source: entry.source.clone(),
+                        scope: entry.scope,
+                        pkg_type: PackageUpdateType::Npm,
+                        from: entry.installed_version.clone(),
+                        to,
+                    });
+                }
+            }
+        }
+        let git_updates_vec = git_updates.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        for entry in &git_candidates {
+            if let Some(u) = git_updates_vec
+                .iter()
+                .find(|u| u.source == entry.source && u.scope == entry.scope)
+            {
+                updated.push(u.clone());
+            }
+        }
+
+        for pkg in updated {
+            let format_ver = |v: Option<&str>| -> String {
+                match v {
+                    None => "(none)".to_owned(),
+                    Some(s) if pkg.pkg_type == PackageUpdateType::Git => s.chars().take(7).collect(),
+                    Some(s) => s.to_owned(),
+                }
+            };
+            let scope_suffix = if pkg.scope == InstalledSourceScope::Project {
+                " (project)"
+            } else {
+                ""
+            };
+            self.emit_progress(ProgressEvent {
+                event_type: ProgressEventType::Result,
+                action: ProgressAction::Update,
+                source: pkg.source.clone(),
+                message: Some(format!(
+                    "{}{} {} -> {}",
+                    pkg.source,
+                    scope_suffix,
+                    format_ver(pkg.from.as_deref()),
+                    format_ver(pkg.to.as_deref())
+                )),
+            });
+        }
         Ok(())
     }
 
-    async fn should_update_npm_source(&self, source: &NpmSource, scope: InstalledSourceScope) -> bool {
+    async fn get_git_head(&self, target_dir: &str) -> Option<String> {
+        if !exists(target_dir) {
+            return None;
+        }
+        self.run_command_capture(
+            "git",
+            &["rev-parse", "HEAD"],
+            Some(target_dir),
+            Some(NETWORK_TIMEOUT_MS),
+            None,
+        )
+        .await
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+    }
+
+    async fn should_update_npm_source(
+        &self,
+        source: &NpmSource,
+        scope: InstalledSourceScope,
+    ) -> (bool, Option<String>, Option<String>) {
         let Ok(installed_path) = self.get_managed_npm_install_path(source, SourceScope::from(scope)) else {
-            return true;
+            return (true, None, None);
         };
         let installed_version = if exists(&installed_path) {
             self.get_installed_npm_version(&installed_path)
         } else {
             None
         };
-        let Some(installed_ver) = installed_version else {
-            return true;
+        let Some(ref installed_ver) = installed_version else {
+            return (true, None, None);
         };
         let spec = if source.version.is_some() {
             source.spec.as_str()
@@ -1513,12 +1686,13 @@ impl DefaultPackageManager {
             source.name.as_str()
         };
         let Ok(target_version) = self.get_latest_npm_version(spec, source.range.as_ref()).await else {
-            return true;
+            return (true, installed_version, None);
         };
-        match (Version::parse(&target_version), Version::parse(&installed_ver)) {
+        let should = match (Version::parse(&target_version), Version::parse(installed_ver)) {
             (Ok(t), Ok(i)) => t > i,
             _ => true,
-        }
+        };
+        (should, installed_version, Some(target_version))
     }
 
     async fn update_npm_batch(&self, sources: &[NpmUpdateTarget], scope: InstalledSourceScope) -> Result<()> {
@@ -1553,7 +1727,38 @@ impl DefaultPackageManager {
         self.with_progress(ProgressAction::Update, &source_label, &message, || async {
             self.install_npm_batch(&specs, SourceScope::from(scope)).await
         })
-        .await
+        .await?;
+
+        self.report_unchanged_npm_updates(sources, scope);
+        Ok(())
+    }
+
+    fn report_unchanged_npm_updates(&self, sources: &[NpmUpdateTarget], scope: InstalledSourceScope) {
+        for entry in sources {
+            let (Some(installed_before), Some(target_ver)) =
+                (entry.installed_version.as_deref(), entry.target_version.as_deref())
+            else {
+                continue;
+            };
+            let Ok(installed_path) = self.get_managed_npm_install_path(&entry.parsed, SourceScope::from(scope)) else {
+                continue;
+            };
+            let Some(version_after) = self.get_installed_npm_version(&installed_path) else {
+                continue;
+            };
+            if version_after != installed_before {
+                continue;
+            }
+            self.emit_progress(ProgressEvent {
+                event_type: ProgressEventType::Progress,
+                action: ProgressAction::Update,
+                source: entry.source.clone(),
+                message: Some(format!(
+                    "{} is still {} (registry reports {}); npm registry metadata may be stale, try again in a few minutes",
+                    entry.source, version_after, target_ver
+                )),
+            });
+        }
     }
 
     async fn install_npm_batch(&self, specs: &[String], scope: SourceScope) -> Result<()> {
@@ -1641,7 +1846,8 @@ impl DefaultPackageManager {
         sources: &[(PackageSource, SourceScope)],
         accumulator: &mut ResourceAccumulator,
         on_missing: Option<&MissingSourceCallback>,
-    ) -> Result<()> {
+    ) -> Result<Vec<PackageInstallFailure>> {
+        let mut install_failures = Vec::new();
         for (pkg, scope) in sources {
             let source_str = Self::get_package_source_string(pkg);
             let filter = match pkg {
@@ -1673,6 +1879,19 @@ impl DefaultPackageManager {
                     let mut installed_path = self.get_npm_install_path(&npm, resolved_scope)?;
                     let needs_install = !exists(&installed_path)
                         || !self.installed_npm_matches_configured_version(&npm, &installed_path);
+                    if !needs_install
+                        && resolved_scope == SourceScope::Temporary
+                        && !npm.pinned
+                        && self.npm_has_available_update(&npm, &installed_path).await
+                    {
+                        let spec = if npm.version.is_some() {
+                            npm.spec.clone()
+                        } else {
+                            format!("{}@latest", npm.name)
+                        };
+                        let refreshed = NpmSource { spec, ..npm.clone() };
+                        let _ = self.install_npm(&refreshed, resolved_scope, true).await;
+                    }
                     if needs_install {
                         let installed = self
                             .install_missing(
@@ -1680,6 +1899,7 @@ impl DefaultPackageManager {
                                 &ParsedSource::Npm(npm.clone()),
                                 resolved_scope,
                                 on_missing,
+                                &mut install_failures,
                             )
                             .await?;
                         if !installed {
@@ -1700,13 +1920,15 @@ impl DefaultPackageManager {
                                 &ParsedSource::Git(git.clone()),
                                 resolved_scope,
                                 on_missing,
+                                &mut install_failures,
                             )
                             .await?;
                         if !installed {
                             continue;
                         }
-                    } else if resolved_scope == SourceScope::Temporary && !git.pinned && !is_offline_mode_enabled() {
-                        self.refresh_temporary_git_source(&git, &resolved_source).await;
+                    } else if resolved_scope == SourceScope::Temporary && !is_offline_mode_enabled() {
+                        self.refresh_temporary_git_source(&git, &resolved_source, &installed_path)
+                            .await;
                     }
                     metadata.base_dir = Some(installed_path.clone());
                     metadata.package_root = Some(installed_path.clone());
@@ -1714,7 +1936,7 @@ impl DefaultPackageManager {
                 }
             }
         }
-        Ok(())
+        Ok(install_failures)
     }
 
     async fn install_missing(
@@ -1723,6 +1945,7 @@ impl DefaultPackageManager {
         parsed: &ParsedSource,
         resolved_scope: SourceScope,
         on_missing: Option<&MissingSourceCallback>,
+        install_failures: &mut Vec<PackageInstallFailure>,
     ) -> Result<bool> {
         if is_offline_mode_enabled() {
             return Ok(false);
@@ -1737,15 +1960,25 @@ impl DefaultPackageManager {
                 MissingSourceAction::Install => {}
             }
         }
-        match parsed {
+        let res = match parsed {
             ParsedSource::Npm(npm) => {
                 self.install_npm(npm, resolved_scope, resolved_scope == SourceScope::Temporary)
-                    .await?
+                    .await
             }
-            ParsedSource::Git(git) => self.install_git(git, resolved_scope).await?,
-            ParsedSource::Local(_) => {}
+            ParsedSource::Git(git) => self.install_git(git, resolved_scope).await,
+            ParsedSource::Local(_) => Ok(()),
+        };
+        match res {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                install_failures.push(PackageInstallFailure {
+                    source: resolved_source.to_owned(),
+                    scope: resolved_scope,
+                    message: err.message(),
+                });
+                Ok(false)
+            }
         }
-        Ok(true)
     }
 
     fn find_autoload_delta_base(
@@ -1813,7 +2046,9 @@ impl DefaultPackageManager {
         match self.parse_source(source) {
             ParsedSource::Npm(npm) => format!("npm:{}", npm.name),
             ParsedSource::Git(git) => format!("git:{}/{}", git.host, git.path),
-            ParsedSource::Local(local) => format!("local:{}", self.resolve_cwd_path(&local.path)),
+            ParsedSource::Local(local) => {
+                format!("local:{}", get_path_comparison_key(&self.resolve_cwd_path(&local.path)))
+            }
         }
     }
 
@@ -1823,7 +2058,10 @@ impl DefaultPackageManager {
             ParsedSource::Git(git) => format!("git:{}/{}", git.host, git.path),
             ParsedSource::Local(local) => {
                 let base_dir = self.get_base_dir_for_scope(scope)?;
-                format!("local:{}", self.resolve_path_from_base(&local.path, &base_dir))
+                format!(
+                    "local:{}",
+                    get_path_comparison_key(&self.resolve_path_from_base(&local.path, &base_dir))
+                )
             }
         })
     }
@@ -2285,23 +2523,34 @@ impl DefaultPackageManager {
                 "--config.strict-peer-dependencies=false",
                 "--config.strict-dep-builds=false",
             ]),
-            "npm" => Ok(vec!["install", "--omit=dev", "--legacy-peer-deps"]),
+            "npm" => Ok(vec![
+                "install",
+                "--omit=dev",
+                "--legacy-peer-deps",
+                "--no-audit",
+                "--no-fund",
+            ]),
             _ => Ok(vec!["install"]),
         }
     }
 
-    fn get_npm_install_args(&self, specs: &[String], install_root: &str) -> Result<Vec<String>> {
+    fn get_npm_install_args(&self, specs: &[String], root: &str) -> Result<Vec<String>> {
+        let install_root = if exists(root) {
+            canonicalize_path(root)
+        } else {
+            root.to_owned()
+        };
         let pm = self.get_package_manager_name()?;
         let mut args = vec!["install".to_owned()];
         args.extend(specs.iter().cloned());
         match pm.as_str() {
             "bun" => {
-                args.extend(["--cwd".to_owned(), install_root.to_owned(), "--omit=peer".to_owned()]);
+                args.extend(["--cwd".to_owned(), install_root, "--omit=peer".to_owned()]);
             }
             "pnpm" => {
                 args.extend([
                     "--prefix".to_owned(),
-                    install_root.to_owned(),
+                    install_root,
                     "--config.auto-install-peers=false".to_owned(),
                     "--config.strict-peer-dependencies=false".to_owned(),
                     "--config.strict-dep-builds=false".to_owned(),
@@ -2310,8 +2559,10 @@ impl DefaultPackageManager {
             _ => {
                 args.extend([
                     "--prefix".to_owned(),
-                    install_root.to_owned(),
+                    install_root,
                     "--legacy-peer-deps".to_owned(),
+                    "--no-audit".to_owned(),
+                    "--no-fund".to_owned(),
                 ]);
             }
         }
@@ -2327,10 +2578,11 @@ impl DefaultPackageManager {
     }
 
     async fn uninstall_npm(&self, source: &NpmSource, scope: SourceScope) -> Result<()> {
-        let install_root = self.get_npm_install_root(scope, false)?;
-        if !exists(&install_root) {
+        let root = self.get_npm_install_root(scope, false)?;
+        if !exists(&root) {
             return Ok(());
         }
+        let install_root = canonicalize_path(&root);
         let pm = self.get_package_manager_name()?;
         if pm == "bun" {
             return self
@@ -2339,7 +2591,7 @@ impl DefaultPackageManager {
         }
         let mut args = vec!["uninstall", &source.name, "--prefix", &install_root];
         if pm != "pnpm" {
-            args.push("--legacy-peer-deps");
+            args.extend(["--legacy-peer-deps", "--no-audit", "--no-fund"]);
         }
         self.run_npm_command(&args, None).await
     }
@@ -2445,16 +2697,27 @@ impl DefaultPackageManager {
     }
 
     async fn clean_and_install_git_dependencies(&self, target_dir: &str, marker_path: &str) -> Result<()> {
+        let mut cleaned = true;
         if let Err(err) = self.run_command("git", &["clean", "-fdx"], Some(target_dir)).await {
-            let _ = self.repair_missing_git_dependencies(target_dir).await;
-            return Err(err);
+            cleaned = false;
+            self.emit_progress(ProgressEvent {
+                event_type: ProgressEventType::Progress,
+                action: ProgressAction::Update,
+                source: target_dir.to_owned(),
+                message: Some(format!(
+                    "Could not remove all untracked files in {target_dir} ({}). Files may be in use by another pi session; close it and run the update again.",
+                    err.message()
+                )),
+            });
         }
         let package_json_path = join(&[target_dir, "package.json"]);
         if exists(&package_json_path) {
             let dep_args = self.get_git_dependency_install_args()?;
             self.run_npm_command(&dep_args, Some(target_dir)).await?;
         }
-        let _ = rm(marker_path, false, true);
+        if cleaned {
+            let _ = rm(marker_path, false, true);
+        }
         Ok(())
     }
 
@@ -2495,8 +2758,16 @@ impl DefaultPackageManager {
         self.clean_and_install_git_dependencies(target_dir, &marker_path).await
     }
 
-    async fn refresh_temporary_git_source(&self, source: &GitSource, source_str: &str) {
+    async fn refresh_temporary_git_source(&self, source: &GitSource, source_str: &str, installed_path: &str) {
         if is_offline_mode_enabled() {
+            return;
+        }
+        if let Some(ref git_ref) = source.ref_name
+            && (7..=64).contains(&git_ref.len())
+            && git_ref.bytes().all(|b| b.is_ascii_hexdigit())
+            && let Some(head) = self.get_git_head(installed_path).await
+            && head.to_ascii_lowercase().starts_with(&git_ref.to_ascii_lowercase())
+        {
             return;
         }
         let _ = self
@@ -2796,30 +3067,42 @@ impl DefaultPackageManager {
         filter: Option<&PackageFilterSource>,
         metadata: &PathMetadata,
     ) -> bool {
+        let manifest = read_pi_manifest(&join(&[package_root, "package.json"]));
+        let mut effective_metadata = metadata.clone();
+        effective_metadata.changelog_path = resolve_package_changelog_path(package_root, manifest.as_ref());
+
         if let Some(filter) = filter {
             for &kind in RESOURCE_KINDS {
                 let target = Self::get_target_map(accumulator, kind);
                 let patterns = Self::filter_entries_for_kind(filter, kind);
                 if filter.autoload == Some(false) {
-                    self.apply_package_delta_filter(package_root, patterns.unwrap_or_default(), kind, target, metadata);
+                    self.apply_package_delta_filter(
+                        package_root,
+                        patterns.unwrap_or_default(),
+                        kind,
+                        target,
+                        &effective_metadata,
+                    );
                 } else if let Some(pats) = patterns {
-                    self.apply_package_filter(package_root, pats, kind, target, metadata);
+                    self.apply_package_filter(package_root, pats, kind, target, &effective_metadata);
                 } else {
-                    self.collect_default_resources(package_root, kind, target, metadata);
+                    self.collect_default_resources(package_root, kind, target, &effective_metadata);
                 }
             }
             return true;
         }
 
-        if let Some(manifest) = read_pi_manifest(&join(&[package_root, "package.json"])) {
+        if let Some(ref manifest) = manifest
+            && has_manifest_resource_fields(manifest)
+        {
             for &kind in RESOURCE_KINDS {
-                let entries = Self::manifest_entries_for_kind(&manifest, kind);
+                let entries = Self::manifest_entries_for_kind(manifest, kind);
                 self.add_manifest_entries(
                     entries,
                     package_root,
                     kind,
                     Self::get_target_map(accumulator, kind),
-                    metadata,
+                    &effective_metadata,
                 );
             }
             return true;
@@ -2832,7 +3115,7 @@ impl DefaultPackageManager {
                 let files = collect_resource_files(&dir, kind);
                 let target = Self::get_target_map(accumulator, kind);
                 for f in files {
-                    Self::add_resource(target, &f, metadata, true);
+                    Self::add_resource(target, &f, &effective_metadata, true);
                 }
                 has_any_dir = true;
             }
@@ -3006,10 +3289,9 @@ impl DefaultPackageManager {
         let user_agents_skills_dir = join(&[&get_home_dir(), ".agents", "skills"]);
         let project_trusted = self.inner.settings_manager.is_project_trusted();
         let project_agents_skill_dirs: Vec<String> = if project_trusted {
-            let resolved_user_agents = resolve(&[&user_agents_skills_dir]);
             collect_ancestor_agents_skill_dirs(&self.inner.cwd)
                 .into_iter()
-                .filter(|dir| resolve(&[dir]) != resolved_user_agents)
+                .filter(|dir| !paths_equal(dir, &user_agents_skills_dir))
                 .collect()
         } else {
             Vec::new()
@@ -3169,7 +3451,7 @@ impl DefaultPackageManager {
             let mut seen = IndexSet::new();
             resolved
                 .into_iter()
-                .filter(|entry| seen.insert(canonicalize_path(&entry.path)))
+                .filter(|entry| seen.insert(get_resource_path_key(&entry.path)))
                 .collect()
         };
 
@@ -3178,6 +3460,7 @@ impl DefaultPackageManager {
             skills: map_to_resolved(acc.skills),
             prompts: map_to_resolved(acc.prompts),
             themes: map_to_resolved(acc.themes),
+            install_failures: None,
         }
     }
 

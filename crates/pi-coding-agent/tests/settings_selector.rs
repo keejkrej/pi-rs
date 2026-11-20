@@ -226,3 +226,74 @@ fn keeps_the_configured_per_model_thinking_level_marked_while_browsing() {
     assert!(moved.contains("  ✓ medium"), "moved={moved}");
     assert!(moved.contains("→   high"), "moved={moved}");
 }
+
+#[test]
+#[serial]
+fn cycles_through_share_destinations() {
+    use pi_coding_agent::modes::interactive::session_share::SessionShareDestination;
+
+    let _g = setup();
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let changes_c = Arc::clone(&changes);
+    let config = SettingsConfig {
+        session_share_destination: SessionShareDestination::Auto,
+        ..Default::default()
+    };
+    let callbacks = SettingsCallbacks {
+        on_session_share_destination_change: Some(Arc::new(move |dest| {
+            changes_c.lock().unwrap().push(dest);
+        })),
+        ..Default::default()
+    };
+    let selector = SettingsSelectorComponent::new(config, callbacks);
+    let list = selector.get_settings_list();
+    list.select_item("share-destination");
+    for _ in 0..3 {
+        list.handle_input("\r");
+    }
+    assert_eq!(
+        *changes.lock().unwrap(),
+        vec![
+            SessionShareDestination::Gist,
+            SessionShareDestination::Radius,
+            SessionShareDestination::Auto,
+        ]
+    );
+}
+
+#[test]
+#[serial]
+fn pages_a_searchable_submenu_with_selection_page_keys_7629() {
+    use pi_coding_agent::modes::interactive::components::settings_submenu::{SelectSubmenu, SelectSubmenuOptions};
+    use pi_tui::SelectItem;
+
+    let _g = setup();
+    let selected = Arc::new(Mutex::new(None::<String>));
+    let selected_c = Arc::clone(&selected);
+    let items: Vec<SelectItem> = (0..20)
+        .map(|index| SelectItem {
+            value: format!("theme-{index}"),
+            label: format!("theme-{index}"),
+            description: None,
+        })
+        .collect();
+    let submenu = SelectSubmenu::new(
+        "Theme",
+        "",
+        items,
+        "theme-0",
+        Arc::new(move |val| {
+            *selected_c.lock().unwrap() = Some(val.to_owned());
+        }),
+        Arc::new(|| {}),
+        None,
+        Some(SelectSubmenuOptions {
+            searchable: true,
+            layout: None,
+        }),
+    );
+
+    submenu.handle_input("\x1b[6~");
+    submenu.handle_input("\r");
+    assert_eq!(selected.lock().unwrap().as_deref(), Some("theme-10"));
+}

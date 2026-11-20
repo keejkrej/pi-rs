@@ -6,8 +6,8 @@ use indexmap::IndexMap;
 use pi_ai::api::openai_completions::stream as stream_openai_completions;
 use pi_ai::compat::{get_model, normalize_context};
 use pi_ai::types::{
-    ApiStreamOptions, CacheRetention, Context, Message, Model, ModelCompat, OpenAICompletionsCompat, ProviderHeaders,
-    SessionAffinityFormat, StreamOptions, UserMessage, UserMessageContent,
+    ApiStreamOptions, CacheRetention, Context, Message, Model, ModelCompat, OpenAICompletionsCompat,
+    PromptCacheKeyMode, ProviderHeaders, SessionAffinityFormat, StreamOptions, UserMessage, UserMessageContent,
 };
 use pi_js::fetch::{Headers, Request, Response};
 use pi_js::time;
@@ -175,6 +175,174 @@ async fn omits_prompt_cache_fields_for_non_openai_urls_without_compatible_long_r
 
     assert!(payload.get("prompt_cache_key").is_none());
     assert!(payload.get("prompt_cache_retention").is_none());
+}
+
+#[tokio::test]
+async fn supports_prompt_cache_key_mode_on_proxies_and_clamps_64_unicode_chars() {
+    let opted_in_proxy = Model {
+        base_url: "https://proxy.example.com/v1".to_owned(),
+        compat: Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            prompt_cache_key_mode: Some(PromptCacheKeyMode::Enabled),
+            supports_long_cache_retention: Some(false),
+            ..Default::default()
+        })),
+        ..create_model()
+    };
+
+    for cache_retention in [None, Some(CacheRetention::Short), Some(CacheRetention::Long)] {
+        let first = capture_request(
+            StreamOptions {
+                cache_retention,
+                session_id: Some("session-proxy".to_owned()),
+                ..Default::default()
+            },
+            &opted_in_proxy,
+        )
+        .await;
+        let repeated = capture_request(
+            StreamOptions {
+                cache_retention,
+                session_id: Some("session-proxy".to_owned()),
+                ..Default::default()
+            },
+            &opted_in_proxy,
+        )
+        .await;
+        let other = capture_request(
+            StreamOptions {
+                cache_retention,
+                session_id: Some("other-session".to_owned()),
+                ..Default::default()
+            },
+            &opted_in_proxy,
+        )
+        .await;
+
+        assert_eq!(first.0.get("prompt_cache_key"), Some(&json!("session-proxy")));
+        assert_eq!(repeated.0.get("prompt_cache_key"), first.0.get("prompt_cache_key"));
+        assert_eq!(other.0.get("prompt_cache_key"), Some(&json!("other-session")));
+        assert!(first.0.get("prompt_cache_retention").is_none());
+        assert!(first.1.get("session_id").is_none());
+    }
+
+    for mode in [None, Some(PromptCacheKeyMode::Auto)] {
+        let proxy = Model {
+            base_url: "https://proxy.example.com/v1".to_owned(),
+            compat: mode.map(|m| {
+                ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+                    prompt_cache_key_mode: Some(m),
+                    ..Default::default()
+                })
+            }),
+            ..create_model()
+        };
+        let (short, _) = capture_request(
+            StreamOptions {
+                session_id: Some("session-proxy".to_owned()),
+                ..Default::default()
+            },
+            &proxy,
+        )
+        .await;
+        let (long, _) = capture_request(
+            StreamOptions {
+                cache_retention: Some(CacheRetention::Long),
+                session_id: Some("session-proxy".to_owned()),
+                ..Default::default()
+            },
+            &proxy,
+        )
+        .await;
+        assert!(short.get("prompt_cache_key").is_none());
+        assert_eq!(long.get("prompt_cache_key"), Some(&json!("session-proxy")));
+        assert_eq!(long.get("prompt_cache_retention"), Some(&json!("24h")));
+    }
+
+    let mut env = IndexMap::new();
+    env.insert("PI_CACHE_RETENTION".to_owned(), "long".to_owned());
+    let enabled_proxy = Model {
+        base_url: "https://proxy.example.com/v1".to_owned(),
+        compat: Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            prompt_cache_key_mode: Some(PromptCacheKeyMode::Enabled),
+            ..Default::default()
+        })),
+        ..create_model()
+    };
+    let (disabled_req, _) = capture_request(
+        StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            session_id: Some("session-proxy".to_owned()),
+            env: Some(env),
+            ..Default::default()
+        },
+        &enabled_proxy,
+    )
+    .await;
+    assert!(disabled_req.get("prompt_cache_key").is_none());
+    assert!(disabled_req.get("prompt_cache_retention").is_none());
+
+    let disabled_model = Model {
+        compat: Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            prompt_cache_key_mode: Some(PromptCacheKeyMode::Disabled),
+            ..Default::default()
+        })),
+        ..create_model()
+    };
+    for cache_retention in [CacheRetention::Short, CacheRetention::Long] {
+        let (p, _) = capture_request(
+            StreamOptions {
+                cache_retention: Some(cache_retention),
+                session_id: Some("session-disabled".to_owned()),
+                ..Default::default()
+            },
+            &disabled_model,
+        )
+        .await;
+        assert!(p.get("prompt_cache_key").is_none());
+        let expected_ret = json!("24h");
+        assert_eq!(
+            p.get("prompt_cache_retention"),
+            if cache_retention == CacheRetention::Long {
+                Some(&expected_ret)
+            } else {
+                None
+            }
+        );
+    }
+
+    let disabled_proxy = Model {
+        base_url: "https://proxy.example.com/v1".to_owned(),
+        compat: Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            prompt_cache_key_mode: Some(PromptCacheKeyMode::Disabled),
+            supports_long_cache_retention: Some(true),
+            ..Default::default()
+        })),
+        ..create_model()
+    };
+    let (p_dp, _) = capture_request(
+        StreamOptions {
+            cache_retention: Some(CacheRetention::Long),
+            session_id: Some("session-proxy".to_owned()),
+            ..Default::default()
+        },
+        &disabled_proxy,
+    )
+    .await;
+    assert!(p_dp.get("prompt_cache_key").is_none());
+    assert_eq!(p_dp.get("prompt_cache_retention"), Some(&json!("24h")));
+
+    let (no_id, _) = capture_request(StreamOptions::default(), &enabled_proxy).await;
+    assert!(no_id.get("prompt_cache_key").is_none());
+
+    let (clamped, _) = capture_request(
+        StreamOptions {
+            session_id: Some("𐐀".repeat(67)),
+            ..Default::default()
+        },
+        &enabled_proxy,
+    )
+    .await;
+    assert_eq!(clamped.get("prompt_cache_key"), Some(&json!("𐐀".repeat(64))));
 }
 
 #[tokio::test]

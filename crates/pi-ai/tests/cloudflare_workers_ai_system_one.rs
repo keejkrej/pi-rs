@@ -15,7 +15,8 @@ use pi_ai::providers::all::get_builtin_classifier_model;
 use pi_ai::providers::cloudflare_workers_ai::cloudflare_workers_ai_provider;
 use pi_ai::types::{
     AnyModel, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModel, ClassifierOptions,
-    ClassifierQuestion, ClassifierStopReason, FetchFunction, ModelType, ProviderEnv, ProviderRequestOptions,
+    ClassifierQuestion, ClassifierStopReason, FetchFunction, ImageContent, ModelModality, ModelType, ProviderEnv,
+    ProviderRequestOptions, SystemOneCompat, SystemOneImageInput,
 };
 use pi_js::fetch::{Headers, Response};
 
@@ -47,7 +48,11 @@ fn sample_context() -> ClassifierContext {
             criteria: choice_criteria,
         },
     );
-    ClassifierContext { state, questions }
+    ClassifierContext {
+        state,
+        questions,
+        images: None,
+    }
 }
 
 fn jev_output() -> Value {
@@ -224,4 +229,267 @@ async fn reports_cloudflare_envelope_errors() {
             .unwrap_or_default()
             .contains("Cloudflare Workers AI error: No such model")
     );
+}
+
+fn clef_output() -> Value {
+    json!({
+        "model": "clef",
+        "answers": {
+            "is_urgent": { "type": "noul", "noul": 0.9912 },
+            "department": {
+                "type": "choice",
+                "choice": "technical",
+                "probabilities": { "billing": 0.1632, "technical": 0.8368 },
+                "confidence": 0.4538,
+            },
+        },
+        "usage": { "input_tokens": 222, "output_tokens": 0 },
+    })
+}
+
+#[tokio::test]
+async fn runs_clef_models_through_ai_run_and_parses_direct_output() {
+    let (models, _) = setup();
+    let context = sample_context();
+    for (id, input_price) in [
+        ("@cf/cloudflare/clef", 0.24_f64),
+        ("@cf/cloudflare/clef-flash", 0.038_f64),
+        ("@cf/cloudflare/clef-omni", 0.15_f64),
+    ] {
+        let clef = match models.get_model_of_type(ModelType::Classifier, "cloudflare-workers-ai", id) {
+            Some(AnyModel::Classifier(m)) => m,
+            other => panic!("missing Cloudflare {id} model: {other:?}"),
+        };
+        let urls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let urls_ref = Arc::clone(&urls);
+        let expected_state = context.state.clone();
+        let expected_id = id.to_owned();
+        let fetch_fn: FetchFunction = Arc::new(move |req| {
+            let urls_ref = Arc::clone(&urls_ref);
+            let expected_state = expected_state.clone();
+            let expected_id = expected_id.clone();
+            Box::pin(async move {
+                urls_ref.lock().unwrap().push(req.url.clone());
+                let payload = req.body_json().expect("json payload");
+                assert_eq!(payload["model"], expected_id);
+                assert_eq!(payload["input"]["state"], json!(expected_state));
+                assert_eq!(payload["input"]["questions"]["is_urgent"]["type"], "noul");
+                Ok(Response::new(
+                    200,
+                    Headers::from_pairs([("content-type", "application/json")]),
+                    pi_js::json::stringify(&json!({
+                        "result": clef_output(),
+                        "success": true,
+                        "errors": [],
+                        "messages": [],
+                    })),
+                ))
+            })
+        });
+
+        let result = models.classify(&clef, &context, Some(auth_options(fetch_fn))).await;
+        assert_eq!(
+            *urls.lock().unwrap(),
+            vec!["https://api.cloudflare.com/client/v4/accounts/account-id/ai/run".to_owned()]
+        );
+        assert_eq!(result.stop_reason, ClassifierStopReason::Stop);
+        assert_eq!(
+            result.answers.get("is_urgent"),
+            Some(&ClassifierAnswer::Bool { probability: 0.9912 })
+        );
+        match result.answers.get("department") {
+            Some(ClassifierAnswer::Choice { choice, confidence, .. }) => {
+                assert_eq!(choice, "technical");
+                assert!((*confidence - 0.4538).abs() < 1e-12);
+            }
+            other => panic!("expected choice answer, got {other:?}"),
+        }
+        let usage = result.usage.expect("usage");
+        assert_eq!(usage.input, 222);
+        assert_eq!(usage.output, 0);
+        assert_eq!(usage.total_tokens, 222);
+        assert!((usage.cost.input - (222.0 * input_price) / 1_000_000.0).abs() < 1e-12);
+    }
+}
+
+#[tokio::test]
+async fn sends_images_to_clef_as_data_urls() {
+    let (models, _) = setup();
+    let clef = match models.get_model_of_type(ModelType::Classifier, "cloudflare-workers-ai", "@cf/cloudflare/clef") {
+        Some(AnyModel::Classifier(m)) => m,
+        other => panic!("missing Clef: {other:?}"),
+    };
+    let captured = Arc::new(Mutex::new(Vec::<(Value, Headers)>::new()));
+    let cap_ref = Arc::clone(&captured);
+    let fetch_fn: FetchFunction = Arc::new(move |req| {
+        let cap_ref = Arc::clone(&cap_ref);
+        Box::pin(async move {
+            cap_ref
+                .lock()
+                .unwrap()
+                .push((req.body_json().unwrap_or(Value::Null), req.headers));
+            Ok(Response::new(
+                200,
+                Headers::from_pairs([("content-type", "application/json")]),
+                pi_js::json::stringify(&json!({
+                    "result": clef_output(),
+                    "success": true,
+                    "errors": [],
+                    "messages": [],
+                })),
+            ))
+        })
+    });
+
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![
+        ImageContent::new("cG5n", "image/png"),
+        ImageContent::new("d2VicA==", "image/webp"),
+    ]);
+    let result = models.classify(&clef, &ctx, Some(auth_options(fetch_fn))).await;
+
+    assert_eq!(result.stop_reason, ClassifierStopReason::Stop);
+    let guard = captured.lock().unwrap();
+    assert_eq!(guard[0].0["input"]["state"], json!(ctx.state));
+    assert!(guard[0].0["input"]["questions"].is_object());
+    assert_eq!(
+        guard[0].0["input"]["images"],
+        json!(["data:image/png;base64,cG5n", "data:image/webp;base64,d2VicA=="])
+    );
+    assert!(guard[0].1.get("typesafe-danger-zone-images").is_none());
+}
+
+#[tokio::test]
+async fn reads_the_image_form_from_compat_before_the_model_id() {
+    let (models, jev) = setup();
+    let clef = match models.get_model_of_type(ModelType::Classifier, "cloudflare-workers-ai", "@cf/cloudflare/clef") {
+        Some(AnyModel::Classifier(m)) => m,
+        other => panic!("missing Clef: {other:?}"),
+    };
+    assert_eq!(
+        clef.compat,
+        Some(SystemOneCompat {
+            image_input: Some(SystemOneImageInput::Images),
+            send_image_opt_in_header: None,
+        })
+    );
+    assert_eq!(
+        jev.compat,
+        Some(SystemOneCompat {
+            image_input: Some(SystemOneImageInput::Assets),
+            send_image_opt_in_header: None,
+        })
+    );
+
+    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let bodies_ref = Arc::clone(&bodies);
+    let fetch_fn: FetchFunction = Arc::new(move |req| {
+        let bodies_ref = Arc::clone(&bodies_ref);
+        Box::pin(async move {
+            bodies_ref.lock().unwrap().push(req.body_json().unwrap_or(Value::Null));
+            Ok(Response::new(
+                200,
+                Headers::from_pairs([("content-type", "application/json")]),
+                pi_js::json::stringify(&json!({
+                    "result": clef_output(),
+                    "success": true,
+                    "errors": [],
+                    "messages": [],
+                })),
+            ))
+        })
+    });
+
+    let mut custom = jev.clone();
+    custom.id = "@cf/acme/clef-finetune".to_owned();
+    custom.input = vec![ModelModality::Text, ModelModality::Image];
+    custom.compat = Some(SystemOneCompat {
+        image_input: Some(SystemOneImageInput::Images),
+        send_image_opt_in_header: None,
+    });
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![ImageContent::new("cG5n", "image/png")]);
+    models.classify(&custom, &ctx, Some(auth_options(fetch_fn))).await;
+
+    let guard = bodies.lock().unwrap();
+    assert_eq!(guard[0]["input"]["images"], json!(["data:image/png;base64,cG5n"]));
+    assert!(guard[0]["input"].get("assets").is_none());
+}
+
+#[tokio::test]
+async fn rejects_more_than_four_images_for_clef_before_sending() {
+    let (models, _) = setup();
+    let clef = match models.get_model_of_type(
+        ModelType::Classifier,
+        "cloudflare-workers-ai",
+        "@cf/cloudflare/clef-flash",
+    ) {
+        Some(AnyModel::Classifier(m)) => m,
+        other => panic!("missing Clef Flash: {other:?}"),
+    };
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_ref = Arc::clone(&calls);
+    let fetch_fn: FetchFunction = Arc::new(move |_req| {
+        calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(Response::new(
+                200,
+                Headers::from_pairs([("content-type", "application/json")]),
+                pi_js::json::stringify(&json!({ "result": clef_output(), "success": true })),
+            ))
+        })
+    });
+    let mut ctx = sample_context();
+    ctx.images = Some(vec![ImageContent::new("cG5n", "image/png"); 5]);
+
+    let result = models.classify(&clef, &ctx, Some(auth_options(fetch_fn))).await;
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(result.stop_reason, ClassifierStopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some("Cloudflare Workers AI accepts at most 4 images for @cf/cloudflare/clef-flash, got 5")
+    );
+}
+
+#[tokio::test]
+async fn sends_images_to_jev_models_as_system_one_assets() {
+    let (models, _) = setup();
+    let base_ctx = sample_context();
+    for id in ["typesafe/jev", "typesafe/jev-1.14.0"] {
+        let jev = match models.get_model_of_type(ModelType::Classifier, "cloudflare-workers-ai", id) {
+            Some(AnyModel::Classifier(m)) => m,
+            other => panic!("missing {id}: {other:?}"),
+        };
+        let captured = Arc::new(Mutex::new(Vec::<(Value, Headers)>::new()));
+        let cap_ref = Arc::clone(&captured);
+        let fetch_fn: FetchFunction = Arc::new(move |req| {
+            let cap_ref = Arc::clone(&cap_ref);
+            Box::pin(async move {
+                cap_ref
+                    .lock()
+                    .unwrap()
+                    .push((req.body_json().unwrap_or(Value::Null), req.headers));
+                Ok(Response::new(
+                    200,
+                    Headers::from_pairs([("content-type", "application/json")]),
+                    pi_js::json::stringify(&rest_response("Completed", jev_output())),
+                ))
+            })
+        });
+
+        let mut ctx = base_ctx.clone();
+        ctx.images = Some(vec![ImageContent::new("cG5n", "image/png")]);
+        let result = models.classify(&jev, &ctx, Some(auth_options(fetch_fn))).await;
+
+        assert_eq!(result.stop_reason, ClassifierStopReason::Stop);
+        let guard = captured.lock().unwrap();
+        assert_eq!(guard[0].0["model"], id);
+        assert_eq!(guard[0].0["input"]["state"], json!(["<image-1>", base_ctx.state]));
+        assert_eq!(
+            guard[0].0["input"]["assets"],
+            json!({ "<image-1>": { "type": "image", "format": "png", "data_base64": "cG5n" } })
+        );
+        assert!(guard[0].1.get("typesafe-danger-zone-images").is_none());
+    }
 }

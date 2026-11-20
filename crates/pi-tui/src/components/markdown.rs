@@ -2,17 +2,19 @@
 
 #![allow(dead_code, unused_variables)]
 
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use indexmap::IndexMap;
 
 use crate::latex::{RenderLatexOptions, render_latex};
 use crate::terminal_image::{get_capabilities, hyperlink, is_image_line};
 use crate::tui::{Component, TuiMouseEvent, TuiMouseEventResult};
-use crate::utils::{apply_background_to_line, flatten_lines, visible_width, wrap_text_with_ansi};
+use crate::utils::{
+    apply_background_to_line, cjk_punctuation_regex, flatten_lines, visible_width, wrap_text_with_ansi,
+};
 use crate::vendor::marked::{
     Lexer, Marked, MarkedExtension, MarkedOptions, MarkedTokenizer, Token, Tokenizer, TokenizerExtension,
-    TokenizerLevel, TokenizerThis, Tokens, TokensList,
+    TokenizerLevel, TokenizerThis, Tokens, TokensList, cjk_friendly_em_strong,
 };
 
 // PORT: `(?=)` and `\1` need fancy_regex. `\s` is the JS whitespace class (PORTING.md §13.2).
@@ -22,24 +24,38 @@ static STRICT_STRIKETHROUGH_REGEX: LazyLock<fancy_regex::Regex> = LazyLock::new(
     fancy_regex::Regex::new(&pattern).expect("STRICT_STRIKETHROUGH_REGEX")
 });
 
-/// `class StrictStrikethroughTokenizer extends Tokenizer`.
-struct StrictStrikethroughTokenizer {
+/// `class MarkdownTokenizer extends Tokenizer`.
+struct MarkdownTokenizer {
     base: Tokenizer,
 }
 
-impl StrictStrikethroughTokenizer {
+impl MarkdownTokenizer {
     fn new() -> Self {
         Self { base: Tokenizer::new() }
     }
 }
 
-impl MarkedTokenizer for StrictStrikethroughTokenizer {
+impl MarkedTokenizer for MarkdownTokenizer {
     fn lexer(&self) -> Lexer {
         self.base.lexer()
     }
 
     fn set_lexer(&self, lexer: Lexer) {
         self.base.set_lexer(lexer);
+    }
+
+    fn url(&self, src: &str) -> Option<Tokens::Link> {
+        let token = self.base.url(src)?;
+        // Bare URLs stop at CJK punctuation; explicit links and angle autolinks
+        // use separate tokenizers and can still contain these characters.
+        let Some(m) = cjk_punctuation_regex.find(&token.raw).ok().flatten() else {
+            return Some(token);
+        };
+        self.base.url(&token.raw[..m.start()])
+    }
+
+    fn em_strong(&self, src: &str, masked_src: &str, prev_char: &str) -> Option<Token> {
+        cjk_friendly_em_strong(src, masked_src, prev_char, &self.lexer())
     }
 
     /// `override del(src)`.
@@ -214,11 +230,34 @@ fn tokenize_inline_latex(source: &str) -> Option<LatexToken> {
     })
 }
 
+static TABLE_DELIMITER_ROW_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*\z")
+        .expect("TABLE_DELIMITER_ROW_REGEX")
+});
+
+// A GFM table starts with a header row followed by a delimiter row such as "|---|---|" or "| --- |".
+// The header needs a "|" only when the delimiter has none: a pipe-free delimiter without a pipe in the
+// header is a thematic break, not a table.
+fn contains_table_start(source: &str) -> bool {
+    let lines: Vec<&str> = source.split('\n').collect();
+    for index in 0..lines.len().saturating_sub(1) {
+        let delimiter_row = lines[index + 1];
+        if (delimiter_row.contains('|') || lines[index].contains('|'))
+            && TABLE_DELIMITER_ROW_REGEX.is_match(delimiter_row)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn tokenize_block_latex(source: &str) -> Option<LatexToken> {
+    // Display math never spans a table. Without this check, an unclosed "$$" or "\[" pairs with a later
+    // opener or stays pending, swallowing the table. See https://github.com/earendil-works/pi/issues/11159.
     if let Some(captures) = BLOCK_LATEX_DOLLAR_REGEX.captures(source) {
         let raw = captures.get(0)?.as_str();
         let inner = captures.get(1)?.as_str();
-        if !inner.is_empty() {
+        if !inner.is_empty() && !contains_table_start(inner) {
             return Some(LatexToken {
                 kind: LatexKind::Block,
                 raw: raw.to_string(),
@@ -231,7 +270,7 @@ fn tokenize_block_latex(source: &str) -> Option<LatexToken> {
     if let Some(captures) = BLOCK_LATEX_BRACKET_REGEX.captures(source) {
         let raw = captures.get(0)?.as_str();
         let inner = captures.get(1)?.as_str();
-        if !inner.is_empty() {
+        if !inner.is_empty() && !contains_table_start(inner) {
             return Some(LatexToken {
                 kind: LatexKind::Block,
                 raw: raw.to_string(),
@@ -244,18 +283,20 @@ fn tokenize_block_latex(source: &str) -> Option<LatexToken> {
     if let Some(captures) = PENDING_BLOCK_BRACKET_REGEX.captures(source) {
         let raw = captures.get(0)?.as_str();
         let inner = captures.get(1)?.as_str();
-        return Some(LatexToken {
-            kind: LatexKind::Block,
-            raw: raw.to_string(),
-            text: inner.to_string(),
-            pending: Some(true),
-        });
+        if !inner.is_empty() && !contains_table_start(inner) {
+            return Some(LatexToken {
+                kind: LatexKind::Block,
+                raw: raw.to_string(),
+                text: inner.to_string(),
+                pending: Some(true),
+            });
+        }
     }
 
     if let Some(captures) = PENDING_BLOCK_DOLLAR_REGEX.captures(source) {
         let raw = captures.get(0)?.as_str();
         let inner = captures.get(1)?.as_str();
-        if !inner.is_empty() && looks_like_pending_dollar_math(inner) {
+        if !inner.is_empty() && looks_like_pending_dollar_math(inner) && !contains_table_start(inner) {
             return Some(LatexToken {
                 kind: LatexKind::Block,
                 raw: raw.to_string(),
@@ -314,7 +355,7 @@ static LATEX_MARKDOWN_EXTENSIONS: LazyLock<Vec<TokenizerExtension>> = LazyLock::
 static MARKDOWN_PARSER: LazyLock<Marked> = LazyLock::new(|| {
     let parser = Marked::new();
     parser.set_options(MarkedOptions {
-        tokenizer: Some(Arc::new(StrictStrikethroughTokenizer::new())),
+        tokenizer: Some(Arc::new(MarkdownTokenizer::new())),
     });
     parser.r#use(MarkedExtension {
         extensions: Some(LATEX_MARKDOWN_EXTENSIONS.to_vec()),
@@ -354,6 +395,46 @@ fn trim_partial_closing_fences(tokens: &mut [Token]) {
             code.text = sliced.strip_suffix('\n').unwrap_or(&sliced).to_string();
         }
         _ => {}
+    }
+}
+
+// An unclosed comment runs to the end of an HTML block, as in CommonMark, so streamed comments stay hidden.
+static HTML_COMMENT_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"<!--[\s\S]*?(?:-->|\z)").expect("HTML_COMMENT_REGEX"));
+
+fn strip_html_comments(html: &str) -> String {
+    HTML_COMMENT_REGEX.replace_all(html, "").into_owned()
+}
+
+/// Remove block HTML tokens that hold only comments, so they render no line. A removed comment between two blank
+/// lines, or at the start or end, also drops a blank line, so it leaves no extra gap.
+/// See <https://github.com/earendil-works/pi/issues/11710>.
+fn remove_html_comment_blocks(tokens: &mut Vec<Token>) {
+    let mut i = tokens.len();
+    while i > 0 {
+        i -= 1;
+        match &mut tokens[i] {
+            Token::List(list) => {
+                for item in &mut list.items {
+                    remove_html_comment_blocks(&mut item.tokens);
+                }
+            }
+            Token::Blockquote(quote) => {
+                remove_html_comment_blocks(&mut quote.tokens);
+            }
+            Token::Html(html) if pi_js::str16::trim(&strip_html_comments(&html.raw)).is_empty() => {
+                tokens.remove(i);
+                if matches!(tokens.get(i), Some(Token::Space(_)))
+                    && (i == 0 || matches!(tokens.get(i - 1), Some(Token::Space(_))))
+                {
+                    tokens.remove(i);
+                } else if i == tokens.len() && i > 0 && matches!(tokens.get(i - 1), Some(Token::Space(_))) {
+                    i -= 1;
+                    tokens.remove(i);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -417,10 +498,21 @@ struct InlineStyleContext {
     style_prefix: String,
 }
 
-/// `{ source, tokens }` held by the token `WeakRef`.
+/// `{ source, tokens }` held for token reuse across theme and width invalidation.
 struct CachedTokens {
     source: String,
     tokens: TokensList,
+}
+
+/// A top-level block of the last render, keyed by its source, reused by the next render.
+#[derive(Clone)]
+struct RenderedBlock {
+    /// Width and type of the following block (which decides the spacing) that the lines were rendered for.
+    width: usize,
+    next_token_type: Option<String>,
+    lines: Vec<String>,
+    /// Highlighted lines of the block's code, keyed by language and source; they survive a resize or new spacing.
+    highlighted_code: IndexMap<String, Vec<String>>,
 }
 
 struct MarkdownFields {
@@ -437,12 +529,12 @@ struct MarkdownFields {
     cached_text: Option<String>,
     cached_width: Option<usize>,
     cached_lines: Option<Vec<String>>,
-    // Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
-    // about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
-    // tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
-    //
-    // PORT: a Rust `Weak` is dropped as soon as its `Arc` is. JS `WeakRef` stays alive until GC.
-    cached_tokens: Option<Weak<CachedTokens>>,
+    // Parsed tokens depend only on the source, so they survive theme and width invalidation.
+    // PORT: Rust has no tracing GC for WeakRef; retain the active cache strongly across invalidations
+    // and replace/drop it on source changes or component drop so synchronous bursts keep cached entries.
+    cached_tokens: Option<Arc<CachedTokens>>,
+    // The last render's top-level blocks, cleared on invalidate() or empty text.
+    blocks: Option<IndexMap<String, RenderedBlock>>,
 }
 
 struct MarkdownInner {
@@ -552,6 +644,8 @@ struct MarkdownSnapshot {
     theme: MarkdownTheme,
     options: MarkdownOptions,
     default_style_prefix: Option<String>,
+    // Highlighted code of the block being rendered, only set while `render_block` runs.
+    block_highlighted_code: Option<IndexMap<String, Vec<String>>>,
 }
 
 impl MarkdownSnapshot {
@@ -564,7 +658,51 @@ impl MarkdownSnapshot {
             theme: fields.theme.clone(),
             options: fields.options.clone(),
             default_style_prefix: fields.default_style_prefix.clone(),
+            block_highlighted_code: None,
         }
+    }
+
+    /// Render one top-level block to output lines: wrapped, with margins, and padded or backgrounded to the width.
+    fn render_block(
+        &mut self,
+        block: &mut RenderedBlock,
+        token: &Token,
+        next_token_type: Option<&str>,
+        width: usize,
+        content_width: i64,
+    ) {
+        self.block_highlighted_code = Some(std::mem::take(&mut block.highlighted_code));
+        let margin_len = self.padding_x.max(0) as usize;
+        let left_margin = " ".repeat(margin_len);
+        let right_margin = " ".repeat(margin_len);
+        let width_i64 = width as i64;
+        let bg_fn = self
+            .default_text_style
+            .as_ref()
+            .and_then(|s| s.bg_color.as_ref())
+            .cloned();
+        let mut lines: Vec<String> = Vec::new();
+        for line in self.render_token(token, content_width, next_token_type, None) {
+            if is_image_line(&line) {
+                lines.push(line);
+                continue;
+            }
+            for wrapped_line in wrap_text_with_ansi(&line, content_width) {
+                let line_with_margins = format!("{left_margin}{wrapped_line}{right_margin}");
+                if let Some(bg) = &bg_fn {
+                    lines.push(apply_background_to_line(&line_with_margins, width_i64, Arc::clone(bg)));
+                } else {
+                    let visible_len = visible_width(&line_with_margins);
+                    let padding_needed = (width_i64 - visible_len).max(0) as usize;
+                    lines.push(format!("{line_with_margins}{}", " ".repeat(padding_needed)));
+                }
+            }
+        }
+        block.highlighted_code = self.block_highlighted_code.take().unwrap_or_default();
+        flatten_lines(&lines);
+        block.lines = lines;
+        block.width = width;
+        block.next_token_type = next_token_type.map(ToString::to_string);
     }
 
     fn apply_default_style(&self, text: &str) -> String {
@@ -663,13 +801,19 @@ impl MarkdownSnapshot {
             Token::Generic(generic) if generic.r#type == "latexBlock" => {
                 let latex_text = generic.text.as_deref().unwrap_or("");
                 let raw_trimmed = pi_js::str16::trim(&generic.raw);
-                let rendered = if !generic.pending.unwrap_or(false) && self.options.render_latex != Some(false) {
+                let mut rendered = if !generic.pending.unwrap_or(false) && self.options.render_latex != Some(false) {
                     render_latex(latex_text, Some(RenderLatexOptions { display: Some(true) }))
-                        .unwrap_or_else(|| raw_trimmed.to_string())
                 } else {
-                    raw_trimmed.to_string()
+                    None
                 };
-                for line in rendered.split('\n') {
+                // A 2D layout cannot be wrapped row by row; fall back to the raw source when it does not fit.
+                if rendered
+                    .as_deref()
+                    .is_none_or(|text| text.split('\n').any(|line| visible_width(line) > width))
+                {
+                    rendered = Some(raw_trimmed.to_string());
+                }
+                for line in rendered.unwrap_or_default().split('\n') {
                     lines.push(self.apply_default_style(line));
                 }
                 if has_next_non_space(next_token_type) {
@@ -681,9 +825,19 @@ impl MarkdownSnapshot {
                 let lang_str = code.lang.as_deref().unwrap_or("");
                 lines.push((self.theme.code_block_border)(&format!("```{lang_str}")));
                 if let Some(highlight_code) = &self.theme.highlight_code {
-                    let highlighted_lines = highlight_code(&code.text, code.lang.as_deref());
-                    for hl_line in highlighted_lines {
-                        lines.push(format!("{indent}{hl_line}"));
+                    let key = format!("{lang_str}\0{}", code.text);
+                    if let Some(cached) = self.block_highlighted_code.as_ref().and_then(|m| m.get(&key)).cloned() {
+                        for hl_line in cached {
+                            lines.push(format!("{indent}{hl_line}"));
+                        }
+                    } else {
+                        let highlighted_lines = highlight_code(&code.text, code.lang.as_deref());
+                        for hl_line in &highlighted_lines {
+                            lines.push(format!("{indent}{hl_line}"));
+                        }
+                        if let Some(map) = self.block_highlighted_code.as_mut() {
+                            map.insert(key, highlighted_lines);
+                        }
                     }
                 } else {
                     for code_line in code.text.split('\n') {
@@ -702,6 +856,18 @@ impl MarkdownSnapshot {
                 lines.extend(self.render_table(table, width, next_token_type, style_context));
             }
             Token::Blockquote(quote) => {
+                // With no room for another border ("│ " plus at least one content column), render the
+                // nested content without one. Otherwise each extra level re-wraps every child line at
+                // width 1 and the output grows exponentially with nesting depth.
+                if width < 3 {
+                    for i in 0..quote.tokens.len() {
+                        let quote_token = &quote.tokens[i];
+                        let next_quote_token_type = quote.tokens.get(i + 1).map(token_type_name);
+                        lines.extend(self.render_token(quote_token, width, next_quote_token_type, style_context));
+                    }
+                    return lines;
+                }
+
                 let quote_fn = Arc::clone(&self.theme.quote);
                 let italic_fn = Arc::clone(&self.theme.italic);
                 let quote_style: StyleFn = Arc::new(move |text: &str| quote_fn(&italic_fn(text)));
@@ -714,7 +880,7 @@ impl MarkdownSnapshot {
                     quote_style(&line_with_reapplied_style)
                 };
 
-                let quote_content_width = (width - 2).max(1);
+                let quote_content_width = width - 2;
                 let quote_inline_style_context = InlineStyleContext {
                     apply_text: Arc::new(|text: &str| text.to_string()),
                     style_prefix: quote_style_prefix.clone(),
@@ -753,10 +919,10 @@ impl MarkdownSnapshot {
                 }
             }
             Token::Html(html) => {
-                lines.push(self.apply_default_style(pi_js::str16::trim(&html.raw)));
+                lines.push(self.apply_default_style(pi_js::str16::trim(&strip_html_comments(&html.raw))));
             }
             Token::Tag(tag) => {
-                lines.push(self.apply_default_style(pi_js::str16::trim(&tag.raw)));
+                lines.push(self.apply_default_style(pi_js::str16::trim(&strip_html_comments(&tag.raw))));
             }
             Token::Space(_) => {
                 lines.push(String::new());
@@ -789,7 +955,12 @@ impl MarkdownSnapshot {
                 .join("\n")
         };
 
-        for token in tokens {
+        // After a skipped HTML comment, drop the next text's leading space if the text before ended with one,
+        // so "a <!-- c --> b" renders as "a b".
+        let mut drop_leading_space = false;
+        for (i, token) in tokens.iter().enumerate() {
+            let was_drop_leading_space = drop_leading_space;
+            drop_leading_space = false;
             match token {
                 Token::Generic(generic) if generic.r#type == "latex" => {
                     let latex_text = generic.text.as_deref().unwrap_or("");
@@ -814,7 +985,12 @@ impl MarkdownSnapshot {
                     {
                         result.push_str(&self.render_inline_tokens(nested, Some(resolved_style_context)));
                     } else {
-                        result.push_str(&apply_text_with_newlines(&text.text));
+                        let content = if was_drop_leading_space && text.text.starts_with([' ', '\t']) {
+                            text.text.trim_start_matches([' ', '\t'])
+                        } else {
+                            text.text.as_str()
+                        };
+                        result.push_str(&apply_text_with_newlines(content));
                     }
                 }
                 Token::Paragraph(paragraph) => {
@@ -860,10 +1036,18 @@ impl MarkdownSnapshot {
                     result.push_str(style_prefix);
                 }
                 Token::Html(html) => {
-                    result.push_str(&apply_text_with_newlines(&html.raw));
+                    if html.raw.starts_with("<!--") {
+                        drop_leading_space = i == 0 || tokens[i - 1].raw().ends_with([' ', '\t']);
+                    } else {
+                        result.push_str(&apply_text_with_newlines(&html.raw));
+                    }
                 }
                 Token::Tag(tag) => {
-                    result.push_str(&apply_text_with_newlines(&tag.raw));
+                    if tag.raw.starts_with("<!--") {
+                        drop_leading_space = i == 0 || tokens[i - 1].raw().ends_with([' ', '\t']);
+                    } else {
+                        result.push_str(&apply_text_with_newlines(&tag.raw));
+                    }
                 }
                 _ => {
                     if let Some(text) = token_text(token) {
@@ -1239,6 +1423,7 @@ impl Markdown {
                     cached_width: None,
                     cached_lines: None,
                     cached_tokens: None,
+                    blocks: None,
                 }),
             }),
         }
@@ -1246,7 +1431,7 @@ impl Markdown {
 
     pub fn set_text(&self, text: &str) {
         self.fields().text = text.to_string();
-        self.invalidate();
+        self.clear_render_cache();
     }
 
     pub fn invalidate(&self) {
@@ -1254,11 +1439,21 @@ impl Markdown {
         fields.cached_text = None;
         fields.cached_width = None;
         fields.cached_lines = None;
+        // The theme may have changed, which changes every styled line and the default style's prefix.
+        fields.blocks = None;
+        fields.default_style_prefix = None;
+    }
+
+    fn clear_render_cache(&self) {
+        let mut fields = self.fields();
+        fields.cached_text = None;
+        fields.cached_width = None;
+        fields.cached_lines = None;
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
-        let (mut snapshot, cached_tokens) = {
-            let fields = self.fields();
+        let (mut snapshot, cached_tokens, mut previous_blocks) = {
+            let mut fields = self.fields();
             if let (Some(cached_lines), Some(cached_text), Some(cached_width)) =
                 (&fields.cached_lines, &fields.cached_text, fields.cached_width)
                 && cached_text == &fields.text
@@ -1267,8 +1462,9 @@ impl Markdown {
                 return cached_lines.clone();
             }
             let snapshot = MarkdownSnapshot::from_fields(&fields);
-            let cached_tokens = fields.cached_tokens.as_ref().and_then(Weak::upgrade);
-            (snapshot, cached_tokens)
+            let cached_tokens = fields.cached_tokens.clone();
+            let previous_blocks = fields.blocks.take();
+            (snapshot, cached_tokens, previous_blocks)
         };
 
         let width_i64 = width as i64;
@@ -1280,6 +1476,7 @@ impl Markdown {
 
         if text.is_empty() || pi_js::str16::trim(&text).is_empty() {
             let mut fields = self.fields();
+            fields.blocks = None;
             if fields.text == snapshot.text {
                 fields.cached_text = Some(snapshot.text);
                 fields.cached_width = Some(width);
@@ -1294,6 +1491,7 @@ impl Markdown {
             _ => {
                 let mut tokens = MARKDOWN_PARSER.lexer(&normalized_text, None);
                 trim_partial_closing_fences(&mut tokens.tokens);
+                remove_html_comment_blocks(&mut tokens.tokens);
                 Arc::new(CachedTokens {
                     source: normalized_text,
                     tokens,
@@ -1301,45 +1499,45 @@ impl Markdown {
             }
         };
 
-        let mut rendered_lines: Vec<String> = Vec::new();
+        // A reference link resolves through a definition anywhere in the text, so blocks with the same source can
+        // render differently; such texts are rare in practice and render without reusing blocks.
+        let reuse_blocks = parsed_tokens.tokens.links.is_empty();
+        let mut blocks: IndexMap<String, RenderedBlock> = IndexMap::new();
+        let mut content_lines: Vec<String> = Vec::new();
         let token_slice = &parsed_tokens.tokens.tokens;
         for i in 0..token_slice.len() {
             let token = &token_slice[i];
             let next_token_type = token_slice.get(i + 1).map(token_type_name);
-            rendered_lines.extend(snapshot.render_token(token, content_width, next_token_type, None));
-        }
-
-        let mut wrapped_lines: Vec<String> = Vec::new();
-        for line in &rendered_lines {
-            if is_image_line(line) {
-                wrapped_lines.push(line.clone());
+            let raw = token.raw();
+            let mut block = if reuse_blocks {
+                blocks
+                    .get(raw)
+                    .cloned()
+                    .or_else(|| previous_blocks.as_mut().and_then(|prev| prev.shift_remove(raw)))
+                    .unwrap_or(RenderedBlock {
+                        width: usize::MAX,
+                        next_token_type: None,
+                        lines: Vec::new(),
+                        highlighted_code: IndexMap::new(),
+                    })
             } else {
-                wrapped_lines.extend(wrap_text_with_ansi(line, content_width));
+                RenderedBlock {
+                    width: usize::MAX,
+                    next_token_type: None,
+                    lines: Vec::new(),
+                    highlighted_code: IndexMap::new(),
+                }
+            };
+            if block.width != width || block.next_token_type.as_deref() != next_token_type {
+                snapshot.render_block(&mut block, token, next_token_type, width, content_width);
             }
+            if reuse_blocks {
+                blocks.insert(raw.to_string(), block.clone());
+            }
+            content_lines.extend(block.lines);
         }
 
-        let margin_len = snapshot.padding_x.max(0) as usize;
-        let left_margin = " ".repeat(margin_len);
-        let right_margin = " ".repeat(margin_len);
         let bg_fn = snapshot.default_text_style.as_ref().and_then(|s| s.bg_color.as_ref());
-        let mut content_lines: Vec<String> = Vec::with_capacity(wrapped_lines.len());
-
-        for line in &wrapped_lines {
-            if is_image_line(line) {
-                content_lines.push(line.clone());
-                continue;
-            }
-
-            let line_with_margins = format!("{left_margin}{line}{right_margin}");
-            if let Some(bg) = bg_fn {
-                content_lines.push(apply_background_to_line(&line_with_margins, width_i64, Arc::clone(bg)));
-            } else {
-                let visible_len = visible_width(&line_with_margins);
-                let padding_needed = (width_i64 - visible_len).max(0) as usize;
-                content_lines.push(format!("{line_with_margins}{}", " ".repeat(padding_needed)));
-            }
-        }
-
         let empty_line = " ".repeat(width);
         let padding_y_count = snapshot.padding_y.max(0) as usize;
         let mut empty_lines: Vec<String> = Vec::with_capacity(padding_y_count);
@@ -1350,12 +1548,12 @@ impl Markdown {
             };
             empty_lines.push(line);
         }
+        flatten_lines(&empty_lines);
 
         let mut result = Vec::with_capacity(empty_lines.len() * 2 + content_lines.len());
         result.extend(empty_lines.iter().cloned());
         result.extend(content_lines);
         result.extend(empty_lines);
-        flatten_lines(&result);
 
         {
             let mut fields = self.fields();
@@ -1366,7 +1564,8 @@ impl Markdown {
                 fields.cached_text = Some(snapshot.text);
                 fields.cached_width = Some(width);
                 fields.cached_lines = Some(result.clone());
-                fields.cached_tokens = Some(Arc::downgrade(&parsed_tokens));
+                fields.cached_tokens = Some(parsed_tokens);
+                fields.blocks = Some(blocks);
             }
         }
 

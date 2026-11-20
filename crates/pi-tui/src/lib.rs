@@ -29,6 +29,7 @@ pub mod vendor;
 pub mod wheel_scroll;
 pub mod word_navigation;
 // @generated-mods end
+pub mod program_status;
 pub use pi_js::{Error, Result};
 
 // Core TUI interfaces and classes
@@ -49,7 +50,7 @@ pub use crate::components::box_::TuiBox as Box;
 pub use crate::components::cancellable_loader::CancellableLoader;
 pub use crate::components::editor::{Editor, EditorOptions, EditorTheme};
 pub use crate::components::h_stack::HStack;
-pub use crate::components::image::{Image, ImageOptions, ImageTheme};
+pub use crate::components::image::{Image, ImageOptions, ImageTheme, ImageTranscoder, set_image_transcoder};
 pub use crate::components::input::Input;
 pub use crate::components::loader::{Loader, LoaderIndicatorOptions};
 pub use crate::components::markdown::{DefaultTextStyle, Markdown, MarkdownOptions, MarkdownTheme};
@@ -72,7 +73,7 @@ pub use crate::fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 // Keybindings
 pub use crate::keybindings::{
     Keybinding, KeybindingConflict, KeybindingDefinition, KeybindingDefinitions, Keybindings, KeybindingsConfig,
-    KeybindingsManager, TUI_KEYBINDINGS, get_keybindings, set_keybindings,
+    KeybindingsManager, TUI_KEYBINDINGS, get_keybindings, get_select_page_index, set_keybindings,
 };
 // Keyboard input handling
 pub use crate::keys::{
@@ -84,6 +85,11 @@ pub use crate::latex::{RenderLatexOptions, render_latex};
 // Native platform integration
 pub use crate::native_platform::{NativeClipboard, get_native_clipboard};
 pub use crate::oklab::oklab_to_okhsl_lightness;
+// Program status reporting (OSC 7501)
+pub use crate::program_status::{
+    PROGRAM_STATUS_QUERY, ProgramStatus, ProgramStatusKind, ProgramStatusState, format_program_status,
+    is_program_status_reply,
+};
 // Input buffering for batch splitting
 pub use crate::stdin_buffer::{StdinBuffer, StdinBufferEventMap, StdinBufferOptions};
 // Terminal interface and implementations
@@ -99,16 +105,16 @@ pub use crate::terminal_image::{
     reset_capabilities_cache, set_capabilities, set_capability_overrides, set_cell_dimensions,
 };
 pub use crate::tui::{
-    CURSOR_MARKER, Component, Container, Focusable, OverlayAnchor, OverlayBounds, OverlayHandle, OverlayMargin,
-    OverlayOptions, OverlayUnfocusOptions, SizeValue, TUI, TuiInputListener, TuiInputListenerResult, TuiMode,
-    TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType, TuiStopOptions, ViewportTUI,
-    composite_tui_line, is_focusable, is_viewport_tui,
+    CURSOR_MARKER, Component, Container, FAKE_CURSOR_END, FAKE_CURSOR_START, Focusable, OverlayAnchor, OverlayBounds,
+    OverlayHandle, OverlayMargin, OverlayOptions, OverlayUnfocusOptions, SizeValue, TUI, TuiInputListener,
+    TuiInputListenerResult, TuiMode, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType,
+    TuiStopOptions, ViewportTUI, composite_tui_line, is_focusable, is_viewport_tui, render_fake_cursor,
 };
 pub use crate::tui_alt_screen::{TuiAltScreen, TuiAltScreenOptions};
 pub use crate::tui_main_screen::{TuiMainScreen, TuiMainScreenRenderState};
 // Utilities
 pub use crate::utils::{
-    get_osc8_link_at_column, slice_by_column, strip_terminal_sequences, truncate_to_width, visible_width,
-    wrap_text_with_ansi,
+    get_osc8_link_at_column, replace_control_characters, slice_by_column, strip_terminal_sequences, truncate_to_width,
+    visible_width, wrap_text_with_ansi,
 };
 pub use crate::wheel_scroll::WheelScrollLines;

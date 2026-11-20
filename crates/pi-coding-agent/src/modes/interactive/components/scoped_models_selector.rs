@@ -768,6 +768,10 @@ impl Component for ScopedModelsSelectorComponent {
         true
     }
 
+    fn captures_viewport_input(&self) -> bool {
+        true
+    }
+
     fn is_container_handle_mouse(&self) -> bool {
         true
     }

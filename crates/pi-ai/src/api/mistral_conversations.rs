@@ -27,13 +27,14 @@ use crate::types::{
     ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall,
     ToolChoice, TranscriptContext, Usage, UsageCost, UserContentBlock, UserMessageContent,
 };
+use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::error_body::{MAX_PROVIDER_ERROR_BODY_CHARS, truncate_error_text};
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
-use crate::utils::json_parse::parse_streaming_json;
-use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{get_system_message_text, render_system_message_update};
 use crate::utils::transcript::{get_current_tools, resolve_transcript};
 
@@ -391,7 +392,15 @@ fn apply_mistral_option_headers(headers: &mut Headers, overrides: Option<&Provid
 
 fn build_mistral_headers(model: &Model, api_key: &str, options: &MistralOptions) -> Headers {
     let mut headers = Headers::new();
-    headers.set("User-Agent", &get_pi_user_agent());
+    for (k, v) in get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        options.base.identity.as_ref(),
+    ) {
+        headers.set(&k, &v);
+    }
     headers.set("accept", "text/event-stream");
     headers.set("authorization", &format!("Bearer {api_key}"));
     headers.set("content-type", "application/json");
@@ -816,7 +825,11 @@ fn map_chat_stop_reason(reason: Option<&str>) -> (StopReason, Option<String>) {
         "stop" => (StopReason::Stop, None),
         "length" | "model_length" => (StopReason::Length, None),
         "tool_calls" => (StopReason::ToolUse, None),
-        "error" => (StopReason::Error, Some("Provider stopped with: error".to_owned())),
+        // Mistral reports transient server failures this way; "server error" makes the message retryable.
+        "error" => (
+            StopReason::Error,
+            Some("Provider stopped with: error (server error)".to_owned()),
+        ),
         other => (StopReason::Error, Some(format!("Provider stopped with: {other}"))),
     }
 }
@@ -1022,34 +1035,60 @@ async fn run_mistral_stream(
 
     let url = build_mistral_completions_url(&model.base_url)?;
     let headers = build_mistral_headers(&model, &api_key, &options);
-    let timeout_signal = AbortSignal::timeout(options.base.timeout_ms.unwrap_or(DEFAULT_MISTRAL_TIMEOUT_MS));
-    let combined_signal = match &options.base.signal {
-        Some(caller_sig) => AbortSignal::any(&[caller_sig.clone(), timeout_signal]),
-        None => timeout_signal,
-    };
+    // The timeout covers only the wait for response headers. Long streams (e.g. extended thinking)
+    // must not be cut off by a fixed deadline; body stalls are left to the HTTP client idle timeout.
+    let timeout_ms = options.base.timeout_ms.unwrap_or(DEFAULT_MISTRAL_TIMEOUT_MS);
+    let header_timeout_signal = AbortSignal::timeout(timeout_ms);
+    let combined_signal = combine_abort_signals([options.base.signal.as_ref(), Some(&header_timeout_signal)]);
 
-    if combined_signal.aborted() {
-        return Err(signal_abort_error(&combined_signal));
+    if let Some(sig) = &combined_signal.signal
+        && sig.aborted()
+    {
+        let err = signal_abort_error(sig);
+        combined_signal.cleanup();
+        return Err(err);
     }
 
     let wire_body = pi_js::json::stringify(&to_mistral_wire_payload(payload));
-    let request = Request::post(url)
-        .with_headers(headers)
-        .body(Body::Text(wire_body))
-        .signal(combined_signal.clone());
+    let mut request = Request::post(url).with_headers(headers).body(Body::Text(wire_body));
+    if let Some(sig) = &combined_signal.signal {
+        request = request.signal(sig.clone());
+    }
 
-    let response = tokio::select! {
-        biased;
-        _ = combined_signal.cancelled() => {
-            return Err(signal_abort_error(&combined_signal));
+    let fetch_res = match &combined_signal.signal {
+        Some(sig) => {
+            tokio::select! {
+                biased;
+                _ = sig.cancelled() => Err(signal_abort_error(sig)),
+                res = async {
+                    if let Some(custom_fetch) = &options.base.fetch {
+                        custom_fetch(request).await
+                    } else {
+                        pi_js::fetch::fetch(request).await
+                    }
+                } => res,
+            }
         }
-        res = async {
+        None => {
             if let Some(custom_fetch) = &options.base.fetch {
                 custom_fetch(request).await
             } else {
                 pi_js::fetch::fetch(request).await
             }
-        } => res?,
+        }
+    };
+    combined_signal.cleanup();
+
+    let response = match fetch_res {
+        Ok(resp) => resp,
+        Err(err) => {
+            if header_timeout_signal.aborted() && !options.base.signal.as_ref().is_some_and(AbortSignal::aborted) {
+                return Err(Error::msg(format!(
+                    "Mistral response headers timed out after {timeout_ms}ms"
+                )));
+            }
+            return Err(err);
+        }
     };
 
     if let Some(on_response) = &options.base.on_response {
@@ -1066,12 +1105,17 @@ async fn run_mistral_stream(
     if !response.ok() {
         let status = response.status();
         let status_text = response.status_text().to_owned();
-        let body = tokio::select! {
-            biased;
-            _ = combined_signal.cancelled() => {
-                return Err(signal_abort_error(&combined_signal));
+        let body = match &options.base.signal {
+            Some(sig) => {
+                tokio::select! {
+                    biased;
+                    _ = sig.cancelled() => {
+                        return Err(signal_abort_error(sig));
+                    }
+                    text_res = response.text() => text_res.unwrap_or_default(),
+                }
             }
-            text_res = response.text() => text_res.unwrap_or_default(),
+            None => response.text().await.unwrap_or_default(),
         };
         return Err(MistralHttpError::new(status, body, status_text).into_js_error());
     }
@@ -1087,16 +1131,20 @@ async fn run_mistral_stream(
     });
 
     let mut active_block: Option<ActiveMistralBlock> = None;
-    let mut tool_blocks_by_key: IndexMap<ToolBlockKey, usize> = IndexMap::new();
-    let mut tool_partial_args: IndexMap<usize, String> = IndexMap::new();
+    let mut tool_calls_by_key: IndexMap<ToolBlockKey, (usize, ToolCallArgumentsStream)> = IndexMap::new();
 
     loop {
-        let next_event = tokio::select! {
-            biased;
-            _ = combined_signal.cancelled() => {
-                return Err(signal_abort_error(&combined_signal));
+        let next_event = match &options.base.signal {
+            Some(sig) => {
+                tokio::select! {
+                    biased;
+                    _ = sig.cancelled() => {
+                        return Err(signal_abort_error(sig));
+                    }
+                    item = sse_stream.next() => item,
+                }
             }
-            item = sse_stream.next() => item,
+            None => sse_stream.next().await,
         };
 
         let Some(sse_result) = next_event else {
@@ -1220,8 +1268,8 @@ async fn run_mistral_stream(
                 None => ToolBlockKey::Id(call_id.clone()),
             };
 
-            let block_idx = if let Some(&existing_idx) = tool_blocks_by_key.get(&key) {
-                existing_idx
+            let block_idx = if let Some((existing_idx, _)) = tool_calls_by_key.get(&key) {
+                *existing_idx
             } else {
                 let idx = output.content.len();
                 output.content.push(AssistantContentBlock::ToolCall(ToolCall::new(
@@ -1229,8 +1277,7 @@ async fn run_mistral_stream(
                     tool_call.function.name,
                     JsonObject::new(),
                 )));
-                tool_blocks_by_key.insert(key, idx);
-                tool_partial_args.insert(idx, String::new());
+                tool_calls_by_key.insert(key.clone(), (idx, ToolCallArgumentsStream::new()));
                 stream.push(AssistantMessageEvent::ToolCallStart {
                     content_index: idx,
                     partial: output.clone(),
@@ -1245,11 +1292,11 @@ async fn run_mistral_stream(
                 _ => "{}".to_owned(),
             };
 
-            let buf = tool_partial_args.entry(block_idx).or_default();
-            buf.push_str(&args_delta);
-            let parsed = parse_streaming_json(Some(buf));
-            if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
-                tc.arguments = parsed;
+            if let Some((_, args_stream)) = tool_calls_by_key.get_mut(&key) {
+                let parsed = args_stream.append(&args_delta);
+                if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(block_idx) {
+                    tc.arguments = parsed;
+                }
             }
             stream.push(AssistantMessageEvent::ToolCallDelta {
                 content_index: block_idx,
@@ -1260,11 +1307,11 @@ async fn run_mistral_stream(
     }
 
     flush_active_block(&mut active_block, &mut output, &stream);
-    for (_, idx) in tool_blocks_by_key {
-        let partial_str = tool_partial_args.shift_remove(&idx);
-        let parsed = parse_streaming_json(partial_str.as_deref());
+    for (_, (idx, args_stream)) in tool_calls_by_key {
+        let parsed = args_stream.finish();
         let final_tc = if let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(idx) {
-            tc.arguments = parsed;
+            tc.arguments = parsed.arguments;
+            tc.arguments_error = parsed.arguments_error;
             Some(tc.clone())
         } else {
             None
@@ -1330,6 +1377,7 @@ fn create_output(model: &Model) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 

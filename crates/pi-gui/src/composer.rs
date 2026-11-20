@@ -334,7 +334,7 @@ fn title_case_thinking(raw: &str) -> &'static str {
         "low" => "Low",
         "medium" => "Medium",
         "high" => "High",
-        "xhigh" => "Max",
+        "xhigh" | "max" => "Max",
         _ => "Medium",
     }
 }

@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -154,6 +154,17 @@ impl WasiMemory {
         let _ = QuickJS { inner: vm_inner }.with_memory_write(offset, &bytes);
     }
 
+    pub fn write_u64_le(&self, ptr: i64, value: u64) {
+        let Some(vm_inner) = self.inner.vm.upgrade() else {
+            return;
+        };
+        let Ok(offset) = u32::try_from(ptr) else {
+            return;
+        };
+        let bytes = value.to_le_bytes();
+        let _ = QuickJS { inner: vm_inner }.with_memory_write(offset, &bytes);
+    }
+
     pub fn read_bytes(&self, ptr: u32, len: usize) -> Vec<u8> {
         let Some(vm_inner) = self.inner.vm.upgrade() else {
             return Vec::new();
@@ -174,10 +185,29 @@ impl WasiMemory {
 /// `fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno`.
 pub type WasiFdWrite = Arc<dyn Fn(&WasiMemory, i64, i64, i64, i64) -> i64 + Send + Sync>;
 
-/// Overrides the caller replaces on `wasi_snapshot_preview1`. Only `fd_write` is used.
+/// `clock_time_get(clock_id, precision, result_ptr) -> errno`.
+pub type WasiClockTimeGet = Arc<dyn Fn(&WasiMemory, i32, i64, i32) -> i32 + Send + Sync>;
+
+/// `random_get(buf_ptr, buf_len) -> errno`.
+pub type WasiRandomGet = Arc<dyn Fn(&WasiMemory, i32, i32) -> i32 + Send + Sync>;
+
+/// Overrides the caller replaces on `wasi_snapshot_preview1`.
 #[derive(Clone, Default)]
 pub struct WasiOverrides {
     pub fd_write: Option<WasiFdWrite>,
+    pub clock_time_get: Option<WasiClockTimeGet>,
+    pub random_get: Option<WasiRandomGet>,
+}
+
+/// Timezone source for QuickJS `Date` operations (`quickjs-wasi` `timezoneOffset`).
+#[derive(Clone)]
+pub enum TimezoneOffset {
+    /// Use the host's local timezone (optionally honoring a captured `TZ` env value).
+    Host { tz: Option<String> },
+    /// Fixed offset in minutes west of UTC (`Date#getTimezoneOffset` convention, e.g. `0` for UTC).
+    FixedMinutes(i32),
+    /// Callback `(time_secs) -> minutes west of UTC`.
+    Callback(Arc<dyn Fn(i64) -> i32 + Send + Sync>),
 }
 
 /// `(memory) => overrides`, matching `WasiOptions` from `quickjs-wasi`.
@@ -322,6 +352,8 @@ struct HostState {
     vm: Weak<QuickJSInner>,
     wasi_memory: WasiMemory,
     fd_write_override: Option<WasiFdWrite>,
+    clock_time_get_override: Option<WasiClockTimeGet>,
+    random_get_override: Option<WasiRandomGet>,
 }
 
 struct WasmExports {
@@ -330,6 +362,7 @@ struct WasmExports {
     _initialize: TypedFunc<(), ()>,
     qjs_init: TypedFunc<(), i32>,
     qjs_init2: TypedFunc<i32, i32>,
+    qjs_get_quickjs_version: TypedFunc<(), i32>,
     qjs_set_interrupt_handler: TypedFunc<i32, ()>,
     qjs_set_promise_rejection_handler: TypedFunc<i32, ()>,
     qjs_set_module_loader: TypedFunc<i32, ()>,
@@ -420,6 +453,7 @@ struct QuickJSInner {
     module_loader: Mutex<Option<ModuleLoader>>,
     timezone_offset_handler: Mutex<Option<Arc<dyn Fn(i64) -> i32 + Send + Sync>>>,
     scopes: Mutex<Vec<Vec<Arc<JSValueHandleInner>>>>,
+    cached_versions: Mutex<Option<IndexMap<String, String>>>,
     cached_global: Mutex<Option<JSValueHandle>>,
     cached_undefined: Mutex<Option<JSValueHandle>>,
     cached_null: Mutex<Option<JSValueHandle>>,
@@ -616,7 +650,7 @@ fn wire_linker(linker: &mut Linker<HostState>) -> pi_js::Result<()> {
                         .clone();
                     match handler {
                         Some(cb) => cb(time_secs),
-                        None => 0,
+                        None => host_timezone_offset_secs(time_secs, None),
                     }
                 })
             },
@@ -628,10 +662,19 @@ fn wire_linker(linker: &mut Linker<HostState>) -> pi_js::Result<()> {
         .func_wrap(
             "wasi_snapshot_preview1",
             "clock_time_get",
-            |mut caller: Caller<'_, HostState>, clock_id: i32, _precision: i64, result_ptr: i32| -> i32 {
-                let Some(vm_inner) = caller.data().vm.upgrade() else {
+            |mut caller: Caller<'_, HostState>, clock_id: i32, precision: i64, result_ptr: i32| -> i32 {
+                let state = caller.data();
+                let vm_id = state.vm_id;
+                let wasi_mem = state.wasi_memory.clone();
+                let custom = state.clock_time_get_override.clone();
+                let Some(vm_inner) = state.vm.upgrade() else {
                     return WASI_ERRNO_NOSYS;
                 };
+                if let Some(override_fn) = custom {
+                    return enter_caller(vm_id, &mut caller, || {
+                        override_fn(&wasi_mem, clock_id, precision, result_ptr)
+                    });
+                }
                 let ns: u64 = if clock_id == WASI_CLOCK_REALTIME {
                     (pi_js::time::now_ms().max(0) as u64).saturating_mul(1_000_000)
                 } else if clock_id == WASI_CLOCK_MONOTONIC {
@@ -644,7 +687,6 @@ fn wire_linker(linker: &mut Linker<HostState>) -> pi_js::Result<()> {
                 } else {
                     return WASI_ERRNO_NOSYS;
                 };
-                let vm_id = caller.data().vm_id;
                 let vm = QuickJS { inner: vm_inner };
                 enter_caller(vm_id, &mut caller, || {
                     if let Ok(ptr) = u32::try_from(result_ptr)
@@ -785,9 +827,14 @@ fn wire_linker(linker: &mut Linker<HostState>) -> pi_js::Result<()> {
             |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_len: i32| -> i32 {
                 let state = caller.data();
                 let vm_id = state.vm_id;
+                let wasi_mem = state.wasi_memory.clone();
+                let custom = state.random_get_override.clone();
                 let Some(vm_inner) = state.vm.upgrade() else {
                     return WASI_ERRNO_IO;
                 };
+                if let Some(override_fn) = custom {
+                    return enter_caller(vm_id, &mut caller, || override_fn(&wasi_mem, buf_ptr, buf_len));
+                }
                 let vm = QuickJS { inner: vm_inner };
                 enter_caller(vm_id, &mut caller, || {
                     let Ok(ptr) = u32::try_from(buf_ptr) else {
@@ -883,6 +930,7 @@ fn load_exports(store: &mut Store<HostState>, instance: &wasmtime::Instance) -> 
         _initialize: get_export(instance, store, "_initialize")?,
         qjs_init: get_export(instance, store, "qjs_init")?,
         qjs_init2: get_export(instance, store, "qjs_init2")?,
+        qjs_get_quickjs_version: get_export(instance, store, "qjs_get_quickjs_version")?,
         qjs_set_interrupt_handler: get_export(instance, store, "qjs_set_interrupt_handler")?,
         qjs_set_promise_rejection_handler: get_export(instance, store, "qjs_set_promise_rejection_handler")?,
         qjs_set_module_loader: get_export(instance, store, "qjs_set_module_loader")?,
@@ -1023,6 +1071,236 @@ fn decode_wtf8(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units)
 }
 
+const QUICKJS_WASI_VERSION: &str = "3.6.2";
+
+#[derive(Clone)]
+struct TzifZone {
+    transitions: Vec<(i64, i32)>,
+    before_first: i32,
+}
+
+static ZONEINFO_CACHE: LazyLock<Mutex<IndexMap<String, Option<TzifZone>>>> =
+    LazyLock::new(|| Mutex::new(IndexMap::new()));
+
+fn parse_tzif_block(bytes: &[u8], offset: usize, is_64: bool) -> Option<(TzifZone, usize)> {
+    if bytes.get(offset..offset + 4)? != b"TZif" {
+        return None;
+    }
+    let read_u32 = |pos: usize| -> Option<usize> {
+        let slice = bytes.get(pos..pos + 4)?;
+        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize)
+    };
+    let isutcnt = read_u32(offset + 20)?;
+    let isstdcnt = read_u32(offset + 24)?;
+    let leapcnt = read_u32(offset + 28)?;
+    let timecnt = read_u32(offset + 32)?;
+    let typecnt = read_u32(offset + 36)?;
+    let charcnt = read_u32(offset + 40)?;
+    if typecnt == 0 {
+        return None;
+    }
+
+    let time_size = if is_64 { 8 } else { 4 };
+    let leap_size = if is_64 { 12 } else { 8 };
+    let data_start = offset + 44;
+    let total_size = timecnt
+        .checked_mul(time_size)?
+        .checked_add(timecnt)?
+        .checked_add(typecnt.checked_mul(6)?)?
+        .checked_add(charcnt)?
+        .checked_add(leapcnt.checked_mul(leap_size)?)?
+        .checked_add(isstdcnt)?
+        .checked_add(isutcnt)?;
+    let block_end = data_start.checked_add(total_size)?;
+    if block_end > bytes.len() {
+        return None;
+    }
+
+    let times_pos = data_start;
+    let types_idx_pos = times_pos + timecnt * time_size;
+    let ttinfo_pos = types_idx_pos + timecnt;
+
+    let mut type_offsets: Vec<(i32, u8)> = Vec::with_capacity(typecnt);
+    for i in 0..typecnt {
+        let p = ttinfo_pos + i * 6;
+        let utoff = i32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]);
+        let isdst = bytes[p + 4];
+        type_offsets.push((utoff, isdst));
+    }
+    let before_first = type_offsets
+        .iter()
+        .find(|&&(_, isdst)| isdst == 0)
+        .or_else(|| type_offsets.first())
+        .map(|&(off, _)| off)
+        .unwrap_or(0);
+
+    let mut transitions = Vec::with_capacity(timecnt);
+    for i in 0..timecnt {
+        let t = if is_64 {
+            let p = times_pos + i * 8;
+            i64::from_be_bytes([
+                bytes[p],
+                bytes[p + 1],
+                bytes[p + 2],
+                bytes[p + 3],
+                bytes[p + 4],
+                bytes[p + 5],
+                bytes[p + 6],
+                bytes[p + 7],
+            ])
+        } else {
+            let p = times_pos + i * 4;
+            i64::from(i32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]))
+        };
+        let tid = usize::from(bytes[types_idx_pos + i]);
+        let &(utoff, _) = type_offsets.get(tid)?;
+        transitions.push((t, utoff));
+    }
+
+    Some((
+        TzifZone {
+            transitions,
+            before_first,
+        },
+        block_end,
+    ))
+}
+
+fn parse_tzif(bytes: &[u8]) -> Option<TzifZone> {
+    let version = *bytes.get(4)?;
+    let (v1, v1_end) = parse_tzif_block(bytes, 0, false)?;
+    if version >= b'2'
+        && let Some((v2, _)) = parse_tzif_block(bytes, v1_end, true)
+    {
+        return Some(v2);
+    }
+    Some(v1)
+}
+
+fn load_tzif_zone(spec: &str) -> Option<TzifZone> {
+    {
+        let cache = ZONEINFO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = cache.get(spec) {
+            return cached.clone();
+        }
+    }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    let spec_path = std::path::Path::new(spec);
+    if spec_path.is_absolute() {
+        candidates.push(spec_path.to_path_buf());
+    } else if !spec
+        .split(['/', '\\'])
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        if let Some(tzdir) = pi_js::env::var("TZDIR")
+            && !tzdir.is_empty()
+        {
+            candidates.push(std::path::Path::new(&tzdir).join(spec));
+        }
+        for dir in [
+            "/var/db/timezone/zoneinfo",
+            "/usr/share/zoneinfo",
+            "/etc/zoneinfo",
+            "/usr/lib/zoneinfo",
+        ] {
+            candidates.push(std::path::Path::new(dir).join(spec));
+        }
+    }
+
+    let parsed = candidates
+        .into_iter()
+        .find_map(|path| std::fs::read(path).ok().and_then(|bytes| parse_tzif(&bytes)));
+
+    ZONEINFO_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(spec.to_string(), parsed.clone());
+    parsed
+}
+
+fn parse_posix_tz_fixed_offset(spec: &str) -> Option<i32> {
+    // Strip quoted `<...>` or alphabetic zone abbreviation.
+    let rest = if let Some(after_lt) = spec.strip_prefix('<') {
+        let (_, tail) = after_lt.split_once('>')?;
+        tail
+    } else {
+        spec.trim_start_matches(|c: char| c.is_ascii_alphabetic())
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let (sign_west, rest) = if let Some(tail) = rest.strip_prefix('-') {
+        // POSIX `-` means east of UTC; return positive east seconds.
+        (-1i32, tail)
+    } else if let Some(tail) = rest.strip_prefix('+') {
+        (1i32, tail)
+    } else {
+        (1i32, rest)
+    };
+    // Only apply fixed offset parser when there's no trailing DST transition spec (e.g. `,`).
+    let offset_part = rest.split([',', ' ', '\t']).next()?;
+    let end_digits = offset_part
+        .find(|c: char| !c.is_ascii_digit() && c != ':')
+        .unwrap_or(offset_part.len());
+    let num_str = &offset_part[..end_digits];
+    if num_str.is_empty()
+        || rest[end_digits..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '<')
+    {
+        // Complex POSIX rule with DST name; let fallback handle if unknown.
+        if rest[end_digits..].contains(',') {
+            return None;
+        }
+    }
+    let mut parts = num_str.split(':');
+    let hours: i32 = parts.next()?.parse().ok()?;
+    let mins: i32 = match parts.next() {
+        Some(s) => s.parse().ok()?,
+        None => 0,
+    };
+    let secs: i32 = match parts.next() {
+        Some(s) => s.parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let total_secs = hours * 3600 + mins * 60 + secs;
+    Some(-sign_west * total_secs)
+}
+
+fn resolve_tz_spec_offset_secs(spec: &str, time_secs: i64) -> Option<i32> {
+    if matches!(spec, "UTC" | "GMT" | "Z" | "UTC0" | "GMT0" | "UTC+0" | "UTC-0") {
+        return Some(0);
+    }
+    if let Some(zone) = load_tzif_zone(spec) {
+        if zone.transitions.is_empty() || time_secs < zone.transitions[0].0 {
+            return Some(zone.before_first);
+        }
+        let idx = zone.transitions.partition_point(|&(t, _)| t <= time_secs) - 1;
+        return Some(zone.transitions[idx].1);
+    }
+    parse_posix_tz_fixed_offset(spec)
+}
+
+fn host_timezone_offset_secs(time_secs: i64, tz_override: Option<&str>) -> i32 {
+    let tz = tz_override
+        .map(str::to_string)
+        .or_else(|| pi_js::env::var("TZ"))
+        .map(|s| s.trim().strip_prefix(':').unwrap_or(s.trim()).to_string());
+    if let Some(spec) = tz.as_deref().filter(|s| !s.is_empty())
+        && let Some(secs) = resolve_tz_spec_offset_secs(spec, time_secs)
+    {
+        return secs;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp(time_secs, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).offset().local_minus_utc())
+        .unwrap_or(0)
+}
+
 // -----------------------------------------------------------------------------
 // QuickJS Implementation
 // -----------------------------------------------------------------------------
@@ -1030,11 +1308,20 @@ fn decode_wtf8(bytes: &[u8]) -> String {
 impl QuickJS {
     /// Create a fresh QuickJS VM instance with all intrinsics enabled.
     pub fn create(options: QuickJSOptions) -> pi_js::Result<Self> {
-        Self::create_with_intrinsics(options, Intrinsics::ALL)
+        Self::create_with_settings(options, Intrinsics::ALL, None)
     }
 
     /// Create a fresh QuickJS VM instance with a specific `Intrinsics` bitmask.
     pub fn create_with_intrinsics(options: QuickJSOptions, intrinsics: u32) -> pi_js::Result<Self> {
+        Self::create_with_settings(options, intrinsics, None)
+    }
+
+    /// Create a fresh QuickJS VM instance with explicit intrinsics and timezone configuration.
+    pub fn create_with_settings(
+        options: QuickJSOptions,
+        intrinsics: u32,
+        timezone_offset: Option<TimezoneOffset>,
+    ) -> pi_js::Result<Self> {
         if let Some(stack) = options.max_stack_size
             && (stack < 0 || stack > MAX_STACK_SIZE)
         {
@@ -1051,7 +1338,11 @@ impl QuickJS {
             let wasi_memory = WasiMemory {
                 inner: Arc::new(WasiMemoryInner { vm: weak.clone() }),
             };
-            let fd_write_override = options.wasi.as_ref().and_then(|factory| factory(&wasi_memory).fd_write);
+            let wasi_overrides = options
+                .wasi
+                .as_ref()
+                .map(|factory| factory(&wasi_memory))
+                .unwrap_or_default();
 
             let mut linker = Linker::new(&WASM_ENGINE);
             if let Err(err) = wire_linker(&mut linker) {
@@ -1064,7 +1355,9 @@ impl QuickJS {
                     vm_id,
                     vm: weak.clone(),
                     wasi_memory: wasi_memory.clone(),
-                    fd_write_override,
+                    fd_write_override: wasi_overrides.fd_write,
+                    clock_time_get_override: wasi_overrides.clock_time_get,
+                    random_get_override: wasi_overrides.random_get,
                 },
             );
 
@@ -1088,6 +1381,28 @@ impl QuickJS {
                 }
             });
 
+            let tz_handler: Option<Arc<dyn Fn(i64) -> i32 + Send + Sync>> = match timezone_offset {
+                Some(TimezoneOffset::FixedMinutes(minutes)) => {
+                    let offset_secs = -minutes.saturating_mul(60);
+                    Some(Arc::new(move |_time_secs| offset_secs))
+                }
+                Some(TimezoneOffset::Callback(cb)) => {
+                    Some(Arc::new(move |time_secs| -cb(time_secs).saturating_mul(60)))
+                }
+                Some(TimezoneOffset::Host { tz }) => {
+                    let captured = tz.or_else(|| pi_js::env::var("TZ"));
+                    Some(Arc::new(move |time_secs| {
+                        host_timezone_offset_secs(time_secs, captured.as_deref())
+                    }))
+                }
+                None => {
+                    let captured = pi_js::env::var("TZ");
+                    Some(Arc::new(move |time_secs| {
+                        host_timezone_offset_secs(time_secs, captured.as_deref())
+                    }))
+                }
+            };
+
             QuickJSInner {
                 id: vm_id,
                 disposed: AtomicBool::new(false),
@@ -1099,8 +1414,9 @@ impl QuickJS {
                 interrupt_handler: Mutex::new(options.interrupt_handler),
                 unhandled_rejection_handler: Mutex::new(None),
                 module_loader: Mutex::new(None),
-                timezone_offset_handler: Mutex::new(None),
+                timezone_offset_handler: Mutex::new(tz_handler),
                 scopes: Mutex::new(Vec::new()),
+                cached_versions: Mutex::new(None),
                 cached_global: Mutex::new(None),
                 cached_undefined: Mutex::new(None),
                 cached_null: Mutex::new(None),
@@ -1219,7 +1535,7 @@ impl QuickJS {
         }
     }
 
-    fn with_active_site<F, R>(&self, exports: &WasmExports, f: F) -> ActiveDispatch<F, R>
+    fn with_active_site<F, R>(&self, exports: &WasmExports, flush: bool, f: F) -> ActiveDispatch<F, R>
     where
         F: FnOnce(&WasmExports, StoreContextMut<'_, HostState>) -> pi_js::Result<R>,
     {
@@ -1238,7 +1554,9 @@ impl QuickJS {
         // Taking it out of `ACTIVE_SITE` guarantees unique `&mut` access during `f`.
         let site = unsafe { ptr.as_mut() };
         let mut ctx = site.as_ctx_mut();
-        flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+        if flush && !self.is_disposed() {
+            flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+        }
         ActiveDispatch::Ran(f(exports, ctx))
     }
 
@@ -1252,7 +1570,7 @@ impl QuickJS {
             .exports
             .as_ref()
             .ok_or_else(|| pi_js::Error::msg("QuickJS VM failed to initialize exports"))?;
-        let f = match self.with_active_site(exports, f) {
+        let f = match self.with_active_site(exports, true, f) {
             ActiveDispatch::Ran(res) => return res,
             ActiveDispatch::NotActive(f) => f,
         };
@@ -1263,6 +1581,30 @@ impl QuickJS {
         };
         let mut ctx = store.as_ctx_mut();
         flush_pending_frees(&self.inner.pending_frees, exports, &mut ctx);
+        f(exports, ctx)
+    }
+
+    /// Access linear memory from either an active WASI/host callback (including during
+    /// `qjs_destroy`) or a non-disposed VM store lock.
+    fn with_memory_site<R>(
+        &self,
+        f: impl FnOnce(&WasmExports, StoreContextMut<'_, HostState>) -> pi_js::Result<R>,
+    ) -> pi_js::Result<R> {
+        let exports = self
+            .inner
+            .exports
+            .as_ref()
+            .ok_or_else(|| pi_js::Error::msg("QuickJS VM failed to initialize exports"))?;
+        let f = match self.with_active_site(exports, false, f) {
+            ActiveDispatch::Ran(res) => return res,
+            ActiveDispatch::NotActive(f) => f,
+        };
+        self.assert_not_disposed()?;
+        let mut guard = self.inner.store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return Err(pi_js::Error::msg("QuickJS VM has been disposed"));
+        };
+        let ctx = store.as_ctx_mut();
         f(exports, ctx)
     }
 
@@ -1282,7 +1624,7 @@ impl QuickJS {
             let _ = exp.qjs_free_value.call(&mut ctx, ptr);
             Ok(())
         };
-        match self.with_active_site(exports, free_fn) {
+        match self.with_active_site(exports, true, free_fn) {
             ActiveDispatch::Ran(_) => return,
             ActiveDispatch::NotActive(_) => {}
         }
@@ -1309,7 +1651,7 @@ impl QuickJS {
     }
 
     fn with_memory_read<R>(&self, ptr: u32, len: usize, f: impl FnOnce(&[u8]) -> R) -> pi_js::Result<R> {
-        self.with_site(|exports, ctx| {
+        self.with_memory_site(|exports, ctx| {
             let data = exports.memory.data(&ctx);
             let start = ptr as usize;
             let end = start
@@ -1323,7 +1665,7 @@ impl QuickJS {
     }
 
     fn with_memory_write(&self, ptr: u32, bytes: &[u8]) -> pi_js::Result<()> {
-        self.with_site(|exports, mut ctx| {
+        self.with_memory_site(|exports, mut ctx| {
             let data = exports.memory.data_mut(&mut ctx);
             let start = ptr as usize;
             let end = start
@@ -1697,33 +2039,64 @@ impl QuickJS {
         })
     }
 
+    /// Version information for the runtime (`"quickjs-wasi"` and `"quickjs"`).
+    pub fn versions(&self) -> pi_js::Result<IndexMap<String, String>> {
+        self.assert_not_disposed()?;
+        if let Some(cached) = self
+            .inner
+            .cached_versions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Ok(cached);
+        }
+        let ptr = self.with_site(|exports, mut ctx| {
+            exports
+                .qjs_get_quickjs_version
+                .call(&mut ctx, ())
+                .map_err(|e| wasm_err("qjs_get_quickjs_version", e))
+        })?;
+        let quickjs_version = self.read_c_string(ptr)?;
+        let mut versions = IndexMap::new();
+        versions.insert("quickjs-wasi".to_string(), QUICKJS_WASI_VERSION.to_string());
+        versions.insert("quickjs".to_string(), quickjs_version);
+        *self.inner.cached_versions.lock().unwrap_or_else(|e| e.into_inner()) = Some(versions.clone());
+        Ok(versions)
+    }
+
+    /// Execute at most one pending microtask job. Returns `true` if a job ran, `false` if empty.
+    pub fn execute_pending_job_step(&self) -> pi_js::Result<bool> {
+        let pending = self.with_site(|exports, mut ctx| {
+            exports
+                .qjs_is_job_pending
+                .call(&mut ctx, ())
+                .map_err(|e| wasm_err("qjs_is_job_pending", e))
+        })?;
+        if pending == 0 {
+            return Ok(false);
+        }
+        let result = self.with_site(|exports, mut ctx| {
+            exports
+                .qjs_execute_pending_job
+                .call(&mut ctx, ())
+                .map_err(|e| wasm_err("qjs_execute_pending_job", e))
+        })?;
+        if result < 0 {
+            let exc_handle = self.get_exception()?;
+            let exc = JSException::new(exc_handle);
+            let msg = format!("Job execution error: {}", exc.message());
+            exc.dispose();
+            return Err(pi_js::Error::msg(msg));
+        }
+        Ok(true)
+    }
+
     /// Execute all pending microtask jobs. Returns the number of jobs executed.
     pub fn execute_pending_jobs(&self) -> pi_js::Result<i64> {
         self.assert_not_disposed()?;
         let mut count: i64 = 0;
-        loop {
-            let pending = self.with_site(|exports, mut ctx| {
-                exports
-                    .qjs_is_job_pending
-                    .call(&mut ctx, ())
-                    .map_err(|e| wasm_err("qjs_is_job_pending", e))
-            })?;
-            if pending == 0 {
-                break;
-            }
-            let result = self.with_site(|exports, mut ctx| {
-                exports
-                    .qjs_execute_pending_job
-                    .call(&mut ctx, ())
-                    .map_err(|e| wasm_err("qjs_execute_pending_job", e))
-            })?;
-            if result < 0 {
-                let exc_handle = self.get_exception()?;
-                let exc = JSException::new(exc_handle);
-                let msg = format!("Job execution error: {}", exc.message());
-                exc.dispose();
-                return Err(pi_js::Error::msg(msg));
-            }
+        while self.execute_pending_job_step()? {
             count += 1;
         }
         Ok(count)

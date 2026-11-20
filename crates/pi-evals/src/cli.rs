@@ -156,14 +156,30 @@ fn artifact_run_id() -> String {
     format!("{timestamp}_{}", pi_js::crypto::random_uuid())
 }
 
+fn map_rust_docs_eval_name(path: &str) -> Option<&'static str> {
+    let normalized = path.replace('\\', "/");
+    match normalized.rsplit('/').next()? {
+        "custom_provider_docs_eval.rs" => Some("evals/custom-provider.docs.eval.ts"),
+        "extensions_docs_eval.rs" => Some("evals/extensions.docs.eval.ts"),
+        "models_docs_eval.rs" => Some("evals/models.docs.eval.ts"),
+        "openai_provider_docs_eval.rs" => Some("evals/openai-provider.docs.eval.ts"),
+        "prompt_templates_docs_eval.rs" => Some("evals/prompt-templates.docs.eval.ts"),
+        "tui_docs_eval.rs" => Some("evals/tui.docs.eval.ts"),
+        _ => None,
+    }
+}
+
 fn container_path(pkg_root: &str, raw_path: &str) -> Result<String> {
     if raw_path.starts_with("evals/") && raw_path.ends_with(".docs.eval.ts") {
         return Ok(raw_path.replace('\\', "/"));
     }
     let absolute = pi_js::path::resolve(&[pkg_root, raw_path]);
     let pkg_relative = pi_js::path::relative(pkg_root, &absolute);
-    if pkg_relative.starts_with("..") {
+    if pkg_relative == ".." || pkg_relative.starts_with("..") || pi_js::path::is_absolute(&pkg_relative) {
         return Err(Error::msg(format!("Eval file must be inside {pkg_root}: {raw_path}")));
+    }
+    if let Some(mapped) = map_rust_docs_eval_name(&pkg_relative) {
+        return Ok(mapped.to_string());
     }
     Ok(pkg_relative.replace('\\', "/"))
 }
@@ -224,12 +240,14 @@ struct PersistedEvalProtocol<'a> {
     protocol_digest: &'a str,
 }
 
-fn default_doc_eval_files() -> Vec<String> {
+/// Returns the sorted list of default documentation-lift eval suite paths.
+pub fn default_doc_eval_files() -> Vec<String> {
     let mut files = vec![
         "evals/custom-provider.docs.eval.ts".to_string(),
         "evals/extensions.docs.eval.ts".to_string(),
         "evals/models.docs.eval.ts".to_string(),
         "evals/openai-provider.docs.eval.ts".to_string(),
+        "evals/prompt-templates.docs.eval.ts".to_string(),
         "evals/tui.docs.eval.ts".to_string(),
     ];
     files.sort();
@@ -459,5 +477,25 @@ pub fn run() -> ExitCode {
             pi_js::console::error(&err.to_js_string());
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_path_resolves_doc_eval_ts_and_maps_rust_eval_paths() {
+        let pkg_root = package_root();
+        assert_eq!(
+            container_path(&pkg_root, "evals/prompt-templates.docs.eval.ts").unwrap(),
+            "evals/prompt-templates.docs.eval.ts"
+        );
+        assert_eq!(
+            container_path(&pkg_root, "src/evals/prompt_templates_docs_eval.rs").unwrap(),
+            "evals/prompt-templates.docs.eval.ts"
+        );
+        let err = container_path(&pkg_root, "../outside.docs.eval.ts").unwrap_err();
+        assert!(err.to_string().contains("Eval file must be inside"), "{err}");
     }
 }

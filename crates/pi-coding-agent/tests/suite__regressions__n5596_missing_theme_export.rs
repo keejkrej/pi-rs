@@ -97,6 +97,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
                 max_tokens: m.max_tokens,
                 sampling_params: m.sampling_params.clone(),
                 compat: m.compat.clone(),
+                sampling_params_by_thinking_level: None,
             })
         })
         .collect();
@@ -160,6 +161,7 @@ async fn exports_with_the_active_fallback_theme_when_the_configured_theme_is_mis
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     session.prompt("hi", None).await.unwrap();

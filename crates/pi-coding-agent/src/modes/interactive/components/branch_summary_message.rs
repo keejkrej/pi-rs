@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 pub use crate::core::messages::BranchSummaryMessage;
 use pi_tui::components::box_::TuiBox;
-use pi_tui::components::markdown::DefaultTextStyle;
+use pi_tui::components::markdown::{DefaultTextStyle, MarkdownOptions};
 use pi_tui::{
     Component, Container, Markdown, MarkdownTheme, MouseRegion, Spacer, Text, TuiMouseButton, TuiMouseEvent,
     TuiMouseEventResult, TuiMouseEventType,
@@ -12,6 +12,9 @@ use pi_tui::{
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
 use super::keybinding_hints::key_text;
+use super::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic_with_meta,
+};
 
 struct BranchSummaryState {
     expanded: bool,
@@ -21,6 +24,9 @@ struct BranchSummaryInner {
     content_box: TuiBox,
     message: BranchSummaryMessage,
     markdown_theme: MarkdownTheme,
+    markdown_transformers: Vec<MarkdownTransformer>,
+    message_id: Option<String>,
+    timestamp: Option<String>,
     state: Mutex<BranchSummaryState>,
 }
 
@@ -33,8 +39,19 @@ pub struct BranchSummaryMessageComponent {
 
 impl BranchSummaryMessageComponent {
     pub fn new(message: BranchSummaryMessage, markdown_theme: Option<MarkdownTheme>) -> Self {
+        Self::new_with_options(message, markdown_theme, None, None, None, None)
+    }
+
+    pub fn new_with_options(
+        message: BranchSummaryMessage,
+        markdown_theme: Option<MarkdownTheme>,
+        output_pad: Option<i64>,
+        markdown_transformers: Option<Vec<MarkdownTransformer>>,
+        message_id: Option<String>,
+        timestamp: Option<String>,
+    ) -> Self {
         let content_box = TuiBox::new(
-            Some(1),
+            Some(output_pad.unwrap_or(1)),
             Some(1),
             Some(Arc::new(|t| theme().bg(ThemeBg::CustomMessageBg, t))),
         );
@@ -43,6 +60,9 @@ impl BranchSummaryMessageComponent {
                 content_box,
                 message,
                 markdown_theme: markdown_theme.unwrap_or_else(get_markdown_theme),
+                markdown_transformers: markdown_transformers.unwrap_or_default(),
+                message_id,
+                timestamp,
                 state: Mutex::new(BranchSummaryState { expanded: false }),
             }),
         };
@@ -71,8 +91,15 @@ impl BranchSummaryMessageComponent {
         let expanded = self.inner.state.lock().unwrap().expanded;
         if expanded {
             let header = "**Branch Summary**\n\n";
+            let inner_transform = create_markdown_transform_dynamic_with_meta(
+                MarkdownMessageType::Summary,
+                Arc::new(|| false),
+                self.inner.markdown_transformers.clone(),
+                self.inner.message_id.clone(),
+                self.inner.timestamp.clone(),
+            );
             content.add_child(Arc::new(Markdown::new(
-                &format!("{header}{}", self.inner.message.summary),
+                &self.inner.message.summary,
                 0,
                 0,
                 self.inner.markdown_theme.clone(),
@@ -80,7 +107,15 @@ impl BranchSummaryMessageComponent {
                     color: Some(Arc::new(|text: &str| theme().fg(ThemeColor::CustomMessageText, text))),
                     ..Default::default()
                 }),
-                None,
+                Some(MarkdownOptions {
+                    preserve_ordered_list_markers: None,
+                    preserve_backslash_escapes: None,
+                    // Transformers see only the summary content, not Pi's header.
+                    transform: Some(Arc::new(move |markdown: &str, width: i64| {
+                        format!("{header}{}", inner_transform(markdown, width))
+                    })),
+                    render_latex: None,
+                }),
             )));
         } else {
             let collapsed = format!(

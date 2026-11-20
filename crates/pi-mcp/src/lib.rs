@@ -8,10 +8,24 @@ pub mod protocol;
 pub mod testing;
 pub mod transports;
 // @generated-mods end
+pub mod config;
+pub mod input_schema;
+pub mod naming;
+pub mod output_limit;
+
 pub use pi_js::{Error, Result};
 
 pub use crate::auth_provider::{AuthProvider, McpFetch, UnauthorizedContext};
 pub use crate::client::{McpClient, McpClientOptions, McpRequestOptions};
+pub use crate::config::{
+    CheckMetadataDocumentCallback, McpHttpServerConfig, McpOAuthConfig, McpServerConfig, McpServerConfigOptions,
+    McpServerConfigResult, McpStdioServerConfig, is_mcp_server_override, validate_mcp_server_config,
+};
+pub use crate::input_schema::normalize_mcp_input_schema;
+pub use crate::naming::{create_mcp_tool_name, mcp_namespace};
+pub use crate::output_limit::{
+    LimitedMcpContent, MCP_OUTPUT_MAX_BYTES, McpOutputData, McpOutputSaver, limit_mcp_content,
+};
 pub use crate::protocol::content::{
     AudioContent, BlobResourceContents, CallToolResult, ContentAnnotations, ContentBlock, EmbeddedResourceContent,
     ImageContent, LlmContent, ResourceLinkContent, TextContent, TextResourceContents, to_llm_content,
@@ -27,12 +41,14 @@ pub use crate::protocol::types::{
     ReadResourceResult, Resource, ResourceTemplate, Root, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities,
     SupportedProtocolVersion, Tool, ToolAnnotations, ToolExecution,
 };
+pub use crate::transports::pipe::{McpPipe, McpPipeHandlers, PipeOpenFn, PipeTransport, PipeTransportOptions};
 pub use crate::transports::stdio::{StdioTransport, StdioTransportOptions};
 pub use crate::transports::streamable_http::{
     McpAuthRequiredError, McpHttpError, McpSessionExpiredError, StreamableHttpTransport, StreamableHttpTransportOptions,
 };
 pub use crate::transports::transport::{
     McpTransport, McpTransportCloseListener, McpTransportErrorListener, McpTransportMessageListener,
+    McpTransportSendOptions,
 };
 
 #[doc(hidden)]

@@ -139,7 +139,7 @@ async fn commits_a_retain_none_turn_end_compaction_and_explicitly_continues_once
     assert!(!recorded[0].contains("discarded response"));
     assert_eq!(observed_ids.lock().unwrap_or_else(PoisonError::into_inner).len(), 2);
     assert_eq!(
-        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled)),
+        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled { .. })),
         1
     );
     harness.cleanup();
@@ -655,7 +655,7 @@ async fn continues_from_an_agent_before_settle_custom_message_before_final_settl
     }));
     assert_eq!(count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentStart)), 2);
     assert_eq!(
-        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled)),
+        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled { .. })),
         1
     );
     harness.cleanup();
@@ -946,7 +946,7 @@ async fn does_not_let_an_invalid_explicit_continuation_suppress_natural_tool_con
         name: "noop".to_string(),
         label: "Noop".to_string(),
         description: "Noop".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1548,7 +1548,7 @@ async fn commits_pre_settlement_drafts_but_suppresses_continuation_when_aborted_
         _ => false,
     }));
     assert_eq!(
-        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled)),
+        count_event(&harness, |e| matches!(e, AgentSessionEvent::AgentSettled { .. })),
         1
     );
     harness.cleanup();
@@ -1562,7 +1562,7 @@ async fn keeps_truncated_tool_attempts_in_context_for_the_natural_next_turn() {
         name: "restricted_truncated_tool".to_string(),
         label: "Restricted truncated tool".to_string(),
         description: "Must not execute from a length response".to_string(),
-        parameters: t::object([("value", t::string())]),
+        parameters: t::object([("value", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -1637,7 +1637,7 @@ async fn resets_length_recovery_after_a_successful_intermediate_assistant_turn()
         name: "noop".to_string(),
         label: "Noop".to_string(),
         description: "Noop".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

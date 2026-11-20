@@ -322,6 +322,8 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub npm_command: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_update_command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapse_changelog: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_install_telemetry: Option<bool>,
@@ -401,8 +403,46 @@ pub struct Settings {
 
 pub const DEFAULT_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write"];
 
-fn is_tool_modifier(entry: &str) -> bool {
+pub fn is_tool_modifier(entry: &str) -> bool {
     entry.starts_with('+') || entry.starts_with('-')
+}
+
+/// Validate a tool list from `--tools` or the SDK `tools` option.
+/// Returns `Some(problem)` when invalid, or `None` when valid.
+pub fn get_tool_list_error(entries: &[String]) -> Option<String> {
+    let modifiers: Vec<&String> = entries.iter().filter(|e| is_tool_modifier(e)).collect();
+    if modifiers.is_empty() {
+        return None;
+    }
+    if modifiers.len() < entries.len() {
+        return Some("tool names cannot be mixed with +name or -name entries".to_owned());
+    }
+    if let Some(pattern) = modifiers.into_iter().find(|e| e.contains('*')) {
+        return Some(format!(
+            "+name and -name entries take exact tool names, not patterns: {pattern}"
+        ));
+    }
+    None
+}
+
+/// Apply the `+name` and `-name` entries of `entries` to `base` in order.
+pub fn apply_tool_modifiers(base: &[String], entries: &[String]) -> Vec<String> {
+    let mut tools = base.to_vec();
+    for entry in entries {
+        if !is_tool_modifier(entry) {
+            continue;
+        }
+        let name = &entry[1..];
+        let pos = tools.iter().position(|t| t == name);
+        if entry.starts_with('+') && pos.is_none() && !name.is_empty() {
+            tools.push(name.to_owned());
+        } else if entry.starts_with('-')
+            && let Some(idx) = pos
+        {
+            tools.remove(idx);
+        }
+    }
+    tools
 }
 
 fn merge_default_tools(base: Option<&Vec<String>>, overrides: Option<&Vec<String>>) -> Option<Vec<String>> {
@@ -422,26 +462,12 @@ fn merge_default_tools(base: Option<&Vec<String>>, overrides: Option<&Vec<String
 
 fn resolve_default_tools(entries: &[String]) -> Vec<String> {
     let plain: Vec<String> = entries.iter().filter(|e| !is_tool_modifier(e)).cloned().collect();
-    let mut tools = if !plain.is_empty() || entries.is_empty() {
+    let base: Vec<String> = if !plain.is_empty() || entries.is_empty() {
         plain
     } else {
         DEFAULT_TOOL_NAMES.iter().map(|&s| s.to_owned()).collect()
     };
-    for entry in entries {
-        if !is_tool_modifier(entry) {
-            continue;
-        }
-        let name = &entry[1..];
-        let pos = tools.iter().position(|t| t == name);
-        if entry.starts_with('+') && pos.is_none() && !name.is_empty() {
-            tools.push(name.to_owned());
-        } else if entry.starts_with('-')
-            && let Some(idx) = pos
-        {
-            tools.remove(idx);
-        }
-    }
-    tools
+    apply_tool_modifiers(&base, entries)
 }
 
 fn deep_merge_values(base: &Map<String, Value>, overrides: &Map<String, Value>) -> Map<String, Value> {
@@ -1522,7 +1548,7 @@ impl SettingsManager {
     pub fn get_cache_warming_mode(&self) -> CacheWarmingMode {
         self.get_global_settings()
             .cache_warming
-            .unwrap_or(CacheWarmingMode::Streaming)
+            .unwrap_or(CacheWarmingMode::Idle)
     }
 
     pub fn set_cache_warming_mode(&self, mode: CacheWarmingMode) {
@@ -1646,6 +1672,10 @@ impl SettingsManager {
         st.global_settings.npm_command = command;
         Self::mark_modified_locked(&mut st, "npmCommand", None);
         self.save_locked(st);
+    }
+
+    pub fn get_self_update_command(&self) -> Option<Vec<String>> {
+        self.get_global_settings().self_update_command
     }
 
     pub fn get_collapse_changelog(&self) -> bool {

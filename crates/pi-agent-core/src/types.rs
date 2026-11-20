@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use indexmap::{IndexMap, IndexSet};
 use pi_ai::{
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, ConstrainedSampling,
-    ConstrainedSamplingConfig, Context, JsonObject, Message, Model, ModelThinkingLevel, ProviderHeaders,
-    SimpleStreamOptions, StopReason, SystemMessage, TSchema as Schema, Tool, ToolCall, ToolResultMessage, Transport,
-    Usage, UserContentBlock, UserMessage,
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, ClientIdentity, ConstrainedSampling,
+    ConstrainedSamplingConfig, Context, DeferredOption, FetchFunction, JsonObject, Message, Model, ModelThinkingLevel,
+    OnProviderStreamEventFn, ProviderEnv, ProviderHeaders, SamplingParams, SimpleStreamOptions, StopReason,
+    SystemMessage, TelemetryContextHandle, TelemetrySpanHandle, Tool, ToolCall, ToolChoice, ToolResultMessage,
+    Transport, Usage, UserContentBlock, UserMessage,
 };
 use pi_js::abort::AbortSignal;
 use pi_js::{BoxFuture, Result};
+use pi_schema::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -305,6 +307,8 @@ pub struct AgentToolCallOutcome {
     pub tool_call: AgentToolCall,
     pub result: AgentToolResult,
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
 }
 
 /// Callback for streaming partial tool execution progress updates.
@@ -344,7 +348,7 @@ impl AgentTool {
         Tool {
             name: self.name.clone(),
             description: self.description.clone(),
-            parameters: self.parameters.clone(),
+            parameters: self.parameters.clone().into(),
             constrained_sampling: self.constrained_sampling.clone().map(ConstrainedSampling::Config),
         }
     }
@@ -533,11 +537,15 @@ pub type PrepareRequestFn = Arc<
 /// Optional stream-level payload inspector matching `SimpleStreamOptions::on_payload`.
 pub type OnPayloadFn = pi_ai::OnPayloadFn<Model>;
 
+/// Optional stream-level raw response inspector matching `SimpleStreamOptions::on_response`.
+pub type OnResponseFn = pi_ai::OnResponseFn<Model>;
+
 /// Configuration for [`agent_loop`](crate::agent_loop::agent_loop) and [`run_agent_loop`](crate::agent_loop::run_agent_loop).
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub model: Model,
     pub temperature: Option<f64>,
+    pub sampling_params: Option<SamplingParams>,
     pub max_tokens: Option<i64>,
     pub api_key: Option<String>,
     pub cache_retention: Option<pi_ai::CacheRetention>,
@@ -546,9 +554,22 @@ pub struct AgentLoopConfig {
     pub transport: Option<Transport>,
     pub thinking_budgets: Option<pi_ai::ThinkingBudgets>,
     pub max_retry_delay_ms: Option<u64>,
+    pub disable_continuation: Option<bool>,
+    pub timeout_ms: Option<u64>,
+    pub websocket_connect_timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub telemetry: Option<TelemetrySpanHandle>,
+    pub telemetry_context: Option<TelemetryContextHandle>,
+    pub fetch: Option<FetchFunction>,
+    pub env: Option<ProviderEnv>,
     pub metadata: Option<IndexMap<String, Value>>,
     pub headers: Option<ProviderHeaders>,
+    pub identity: Option<ClientIdentity>,
     pub on_payload: Option<OnPayloadFn>,
+    pub on_response: Option<OnResponseFn>,
+    pub on_provider_stream_event: Option<OnProviderStreamEventFn>,
+    pub tool_choice: Option<ToolChoice>,
+    pub deferred: Option<DeferredOption>,
     pub tool_execution: Option<ToolExecutionMode>,
     pub convert_to_llm: ConvertToLlmFn,
     pub transform_context: Option<TransformContextFn>,
@@ -570,6 +591,7 @@ impl AgentLoopConfig {
         Self {
             model,
             temperature: None,
+            sampling_params: None,
             max_tokens: None,
             api_key: None,
             cache_retention: None,
@@ -578,9 +600,22 @@ impl AgentLoopConfig {
             transport: None,
             thinking_budgets: None,
             max_retry_delay_ms: None,
+            disable_continuation: None,
+            timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            max_retries: None,
+            telemetry: None,
+            telemetry_context: None,
+            fetch: None,
+            env: None,
             metadata: None,
             headers: None,
+            identity: None,
             on_payload: None,
+            on_response: None,
+            on_provider_stream_event: None,
+            tool_choice: None,
+            deferred: None,
             tool_execution: None,
             convert_to_llm,
             transform_context: None,
@@ -662,6 +697,8 @@ pub enum AgentEvent {
         result: AgentToolResult,
         #[serde(rename = "isError")]
         is_error: bool,
+        #[serde(default, rename = "durationMs", skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<i64>,
     },
 }
 

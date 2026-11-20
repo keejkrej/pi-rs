@@ -20,19 +20,21 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use futures::future::Shared;
 use indexmap::{IndexMap, IndexSet};
-use serde_json::Value;
 
 use crate::config::get_agent_dir;
 use crate::core::extensions::types::{
     BeforeAgentStartEvent, BeforeAgentStartEventResult, CommandHandlerFn, ExtensionApi, ExtensionCommandContext,
     ExtensionContext, ExtensionFactory, ExtensionMode, ExtensionUIDialogOptions, McpServersChangeEvent, ModelRegistry,
     NotifyType, RegisteredCommandOptions, RegisteredMcpServer, SessionShutdownEvent, SessionStartEvent, ToolCallEvent,
-    ToolCallEventResult, ToolDefinition, ToolExposure, ToolNamespace, TurnStartEvent,
+    ToolCallEventResult, ToolDefinition, ToolExposure, ToolNamespace, ToolReachScope, ToolRendererResolver,
+    TurnStartEvent,
 };
-use crate::extensions::codemode::tool::{CODEMODE_TOOL_NAME, is_codemode_tool};
+use crate::core::tools::truncate::slice_head;
+use crate::extensions::codemode::tool::CODEMODE_TOOL_NAME;
 use crate::extensions::mcp::config::{
-    LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpServerConfig, McpServerConfigPatch, McpServerEntry,
-    get_mcp_tool_exposure, load_mcp_config, mcp_namespace, update_mcp_server_config,
+    LoadMcpConfigOptions, LoadedMcpConfig, McpExposure, McpScope, McpServerConfig, McpServerConfigPatch,
+    McpServerEntry, UpdateMcpConfigOptions, get_mcp_tool_exposure, load_mcp_config, mcp_namespace,
+    update_mcp_server_config,
 };
 use crate::extensions::mcp::log::McpServerLog;
 use crate::extensions::mcp::oauth::{
@@ -46,12 +48,12 @@ use crate::extensions::mcp::runtime_lazy::{
 };
 use crate::extensions::mcp::tools::{
     CreateMcpToolDefinitionOptions, McpToolCaller, READ_MCP_RESOURCE_TOOL, create_mcp_tool_definition,
-    create_mcp_tool_name,
+    create_mcp_tool_name, create_mcp_tool_renderers,
 };
 use crate::extensions::mcp::ui::{McpMenu, McpSubscribeFn, McpUi, show_mcp_manager};
-use crate::extensions::tool_search::tool::{TOOL_SEARCH_TOOL_NAME, is_tool_search_tool};
+use crate::extensions::tool_search::tool::TOOL_SEARCH_TOOL_NAME;
 use crate::utils::open_browser::open_browser;
-use pi_js::abort::AbortSignal;
+use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::{BoxFuture, Error, Result, Unsubscribe};
 use pi_tui::autocomplete::AutocompleteItem;
 use pi_tui::components::select_list::SelectItem;
@@ -74,7 +76,8 @@ pub struct McpExtensionOptions {
     pub log_path: Option<String>,
     /// Opens the OAuth authorization URL. Defaults to the platform browser.
     pub open_url: Option<McpOpenUrlFn>,
-    /// Saves `/mcp` changes to the server's config file. Defaults to editing its `mcp.json`.
+    /// Saves `/mcp` changes to the server's config file: its project `override_path` when set, else its
+    /// `source`. Defaults to editing that `mcp.json`.
     pub update_config: Option<McpUpdateConfigFn>,
     /// How long the first prompt waits for servers with `direct` tools that are still connecting
     /// at startup, in milliseconds. Default: 10000.
@@ -87,9 +90,8 @@ pub const MCP_SERVERS_SECTION: &str = "mcp_servers";
 pub const MAX_SERVERS_SECTION_CHARS: usize = 4096;
 const MCP_USAGE: &str = "Usage: /mcp, /mcp login [server], /mcp logout [server], /mcp reconnect [server]";
 
-static SCRIPT_SEARCH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b").expect("valid script search regex")
-});
+static MCP_TOOL_NAME_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^mcp__(.+?)__(.+)$").expect("valid mcp tool name regex"));
 
 fn is_resource_tool_name(name: &str) -> bool {
     matches!(
@@ -100,11 +102,17 @@ fn is_resource_tool_name(name: &str) -> bool {
 
 #[derive(Clone)]
 struct McpServer {
+    instance_id: u64,
     entry: McpServerEntry,
     connection: Option<Arc<McpServerConnection>>,
     registered_config: Option<String>,
     message: Option<String>,
-    ready: Option<Shared<BoxFuture<()>>>,
+    /// Identifies the current connection attempt; disabling or replacing it invalidates earlier work.
+    attempt: Option<u64>,
+    /// Settles when the connection started for the server connected or failed.
+    ready: Option<(u64, Shared<BoxFuture<()>>)>,
+    /// Cleanup of a detached connection; a replacement waits for it before opening a transport.
+    closing: Option<(u64, Shared<BoxFuture<()>>)>,
 }
 
 const EXPOSURE_DESCRIPTIONS: &[(&str, &str)] = &[
@@ -276,18 +284,7 @@ fn truncate_chars_utf16(text: &str, max: usize) -> String {
     if max <= 1 {
         return String::new();
     }
-    let keep = max - 1;
-    let mut acc = 0usize;
-    let mut end_byte = 0usize;
-    for (idx, ch) in text.char_indices() {
-        let ch_u16 = ch.len_utf16();
-        if acc + ch_u16 > keep {
-            break;
-        }
-        acc += ch_u16;
-        end_byte = idx + ch.len_utf8();
-    }
-    format!("{}…", text[..end_byte].trim_end())
+    format!("{}…", pi_js::str16::trim_end(slice_head(text, max - 1)))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -396,11 +393,16 @@ pub fn render_servers_section(servers: &[McpServerListing]) -> Option<String> {
     Some(out_lines.join("\n"))
 }
 
-fn script_needs_server(code: &str, server: &str) -> bool {
-    if SCRIPT_SEARCH_RE.is_match(code) {
-        return true;
+/// Whether a call that reaches `reach` (see `ToolDefinition::reaches_tools`) needs the server: it
+/// reaches every tool, or one of its words contains the server's namespace.
+fn reaches_server(reach: &ToolReachScope, server: &str) -> bool {
+    match reach {
+        ToolReachScope::All => true,
+        ToolReachScope::Names(words) => {
+            let namespace = mcp_namespace(server);
+            words.iter().any(|word| word.contains(&namespace))
+        }
     }
-    code.contains(&mcp_namespace(server))
 }
 
 fn state_as_str(state: ServerState) -> &'static str {
@@ -433,14 +435,13 @@ fn describe_state(server: &McpServer, with_error: bool) -> String {
         }
         ServerState::Connected => {
             let tools = connection.tools().len();
-            let resources = connection.resources().len();
-            let resource_count = if resources > 0 {
-                format!(" · {resources} resource{}", if resources == 1 { "" } else { "s" })
+            let resources = if connection.has_resources() {
+                " · resources"
             } else {
-                String::new()
+                ""
             };
             format!(
-                "connected · {tools} tool{}{resource_count}",
+                "connected · {tools} tool{}{resources}",
                 if tools == 1 { "" } else { "s" }
             )
         }
@@ -485,32 +486,20 @@ fn default_load_config(ctx: &ExtensionContext) -> LoadedMcpConfig {
     })
 }
 
-async fn wait_for_ready_futures(ready: Vec<Shared<BoxFuture<()>>>, signal: Option<AbortSignal>) {
-    if ready.is_empty() || signal.as_ref().is_some_and(AbortSignal::aborted) {
-        return;
-    }
-    let all = futures::future::join_all(ready);
-    if let Some(sig) = signal {
-        tokio::select! {
-            _ = all => {}
-            _ = sig.cancelled() => {}
-        }
-    } else {
-        all.await;
-    }
-}
-
 struct ManagerInner {
     servers: Vec<McpServer>,
     configured_entries: Vec<McpServerEntry>,
     config_errors: Vec<String>,
+    project_config: Option<String>,
     overridden: Vec<String>,
-    session_active: bool,
     auto_enable_codemode: bool,
     warned_unreachable: bool,
     pending: Option<Shared<BoxFuture<()>>>,
     waited_for_startup: bool,
-    generation: u64,
+    /// Lifetime of the current session: aborted on `session_shutdown`, and before the first `session_start`.
+    session: AbortController,
+    next_id: u64,
+    background_actions: IndexMap<u64, Shared<BoxFuture<()>>>,
     session_cwd: String,
     credentials: Option<McpOAuthCredentialStore>,
     model_registry: Option<ModelRegistry>,
@@ -540,12 +529,23 @@ impl McpManager {
                 open_browser(url);
             })
         });
-        let update_config: McpUpdateConfigFn = options
-            .update_config
-            .clone()
-            .unwrap_or_else(|| Arc::new(|entry, patch| update_mcp_server_config(&entry.source, &entry.name, patch)));
+        let update_config: McpUpdateConfigFn = options.update_config.clone().unwrap_or_else(|| {
+            Arc::new(|entry, patch| {
+                let target = entry.override_path.as_deref().unwrap_or(&entry.source);
+                update_mcp_server_config(
+                    target,
+                    &entry.name,
+                    patch,
+                    Some(UpdateMcpConfigOptions {
+                        r#override: entry.override_path.is_some(),
+                    }),
+                )
+            })
+        });
         let startup_wait_ms = options.startup_wait_ms.unwrap_or(DEFAULT_STARTUP_WAIT_MS);
         let credentials = options.credentials.clone();
+        let session = AbortController::new();
+        session.abort(None);
 
         Arc::new(Self {
             pi,
@@ -557,13 +557,15 @@ impl McpManager {
                 servers: Vec::new(),
                 configured_entries: Vec::new(),
                 config_errors: Vec::new(),
+                project_config: None,
                 overridden: Vec::new(),
-                session_active: false,
                 auto_enable_codemode: true,
                 warned_unreachable: false,
                 pending: None,
                 waited_for_startup: false,
-                generation: 0,
+                session,
+                next_id: 1,
+                background_actions: IndexMap::new(),
                 session_cwd: pi_js::env::cwd(),
                 credentials,
                 model_registry: None,
@@ -577,6 +579,110 @@ impl McpManager {
                 tokens_at_sign_in: IndexMap::new(),
             }),
         })
+    }
+
+    fn alloc_id(guard: &mut ManagerInner) -> u64 {
+        let id = guard.next_id;
+        guard.next_id = guard.next_id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn track_action<F, T>(self: &Arc<Self>, work: F) -> BoxFuture<T>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mgr = Arc::clone(self);
+        let task_id = {
+            let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+            Self::alloc_id(&mut guard)
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mgr_cleanup = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            let res = work.await;
+            let _ = tx.send(res);
+            let mut guard = mgr_cleanup.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.background_actions.shift_remove(&task_id);
+        });
+        let bg_fut: Shared<BoxFuture<()>> = async move {
+            let _ = handle.await;
+        }
+        .boxed()
+        .shared();
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.background_actions.insert(task_id, bg_fut.clone());
+        }
+        Box::pin(async move {
+            let _ = bg_fut.await;
+            rx.await.expect("tracked background action dropped before returning")
+        })
+    }
+
+    fn track_bg<F>(self: &Arc<Self>, work: F) -> Shared<BoxFuture<()>>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mgr = Arc::clone(self);
+        let task_id = {
+            let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+            Self::alloc_id(&mut guard)
+        };
+        let mgr_cleanup = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            work.await;
+            let mut guard = mgr_cleanup.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.background_actions.shift_remove(&task_id);
+        });
+        let bg_fut: Shared<BoxFuture<()>> = async move {
+            let _ = handle.await;
+        }
+        .boxed()
+        .shared();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.background_actions.insert(task_id, bg_fut.clone());
+        bg_fut
+    }
+
+    async fn wait_for_servers(&self, waiting_instance_ids: &[u64], signal: Option<AbortSignal>) {
+        if waiting_instance_ids.is_empty() || signal.as_ref().is_some_and(AbortSignal::aborted) {
+            return;
+        }
+        loop {
+            let ready: Vec<(u64, u64, Shared<BoxFuture<()>>)> = {
+                let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .servers
+                    .iter()
+                    .filter(|s| waiting_instance_ids.contains(&s.instance_id) && is_enabled(&s.entry))
+                    .filter_map(|s| s.ready.as_ref().map(|(rid, fut)| (s.instance_id, *rid, fut.clone())))
+                    .collect()
+            };
+            if ready.is_empty() || signal.as_ref().is_some_and(AbortSignal::aborted) {
+                return;
+            }
+            let futs: Vec<Shared<BoxFuture<()>>> = ready.iter().map(|(_, _, f)| f.clone()).collect();
+            let all = futures::future::join_all(futs);
+            if let Some(ref sig) = signal {
+                tokio::select! {
+                    _ = all => {}
+                    _ = sig.cancelled() => return,
+                }
+            } else {
+                all.await;
+            }
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let all_settled = ready.iter().all(|(inst_id, rid, _)| {
+                let Some(srv) = guard.servers.iter().find(|s| s.instance_id == *inst_id) else {
+                    return true;
+                };
+                !is_enabled(&srv.entry) || srv.ready.as_ref().is_some_and(|(cur_id, _)| cur_id == rid)
+            });
+            if all_settled {
+                return;
+            }
+        }
     }
 
     fn emit_change(&self) {
@@ -651,16 +757,20 @@ impl McpManager {
             }
             let registered_config = Some(pi_js::json::stringify(&config));
             out.push(McpServer {
+                instance_id: 0,
                 entry: McpServerEntry {
                     name,
                     config,
                     source: extension_path,
-                    scope: Some(crate::extensions::mcp::config::McpScope::Extension),
+                    scope: Some(McpScope::Extension),
+                    override_path: None,
                 },
                 connection: None,
                 registered_config,
                 message: None,
+                attempt: None,
                 ready: None,
+                closing: None,
             });
         }
         (out, overridden)
@@ -751,6 +861,7 @@ impl McpManager {
                 .map(String::from);
             let namespace = ToolNamespace {
                 name: mcp_namespace(&server),
+                aliases: Some(vec![server.clone()]),
                 description,
                 instructions: connection.instructions(),
             };
@@ -780,9 +891,11 @@ impl McpManager {
                 guard.tool_owners.insert(assigned.clone(), owner);
                 current.insert(assigned.clone());
 
-                let conn_call = Arc::clone(connection);
+                let weak_mgr = Arc::downgrade(self);
+                let server_call = server.clone();
+                let tool_call_name = tool.name.clone();
                 let weak_res = Arc::downgrade(self);
-                let conn_res = Arc::clone(connection);
+                let server_res = server.clone();
                 let def = create_mcp_tool_definition(CreateMcpToolDefinitionOptions {
                     server: server.clone(),
                     exposure: get_mcp_tool_exposure(&entry.config, &tool.name),
@@ -791,13 +904,45 @@ impl McpManager {
                     namespace: namespace.clone(),
                     timeout_ms: connection.timeout_ms(),
                     get_client: Arc::new(move || {
-                        let c = Arc::new(Arc::clone(&conn_call)) as Arc<dyn McpToolCaller>;
-                        Box::pin(async move { Ok(c) })
+                        let weak_mgr = weak_mgr.clone();
+                        let server_call = server_call.clone();
+                        let tool_call_name = tool_call_name.clone();
+                        Box::pin(async move {
+                            let mgr = weak_mgr
+                                .upgrade()
+                                .ok_or_else(|| Error::msg(format!("MCP server \"{server_call}\" is disabled.")))?;
+                            let (enabled, client, current_config) = {
+                                let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                let Some(current) = guard.servers.iter().find(|s| s.entry.name == server_call) else {
+                                    return Err(Error::msg(format!("MCP server \"{server_call}\" is disabled.")));
+                                };
+                                (
+                                    is_enabled(&current.entry),
+                                    current.connection.clone(),
+                                    current.entry.config.clone(),
+                                )
+                            };
+                            if !enabled {
+                                return Err(Error::msg(format!("MCP server \"{server_call}\" is disabled.")));
+                            }
+                            let Some(client) = client else {
+                                return Err(Error::msg(format!("MCP server \"{server_call}\" is still starting.")));
+                            };
+                            if get_mcp_tool_exposure(&current_config, &tool_call_name) == McpExposure::Hidden
+                                || (client.state() == ServerState::Connected
+                                    && !client.tools().iter().any(|offered| offered.name == tool_call_name))
+                            {
+                                return Err(Error::msg(format!(
+                                    "MCP tool \"{server_call}/{tool_call_name}\" is no longer available."
+                                )));
+                            }
+                            Ok(Arc::new(client) as Arc<dyn McpToolCaller>)
+                        })
                     }),
                     readable_resources: Some(Arc::new(move || {
                         weak_res
                             .upgrade()
-                            .is_some_and(|m| m.has_readable_resource_server(&conn_res))
+                            .is_some_and(|m| m.resource_servers_connections().iter().any(|c| c.name() == server_res))
                     })),
                 });
                 guard.definitions.insert(def.name.clone(), def.clone());
@@ -861,8 +1006,11 @@ impl McpManager {
         let Ok(tools) = self.pi.get_all_tools() else {
             return;
         };
-        let has_codemode = tools.iter().any(|t| is_codemode_tool(&t.name, &t.parameters));
-        let has_tool_search = tools.iter().any(|t| is_tool_search_tool(&t.name, &t.parameters));
+        // Only a tool of these names that declares `reaches_tools` can reach MCP tools; another
+        // extension's tool of the same name without it is never activated.
+        let has_reaching_tool = |name: &str| tools.iter().any(|t| t.name == name && t.reaches_tools.is_some());
+        let has_codemode = has_reaching_tool(CODEMODE_TOOL_NAME);
+        let has_tool_search = has_reaching_tool(TOOL_SEARCH_TOOL_NAME);
         let Ok(active) = self.pi.get_active_tools() else {
             return;
         };
@@ -978,13 +1126,32 @@ impl McpManager {
         self.ensure_discovery_active(ctx);
     }
 
-    fn create_connection(self: &Arc<Self>, server_name: &str) -> Option<Arc<McpServerConnection>> {
+    fn is_attempt_current(&self, session_signal: &AbortSignal, server_instance_id: u64, attempt_id: u64) -> bool {
+        if session_signal.aborted() {
+            return false;
+        }
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .servers
+            .iter()
+            .any(|s| s.instance_id == server_instance_id && s.attempt == Some(attempt_id) && is_enabled(&s.entry))
+    }
+
+    fn create_connection(
+        self: &Arc<Self>,
+        session_signal: &AbortSignal,
+        server_instance_id: u64,
+        attempt_id: u64,
+    ) -> Option<Arc<McpServerConnection>> {
+        if session_signal.aborted() {
+            return None;
+        }
         let (entry, cwd, model_registry) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let entry = guard
                 .servers
                 .iter()
-                .find(|s| s.entry.name == server_name)
+                .find(|s| s.instance_id == server_instance_id && s.attempt == Some(attempt_id) && is_enabled(&s.entry))
                 .map(|s| s.entry.clone())?;
             (entry, guard.session_cwd.clone(), guard.model_registry.clone())
         };
@@ -998,6 +1165,8 @@ impl McpManager {
 
         let weak_tools = Arc::downgrade(self);
         let weak_change = Arc::downgrade(self);
+        let sig_tools = session_signal.clone();
+        let sig_change = session_signal.clone();
         let provider_token: Option<crate::extensions::mcp::runtime_lazy::ProviderTokenFn> =
             Some(Arc::new(move |provider: &str| {
                 let reg = model_registry.clone();
@@ -1015,23 +1184,41 @@ impl McpManager {
             credentials,
             provider_token,
             on_tools: Arc::new(move |c| {
-                if let Some(mgr) = weak_tools.upgrade() {
+                if let Some(mgr) = weak_tools.upgrade()
+                    && mgr.is_attempt_current(&sig_tools, server_instance_id, attempt_id)
+                {
                     mgr.register_tools(&c);
                 }
             }),
             on_change: Some(Arc::new(move |c| {
                 if let Some(mgr) = weak_change.upgrade() {
-                    mgr.on_connection_change(&c);
+                    if mgr.is_attempt_current(&sig_change, server_instance_id, attempt_id) {
+                        mgr.on_connection_change(&c);
+                    } else {
+                        let key = Arc::as_ptr(&c) as usize;
+                        let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.tokens_at_sign_in.shift_remove(&key);
+                    }
                 }
             })),
             log: Some(log),
         });
 
-        {
+        let stored = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
+            if !session_signal.aborted()
+                && let Some(s) = guard.servers.iter_mut().find(|s| {
+                    s.instance_id == server_instance_id && s.attempt == Some(attempt_id) && is_enabled(&s.entry)
+                })
+            {
                 s.connection = Some(Arc::clone(&conn));
+                true
+            } else {
+                false
             }
+        };
+        if !stored {
+            return None;
         }
         self.emit_change();
         Some(conn)
@@ -1039,31 +1226,33 @@ impl McpManager {
 
     fn start_connection(
         self: &Arc<Self>,
-        server_name: String,
-        generation: u64,
+        server_instance_id: u64,
         after: Option<Shared<BoxFuture<()>>>,
     ) -> Shared<BoxFuture<()>> {
+        let (session_signal, attempt_id, ready_id) = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let attempt_id = Self::alloc_id(&mut guard);
+            let ready_id = Self::alloc_id(&mut guard);
+            if let Some(s) = guard.servers.iter_mut().find(|s| s.instance_id == server_instance_id) {
+                s.attempt = Some(attempt_id);
+            }
+            (guard.session.signal(), attempt_id, ready_id)
+        };
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
         let mgr = Arc::clone(self);
-        let name = server_name.clone();
+        let sig = session_signal.clone();
         let handle = tokio::spawn(async move {
+            let _ = gate_rx.await;
             if let Some(after_fut) = after {
                 after_fut.await;
             }
-            let is_current = {
-                let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard.generation == generation
-            };
-            if !is_current {
+            if !mgr.is_attempt_current(&sig, server_instance_id, attempt_id) {
                 return;
             }
-            let Some(conn) = mgr.create_connection(&name) else {
+            let Some(conn) = mgr.create_connection(&sig, server_instance_id, attempt_id) else {
                 return;
             };
-            let still_current = {
-                let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard.generation == generation
-            };
-            if !still_current {
+            if !mgr.is_attempt_current(&sig, server_instance_id, attempt_id) {
                 conn.close().await;
                 return;
             }
@@ -1077,10 +1266,15 @@ impl McpManager {
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
-                s.ready = Some(ready.clone());
+            if let Some(s) = guard
+                .servers
+                .iter_mut()
+                .find(|s| s.instance_id == server_instance_id && s.attempt == Some(attempt_id))
+            {
+                s.ready = Some((ready_id, ready.clone()));
             }
         }
+        let _ = gate_tx.send(());
         ready
     }
 
@@ -1123,29 +1317,41 @@ impl McpManager {
         }
     }
 
-    fn save_config(&self, server_name: &str, patch: McpServerConfigPatch) -> Option<String> {
-        let entry = {
+    fn save_config(&self, server_name: &str, patch: McpServerConfigPatch, in_project: bool) -> Option<String> {
+        let (entry, project_config) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard
+            let entry = guard
                 .servers
                 .iter()
                 .find(|s| s.entry.name == server_name)
-                .map(|s| s.entry.clone())?
+                .map(|s| s.entry.clone())?;
+            (entry, guard.project_config.clone())
         };
-        if entry.scope != Some(crate::extensions::mcp::config::McpScope::Extension)
+        let mut entry = entry;
+        if in_project && let Some(pc) = project_config {
+            entry.override_path = Some(pc);
+        }
+        if entry.scope != Some(McpScope::Extension)
             && let Err(err) = (self.update_config)(&entry, patch)
         {
-            return Some(format!("Could not update {}: {}", entry.source, error_message(&err)));
+            let target = entry.override_path.as_deref().unwrap_or(&entry.source);
+            return Some(format!("Could not update {target}: {}", error_message(&err)));
         }
+        apply_config_patch(&mut entry.config, patch);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
-            apply_config_patch(&mut s.entry.config, patch);
+            s.entry = entry;
         }
         None
     }
 
-    async fn sign_in(self: &Arc<Self>, server_name: &str, prompt: Arc<dyn McpSignInPrompt>) -> Option<String> {
-        let (connection, url) = {
+    async fn sign_in(
+        self: &Arc<Self>,
+        server_name: &str,
+        prompt: Arc<dyn McpSignInPrompt>,
+        cancel: Option<AbortSignal>,
+    ) -> Option<String> {
+        let (connection, url, session_signal) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let conn = guard
                 .servers
@@ -1153,7 +1359,7 @@ impl McpManager {
                 .find(|s| s.entry.name == server_name)
                 .and_then(|s| s.connection.clone());
             let url = conn.as_ref().and_then(|c| c.oauth_url().map(String::from));
-            (conn, url)
+            (conn, url, guard.session.signal())
         };
         let (Some(connection), Some(url)) = (connection, url) else {
             return Some(format!("MCP server \"{server_name}\" does not use OAuth."));
@@ -1166,15 +1372,19 @@ impl McpManager {
             Ok(s) => s,
             Err(err) => return Some(format!("Sign-in failed: {}", error_message(&err))),
         };
-        if let Err(err) = sign_in_mcp_server(SignInMcpServerOptions {
+        let signal = match cancel {
+            Some(c) => AbortSignal::any(&[session_signal, c]),
+            None => session_signal,
+        };
+        let tracked = self.track_action(sign_in_mcp_server(SignInMcpServerOptions {
             server_url: url,
             store,
             settings,
             challenge: connection.challenge(),
             prompt,
-        })
-        .await
-        {
+            signal: Some(signal),
+        }));
+        if let Err(err) = tracked.await {
             if err.downcast_ref::<McpSignInCancelledError>().is_some() || err.name() == "McpSignInCancelledError" {
                 return Some("Sign-in cancelled.".to_string());
             }
@@ -1207,55 +1417,112 @@ impl McpManager {
     }
 
     async fn reconnect(&self, server_name: &str) -> Option<String> {
-        let connection = {
-            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard
-                .servers
-                .iter()
-                .find(|s| s.entry.name == server_name)
-                .and_then(|s| s.connection.clone())
+        let (connection, previous, ready_id) = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let ready_id = Self::alloc_id(&mut guard);
+            let srv = guard.servers.iter().find(|s| s.entry.name == server_name)?;
+            (
+                srv.connection.clone(),
+                srv.ready.as_ref().map(|(_, r)| r.clone()),
+                ready_id,
+            )
         };
         let Some(connection) = connection else {
             return Some(format!("MCP server \"{server_name}\" is disabled."));
         };
-        match connection.reconnect().await {
-            Ok(()) => None,
-            Err(err) => Some(error_message(&err)),
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let (res_tx, res_rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        let handle = tokio::spawn(async move {
+            let _ = gate_rx.await;
+            if let Some(prev) = previous {
+                prev.await;
+            }
+            let res = match connection.reconnect().await {
+                Ok(()) => None,
+                Err(err) => Some(error_message(&err)),
+            };
+            let _ = res_tx.send(res);
+        });
+        let ready: Shared<BoxFuture<()>> = async move {
+            let _ = handle.await;
         }
+        .boxed()
+        .shared();
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
+                s.ready = Some((ready_id, ready.clone()));
+            }
+        }
+        let _ = gate_tx.send(());
+        ready.await;
+        res_rx.await.unwrap_or(None)
     }
 
-    async fn set_enabled(self: &Arc<Self>, server_name: &str, enabled: bool) -> Option<String> {
+    async fn set_enabled(self: &Arc<Self>, server_name: &str, enabled: bool, in_project: bool) -> Option<String> {
         if let Some(failed) = self.save_config(
             server_name,
             McpServerConfigPatch {
                 enabled: Some(enabled),
                 exposure: None,
             },
+            in_project,
         ) {
             return Some(failed);
         }
         if !enabled {
-            let prev_conn = {
+            let closing_pair: Option<(u64, Shared<BoxFuture<()>>)> = {
                 let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                guard
-                    .servers
-                    .iter_mut()
-                    .find(|s| s.entry.name == server_name)
-                    .and_then(|s| s.connection.take())
+                let closing_id = Self::alloc_id(&mut guard);
+                if let Some(srv) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
+                    srv.attempt = None;
+                    let prev_conn = srv.connection.take();
+                    let prev_ready = srv.ready.as_ref().map(|(_, r)| r.clone());
+                    if let Some(conn) = prev_conn {
+                        // A reconnect may already have detached its old client while awaiting transport
+                        // shutdown. Closing the connection alone does not wait for that reconnect.
+                        let closing_fut = self.track_bg(async move {
+                            futures::future::join(conn.close(), async {
+                                if let Some(r) = prev_ready {
+                                    r.await;
+                                }
+                            })
+                            .await;
+                        });
+                        srv.closing = Some((closing_id, closing_fut.clone()));
+                        Some((closing_id, closing_fut))
+                    } else {
+                        srv.closing.clone()
+                    }
+                } else {
+                    None
+                }
             };
             self.hide_tools(server_name);
             self.emit_change();
-            if let Some(conn) = prev_conn {
-                conn.close().await;
+            if let Some((closing_id, closing_fut)) = closing_pair {
+                closing_fut.await;
+                let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(srv) = guard.servers.iter_mut().find(|s| s.entry.name == server_name)
+                    && srv.closing.as_ref().is_some_and(|(id, _)| *id == closing_id)
+                {
+                    srv.closing = None;
+                }
             }
             return None;
         }
-        let current_gen = {
+        let target = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.generation
+            guard
+                .servers
+                .iter()
+                .find(|s| s.entry.name == server_name)
+                .map(|s| (s.instance_id, s.closing.as_ref().map(|(_, f)| f.clone())))
         };
-        let ready = self.start_connection(server_name.to_string(), current_gen, None);
-        ready.await;
+        if let Some((instance_id, closing)) = target {
+            let ready = self.start_connection(instance_id, closing);
+            ready.await;
+        }
         None
     }
 
@@ -1266,6 +1533,7 @@ impl McpManager {
                 enabled: None,
                 exposure: Some(exposure),
             },
+            false,
         ) {
             return Some(failed);
         }
@@ -1319,7 +1587,11 @@ impl McpManager {
         let items = sorted
             .into_iter()
             .map(|server| {
-                let scope_text = server.entry.scope.map(|s| s.as_str()).unwrap_or(&server.entry.source);
+                let scope_text = if server.entry.override_path.is_some() {
+                    "global, project override"
+                } else {
+                    server.entry.scope.map(|s| s.as_str()).unwrap_or(&server.entry.source)
+                };
                 SelectItem {
                     value: server.entry.name.clone(),
                     label: server.entry.name.clone(),
@@ -1367,18 +1639,33 @@ impl McpManager {
         };
         let entry = &server.entry;
         let connection = server.connection.as_ref();
-        let saved = match entry.scope {
-            Some(crate::extensions::mcp::config::McpScope::Extension) => "for this session".to_string(),
-            Some(scope) => format!("saved to the {} mcp.json", scope.as_str()),
-            None => "saved to mcp.json".to_string(),
+        let saved = if entry.scope == Some(McpScope::Extension) {
+            "for this session".to_string()
+        } else if entry.override_path.is_some() {
+            "saved to the project mcp.json".to_string()
+        } else if let Some(scope) = entry.scope {
+            format!("saved to the {} mcp.json", scope.as_str())
+        } else {
+            "saved to mcp.json".to_string()
         };
+        // Global servers without an override can be turned on or off for the trusted project alone.
+        let in_project =
+            entry.scope == Some(McpScope::Global) && entry.override_path.is_none() && guard.project_config.is_some();
+        let in_project_saved = "saved to the project mcp.json".to_string();
         let mut items = Vec::new();
         if !is_enabled(entry) {
             items.push(SelectItem {
                 value: "enable".to_string(),
                 label: "Enable".to_string(),
-                description: Some(saved.clone()),
+                description: Some(saved),
             });
+            if in_project {
+                items.push(SelectItem {
+                    value: "enable-project".to_string(),
+                    label: "Enable in this project".to_string(),
+                    description: Some(in_project_saved),
+                });
+            }
         } else {
             let st = connection.map(|c| c.state());
             if st == Some(ServerState::NeedsAuth) {
@@ -1424,17 +1711,27 @@ impl McpManager {
                 label: "Disable".to_string(),
                 description: Some(saved),
             });
+            if in_project {
+                items.push(SelectItem {
+                    value: "disable-project".to_string(),
+                    label: "Disable in this project".to_string(),
+                    description: Some(in_project_saved),
+                });
+            }
         }
-        let details = [
+        let mut details_lines = vec![
             describe_transport(entry),
             format!(
                 "{}: {}",
                 entry.scope.map(|s| s.as_str()).unwrap_or("config"),
                 entry.source
             ),
-            format!("State: {}", describe_state(server, false)),
-        ]
-        .join("\n");
+        ];
+        if let Some(ref override_path) = entry.override_path {
+            details_lines.push(format!("project override: {override_path}"));
+        }
+        details_lines.push(format!("State: {}", describe_state(server, false)));
+        let details = details_lines.join("\n");
         let mut err_lines = Vec::new();
         if let Some(ref m) = server.message {
             err_lines.push(m.clone());
@@ -1514,13 +1811,16 @@ impl McpManager {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let server = guard.servers.iter().find(|s| s.entry.name == server_name)?;
             let current = exposure_of(&server.entry);
-            let details = if server.entry.scope == Some(crate::extensions::mcp::config::McpScope::Extension) {
+            let details = if server.entry.scope == Some(McpScope::Extension) {
                 format!(
                     "Applies to this session; the server is registered by {}.",
                     server.entry.source
                 )
             } else {
-                format!("Saved to {}.", server.entry.source)
+                format!(
+                    "Saved to {}.",
+                    server.entry.override_path.as_deref().unwrap_or(&server.entry.source)
+                )
             };
             let items = EXPOSURE_DESCRIPTIONS
                 .iter()
@@ -1558,6 +1858,67 @@ impl McpManager {
         self.set_exposure(server_name, next)
     }
 
+    async fn sign_in_with_ui(self: &Arc<Self>, ui: &Arc<dyn McpUi>, server_name: &str) -> Option<String> {
+        let title = format!("Sign in to {server_name}");
+        let cancel = Arc::new(AbortController::new());
+        let cancel_handle = Arc::clone(&cancel);
+        let on_cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            cancel_handle.abort(None);
+        });
+        ui.status(
+            &title,
+            "Contacting the authorization server…",
+            Some(Arc::clone(&on_cancel)),
+        );
+        let prompt = Arc::new(TuiSignInPrompt {
+            title,
+            ui: Arc::clone(ui),
+            open_url: Arc::clone(&self.open_url),
+            auth_url: Mutex::new(String::new()),
+            on_cancel,
+        });
+        self.sign_in(server_name, prompt, Some(cancel.signal())).await
+    }
+
+    fn run_in_background<F>(self: &Arc<Self>, ctx: &ExtensionContext, server_name: &str, op: F)
+    where
+        F: FnOnce(Arc<Self>) -> BoxFuture<Option<String>> + Send + 'static,
+    {
+        let (attempt, session_signal) = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let attempt = guard
+                .servers
+                .iter()
+                .find(|s| s.entry.name == server_name)
+                .and_then(|s| s.attempt);
+            (attempt, guard.session.signal())
+        };
+        let mgr = Arc::clone(self);
+        let ctx = ctx.clone();
+        let server_name = server_name.to_string();
+        let _tracked = self.track_action(async move {
+            let message = op(Arc::clone(&mgr)).await;
+            if session_signal.aborted() {
+                return;
+            }
+            let updated = {
+                let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(srv) = guard.servers.iter_mut().find(|s| s.entry.name == server_name)
+                    && srv.attempt == attempt
+                {
+                    srv.message = message;
+                    true
+                } else {
+                    false
+                }
+            };
+            if updated {
+                mgr.ensure_discovery_active(&ctx);
+                mgr.emit_change();
+            }
+        });
+    }
+
     async fn run_action(
         self: &Arc<Self>,
         ui: &Arc<dyn McpUi>,
@@ -1565,21 +1926,21 @@ impl McpManager {
         server_name: &str,
         action: &str,
     ) {
+        let session_signal = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.session.signal()
+        };
         let message = match action {
-            "signin" => {
-                let title = format!("Sign in to {server_name}");
-                ui.status(&title, "Contacting the authorization server…");
-                let prompt = Arc::new(TuiSignInPrompt {
-                    title,
-                    ui: Arc::clone(ui),
-                    open_url: Arc::clone(&self.open_url),
-                    auth_url: Mutex::new(String::new()),
-                });
-                self.sign_in(server_name, prompt).await
-            }
+            "signin" => self.sign_in_with_ui(ui, server_name).await,
             "reconnect" => {
-                ui.status(&format!("MCP server {server_name}"), "Reconnecting…");
-                let _ = self.reconnect(server_name).await;
+                let srv = server_name.to_string();
+                // Connection state and error already report failures, including required sign-ins.
+                self.run_in_background(ctx, server_name, move |mgr| {
+                    Box::pin(async move {
+                        let _ = mgr.reconnect(&srv).await;
+                        None
+                    })
+                });
                 None
             }
             "signout" => {
@@ -1591,16 +1952,20 @@ impl McpManager {
                 None
             }
             "exposure" => self.choose_exposure(ui, server_name).await,
-            "enable" | "disable" => {
-                let enable = action == "enable";
-                ui.status(
-                    &format!("MCP server {server_name}"),
-                    if enable { "Connecting…" } else { "Disconnecting…" },
-                );
-                self.set_enabled(server_name, enable).await
+            "enable" | "disable" | "enable-project" | "disable-project" => {
+                let enable = action.starts_with("enable");
+                let in_project = action.ends_with("-project");
+                let srv = server_name.to_string();
+                self.run_in_background(ctx, server_name, move |mgr| {
+                    Box::pin(async move { mgr.set_enabled(&srv, enable, in_project).await })
+                });
+                None
             }
             _ => None,
         };
+        if session_signal.aborted() {
+            return;
+        }
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.servers.iter_mut().find(|s| s.entry.name == server_name) {
@@ -1764,12 +2129,36 @@ impl McpManager {
             }
             return;
         }
-        let prompt = Arc::new(CommandSignInPrompt {
-            name: server_name.to_string(),
-            ctx: ctx.clone(),
-            open_url: Arc::clone(&self.open_url),
-        });
-        if let Some(failure) = self.sign_in(server_name, prompt).await {
+        let session_signal = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.session.signal()
+        };
+        let failure = if ctx.base.mode().ok() == Some(ExtensionMode::Tui) {
+            let mgr_ui = Arc::clone(self);
+            let srv = server_name.to_string();
+            let slot = Arc::new(Mutex::new(None));
+            let slot_cb = Arc::clone(&slot);
+            let _ = show_mcp_manager(ctx, move |ui| {
+                Box::pin(async move {
+                    let res = mgr_ui.sign_in_with_ui(&ui, &srv).await;
+                    *slot_cb.lock().unwrap_or_else(|e| e.into_inner()) = res;
+                    Ok(())
+                })
+            })
+            .await;
+            slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+        } else {
+            let prompt = Arc::new(CommandSignInPrompt {
+                name: server_name.to_string(),
+                ctx: ctx.clone(),
+                open_url: Arc::clone(&self.open_url),
+            });
+            self.sign_in(server_name, prompt, None).await
+        };
+        if session_signal.aborted() {
+            return;
+        }
+        if let Some(failure) = failure {
             if let Ok(ui) = ctx.base.ui() {
                 let kind = if failure == "Sign-in cancelled." {
                     NotifyType::Info
@@ -1811,7 +2200,7 @@ impl McpManager {
                 .iter()
                 .filter_map(|s| {
                     if is_enabled(&s.entry) && has_direct_tools(&s.entry) {
-                        s.ready.clone()
+                        s.ready.as_ref().map(|(_, r)| r.clone())
                     } else {
                         None
                     }
@@ -1840,6 +2229,7 @@ struct TuiSignInPrompt {
     ui: Arc<dyn McpUi>,
     open_url: McpOpenUrlFn,
     auth_url: Mutex<String>,
+    on_cancel: Arc<dyn Fn() + Send + Sync>,
 }
 
 #[async_trait]
@@ -1852,7 +2242,8 @@ impl McpSignInPrompt for TuiSignInPrompt {
     async fn prompt_for_redirect_url(&self, signal: AbortSignal) -> Result<Option<String>> {
         let url = self.auth_url.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let val = self.ui.redirect_url(&self.title, &url, signal).await;
-        self.ui.status(&self.title, "Connecting…");
+        self.ui
+            .status(&self.title, "Connecting…", Some(Arc::clone(&self.on_cancel)));
         Ok(val)
     }
 }
@@ -1866,23 +2257,9 @@ struct CommandSignInPrompt {
 #[async_trait]
 impl McpSignInPrompt for CommandSignInPrompt {
     fn show_authorization_url(&self, url: &url::Url) {
-        let lines = if self.ctx.base.mode().ok() == Some(ExtensionMode::Tui) {
-            let click_hint = if cfg!(target_os = "macos") {
-                "Cmd+click to open"
-            } else {
-                "Ctrl+click to open"
-            };
-            format!(
-                "{}\n{}",
-                pi_tui::hyperlink(url.as_str(), url.as_str()),
-                pi_tui::hyperlink(click_hint, url.as_str())
-            )
-        } else {
-            url.to_string()
-        };
         if let Ok(ui) = self.ctx.base.ui() {
             ui.notify(
-                &format!("Sign in to MCP server \"{}\" in your browser:\n{lines}", self.name),
+                &format!("Sign in to MCP server \"{}\" in your browser:\n{}", self.name, url),
                 Some(NotifyType::Info),
             );
         }
@@ -1916,6 +2293,15 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
         Box::pin(async move {
             let mgr = McpManager::new(pi.clone(), options);
 
+            // A resumed session renders calls to MCP tools before their server connected, if it ever does.
+            let resolver: ToolRendererResolver = Arc::new(|tool_name, next| {
+                next().or_else(|| {
+                    let caps = MCP_TOOL_NAME_RE.captures(tool_name)?;
+                    Some(create_mcp_tool_renderers(&format!("{}/{}", &caps[1], &caps[2])))
+                })
+            });
+            let _ = pi.register_tool_renderer(resolver);
+
             // session_start
             let mgr_start = Arc::clone(&mgr);
             pi.on::<SessionStartEvent>(move |_event, ctx| {
@@ -1926,43 +2312,50 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                         None => default_load_config(&ctx),
                     };
                     let (reg_servers, reg_overridden) = mgr.registered_servers(&loaded.servers);
-                    let (current_gen, enabled_names) = {
+                    let (session_signal, enabled_ids) = {
                         let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard.config_errors = loaded.errors;
+                        guard.project_config = loaded.project_config;
                         guard.auto_enable_codemode = loaded.auto_enable_codemode.unwrap_or(true);
                         guard.warned_unreachable = false;
                         guard.waited_for_startup = false;
                         guard.session_cwd = ctx.cwd().unwrap_or_else(|_| pi_js::env::cwd());
                         guard.model_registry = ctx.model_registry().ok();
-                        guard.generation = guard.generation.wrapping_add(1);
-                        let current = guard.generation;
-                        guard.session_active = true;
+                        let session = AbortController::new();
+                        let sig = session.signal();
+                        guard.session = session;
                         guard.configured_entries = loaded.servers.clone();
                         guard.overridden = reg_overridden;
-                        let mut next_servers: Vec<McpServer> = loaded
-                            .servers
-                            .into_iter()
-                            .map(|entry| McpServer {
+                        let mut next_servers = Vec::with_capacity(loaded.servers.len() + reg_servers.len());
+                        for entry in loaded.servers {
+                            let instance_id = McpManager::alloc_id(&mut guard);
+                            next_servers.push(McpServer {
+                                instance_id,
                                 entry,
                                 connection: None,
                                 registered_config: None,
                                 message: None,
+                                attempt: None,
                                 ready: None,
-                            })
-                            .collect();
-                        next_servers.extend(reg_servers);
+                                closing: None,
+                            });
+                        }
+                        for mut srv in reg_servers {
+                            srv.instance_id = McpManager::alloc_id(&mut guard);
+                            next_servers.push(srv);
+                        }
                         guard.servers = next_servers;
-                        let enabled: Vec<String> = guard
+                        let enabled: Vec<u64> = guard
                             .servers
                             .iter()
                             .filter(|s| is_enabled(&s.entry))
-                            .map(|s| s.entry.name.clone())
+                            .map(|s| s.instance_id)
                             .collect();
-                        (current, enabled)
+                        (sig, enabled)
                     };
                     mgr.emit_change();
                     mgr.ensure_discovery_active(&ctx);
-                    if enabled_names.is_empty() {
+                    if enabled_ids.is_empty() {
                         mgr.report_problems(&ctx, None);
                         return Ok(None);
                     }
@@ -1977,20 +2370,17 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                     .boxed()
                     .shared();
 
-                    let mut readies = Vec::with_capacity(enabled_names.len());
-                    for name in enabled_names {
-                        readies.push(mgr.start_connection(name, current_gen, Some(runtime_ready.clone())));
+                    let mut readies = Vec::with_capacity(enabled_ids.len());
+                    for inst_id in enabled_ids {
+                        readies.push(mgr.start_connection(inst_id, Some(runtime_ready.clone())));
                     }
 
                     let mgr_done = Arc::clone(&mgr);
                     let ctx_done = ctx.clone();
+                    let sig_done = session_signal.clone();
                     let pending_handle = tokio::spawn(async move {
                         futures::future::join_all(readies).await;
-                        let is_current = {
-                            let guard = mgr_done.inner.lock().unwrap_or_else(|e| e.into_inner());
-                            guard.generation == current_gen
-                        };
-                        if is_current {
+                        if !sig_done.aborted() {
                             mgr_done.report_problems(&ctx_done, None);
                         }
                     });
@@ -2001,7 +2391,7 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                     .shared();
                     {
                         let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        if guard.generation == current_gen {
+                        if !session_signal.aborted() {
                             guard.pending = Some(pending_fut);
                         }
                     }
@@ -2052,39 +2442,46 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                     let Some(tool) = tools.into_iter().find(|t| t.name == tool_name) else {
                         return Ok(Some(ToolCallEventResult::default()));
                     };
-                    let pending_servers: Vec<(String, Shared<BoxFuture<()>>)> = {
+                    let ready_servers: Vec<(u64, String)> = {
                         let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard
                             .servers
                             .iter()
-                            .filter_map(|s| {
-                                if is_enabled(&s.entry)
-                                    && s.connection.as_ref().map(|c| c.state()) != Some(ServerState::Connected)
-                                {
-                                    s.ready.clone().map(|r| (s.entry.name.clone(), r))
-                                } else {
-                                    None
-                                }
-                            })
+                            .filter(|s| is_enabled(&s.entry) && s.ready.is_some())
+                            .map(|s| (s.instance_id, s.entry.name.clone()))
                             .collect()
                     };
-                    if pending_servers.is_empty() {
+                    if ready_servers.is_empty() {
                         return Ok(Some(ToolCallEventResult::default()));
                     }
-                    let waiting: Vec<Shared<BoxFuture<()>>> = if is_codemode_tool(&tool.name, &tool.parameters) {
-                        let input_val = event.input_value();
-                        let source = input_val.get("code").and_then(Value::as_str).unwrap_or("");
-                        pending_servers
+                    let waiting: Vec<u64> = if let Some(ref reaches) = tool.reaches_tools {
+                        let reach = reaches(&event.input_value());
+                        ready_servers
                             .into_iter()
-                            .filter(|(name, _)| script_needs_server(source, name))
-                            .map(|(_, r)| r)
+                            .filter(|(_, name)| reaches_server(&reach, name))
+                            .map(|(id, _)| id)
                             .collect()
-                    } else if is_tool_search_tool(&tool.name, &tool.parameters) || is_resource_tool_name(&tool.name) {
-                        pending_servers.into_iter().map(|(_, r)| r).collect()
+                    } else if is_resource_tool_name(&tool.name) {
+                        ready_servers.into_iter().map(|(id, _)| id).collect()
                     } else {
-                        Vec::new()
+                        let owner = {
+                            let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            guard
+                                .tool_owners
+                                .get(&tool.name)
+                                .and_then(|o| o.split('\0').next())
+                                .map(String::from)
+                        };
+                        match owner {
+                            Some(owner_name) => ready_servers
+                                .into_iter()
+                                .filter(|(_, name)| name == &owner_name)
+                                .map(|(id, _)| id)
+                                .collect(),
+                            None => Vec::new(),
+                        }
                     };
-                    wait_for_ready_futures(waiting, ctx.signal().ok().flatten()).await;
+                    mgr.wait_for_servers(&waiting, ctx.signal().ok().flatten()).await;
                     Ok(Some(ToolCallEventResult::default()))
                 })
             });
@@ -2110,11 +2507,11 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
             pi.on::<McpServersChangeEvent>(move |_event, ctx| {
                 let mgr = Arc::clone(&mgr_change);
                 Box::pin(async move {
-                    let (active, current_gen, configured) = {
+                    let (session_signal, configured) = {
                         let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        (guard.session_active, guard.generation, guard.configured_entries.clone())
+                        (guard.session.signal(), guard.configured_entries.clone())
                     };
-                    if !active {
+                    if session_signal.aborted() {
                         return Ok(None);
                     }
                     let (reg_servers, reg_overridden) = mgr.registered_servers(&configured);
@@ -2130,8 +2527,7 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                         let mut rem_conns = Vec::new();
                         let mut kept = Vec::with_capacity(guard.servers.len());
                         for srv in guard.servers.drain(..) {
-                            let should_remove = srv.entry.scope
-                                == Some(crate::extensions::mcp::config::McpScope::Extension)
+                            let should_remove = srv.entry.scope == Some(McpScope::Extension)
                                 && next_configs.get(&srv.entry.name).and_then(|o| o.as_ref())
                                     != srv.registered_config.as_ref();
                             if should_remove {
@@ -2146,16 +2542,17 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                         guard.servers = kept;
                         let existing_names: IndexSet<String> =
                             guard.servers.iter().map(|s| s.entry.name.clone()).collect();
-                        let mut added_names = Vec::new();
-                        for srv in reg_servers {
+                        let mut added_entries = Vec::new();
+                        for mut srv in reg_servers {
                             if !existing_names.contains(&srv.entry.name) {
+                                srv.instance_id = McpManager::alloc_id(&mut guard);
                                 if is_enabled(&srv.entry) {
-                                    added_names.push(srv.entry.name.clone());
+                                    added_entries.push((srv.instance_id, srv.entry.name.clone()));
                                 }
                                 guard.servers.push(srv);
                             }
                         }
-                        (rem_names, rem_conns, added_names)
+                        (rem_names, rem_conns, added_entries)
                     };
 
                     for name in &removed_names {
@@ -2166,29 +2563,22 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                     for conn in removed_conns {
                         conn.close().await;
                     }
-                    let gen_matches = {
-                        let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.generation == current_gen
-                    };
-                    if !gen_matches || added_enabled.is_empty() {
+                    if session_signal.aborted() || added_enabled.is_empty() {
                         return Ok(None);
                     }
                     let mut readies = Vec::with_capacity(added_enabled.len());
-                    for name in &added_enabled {
-                        readies.push(mgr.start_connection(name.clone(), current_gen, None));
+                    for (inst_id, _) in &added_enabled {
+                        readies.push(mgr.start_connection(*inst_id, None));
                     }
                     futures::future::join_all(readies).await;
-                    let gen_still = {
-                        let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.generation == current_gen
-                    };
-                    if !gen_still {
+                    if session_signal.aborted() {
+                        let stale_ids: IndexSet<u64> = added_enabled.iter().map(|(id, _)| *id).collect();
                         let stale_conns: Vec<Arc<McpServerConnection>> = {
                             let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
                             guard
                                 .servers
                                 .iter()
-                                .filter(|s| added_enabled.contains(&s.entry.name))
+                                .filter(|s| stale_ids.contains(&s.instance_id))
                                 .filter_map(|s| s.connection.clone())
                                 .collect()
                         };
@@ -2197,7 +2587,7 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                         }
                         return Ok(None);
                     }
-                    let only: IndexSet<String> = added_enabled.into_iter().collect();
+                    let only: IndexSet<String> = added_enabled.into_iter().map(|(_, n)| n).collect();
                     mgr.report_problems(&ctx, Some(&only));
                     Ok(None)
                 })
@@ -2208,18 +2598,29 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
             pi.on::<SessionShutdownEvent>(move |_event, _ctx| {
                 let mgr = Arc::clone(&mgr_shutdown);
                 Box::pin(async move {
-                    let closing: Vec<Arc<McpServerConnection>> = {
+                    let (closing_conns, closing_futs, bg_futs) = {
                         let mut guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.session_active = false;
-                        guard.generation = guard.generation.wrapping_add(1);
-                        let conns = guard.servers.iter().filter_map(|s| s.connection.clone()).collect();
-                        guard.servers.clear();
-                        conns
+                        guard.session.abort(None);
+                        let mut conns = Vec::new();
+                        let mut close_futs = Vec::new();
+                        for s in guard.servers.drain(..) {
+                            if let Some(c) = s.connection {
+                                conns.push(c);
+                            }
+                            if let Some((_, cf)) = s.closing {
+                                close_futs.push(cf);
+                            }
+                        }
+                        let bg: Vec<Shared<BoxFuture<()>>> = guard.background_actions.values().cloned().collect();
+                        (conns, close_futs, bg)
                     };
                     mgr.emit_change();
-                    for conn in closing {
-                        conn.close().await;
-                    }
+                    futures::future::join_all(closing_conns.into_iter().map(|c| async move {
+                        c.close().await;
+                    }))
+                    .await;
+                    futures::future::join_all(closing_futs).await;
+                    futures::future::join_all(bg_futs).await;
                     Ok(None)
                 })
             });
@@ -2230,13 +2631,6 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
             let handler: CommandHandlerFn = Arc::new(move |args: String, ctx: ExtensionCommandContext| {
                 let mgr = Arc::clone(&mgr_cmd);
                 Box::pin(async move {
-                    let pending = {
-                        let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.pending.clone()
-                    };
-                    if let Some(p) = pending {
-                        p.await;
-                    }
                     let parts: Vec<&str> = args.split_whitespace().collect();
                     let Some(&action) = parts.first() else {
                         if ctx.base.mode().ok() == Some(ExtensionMode::Tui) {
@@ -2249,8 +2643,17 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                                 })
                             })
                             .await?;
-                        } else if let Ok(ui) = ctx.base.ui() {
-                            ui.notify(&mgr.format_status(), Some(NotifyType::Info));
+                        } else {
+                            let pending = {
+                                let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.pending.clone()
+                            };
+                            if let Some(p) = pending {
+                                p.await;
+                            }
+                            if let Ok(ui) = ctx.base.ui() {
+                                ui.notify(&mgr.format_status(), Some(NotifyType::Info));
+                            }
                         }
                         return Ok(());
                     };
@@ -2260,6 +2663,13 @@ pub fn create_mcp_extension(options: McpExtensionOptions) -> ExtensionFactory {
                             ui.notify(MCP_USAGE, Some(NotifyType::Warning));
                         }
                         return Ok(());
+                    }
+                    let pending = {
+                        let guard = mgr.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.pending.clone()
+                    };
+                    if let Some(p) = pending {
+                        p.await;
                     }
                     let oauth_none =
                         "No enabled MCP server uses OAuth. Only HTTP servers without an Authorization header do.";

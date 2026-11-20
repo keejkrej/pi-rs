@@ -17,12 +17,9 @@ fn binds_modified_and_unmodified_editor_viewport_navigation() {
 
     assert_eq!(
         keybindings.get_keys("tui.editor.cursorLineStart"),
-        vec!["home", "ctrl+home", "ctrl+a"]
+        vec!["home", "ctrl+a"]
     );
-    assert_eq!(
-        keybindings.get_keys("tui.editor.cursorLineEnd"),
-        vec!["end", "ctrl+end", "ctrl+e"]
-    );
+    assert_eq!(keybindings.get_keys("tui.editor.cursorLineEnd"), vec!["end", "ctrl+e"]);
     assert_eq!(keybindings.get_keys("tui.editor.pageUp"), vec!["pageUp", "ctrl+pageUp"]);
     assert_eq!(
         keybindings.get_keys("tui.editor.pageDown"),
@@ -66,8 +63,20 @@ fn binds_unmodified_terminal_viewport_shortcuts_to_alternate_screen_navigation()
         vec!["shift+enter", "ctrl+shift+g"]
     );
     assert_eq!(keybindings.get_keys("tui.altScreen.searchClose"), vec!["escape"]);
-    assert_eq!(keybindings.get_keys("tui.altScreen.top"), vec!["home"]);
-    assert_eq!(keybindings.get_keys("tui.altScreen.bottom"), vec!["end"]);
+    assert_eq!(keybindings.get_keys("tui.altScreen.top"), vec!["ctrl+home"]);
+    assert_eq!(keybindings.get_keys("tui.altScreen.bottom"), vec!["ctrl+end"]);
+}
+
+#[test]
+fn computes_clamped_select_page_indices() {
+    use pi_tui::get_select_page_index;
+    let keybindings = KeybindingsManager::new((&*TUI_KEYBINDINGS).clone(), None);
+
+    assert_eq!(get_select_page_index(&keybindings, "a", 0, 12, 5), None);
+    assert_eq!(get_select_page_index(&keybindings, "\x1b[6~", 0, 12, 5), Some(5));
+    assert_eq!(get_select_page_index(&keybindings, "\x1b[6~", 10, 12, 5), Some(11));
+    assert_eq!(get_select_page_index(&keybindings, "\x1b[5~", 2, 12, 5), Some(0));
+    assert_eq!(get_select_page_index(&keybindings, "\x1b[6~", 0, 0, 5), Some(0));
 }
 
 #[test]

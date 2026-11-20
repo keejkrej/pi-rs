@@ -33,6 +33,7 @@ fn openrouter_model(thinking_level_map: Option<ThinkingLevelMap>) -> Model {
             thinking_format: Some(ThinkingFormat::OpenRouter),
             ..Default::default()
         })),
+        sampling_params_by_thinking_level: None,
     }
 }
 

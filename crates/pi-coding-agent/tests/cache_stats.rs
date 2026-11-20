@@ -48,6 +48,7 @@ fn make_assistant(
                 cache_read: cost_cache_read,
                 cache_write: cost_cache_write,
                 total: 0.0,
+                total_from_provider: None,
             },
         },
         stop_reason: StopReason::Stop,
@@ -56,6 +57,7 @@ fn make_assistant(
         raw_stop_reason: None,
         end_turn: None,
         timestamp,
+        duration_ms: None,
     }
 }
 

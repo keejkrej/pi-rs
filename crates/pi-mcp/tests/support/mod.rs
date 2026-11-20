@@ -4,3 +4,4 @@
 // @generated-mods begin (scaffold-owned, do not edit)
 pub mod helpers;
 // @generated-mods end
+pub mod auth_server;

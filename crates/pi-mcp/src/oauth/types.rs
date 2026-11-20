@@ -92,7 +92,7 @@ pub struct OAuthTokens {
     pub id_token: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthClientMetadata {
     #[serde(rename = "redirect_uris")]
@@ -107,6 +107,10 @@ pub struct OAuthClientMetadata {
     pub grant_types: Option<Vec<String>>,
     #[serde(rename = "response_types", default, skip_serializing_if = "Option::is_none")]
     pub response_types: Option<Vec<String>>,
+    /// OpenID Connect client type, `native` or `web`. Dynamic client registration derives it from
+    /// `redirect_uris` when absent (MCP SEP-837).
+    #[serde(rename = "application_type", default, skip_serializing_if = "Option::is_none")]
+    pub application_type: Option<String>,
     #[serde(rename = "client_name", default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(rename = "client_uri", default, skip_serializing_if = "Option::is_none")]
@@ -180,6 +184,8 @@ pub struct OAuthClientInformationFull {
     pub grant_types: Option<Vec<String>>,
     #[serde(rename = "response_types", default, skip_serializing_if = "Option::is_none")]
     pub response_types: Option<Vec<String>>,
+    #[serde(rename = "application_type", default, skip_serializing_if = "Option::is_none")]
+    pub application_type: Option<String>,
     #[serde(rename = "client_name", default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(rename = "client_uri", default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +244,8 @@ pub struct OAuthClientInformationMixed {
     pub grant_types: Option<Vec<String>>,
     #[serde(rename = "response_types", default, skip_serializing_if = "Option::is_none")]
     pub response_types: Option<Vec<String>>,
+    #[serde(rename = "application_type", default, skip_serializing_if = "Option::is_none")]
+    pub application_type: Option<String>,
     #[serde(rename = "client_name", default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     #[serde(rename = "client_uri", default, skip_serializing_if = "Option::is_none")]
@@ -277,6 +285,7 @@ impl From<OAuthClientInformation> for OAuthClientInformationMixed {
             token_endpoint_auth_method: None,
             grant_types: None,
             response_types: None,
+            application_type: None,
             client_name: None,
             client_uri: None,
             logo_uri: None,
@@ -305,6 +314,7 @@ impl From<OAuthClientInformationFull> for OAuthClientInformationMixed {
             token_endpoint_auth_method: info.token_endpoint_auth_method,
             grant_types: info.grant_types,
             response_types: info.response_types,
+            application_type: info.application_type,
             client_name: info.client_name,
             client_uri: info.client_uri,
             logo_uri: info.logo_uri,
@@ -534,6 +544,7 @@ pub fn parse_client_information(value: Value) -> Result<OAuthClientInformationFu
     let token_endpoint_auth_method = opt_str("token_endpoint_auth_method");
     let grant_types = opt_strs("grant_types");
     let response_types = opt_strs("response_types");
+    let application_type = opt_str("application_type");
     let client_name = opt_str("client_name");
     let client_uri = opt_str("client_uri");
     let logo_uri = opt_str("logo_uri");
@@ -559,6 +570,7 @@ pub fn parse_client_information(value: Value) -> Result<OAuthClientInformationFu
                 | "token_endpoint_auth_method"
                 | "grant_types"
                 | "response_types"
+                | "application_type"
                 | "client_name"
                 | "client_uri"
                 | "logo_uri"
@@ -585,6 +597,7 @@ pub fn parse_client_information(value: Value) -> Result<OAuthClientInformationFu
         token_endpoint_auth_method,
         grant_types,
         response_types,
+        application_type,
         client_name,
         client_uri,
         logo_uri,
@@ -643,13 +656,19 @@ fn optional_strings(value: &Value, name: &str) -> Result<Option<Vec<String>>> {
     Ok(Some(out))
 }
 
+/// Accepts only `http:` and `https:` URLs. Servers supply these URLs, and the authorization endpoint is
+/// opened with the platform URL handler, so a `file:` or custom protocol URL would launch local programs.
 fn safe_url(value: &Value, name: &str) -> Result<String> {
     let text = required_string(value, name)?;
     let parsed = url::Url::parse(&text).map_err(|_| pi_js::Error::msg(format!("Invalid {name}")))?;
-    if matches!(parsed.scheme(), "javascript" | "data" | "vbscript") {
+    if !is_http_url(&parsed) {
         return Err(pi_js::Error::msg(format!("Invalid {name}")));
     }
     Ok(text)
+}
+
+pub fn is_http_url(url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
 }
 
 fn optional_url(value: &Value, name: &str) -> Result<Option<String>> {

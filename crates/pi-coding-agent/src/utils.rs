@@ -34,3 +34,7 @@ pub mod windows_self_update;
 pub mod wsl;
 pub mod zip;
 // @generated-mods end
+
+pub mod output_files;
+pub mod terminal_question;
+pub mod web_url;

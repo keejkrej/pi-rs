@@ -38,6 +38,7 @@ fn sample_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -138,6 +139,7 @@ async fn cloudflare_classifier_materializes_account_placeholder() {
         context_window: 32000,
         cost: ModelCost::default(),
         headers: None,
+        compat: None,
     };
     let captured = Arc::new(Mutex::new(None::<String>));
     let c = Arc::clone(&captured);
@@ -167,6 +169,7 @@ async fn cloudflare_classifier_materializes_account_placeholder() {
     let ctx = ClassifierContext {
         state: IndexMap::new(),
         questions: IndexMap::new(),
+        images: None,
     };
     wrapped.classify(&model, &ctx, Some(opts)).await;
     assert_eq!(

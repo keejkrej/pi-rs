@@ -2,54 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use pi_js::time::{Interval, set_interval};
-use pi_tui::colors::ParseColorValue;
-use pi_tui::{
-    Color, ColorMixSpace, Component, RgbColorValue, TUI, Text, TuiMouseEvent, TuiMouseEventResult, foreground_ansi,
-    mix_colors, parse_color,
-};
+use pi_js::time::Interval;
+use pi_tui::{Component, TUI, Text, TuiMouseEvent, TuiMouseEventResult};
 
 use super::super::theme::theme::{ThemeColor, theme};
 use super::extension_selector::ExtensionSelectorComponent;
-
-const CHARS_PER_COLOR: f64 = 4.0;
-const CHARS_PER_SECOND: f64 = 10.0;
-const ANIMATION_FRAME_MS: u64 = 50;
-
-fn radius_colors() -> [Color; 4] {
-    let fallback = Color::Rgb(RgbColorValue {
-        r: 77.0,
-        g: 154.0,
-        b: 191.0,
-    });
-    [
-        parse_color(ParseColorValue::Text("#4d9abf")).unwrap_or(fallback),
-        parse_color(ParseColorValue::Text("#83ccd2")).unwrap_or(fallback),
-        parse_color(ParseColorValue::Text("#f1be57")).unwrap_or(fallback),
-        parse_color(ParseColorValue::Text("#f09082")).unwrap_or(fallback),
-    ]
-}
-
-fn radius_shimmer(text: &str, elapsed_ms: f64) -> String {
-    let colors = radius_colors();
-    let mode = theme().get_color_mode();
-    let cycle = (colors.len() as f64) * CHARS_PER_COLOR;
-    let offset = (elapsed_ms / 1000.0) * CHARS_PER_SECOND;
-    let mut result = String::new();
-    for (index, ch) in text.chars().enumerate() {
-        let position = (((index as f64 - offset) % cycle) + cycle) % cycle;
-        let band = (position / CHARS_PER_COLOR).floor() as usize % colors.len();
-        let t = position / CHARS_PER_COLOR - (band as f64);
-        let amount = t * t * (3.0 - 2.0 * t);
-        let from = colors[band];
-        let to = colors[(band + 1) % colors.len()];
-        let mixed = mix_colors(from, to, amount, Some(ColorMixSpace::Srgb)).unwrap_or(from);
-        result.push_str(&foreground_ansi(mixed, mode));
-        result.push(ch);
-    }
-    result.push_str("\x1b[39m");
-    result
-}
+use super::provider_brand::{radius_shimmer, start_brand_animation};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadiusOption {
@@ -122,14 +80,13 @@ impl RadiusLoginMenuComponent {
         *state_ref.lock().unwrap() = Some(Arc::clone(&inner));
 
         let weak = Arc::downgrade(&inner);
-        let timer = set_interval(ANIMATION_FRAME_MS, move || {
-            let Some(inner) = weak.upgrade() else {
-                return;
-            };
-            if inner.state.lock().unwrap().animating {
-                tui.request_render(None);
-            }
-        });
+        let timer = start_brand_animation(
+            tui,
+            Arc::new(move || {
+                weak.upgrade()
+                    .is_some_and(|inner| inner.state.lock().unwrap().animating)
+            }),
+        );
         inner.state.lock().unwrap().animation_timer = Some(timer);
 
         Self { inner }

@@ -3,18 +3,18 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::{IndexMap, IndexSet};
-use pi_ai::api::lazy::lazy_stream;
+use pi_ai::api::lazy::lazy_stream_with_options;
 use pi_ai::compat::extension_oauth_types::{
     OAuthAuthInfo, OAuthCredentials, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthPrompt, OAuthSelectPrompt,
 };
 use pi_ai::compat::get_api_provider;
-use pi_ai::models::{ModelsPublication, Provider, RefreshModelsContext};
+use pi_ai::models::{ModelsPublication, Provider, RefreshModelsAuth, RefreshModelsContext};
 use pi_ai::types::{
     AnyModel, ApiStreamOptions, AssistantImages, ClassifierContext, ClassifierModel, ClassifierOptions,
     ClassifierResult, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, ImageModel, ImagesContext,
     ImagesOptions, Model, ModelCompat, ModelCost, ModelInput, ModelInputLimits, ModelOutput, ModelPromptCache,
-    ProviderClassifier, ProviderHeaders, ProviderImages, SimpleStreamFunction, SimpleStreamOptions, ThinkingLevelMap,
-    TranscriptContext,
+    ProviderClassifier, ProviderHeaders, ProviderImages, SamplingParamsByThinkingLevel, SimpleStreamFunction,
+    SimpleStreamOptions, SystemOneCompat, ThinkingLevelMap, TranscriptContext,
 };
 use pi_ai::utils::model_operations::{classifier_error_result, image_error_result};
 use pi_ai::{
@@ -61,6 +61,7 @@ pub struct ProviderChatModelConfig {
     pub context_window: i64,
     pub max_tokens: i64,
     pub sampling_params: Option<IndexMap<String, Value>>,
+    pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
     pub compat: Option<ModelCompat>,
 }
 
@@ -88,6 +89,7 @@ pub struct ProviderClassifierModelConfig {
     pub cost: ModelCost,
     pub headers: Option<IndexMap<String, String>>,
     pub context_window: i64,
+    pub compat: Option<SystemOneCompat>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,6 +270,41 @@ fn merge_input_limits(
     })
 }
 
+fn merge_sampling_params_by_thinking_level(
+    base: Option<SamplingParamsByThinkingLevel>,
+    override_map: Option<&SamplingParamsByThinkingLevel>,
+) -> Option<SamplingParamsByThinkingLevel> {
+    let Some(ovr) = override_map else {
+        return base;
+    };
+    let mut merged = base.unwrap_or_default();
+    for (level, params) in ovr {
+        let entry = merged.entry(*level).or_default();
+        for (k, v) in params {
+            entry.insert(k.clone(), v.clone());
+        }
+    }
+    Some(merged)
+}
+
+fn merge_classifier_compat(base: Option<&SystemOneCompat>, override_val: Option<&Value>) -> Option<SystemOneCompat> {
+    let Some(ovr) = override_val else {
+        return base.cloned();
+    };
+    let mut merged = match base.and_then(|c| serde_json::to_value(c).ok()) {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    if let Value::Object(ovr_map) = ovr {
+        for (k, v) in ovr_map {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::from_value(Value::Object(merged))
+        .ok()
+        .or_else(|| base.cloned())
+}
+
 fn apply_model_override(mut model: Model, ovr: &ModelsJsonModelOverride) -> Model {
     if let Some(ref name) = ovr.name {
         model.name = name.clone();
@@ -315,6 +352,10 @@ fn apply_model_override(mut model: Model, ovr: &ModelsJsonModelOverride) -> Mode
         }
         model.sampling_params = Some(merged);
     }
+    model.sampling_params_by_thinking_level = merge_sampling_params_by_thinking_level(
+        model.sampling_params_by_thinking_level,
+        ovr.sampling_params_by_thinking_level.as_ref(),
+    );
     let api = model.api.clone();
     model.compat = merge_compat_json(&api, model.compat.as_ref(), ovr.compat.as_ref());
     model
@@ -387,6 +428,7 @@ fn model_from_json(
         max_tokens: definition.max_tokens.map(|v| v as i64).unwrap_or(16_384),
         headers: None,
         sampling_params: definition.sampling_params.clone(),
+        sampling_params_by_thinking_level: definition.sampling_params_by_thinking_level.clone(),
         compat,
     })
 }
@@ -489,6 +531,7 @@ fn extension_model_from_definition(
             context_window: def.context_window,
             cost: def.cost.clone(),
             headers: None,
+            compat: def.compat.clone(),
         })),
         ProviderModelConfig::Chat(def) => Ok(AnyModel::Chat(Model {
             r#type: None,
@@ -507,6 +550,7 @@ fn extension_model_from_definition(
             max_tokens: def.max_tokens,
             headers: None,
             sampling_params: def.sampling_params.clone(),
+            sampling_params_by_thinking_level: def.sampling_params_by_thinking_level.clone(),
             compat: def.compat.clone(),
         })),
     }
@@ -580,6 +624,12 @@ fn apply_models_json(
                     chat.compat = merge_compat_json(&api, chat.compat.as_ref(), config.compat.as_ref());
                     AnyModel::Chat(chat)
                 }
+                AnyModel::Classifier(mut classifier) => {
+                    classifier.base_url = base_url;
+                    // Classifier APIs read their own compat fields, such as how a System One service takes images.
+                    classifier.compat = merge_classifier_compat(classifier.compat.as_ref(), config.compat.as_ref());
+                    AnyModel::Classifier(classifier)
+                }
                 other => set_any_model_base_url(other, base_url),
             }
         })
@@ -649,6 +699,8 @@ impl OAuthLoginCallbacks for OAuthLoginCallbacksAdapter {
             verification_uri: info.verification_uri,
             interval_seconds: info.interval_seconds,
             expires_in_seconds: info.expires_in_seconds,
+            open_browser_on_confirm: info.open_browser_on_confirm,
+            copy_code_on_confirm: info.copy_code_on_confirm,
         });
     }
 
@@ -1254,38 +1306,48 @@ impl ComposedProvider {
         let model_owned = model.clone();
         let context_owned = context.clone();
 
-        lazy_stream(model, async move {
-            let effective_simple = if simple {
-                simple_options.unwrap_or_default()
-            } else {
-                SimpleStreamOptions {
-                    base: options.as_ref().map(|o| o.base.clone()).unwrap_or_default(),
-                    ..Default::default()
-                }
-            };
+        let signal = options
+            .as_ref()
+            .and_then(|o| o.base.signal.clone())
+            .or_else(|| simple_options.as_ref().and_then(|o| o.base.signal.clone()));
 
-            if let Some(stream_simple_fn) = ext_stream_simple
-                && ext_api.as_deref() == Some(model_owned.api.as_str())
-            {
-                return Ok(stream_simple_fn(&model_owned, &context_owned, Some(effective_simple)));
-            }
-            if let Some(base_provider) = base
-                && supports_base
-            {
-                return Ok(if simple {
-                    base_provider.stream_simple(&model_owned, &context_owned, Some(effective_simple))
+        lazy_stream_with_options(
+            model,
+            async move {
+                let effective_simple = if simple {
+                    simple_options.unwrap_or_default()
                 } else {
-                    base_provider.stream(&model_owned, &context_owned, options)
-                });
-            }
-            let api_provider = get_api_provider(&model_owned.api)
-                .ok_or_else(|| Error::msg(format!("No API provider registered for api: {}", model_owned.api)))?;
-            Ok(if simple {
-                (api_provider.stream_simple)(&model_owned, &context_owned, Some(effective_simple))
-            } else {
-                (api_provider.stream)(&model_owned, &context_owned, options)
-            })
-        })
+                    SimpleStreamOptions {
+                        base: options.as_ref().map(|o| o.base.clone()).unwrap_or_default(),
+                        ..Default::default()
+                    }
+                };
+
+                if let Some(stream_simple_fn) = ext_stream_simple
+                    && ext_api.as_deref() == Some(model_owned.api.as_str())
+                {
+                    return Ok(stream_simple_fn(&model_owned, &context_owned, Some(effective_simple)));
+                }
+                if let Some(base_provider) = base
+                    && supports_base
+                {
+                    return Ok(if simple {
+                        base_provider.stream_simple(&model_owned, &context_owned, Some(effective_simple))
+                    } else {
+                        base_provider.stream(&model_owned, &context_owned, options)
+                    });
+                }
+                let api_provider = get_api_provider(&model_owned.api)
+                    .ok_or_else(|| Error::msg(format!("No API provider registered for api: {}", model_owned.api)))?;
+                Ok(if simple {
+                    (api_provider.stream_simple)(&model_owned, &context_owned, Some(effective_simple))
+                } else {
+                    (api_provider.stream)(&model_owned, &context_owned, options)
+                })
+            },
+            None,
+            signal,
+        )
     }
 }
 
@@ -1297,6 +1359,7 @@ fn clone_refresh_context(ctx: &RefreshModelsContext) -> RefreshModelsContext {
         allow_network: ctx.allow_network,
         force: ctx.force,
         signal: ctx.signal.clone(),
+        base_url: ctx.base_url.clone(),
     }
 }
 
@@ -1331,6 +1394,19 @@ impl Provider for ComposedProvider {
 
     fn get_all_models(&self) -> Option<Vec<AnyModel>> {
         Some(self.compute_all_models().unwrap_or_default())
+    }
+
+    fn refresh_models_auth(&self) -> RefreshModelsAuth {
+        let ext_overrides_refresh = self.extension.as_ref().is_some_and(|e| {
+            e.refresh_models.is_some() || e.oauth.as_ref().and_then(|o| o.modify_models.as_ref()).is_some()
+        });
+        if ext_overrides_refresh {
+            RefreshModelsAuth::Credential
+        } else {
+            self.base
+                .as_ref()
+                .map_or(RefreshModelsAuth::Credential, |b| b.refresh_models_auth())
+        }
     }
 
     fn refresh_models(&self, context: RefreshModelsContext) -> Option<BoxFuture<Result<()>>> {

@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::oauth::flow::{InvalidateCredentialsKind, OAuthClientProvider};
+use crate::oauth::flow::{InvalidateCredentialsKind, OAuthClientMetadataDocument, OAuthClientProvider};
 use crate::oauth::types::{
-    OAuthClientInformation, OAuthClientInformationMixed, OAuthClientMetadata, OAuthDiscoveryState, OAuthTokens,
+    AuthorizationServerMetadata, OAuthClientInformation, OAuthClientInformationMixed, OAuthClientMetadata,
+    OAuthDiscoveryState, OAuthTokens,
 };
 use pi_js::{Error, Result};
 
@@ -45,6 +46,7 @@ pub struct McpOAuthProviderClientMetadata {
     pub token_endpoint_auth_method: Option<String>,
     pub grant_types: Option<Vec<String>>,
     pub response_types: Option<Vec<String>>,
+    pub application_type: Option<String>,
     pub client_name: Option<String>,
     pub client_uri: Option<String>,
     pub logo_uri: Option<String>,
@@ -58,6 +60,9 @@ pub struct McpOAuthProviderClientMetadata {
     pub software_version: Option<String>,
     pub software_statement: Option<String>,
 }
+
+pub type ClientMetadataDocumentFn =
+    Arc<dyn Fn(Option<&AuthorizationServerMetadata>) -> Result<Option<OAuthClientMetadataDocument>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct McpOAuthProviderOptions {
@@ -132,6 +137,7 @@ pub struct McpOAuthProvider {
 struct McpOAuthProviderInner {
     redirect_url: String,
     client_metadata: OAuthClientMetadata,
+    client_metadata_document: Option<ClientMetadataDocumentFn>,
     server_url: String,
     configured_client: Option<OAuthClientInformationMixed>,
     store: Arc<dyn McpOAuthStateStore>,
@@ -143,6 +149,15 @@ struct McpOAuthProviderInner {
 
 impl McpOAuthProvider {
     pub fn new(options: McpOAuthProviderOptions) -> Self {
+        Self::new_with_document(options, None)
+    }
+
+    // PORT: Additive constructor with `client_metadata_document` so `McpOAuthProviderOptions` keeps all
+    // existing struct-literal callers compiling.
+    pub fn new_with_document(
+        options: McpOAuthProviderOptions,
+        client_metadata_document: Option<ClientMetadataDocumentFn>,
+    ) -> Self {
         let server_url = url::Url::parse(&options.server_url)
             .unwrap_or_else(|e| panic!("Invalid MCP server URL '{}': {e}", options.server_url))
             .to_string();
@@ -163,6 +178,7 @@ impl McpOAuthProvider {
                     .unwrap_or_else(|| vec!["authorization_code".to_string(), "refresh_token".to_string()]),
             ),
             response_types: Some(meta.response_types.unwrap_or_else(|| vec!["code".to_string()])),
+            application_type: meta.application_type,
             client_name: meta.client_name,
             client_uri: meta.client_uri,
             logo_uri: meta.logo_uri,
@@ -193,6 +209,7 @@ impl McpOAuthProvider {
             inner: Arc::new(McpOAuthProviderInner {
                 redirect_url,
                 client_metadata,
+                client_metadata_document,
                 server_url,
                 configured_client,
                 store,
@@ -242,6 +259,16 @@ impl OAuthClientProvider for McpOAuthProvider {
 
     fn client_metadata(&self) -> &OAuthClientMetadata {
         &self.inner.client_metadata
+    }
+
+    fn client_metadata_document(
+        &self,
+        metadata: Option<&AuthorizationServerMetadata>,
+    ) -> Result<Option<OAuthClientMetadataDocument>> {
+        match &self.inner.client_metadata_document {
+            Some(f) => f(metadata),
+            None => Ok(None),
+        }
     }
 
     async fn state(&self) -> Result<Option<String>> {

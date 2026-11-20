@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 
+use pi_js::abort::AbortSignal;
 use pi_js::{Error, Unsubscribe};
 
 use crate::protocol::jsonrpc::JsonRpcMessage;
@@ -17,10 +18,22 @@ pub type McpTransportMessageListener = Arc<dyn Fn(&JsonRpcMessage) + Send + Sync
 pub type McpTransportErrorListener = Arc<dyn Fn(&Error) + Send + Sync>;
 pub type McpTransportCloseListener = Arc<dyn Fn() + Send + Sync>;
 
+#[derive(Clone, Debug, Default)]
+pub struct McpTransportSendOptions {
+    /// Aborted once the sender no longer waits for a reply (the request was cancelled, timed out, answered,
+    /// or the client closed). A transport must not dispatch the message after that, for example when
+    /// retrying it after an authorization refresh. It does not undo a message already dispatched.
+    pub signal: Option<AbortSignal>,
+}
+
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     async fn start(&self) -> pi_js::Result<()>;
     async fn send(&self, message: JsonRpcMessage) -> pi_js::Result<()>;
+    // PORT: Additive default method so existing downstream `McpTransport` impls keep compiling.
+    async fn send_with_options(&self, message: JsonRpcMessage, _options: McpTransportSendOptions) -> pi_js::Result<()> {
+        self.send(message).await
+    }
     async fn close(&self) -> pi_js::Result<()>;
     fn on_message(&self, listener: McpTransportMessageListener) -> Unsubscribe;
     fn on_error(&self, listener: McpTransportErrorListener) -> Unsubscribe;

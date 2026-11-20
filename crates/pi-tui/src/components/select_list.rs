@@ -4,34 +4,12 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::keybindings::get_select_page_index;
 use crate::tui::{Component, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType};
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH: i64 = 32;
 const PRIMARY_COLUMN_GAP: i64 = 2;
 const MIN_DESCRIPTION_WIDTH: i64 = 10;
-
-/// PORT: helper mirrored from `packages/tui/src/keybindings.ts` (`getSelectPageIndex`)
-/// because `crates/pi-tui/src/keybindings.rs` is non-owned and does not expose it yet.
-fn get_select_page_index(
-    kb: &crate::keybindings::KeybindingsManager,
-    data: &str,
-    selected_index: i64,
-    item_count: i64,
-    page_size: i64,
-) -> Option<i64> {
-    if item_count <= 0 {
-        return None;
-    }
-    let direction = if kb.matches(data, "tui.select.pageUp") {
-        -1
-    } else if kb.matches(data, "tui.select.pageDown") {
-        1
-    } else {
-        return None;
-    };
-    let step = page_size.max(1);
-    Some((selected_index + direction * step).min(item_count - 1).max(0))
-}
 
 pub type SelectItemCallback = Arc<dyn Fn(&SelectItem) + Send + Sync>;
 pub type SelectCancelCallback = Arc<dyn Fn() + Send + Sync>;
@@ -423,7 +401,7 @@ impl SelectList {
             } else if let Some(next_index) =
                 get_select_page_index(&kb, key_data, fields.selected_index, len, fields.max_visible)
             {
-                if next_index != fields.selected_index {
+                if len > 0 && next_index != fields.selected_index {
                     fields.selected_index = next_index;
                     Self::selection_change_payload(&fields)
                         .map_or(InputAction::None, |(cb, item)| InputAction::NotifySelection(cb, item))
@@ -661,6 +639,10 @@ impl Component for SelectList {
 
     fn wants_key_release(&self) -> bool {
         false
+    }
+
+    fn captures_viewport_input(&self) -> bool {
+        true
     }
 
     fn invalidate(&self) {

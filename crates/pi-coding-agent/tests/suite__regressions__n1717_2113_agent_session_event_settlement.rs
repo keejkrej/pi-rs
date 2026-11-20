@@ -24,7 +24,7 @@ fn create_echo_tool() -> AgentTool {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

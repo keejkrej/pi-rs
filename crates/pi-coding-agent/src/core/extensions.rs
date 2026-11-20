@@ -10,6 +10,8 @@ pub mod virtual_modules;
 pub mod wrapper;
 // @generated-mods end
 
+pub mod pi_ai_extension_view;
+
 pub use loader::{
     clear_extension_cache, create_extension_api, create_extension_runtime, discover_and_load_extensions,
     load_extension_from_factory, load_extensions, load_extensions_cached,

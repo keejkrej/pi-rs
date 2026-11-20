@@ -233,3 +233,163 @@ fn returns_none_for_empty_tool_list() {
         None
     );
 }
+
+// Regression coverage for #11308.
+#[test]
+fn preserves_literal_data_under_non_schema_keywords() {
+    for key in ["default", "examples", "enum", "const", "x-custom"] {
+        let literal = json!({ "const": "literal-data", "properties": { "nested": { "const": 1 } } });
+        let value = if key == "enum" || key == "examples" {
+            json!([literal])
+        } else {
+            literal
+        };
+        let mut prop = serde_json::Map::new();
+        prop.insert("type".to_owned(), json!("object"));
+        prop.insert(key.to_owned(), value);
+        let parameters = json!({ "type": "object", "properties": { "value": Value::Object(prop) } });
+        let original = parameters.clone();
+
+        let result = convert_tools(&[make_tool(parameters)], false, true)
+            .expect("convert_tools")
+            .expect("some tools");
+        assert_eq!(
+            result[0].function_declarations[0].parameters_json_schema,
+            Some(original)
+        );
+    }
+}
+
+#[test]
+fn preserves_names_while_rewriting_schemas_in_nested_maps() {
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependencies",
+    ] {
+        let map_val = json!({
+            "__proto__": { "const": "x" },
+            "const": { "const": "y" },
+            "properties": { "const": "z" }
+        });
+        let expected_map = json!({
+            "__proto__": { "enum": ["x"] },
+            "const": { "enum": ["y"] },
+            "properties": { "enum": ["z"] }
+        });
+        let mut parameters = serde_json::Map::new();
+        parameters.insert("type".to_owned(), json!("object"));
+        parameters.insert(key.to_owned(), map_val);
+        let mut expected = serde_json::Map::new();
+        expected.insert("type".to_owned(), json!("object"));
+        expected.insert(key.to_owned(), expected_map);
+
+        let result = convert_tools(&[make_tool(Value::Object(parameters))], false, true)
+            .expect("convert_tools")
+            .expect("some tools");
+        let schema = result[0].function_declarations[0]
+            .parameters_json_schema
+            .as_ref()
+            .unwrap();
+        let expected_val = Value::Object(expected);
+        assert_eq!(schema, &expected_val);
+        assert_eq!(pi_js::json::stringify(schema), pi_js::json::stringify(&expected_val));
+    }
+}
+
+#[test]
+fn rewrites_only_schema_bearing_keywords() {
+    let parameters = json!({
+        "type": "object",
+        "additionalProperties": { "const": "x" },
+        "unevaluatedProperties": false,
+        "propertyNames": { "const": "name" },
+        "allOf": [{ "if": { "const": "x" }, "then": { "const": "y" }, "else": { "not": { "const": "z" } } }],
+        "properties": {
+            "list": {
+                "type": "array",
+                "items": [{ "const": 1 }],
+                "prefixItems": [{ "const": 2 }],
+                "additionalItems": { "const": 3 },
+                "contains": { "const": 4 },
+                "unevaluatedItems": { "const": 5 }
+            }
+        },
+        "dependencies": { "list": ["other"] }
+    });
+    let expected = json!({
+        "type": "object",
+        "additionalProperties": { "enum": ["x"] },
+        "unevaluatedProperties": false,
+        "propertyNames": { "enum": ["name"] },
+        "allOf": [{ "if": { "enum": ["x"] }, "then": { "enum": ["y"] }, "else": { "not": { "enum": ["z"] } } }],
+        "properties": {
+            "list": {
+                "type": "array",
+                "items": [{ "enum": [1] }],
+                "prefixItems": [{ "enum": [2] }],
+                "additionalItems": { "enum": [3] },
+                "contains": { "enum": [4] },
+                "unevaluatedItems": { "enum": [5] }
+            }
+        },
+        "dependencies": { "list": ["other"] }
+    });
+
+    let result = convert_tools(&[make_tool(parameters)], false, true)
+        .expect("convert_tools")
+        .expect("some tools");
+    assert_eq!(
+        result[0].function_declarations[0].parameters_json_schema,
+        Some(expected)
+    );
+}
+
+#[test]
+fn rewrites_string_and_number_const_values_to_single_value_enums_in_parameters_json_schema() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "origin": { "type": "string", "const": "zq-src-7" },
+            "mode": {
+                "anyOf": [
+                    { "type": "string", "const": "a" },
+                    { "type": "string", "const": "b" }
+                ]
+            },
+            "level": { "oneOf": [{ "const": 1 }, { "const": 2 }] },
+            "flag": { "type": "boolean", "const": true },
+            "list": { "type": "array", "items": { "const": "x" } },
+            "const": { "type": "string" }
+        },
+        "required": ["origin"]
+    });
+    let expected = json!({
+        "type": "object",
+        "properties": {
+            "origin": { "type": "string", "enum": ["zq-src-7"] },
+            "mode": {
+                "anyOf": [
+                    { "type": "string", "enum": ["a"] },
+                    { "type": "string", "enum": ["b"] }
+                ]
+            },
+            "level": { "oneOf": [{ "enum": [1] }, { "enum": [2] }] },
+            "flag": { "type": "boolean", "const": true },
+            "list": { "type": "array", "items": { "enum": ["x"] } },
+            "const": { "type": "string" }
+        },
+        "required": ["origin"]
+    });
+
+    let result = convert_tools(&[make_tool(parameters)], false, true)
+        .expect("convert_tools")
+        .expect("some tools");
+    assert_eq!(
+        result[0].function_declarations[0].parameters_json_schema,
+        Some(expected)
+    );
+}

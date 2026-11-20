@@ -78,9 +78,8 @@ fn does_not_apply_the_public_radius_catalog_to_custom_gateways() {
 }
 
 #[tokio::test]
-async fn overlays_refreshed_models_on_the_static_public_catalog() {
+async fn replaces_the_static_public_catalog_with_refreshed_models() {
     let cfg = radius_config();
-    let cfg_len = cfg.models.len();
     let body = pi_js::json::stringify(&cfg);
     let _guard = mock_fetch(move |_req| {
         let body = body.clone();
@@ -122,12 +121,14 @@ async fn overlays_refreshed_models_on_the_static_public_catalog() {
     assert_eq!(balanced.base_url, "https://radius.example/v1");
     assert_eq!(balanced.context_window, 424_242);
     assert!(models.get_model("radius", "organization-only").is_some());
-    assert!(models.get_models(Some("radius")).len() > cfg_len);
+    // Models disabled by the organization must not reappear from the shipped catalog.
+    let ids: Vec<String> = models.get_models(Some("radius")).into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec!["balanced".to_owned(), "organization-only".to_owned()]);
     let _ = json!({});
 }
 
 #[tokio::test]
-async fn overlays_a_cached_effective_catalog_without_network_access() {
+async fn replaces_the_static_public_catalog_with_a_cached_catalog_without_network_access() {
     let store = Arc::new(InMemoryModelsStore::new());
     let cached_models: Vec<AnyModel> = get_radius_models_from_config("radius", &radius_config())
         .into_iter()
@@ -167,4 +168,45 @@ async fn overlays_a_cached_effective_catalog_without_network_access() {
         Some("Fresh Balanced")
     );
     assert!(models.get_model("radius", "organization-only").is_some());
+    let ids: Vec<String> = models.get_models(Some("radius")).into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec!["balanced".to_owned(), "organization-only".to_owned()]);
+}
+
+#[tokio::test]
+async fn exposes_no_models_when_the_organization_disabled_all_of_them() {
+    let body = pi_js::json::stringify(&json!({ "baseUrl": "https://radius.example/v1", "models": [] }));
+    let _guard = mock_fetch(move |_req| {
+        let body = body.clone();
+        Box::pin(async move { Ok(response(200, &[("content-type", "application/json")], body)) })
+    });
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    credentials
+        .modify_with(
+            "radius",
+            |_| async {
+                Ok(Some(Credential::ApiKey(ApiKeyCredential {
+                    key: Some("radius-key".to_owned()),
+                    env: None,
+                })))
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let models = create_models(Some(CreateModelsOptions {
+        credentials: Some(credentials as Arc<dyn pi_ai::auth::types::CredentialStore + Send + Sync>),
+        ..Default::default()
+    }));
+    models.set_provider(radius_provider());
+
+    let result = models
+        .refresh(Some(ModelsRefreshOptions {
+            providers: Some(vec!["radius".to_owned()]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert!(result.errors.is_empty());
+    assert!(models.get_models(Some("radius")).is_empty());
 }

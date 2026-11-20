@@ -10,31 +10,30 @@ use pi_js::fetch::{Body, Headers, Request, Response, fetch as default_fetch};
 use serde_json::{Map, Value};
 use url::Url;
 
+use crate::api::azure_openai_config::AzureEndpointOptions;
+pub use crate::api::azure_openai_config::{DEFAULT_AZURE_API_VERSION, normalize_azure_base_url};
 use crate::api::constrained_sampling::create_grammar_tool_input_properties;
 use crate::api::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::api::openai_responses::OpenAIReasoningEffort;
 use crate::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ProcessResponsesStreamOptions,
     convert_responses_messages, convert_responses_tools, create_pending_assistant_message,
-    enrich_chatgpt_usage_limit_error, process_responses_stream, resolve_responses_cache_retention,
-    response_to_sse_json_stream,
+    enrich_chatgpt_usage_limit_error, get_responses_tool_support, process_responses_stream,
+    resolve_responses_cache_retention, response_to_sse_json_stream,
 };
-use crate::api::simple_options::{build_base_options, clamp_reasoning};
+use crate::api::simple_options::{build_base_options, clamp_reasoning, resolve_sampling_params};
 use crate::env_api_keys::get_env_api_key;
 use crate::types::{
-    ApiStreamOptions, CacheRetention, Model, ModelThinkingLevel, ProviderEnv, ProviderHeaders, ProviderStreams,
-    SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice, TranscriptContext,
+    ApiStreamOptions, CacheRetention, Model, ModelThinkingLevel, PromptCacheKeyMode, ProviderEnv, ProviderHeaders,
+    ProviderStreams, SimpleStreamOptions, StreamOptions, ThinkingLevel, ToolChoice, TranscriptContext,
 };
 use crate::utils::abort_signals::combine_abort_signals;
 use crate::utils::diagnostics::{append_assistant_message_diagnostic, create_assistant_message_diagnostic};
 use crate::utils::error_body::{format_provider_error, normalize_provider_error, truncate_error_text};
 use crate::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
-use crate::utils::pi_user_agent::get_pi_user_agent;
-use crate::utils::provider_env::get_provider_env_value;
+use crate::utils::identity::{ClientIdentity, ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderHttpError, ProviderRetryOptions, retry_provider_request};
-use crate::utils::transcript::{get_declared_tools, resolve_transcript};
-
-pub const DEFAULT_AZURE_API_VERSION: &str = "v1";
+use crate::utils::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools_with_support};
 
 /// Options for Azure OpenAI Responses API requests.
 #[derive(Debug, Clone, Default)]
@@ -130,59 +129,17 @@ impl AzureOpenAIResponsesOptions {
     }
 }
 
-fn is_azure_host(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    lower.ends_with(".cognitiveservices.azure.com")
-        || lower.ends_with(".openai.azure.com")
-        || lower.ends_with(".ai.azure.com")
-}
-
-/// Normalize Azure OpenAI base URL according to host and path conventions.
-pub fn normalize_azure_base_url(raw_url: &str) -> Result<String> {
-    let trimmed = pi_js::str16::trim(raw_url);
-    let mut parsed =
-        Url::parse(trimmed).map_err(|e| Error::msg(format!("Invalid Azure OpenAI base URL \"{raw_url}\": {e}")))?;
-    let host = parsed.host_str().unwrap_or("");
-    if is_azure_host(host) {
-        parsed.set_query(None);
-        parsed.set_fragment(None);
-        let path_trimmed = parsed.path().trim_end_matches('/').to_string();
-        let normalized_path = match path_trimmed.as_str() {
-            "" | "/openai" | "/openai/v1" | "/openai/v1/responses" => "/openai/v1",
-            other => other,
-        };
-        parsed.set_path(normalized_path);
-        Ok(parsed.to_string().trim_end_matches('/').to_string())
-    } else {
-        let query = parsed.query().map(str::to_string);
-        let path_trimmed = parsed.path().trim_end_matches('/').to_string();
-        parsed.set_path(&path_trimmed);
-        parsed.set_query(query.as_deref());
-        let s = parsed.to_string();
-        Ok(if query.is_none() {
-            s.trim_end_matches('/').to_string()
-        } else {
-            s
-        })
+fn to_endpoint_options(options: &AzureOpenAIResponsesOptions) -> AzureEndpointOptions {
+    AzureEndpointOptions {
+        base: options.base.clone(),
+        azure_api_version: options.azure_api_version.clone(),
+        azure_resource_name: options.azure_resource_name.clone(),
+        azure_base_url: options.azure_base_url.clone(),
+        azure_deployment_name: options.azure_deployment_name.clone(),
     }
 }
 
-fn parse_deployment_name_map(raw: &str) -> IndexMap<String, String> {
-    let mut map = IndexMap::new();
-    for entry in raw.split(',') {
-        let trimmed = pi_js::str16::trim(entry);
-        if let Some((k, v)) = trimmed.split_once('=') {
-            let key = pi_js::str16::trim(k);
-            let val = pi_js::str16::trim(v);
-            if !key.is_empty() && !val.is_empty() {
-                map.insert(key.to_string(), val.to_string());
-            }
-        }
-    }
-    map
-}
-
-fn resolve_azure_config(
+fn resolve_azure_stream_config(
     model: &Model,
     options: &AzureOpenAIResponsesOptions,
 ) -> Result<(String, String, String, String)> {
@@ -194,47 +151,13 @@ fn resolve_azure_config(
         .as_deref()
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .or_else(|| get_env_api_key("azure-openai-responses", env))
+        .or_else(|| get_env_api_key("azure", env))
         .ok_or_else(|| Error::msg("Azure OpenAI API key is required (AZURE_OPENAI_API_KEY)"))?;
 
-    let api_version = options
-        .azure_api_version
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| get_provider_env_value("AZURE_OPENAI_API_VERSION", env).filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_string());
-
-    let deployment_name = options
-        .azure_deployment_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            get_provider_env_value("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", env)
-                .and_then(|raw| parse_deployment_name_map(&raw).get(&model.id).cloned())
-        })
-        .unwrap_or_else(|| model.id.clone());
-
-    let raw_base_url = options
-        .azure_base_url
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| get_provider_env_value("AZURE_OPENAI_BASE_URL", env).filter(|s| !s.is_empty()))
-        .or_else(|| {
-            let res = options
-                .azure_resource_name
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .or_else(|| get_provider_env_value("AZURE_OPENAI_RESOURCE_NAME", env).filter(|s| !s.is_empty()));
-            res.map(|name| format!("https://{name}.openai.azure.com"))
-        })
-        .unwrap_or_else(|| model.base_url.clone());
-
-    let base_url = normalize_azure_base_url(&raw_base_url)?;
-    Ok((api_key, base_url, api_version, deployment_name))
+    let endpoint_opts = to_endpoint_options(options);
+    let cfg = crate::api::azure_openai_config::resolve_azure_config(model, Some(&endpoint_opts))?;
+    let deployment_name = crate::api::azure_openai_config::resolve_deployment_name(model, Some(&endpoint_opts));
+    Ok((api_key, cfg.base_url, cfg.api_version, deployment_name))
 }
 
 fn build_azure_responses_url(normalized_base: &str, api_version: &str) -> Result<String> {
@@ -251,7 +174,7 @@ fn allowed_tool_call_providers() -> IndexSet<String> {
     set.insert("openai".to_string());
     set.insert("openai-codex".to_string());
     set.insert("opencode".to_string());
-    set.insert("azure-openai-responses".to_string());
+    set.insert("azure".to_string());
     set
 }
 
@@ -270,12 +193,24 @@ fn apply_raw_header_layer(headers: &mut Headers, layer: &IndexMap<String, String
     }
 }
 
-fn build_azure_headers(model: &Model, api_key: &str, options_headers: Option<&ProviderHeaders>) -> Headers {
+fn build_azure_headers(
+    model: &Model,
+    api_key: &str,
+    options_headers: Option<&ProviderHeaders>,
+    identity: Option<&ClientIdentity>,
+) -> Headers {
     let mut headers = Headers::new();
     headers.set("accept", "text/event-stream");
     headers.set("content-type", "application/json");
     headers.set("api-key", api_key);
-    headers.set("user-agent", &get_pi_user_agent());
+    let identity_headers = get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        identity,
+    );
+    apply_raw_header_layer(&mut headers, &identity_headers);
     if let Some(mh) = &model.headers {
         apply_raw_header_layer(&mut headers, mh);
     }
@@ -315,7 +250,7 @@ fn build_params(
     deployment_name: &str,
     context: &TranscriptContext,
     options: &AzureOpenAIResponsesOptions,
-    cache_retention: CacheRetention,
+    _cache_retention: CacheRetention,
 ) -> Result<(Value, IndexMap<String, String>)> {
     let providers = allowed_tool_call_providers();
     let compat = model.compat.as_ref().and_then(|c| c.as_openai_responses());
@@ -323,9 +258,24 @@ fn build_params(
     let supports_max_output_tokens = compat.and_then(|c| c.supports_max_output_tokens).unwrap_or(true);
     let supports_grammar_tools = compat.and_then(|c| c.supports_open_ai_grammar_tools).unwrap_or(false);
     let supports_mid_convo = compat.and_then(|c| c.supports_mid_convo_system_messages);
+    let supports_additional_tools = compat.and_then(|c| c.supports_additional_tools).unwrap_or(false);
+    let supports_tool_search = compat.and_then(|c| c.supports_tool_search).unwrap_or(false);
+    let prompt_cache_key_mode = compat.and_then(|c| c.prompt_cache_key_mode);
     let resolved_ctx = resolve_transcript(context, supports_mid_convo);
     let declared_tools = get_declared_tools(&resolved_ctx.messages);
+    let tool_support = get_responses_tool_support(
+        supports_mid_convo == Some(true),
+        supports_additional_tools,
+        supports_tool_search,
+    );
+    let transcript_tools = resolve_transcript_tools_with_support(&resolved_ctx.messages, tool_support);
     let grammar_props = create_grammar_tool_input_properties(Some(&declared_tools), supports_grammar_tools)?;
+
+    let tool_opts = ConvertResponsesToolsOptions {
+        strict: Some(supports_strict_mode),
+        supports_openai_grammar_tools: Some(supports_grammar_tools),
+        ..Default::default()
+    };
 
     let msg_opts = ConvertResponsesMessagesOptions {
         include_system_prompt: Some(true),
@@ -334,7 +284,11 @@ fn build_params(
         } else {
             Some(grammar_props.clone())
         },
-        ..Default::default()
+        supports_mid_convo_system_messages: supports_mid_convo,
+        supports_additional_tools,
+        supports_tool_search,
+        tool_options: Some(tool_opts.clone()),
+        configuration_update_effort: None,
     };
     let messages = convert_responses_messages(model, &resolved_ctx, &providers, Some(&msg_opts));
 
@@ -344,7 +298,7 @@ fn build_params(
     params.insert("stream".to_string(), Value::Bool(true));
     params.insert("store".to_string(), Value::Bool(false));
 
-    if cache_retention != CacheRetention::None {
+    if prompt_cache_key_mode != Some(PromptCacheKeyMode::Disabled) {
         if let Some(cache_key) = clamp_openai_prompt_cache_key(options.base.session_id.as_deref()) {
             if !cache_key.is_empty() {
                 params.insert("prompt_cache_key".to_string(), Value::String(cache_key));
@@ -363,13 +317,8 @@ fn build_params(
         }
     }
 
-    if !declared_tools.is_empty() {
-        let tool_opts = ConvertResponsesToolsOptions {
-            strict: Some(supports_strict_mode),
-            supports_openai_grammar_tools: Some(supports_grammar_tools),
-            ..Default::default()
-        };
-        let converted_tools = convert_responses_tools(&declared_tools, Some(&tool_opts))?;
+    if !transcript_tools.request_tools.is_empty() {
+        let converted_tools = convert_responses_tools(&transcript_tools.request_tools, Some(&tool_opts))?;
         params.insert("tools".to_string(), Value::Array(converted_tools));
     }
 
@@ -377,37 +326,63 @@ fn build_params(
         params.insert("tool_choice".to_string(), tc_val.clone());
     }
 
+    let reasoning_effort = options.reasoning_effort.or_else(|| {
+        options
+            .reasoning_summary
+            .as_ref()
+            .map(|_| OpenAIReasoningEffort::Medium)
+    });
     if model.reasoning {
-        let resolved_effort = resolve_effort_for_model(model, options.reasoning_effort);
-        let summary_opt = options.reasoning_summary.as_deref().filter(|s| *s != "off");
+        if let Some(req_effort) = reasoning_effort {
+            let effort = if options.reasoning_effort.is_some() {
+                resolve_effort_for_model(model, options.reasoning_effort)
+            } else {
+                Some(req_effort.as_str().to_string())
+            };
+            let summary_opt = options.reasoning_summary.as_deref().filter(|s| *s != "off");
 
-        if resolved_effort.is_some() || summary_opt.is_some() {
-            let mut reasoning_obj = Map::new();
-            if let Some(ref effort_str) = resolved_effort {
-                reasoning_obj.insert("effort".to_string(), Value::String(effort_str.clone()));
+            if effort.is_some() || summary_opt.is_some() {
+                let mut reasoning_obj = Map::new();
+                if let Some(ref effort_str) = effort {
+                    reasoning_obj.insert("effort".to_string(), Value::String(effort_str.clone()));
+                }
+                if let Some(summary) = summary_opt {
+                    reasoning_obj.insert("summary".to_string(), Value::String(summary.to_string()));
+                }
+                params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
             }
-            if let Some(summary) = summary_opt {
-                reasoning_obj.insert("summary".to_string(), Value::String(summary.to_string()));
-            }
-            params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
-        }
-
-        if resolved_effort.as_deref().is_some_and(|e| e != "none") {
             params.insert(
                 "include".to_string(),
                 Value::Array(vec![Value::String("reasoning.encrypted_content".to_string())]),
             );
+        } else {
+            let off_entry = model
+                .thinking_level_map
+                .as_ref()
+                .and_then(|m| m.get(&ModelThinkingLevel::Off));
+            match off_entry {
+                Some(None) => {}
+                Some(Some(val)) => {
+                    let mut reasoning_obj = Map::new();
+                    reasoning_obj.insert("effort".to_string(), Value::String(val.clone()));
+                    params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
+                }
+                None => {
+                    let mut reasoning_obj = Map::new();
+                    reasoning_obj.insert("effort".to_string(), Value::String("none".to_string()));
+                    params.insert("reasoning".to_string(), Value::Object(reasoning_obj));
+                }
+            }
         }
     }
 
-    if let Some(model_sp) = &model.sampling_params {
-        for (k, v) in model_sp {
-            params.insert(k.clone(), v.clone());
-        }
-    }
-    if let Some(opt_sp) = &options.base.sampling_params {
-        for (k, v) in opt_sp {
-            params.insert(k.clone(), v.clone());
+    let sampling_level = reasoning_effort
+        .map(OpenAIReasoningEffort::to_model_thinking_level)
+        .unwrap_or(ModelThinkingLevel::Off);
+    if let Some(sampling_params) = resolve_sampling_params(model, sampling_level, options.base.sampling_params.as_ref())
+    {
+        for (k, v) in sampling_params {
+            params.insert(k, v);
         }
     }
 
@@ -482,10 +457,15 @@ async fn run_azure_responses_stream(
     output: &mut crate::types::AssistantMessage,
     event_stream: &AssistantMessageEventStream,
 ) -> Result<()> {
-    let (api_key, normalized_base, api_version, deployment_name) = resolve_azure_config(&model, &options)?;
+    let (api_key, normalized_base, api_version, deployment_name) = resolve_azure_stream_config(&model, &options)?;
     let endpoint_url = build_azure_responses_url(&normalized_base, &api_version)?;
     let cache_retention = resolve_responses_cache_retention(options.base.cache_retention, options.base.env.as_ref());
-    let headers = build_azure_headers(&model, &api_key, options.base.headers.as_ref());
+    let headers = build_azure_headers(
+        &model,
+        &api_key,
+        options.base.headers.as_ref(),
+        options.base.identity.as_ref(),
+    );
 
     let (mut params, grammar_props) = build_params(&model, &deployment_name, &context, &options, cache_retention)?;
 

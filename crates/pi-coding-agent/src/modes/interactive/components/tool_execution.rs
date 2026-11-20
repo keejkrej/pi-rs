@@ -78,6 +78,10 @@ impl ToolRenderers {
             expanded: ctx.expanded,
             show_images: ctx.show_images,
             is_error: ctx.is_error,
+            duration_ms: ctx.duration_ms,
+            output_pad: ctx.output_pad,
+            key_text: ctx.key_text,
+            key_hint: ctx.key_hint,
         };
         Self {
             render_shell: def.render_shell,

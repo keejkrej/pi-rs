@@ -16,7 +16,11 @@ use tokio::io::AsyncReadExt as _;
 use crate::keys::set_kitty_protocol_active;
 use crate::native_modifiers::{ModifierKey, is_native_modifier_pressed};
 use crate::native_platform::get_native_platform_helper;
+use crate::program_status::{
+    PROGRAM_STATUS_QUERY, ProgramStatus, ProgramStatusState, format_program_status, is_program_status_reply,
+};
 use crate::stdin_buffer::{StdinBuffer, StdinBufferData, StdinBufferOptions};
+use crate::utils::replace_control_characters;
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS: i64 = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE: &str = "\x1b]9;4;3\x07";
@@ -25,7 +29,8 @@ const NATIVE_SHIFT_ENTER_SEQUENCE: &str = "\x1b[13;2u";
 #[allow(dead_code)]
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS: i64 = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS: i64 = 150;
-const KITTY_KEYBOARD_PROTOCOL_QUERY: &str = "\x1b[>7u\x1b[?u\x1b[c";
+const KITTY_KEYBOARD_PROTOCOL_QUERY: &str = "\x1b[>7u\x1b[?u";
+const DEVICE_ATTRIBUTES_QUERY: &str = "\x1b[c";
 
 const DEFAULT_ESCAPE_TIMEOUT_MS: i64 = 10;
 const DEFAULT_SSH_ESCAPE_TIMEOUT_MS: i64 = 100;
@@ -88,12 +93,17 @@ pub fn refresh_terminal_dimensions() {
     }
 }
 
+// Some Apple Terminal setups send ESC+CR (Alt+Enter) for Shift+Enter (#11559).
+fn is_native_shift_enter_candidate(data: &str) -> bool {
+    data == "\r" || data == "\x1b\r"
+}
+
 pub fn normalize_native_shift_enter_input(
     data: &str,
     should_detect_native_shift_enter: bool,
     is_shift_pressed: bool,
 ) -> String {
-    if should_detect_native_shift_enter && data == "\r" && is_shift_pressed {
+    if should_detect_native_shift_enter && is_native_shift_enter_candidate(data) && is_shift_pressed {
         return NATIVE_SHIFT_ENTER_SEQUENCE.to_string();
     }
     data.to_string()
@@ -114,6 +124,10 @@ pub trait Terminal: Send + Sync {
 
     /// Stop the terminal and restore state.
     fn stop(&self);
+
+    /// Synchronously restore terminal modes from a process exit handler when `stop()` did not run.
+    /// Writes `before`, then this terminal's own mode resets, then `after`.
+    fn restore_on_exit(&self, _before: &str, _after: &str) {}
 
     /// Drain stdin before exiting to prevent Kitty key release events from
     /// leaking to the parent shell over slow SSH connections.
@@ -159,6 +173,10 @@ pub trait Terminal: Send + Sync {
 
     /// Progress indicator (OSC 9;4).
     fn set_progress(&self, active: bool);
+
+    /// Report what the program is doing (OSC 7501). Sent only to terminals that support it; the latest
+    /// status is re-sent when support is confirmed or the terminal restarts.
+    fn set_program_status(&self, _status: ProgramStatus) {}
 }
 
 /// Resolve how long to wait for the rest of an escape sequence before
@@ -238,6 +256,12 @@ struct ProcessTerminalState {
     stdin_buffer: Option<StdinBuffer>,
     stdin_data_handler: Option<TerminalInputHandler>,
     progress_interval: Option<Interval>,
+    /// Latest program status, kept across stop() so start() can report it again.
+    program_status: Option<ProgramStatus>,
+    /// Whether the terminal confirmed OSC 7501 support since the last start(), or `PI_PROGRAM_STATUS=1`.
+    program_status_supported: bool,
+    /// The support query was sent and its DA1 sentinel has not arrived yet.
+    program_status_query_pending: bool,
     session_id: u64,
     stdin_abort: Option<tokio::task::AbortHandle>,
     resize_abort: Option<tokio::task::AbortHandle>,
@@ -282,6 +306,9 @@ impl ProcessTerminal {
                     stdin_buffer: None,
                     stdin_data_handler: None,
                     progress_interval: None,
+                    program_status: None,
+                    program_status_supported: false,
+                    program_status_query_pending: false,
                     session_id: 0,
                     stdin_abort: None,
                     resize_abort: None,
@@ -311,6 +338,22 @@ impl ProcessTerminal {
 
         let this = self.clone();
         stdin_buffer.on_data(Arc::new(move |sequence| {
+            if is_program_status_reply(sequence) {
+                let should_write = {
+                    let mut state = this.inner.state.lock().unwrap();
+                    if state.program_status_query_pending {
+                        state.program_status_query_pending = false;
+                        state.program_status_supported = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_write {
+                    this.write_program_status();
+                }
+                return;
+            }
             let negotiation = this.read_keyboard_protocol_negotiation_sequence(sequence);
             match negotiation {
                 Some(KeyboardProtocolNegotiationRead::Pending) => {
@@ -374,15 +417,28 @@ impl ProcessTerminal {
     /// - 1 = disambiguate escape codes
     /// - 2 = report event types (press/repeat/release)
     /// - 4 = report alternate keys (shifted key, base layout key)
+    ///
+    /// The OSC 7501 program status query shares the DA sentinel: a terminal that supports it replies
+    /// before DA. `PI_PROGRAM_STATUS=1` or `0` skips the query.
     fn query_and_enable_kitty_protocol(&self) {
         self.setup_stdin_buffer();
+        let program_status_override = env::var("PI_PROGRAM_STATUS");
+        let supported = program_status_override.as_deref() == Some("1");
+        let query_pending =
+            program_status_override.as_deref() != Some("1") && program_status_override.as_deref() != Some("0");
         {
             let mut state = self.inner.state.lock().unwrap();
             state.keyboard_protocol_pushed = true;
             state.pending_keyboard_protocol_device_attributes += 1;
+            state.program_status_supported = supported;
+            state.program_status_query_pending = query_pending;
         }
         self.clear_keyboard_protocol_negotiation_buffer();
-        write_stdout(KITTY_KEYBOARD_PROTOCOL_QUERY);
+        let program_status_query = if query_pending { PROGRAM_STATUS_QUERY } else { "" };
+        write_stdout(&format!(
+            "{KITTY_KEYBOARD_PROTOCOL_QUERY}{program_status_query}{DEVICE_ATTRIBUTES_QUERY}"
+        ));
+        self.write_program_status();
     }
 
     fn handle_keyboard_protocol_negotiation_sequence(
@@ -398,6 +454,11 @@ impl ProcessTerminal {
                         return false;
                     }
                     state.pending_keyboard_protocol_device_attributes -= 1;
+                    // The last owed DA answers the latest query, which got no program status reply first. Earlier DA
+                    // replies belong to queries from before a restart.
+                    if state.pending_keyboard_protocol_device_attributes == 0 {
+                        state.program_status_query_pending = false;
+                    }
                     state.kitty_protocol_active
                 };
                 if !is_active {
@@ -525,7 +586,7 @@ impl ProcessTerminal {
             return;
         };
         let should_detect_native_shift_enter =
-            sequence == "\r" && (is_apple_terminal_session() || env::platform() == "win32");
+            is_native_shift_enter_candidate(sequence) && (is_apple_terminal_session() || env::platform() == "win32");
         let is_shift = should_detect_native_shift_enter && is_native_modifier_pressed(ModifierKey::Shift);
         let input = normalize_native_shift_enter_input(sequence, should_detect_native_shift_enter, is_shift);
         handler(&input);
@@ -576,6 +637,20 @@ impl ProcessTerminal {
             true
         } else {
             false
+        }
+    }
+
+    fn write_program_status(&self) {
+        let status = {
+            let state = self.inner.state.lock().unwrap();
+            if state.program_status_supported {
+                state.program_status.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(status) = status {
+            write_stdout(&format_program_status(&status));
         }
     }
 }
@@ -707,6 +782,20 @@ impl Terminal for ProcessTerminal {
         if self.clear_progress_interval() {
             write_stdout(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
         }
+        // Remove the status while stopped, for example after exit or while suspended. start() reports it again.
+        let clear_status = {
+            let mut state = self.inner.state.lock().unwrap();
+            let should_clear = state.program_status_supported && state.program_status.is_some();
+            state.program_status_supported = false;
+            state.program_status_query_pending = false;
+            should_clear
+        };
+        if clear_status {
+            write_stdout(&format_program_status(&ProgramStatus {
+                state: ProgramStatusState::Clear,
+                ..Default::default()
+            }));
+        }
 
         // Disable bracketed paste mode
         write_stdout("\x1b[?2004l");
@@ -755,6 +844,37 @@ impl Terminal for ProcessTerminal {
         if !was_raw {
             let _ = crossterm::terminal::disable_raw_mode();
         }
+    }
+
+    fn restore_on_exit(&self, before: &str, after: &str) {
+        let (has_progress, kitty_reset, modify_reset) = {
+            let state = self.inner.state.lock().unwrap();
+            (
+                state.progress_interval.is_some(),
+                state.keyboard_protocol_pushed || state.kitty_protocol_active,
+                state.modify_other_keys_active,
+            )
+        };
+        let mut sequence = String::from(before);
+        if has_progress {
+            sequence.push_str(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+        }
+        sequence.push_str("\x1b[?2004l");
+        if kitty_reset {
+            sequence.push_str("\x1b[<u");
+        }
+        if modify_reset {
+            sequence.push_str("\x1b[>4;0m");
+        }
+        sequence.push_str(after);
+
+        if let Some(f) = testing::OVERRIDE_STDOUT_WRITE.try_with(|s| s.get()).ok().flatten() {
+            f(&sequence);
+            return;
+        }
+        let mut stdout = std::io::stdout().lock();
+        let _ = std::io::Write::write_all(&mut stdout, sequence.as_bytes());
+        let _ = std::io::Write::flush(&mut stdout);
     }
 
     async fn drain_input(&self, max_ms: Option<i64>, idle_ms: Option<i64>) {
@@ -888,7 +1008,9 @@ impl Terminal for ProcessTerminal {
     }
 
     fn set_title(&self, title: &str) {
-        write_stdout(&format!("\x1b]0;{title}\x07"));
+        // OSC 0;title BEL - set terminal window title. A BEL or ESC in the title would end the sequence early and
+        // send the rest to the terminal as escape sequences (session names come from session files).
+        write_stdout(&format!("\x1b]0;{}\x07", replace_control_characters(title)));
     }
 
     fn set_progress(&self, active: bool) {
@@ -904,6 +1026,17 @@ impl Terminal for ProcessTerminal {
         } else {
             self.clear_progress_interval();
             write_stdout(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+        }
+    }
+
+    fn set_program_status(&self, status: ProgramStatus) {
+        let should_write = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.program_status = (status.state != ProgramStatusState::Clear).then_some(status.clone());
+            state.program_status_supported
+        };
+        if should_write {
+            write_stdout(&format_program_status(&status));
         }
     }
 }

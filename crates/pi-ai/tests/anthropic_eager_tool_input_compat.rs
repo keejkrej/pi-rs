@@ -41,6 +41,7 @@ fn create_model(compat: Option<AnthropicMessagesCompat>) -> Model {
         headers: None,
         sampling_params: None,
         compat: Some(ModelCompat::AnthropicMessages(merged)),
+        sampling_params_by_thinking_level: None,
     }
 }
 

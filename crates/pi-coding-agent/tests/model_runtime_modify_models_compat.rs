@@ -55,6 +55,7 @@ fn test_model(provider: &str, id: &str, base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn chat_cfg(provider: &str, id: &str, base_url: &str) -> ProviderModelConfig {
         max_tokens: m.max_tokens,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     })
 }
 
@@ -411,6 +413,7 @@ async fn preserves_native_deferred_methods_through_provider_overlays() {
                         raw_stop_reason: None,
                         end_turn: None,
                         timestamp: 0,
+                        duration_ms: None,
                     };
                     stream.push(pi_ai::types::AssistantMessageEvent::Start { partial: msg.clone() });
                     stream.push(pi_ai::types::AssistantMessageEvent::Done {

@@ -29,7 +29,7 @@ fn screenshot_tool() -> AgentTool {
         name: "screenshot".to_string(),
         label: "Screenshot".to_string(),
         description: "Return a screenshot".to_string(),
-        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]),
+        parameters: t::object([] as [(&str, pi_js::vendor::typebox::Schema); 0]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,

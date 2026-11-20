@@ -58,6 +58,7 @@ fn make_assistant_message(model: &Model, text: &str, total_tokens: i64, timestam
         raw_stop_reason: None,
         end_turn: None,
         timestamp,
+        duration_ms: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn make_tool_result_message(usage: Usage) -> AgentMessage {
         is_error: false,
         nested_calls: None,
         timestamp: 1,
+        duration_ms: None,
     })
     .into()
 }
@@ -141,6 +143,7 @@ async fn create_session() -> (AgentSession, SessionManager, Model) {
         session_start_event: None,
         initial_model: Some(model.clone()),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     (session, session_manager, model)
@@ -261,6 +264,7 @@ async fn includes_branch_summary_usage_in_session_totals() {
                     cache_read: 0.3,
                     cache_write: 0.4,
                     total: 1.0,
+                    total_from_provider: None,
                 },
             }),
         )
@@ -308,6 +312,7 @@ async fn includes_compaction_usage_in_session_totals() {
                     cache_read: 0.3,
                     cache_write: 0.4,
                     total: 1.0,
+                    total_from_provider: None,
                 },
             }),
         )
@@ -352,6 +357,7 @@ async fn includes_cache_warming_usage_exactly_once_without_adding_messages() {
                     cache_read: 0.007,
                     cache_write: 0.0,
                     total: 0.01,
+                    total_from_provider: None,
                 },
             },
             Some("extension override"),
@@ -411,6 +417,7 @@ async fn includes_tool_result_usage_in_session_totals() {
                 cache_read: 0.3,
                 cache_write: 0.4,
                 total: 1.0,
+                total_from_provider: None,
             },
         }))
         .unwrap();

@@ -18,7 +18,7 @@ use pi_ai::types::{
     StopReason, StreamOptions, TextContent, ThinkingLevel, Tool, ToolResultMessage, Transport, UserContentBlock,
     UserMessage, UserMessageContent,
 };
-use pi_ai::utils::pi_user_agent::get_pi_user_agent;
+use pi_ai::utils::identity::format_user_agent;
 use pi_js::abort::AbortController;
 use pi_js::b64::btoa;
 use pi_js::fetch::{Headers, Request, Response};
@@ -160,6 +160,7 @@ fn codex_model(id: &str, base_url: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -229,7 +230,7 @@ async fn streams_sse_responses_and_forwards_raw_provider_events() {
                         assert_eq!(req.headers.get("originator").as_deref(), Some("pi"));
                         assert_eq!(
                             req.headers.get("user-agent").as_deref(),
-                            Some(get_pi_user_agent().as_str())
+                            Some(format_user_agent(None).as_str())
                         );
                         assert_eq!(req.headers.get("accept").as_deref(), Some("text/event-stream"));
                         assert!(!req.headers.has("x-api-key"));
@@ -1600,6 +1601,7 @@ async fn ages_out_cached_websockets_sends_deltas_and_recovers_missing_continuati
                 nested_calls: None,
                 usage: None,
                 timestamp: 2,
+                duration_ms: None,
             }),
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Now finish".to_owned()),
@@ -1906,4 +1908,112 @@ async fn handles_sse_retry_headers_exponential_backoff_and_delay_limit() {
     let res_exp = handle_exp.await.unwrap();
     assert_eq!(reqs_exp.load(Ordering::SeqCst), 4);
     assert_eq!(first_text(&res_exp), "Hello");
+}
+
+#[tokio::test]
+#[serial]
+async fn lets_model_and_caller_headers_override_originator_and_user_agent() {
+    let _g = reset_guard();
+    let token = mock_token("acc_test");
+    let sse = build_sse_payload("completed", false, None);
+    let captured_headers: Arc<Mutex<Option<Headers>>> = Arc::new(Mutex::new(None));
+    let cap_clone = Arc::clone(&captured_headers);
+
+    let mut model = codex_model("gpt-5.1-codex", "https://chatgpt.com/backend-api");
+    let mut model_hdrs = IndexMap::new();
+    model_hdrs.insert("originator".to_string(), "my-app".to_string());
+    model.headers = Some(model_hdrs);
+
+    let mut caller_hdrs = IndexMap::new();
+    caller_hdrs.insert("user-agent".to_string(), Some("my-app/1.0".to_string()));
+    caller_hdrs.insert("Authorization".to_string(), Some("Bearer ignored".to_string()));
+
+    let res = stream_codex(
+        &model,
+        &hello_context(),
+        Some(ApiStreamOptions {
+            base: StreamOptions {
+                api_key: Some(token.clone()),
+                transport: Some(Transport::Sse),
+                headers: Some(caller_hdrs),
+                fetch: Some(Arc::new(move |req: Request| {
+                    let s = sse.clone();
+                    let cap = Arc::clone(&cap_clone);
+                    Box::pin(async move {
+                        *cap.lock().unwrap() = Some(req.headers.clone());
+                        Ok(Response::new(
+                            200,
+                            Headers::from_pairs([("content-type", "text/event-stream")]),
+                            s,
+                        ))
+                    })
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .result()
+    .await;
+
+    assert_eq!(res.stop_reason, StopReason::Stop);
+    let hdrs = captured_headers.lock().unwrap().clone().expect("headers captured");
+    assert_eq!(hdrs.get("originator").as_deref(), Some("my-app"));
+    assert_eq!(hdrs.get("user-agent").as_deref(), Some("my-app/1.0"));
+    assert_eq!(
+        hdrs.get("authorization").as_deref(),
+        Some(format!("Bearer {token}").as_str())
+    );
+}
+
+// Regression test for #11708
+#[tokio::test]
+#[serial]
+async fn completes_sse_retry_with_retry_after_zero_and_abort_signal() {
+    let _g = reset_guard();
+    let token = mock_token("acc_test");
+    let model = codex_model("gpt-5.1-codex", "https://chatgpt.com/backend-api");
+    let sse = build_sse_payload("completed", false, None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_c = Arc::clone(&calls);
+
+    let controller = AbortController::new();
+    let res = stream_codex(
+        &model,
+        &hello_context(),
+        Some(ApiStreamOptions {
+            base: StreamOptions {
+                api_key: Some(token),
+                transport: Some(Transport::Sse),
+                max_retries: Some(3),
+                signal: Some(controller.signal()),
+                fetch: Some(Arc::new(move |_| {
+                    let n = calls_c.fetch_add(1, Ordering::SeqCst) + 1;
+                    let s = sse.clone();
+                    Box::pin(async move {
+                        if n <= 3 {
+                            Ok(Response::new(
+                                429,
+                                Headers::from_pairs([("content-type", "application/json"), ("retry-after", "0")]),
+                                json!({ "error": { "message": "rate limited" } }).to_string(),
+                            ))
+                        } else {
+                            Ok(Response::new(
+                                200,
+                                Headers::from_pairs([("content-type", "text/event-stream")]),
+                                s,
+                            ))
+                        }
+                    })
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .result()
+    .await;
+
+    assert_eq!(res.stop_reason, StopReason::Stop);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
 }

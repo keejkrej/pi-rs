@@ -25,12 +25,22 @@ pub struct ReadToolDetails {
     pub truncation: Option<TruncationResult>,
 }
 
+pub type ReadByteStream = std::pin::Pin<Box<dyn futures::Stream<Item = pi_js::Result<Vec<u8>>> + Send>>;
+
 /// Pluggable operations for the read tool.
 pub trait ReadOperations: Send + Sync {
     fn read_file(&self, absolute_path: &str) -> BoxFuture<pi_js::Result<Vec<u8>>>;
     fn access(&self, absolute_path: &str) -> BoxFuture<pi_js::Result<()>>;
     fn detect_image_mime_type(&self, _absolute_path: &str) -> BoxFuture<pi_js::Result<Option<String>>> {
         Box::pin(async { Ok(None) })
+    }
+    /// Stream file contents in chunks. Only shown lines are buffered into memory when present.
+    fn create_read_stream(
+        &self,
+        _absolute_path: &str,
+        _signal: Option<pi_js::abort::AbortSignal>,
+    ) -> Option<BoxFuture<pi_js::Result<ReadByteStream>>> {
+        None
     }
 }
 
@@ -44,13 +54,16 @@ pub struct ReadToolOptions {
 use std::io::Cursor;
 use std::sync::LazyLock;
 
+use futures::StreamExt;
 use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, ImageFormat};
 use pi_agent_core::types::{AgentTool, AgentToolResult};
 use pi_ai::types::{ImageContent, ModelModality, TextContent, UserContentBlock};
 use pi_js::seam::{Guard, Slot};
+use pi_js::text::{TextDecoderOptions, Utf8StreamDecoder};
 use pi_js::vendor::typebox::{Schema, t};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::tools::edit::ToolSystemPromptContribution;
@@ -102,6 +115,47 @@ impl ReadOperations for LocalReadOperations {
                 .await
                 .map(|opt| opt.map(str::to_owned))
         })
+    }
+
+    fn create_read_stream(
+        &self,
+        absolute_path: &str,
+        signal: Option<pi_js::abort::AbortSignal>,
+    ) -> Option<BoxFuture<pi_js::Result<ReadByteStream>>> {
+        let path = absolute_path.to_string();
+        Some(Box::pin(async move {
+            let file = tokio::fs::File::open(&path)
+                .await
+                .map_err(|e| pi_js::Error::msg(e.to_string()))?;
+            let meta = file.metadata().await.map_err(|e| pi_js::Error::msg(e.to_string()))?;
+            let remaining = if meta.is_file() && meta.len() > 0 {
+                Some(meta.len() as usize)
+            } else {
+                None
+            };
+            let stream = futures::stream::unfold((file, remaining, signal), |(mut file, mut rem, sig)| async move {
+                if sig.as_ref().is_some_and(|s| s.aborted()) {
+                    return Some((Err(pi_js::Error::msg("Operation aborted")), (file, rem, sig)));
+                }
+                if rem == Some(0) {
+                    return None;
+                }
+                let want = rem.map_or(65536, |r| r.min(65536));
+                let mut buf = vec![0u8; want];
+                match file.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        if let Some(ref mut r) = rem {
+                            *r = r.saturating_sub(n);
+                        }
+                        Some((Ok(buf), (file, rem, sig)))
+                    }
+                    Err(e) => Some((Err(pi_js::Error::msg(e.to_string())), (file, Some(0), sig))),
+                }
+            });
+            Ok(Box::pin(stream) as ReadByteStream)
+        }))
     }
 }
 
@@ -354,6 +408,63 @@ pub fn create_read_tool_definition(cwd: &str, options: Option<ReadToolOptions>) 
                     .await;
                 }
 
+                let is_streamable = input.offset.is_none_or(|o| o.fract() == 0.0)
+                    && input.limit.is_none_or(|l| l.fract() == 0.0 && l >= 0.0);
+                let offset_val = input.offset.map(|o| o.floor().max(1.0) as usize).unwrap_or(1);
+                let start_line = offset_val - 1;
+
+                if is_streamable && let Some(stream_fut) = ops.create_read_stream(&absolute_path, signal.clone()) {
+                    let mut stream = Some(stream_fut.await?);
+                    // Check first chunk for BMP header before streaming lines as UTF-8 text.
+                    let mut first_chunk_checked = false;
+                    let mut buffered_first: Option<Vec<u8>> = None;
+                    while let Some(chunk_res) = stream.as_mut().expect("stream active").next().await {
+                        let chunk = chunk_res?;
+                        if !chunk.is_empty() {
+                            if is_bmp_header(&chunk) {
+                                drop(stream.take());
+                                let buffer = ops.read_file(&absolute_path).await?;
+                                if signal.as_ref().is_some_and(|s| s.aborted()) {
+                                    return Err(pi_js::Error::msg("Operation aborted"));
+                                }
+                                if let Ok(png_bytes) = convert_bmp_to_png(&buffer) {
+                                    return finish_image_read(
+                                        &png_bytes,
+                                        "image/png",
+                                        Some("[Image converted from image/bmp to image/png.]"),
+                                        auto_resize_images,
+                                        &ctx,
+                                        tool_resize_options.as_ref(),
+                                    )
+                                    .await;
+                                }
+                            }
+                            first_chunk_checked = true;
+                            buffered_first = Some(chunk);
+                            break;
+                        }
+                    }
+
+                    let selected = select_lines_from_stream(
+                        buffered_first,
+                        if first_chunk_checked { stream } else { None },
+                        start_line,
+                        input.limit.map(|l| l.floor().max(0.0) as usize),
+                        signal.clone(),
+                    )
+                    .await?;
+                    if signal.as_ref().is_some_and(|s| s.aborted()) {
+                        return Err(pi_js::Error::msg("Operation aborted"));
+                    }
+                    return format_text_read_result(
+                        &input.path,
+                        start_line,
+                        input.limit.map(|l| l.floor().max(0.0) as usize),
+                        offset_val,
+                        selected,
+                    );
+                }
+
                 let buffer = ops.read_file(&absolute_path).await?;
                 if signal.as_ref().is_some_and(|s| s.aborted()) {
                     return Err(pi_js::Error::msg("Operation aborted"));
@@ -376,92 +487,251 @@ pub fn create_read_tool_definition(cwd: &str, options: Option<ReadToolOptions>) 
                 let text_content = String::from_utf8_lossy(&buffer).into_owned();
                 let all_lines: Vec<&str> = text_content.split('\n').collect();
                 let total_file_lines = all_lines.len();
-
-                let offset_val = input.offset.map(|o| o.floor().max(1.0) as usize).unwrap_or(1);
-                let start_line = offset_val - 1;
                 if start_line >= total_file_lines {
                     return Err(pi_js::Error::msg(format!(
                         "Offset {offset_val} is beyond end of file ({total_file_lines} lines total)"
                     )));
                 }
 
-                let (selected_lines, user_limited_lines) = if let Some(limit_raw) = input.limit {
-                    let limit_val = limit_raw.floor().max(0.0) as usize;
+                let limit_opt = input.limit.map(|l| l.floor().max(0.0) as usize);
+                let selected_lines = if let Some(limit_val) = limit_opt {
                     let end_line = (start_line + limit_val).min(total_file_lines);
-                    (&all_lines[start_line..end_line], Some(end_line - start_line))
+                    &all_lines[start_line..end_line]
                 } else {
-                    (&all_lines[start_line..], None)
+                    &all_lines[start_line..]
                 };
 
                 let selected_content = selected_lines.join("\n");
-                let mut truncation = truncate_head(&selected_content, None);
-
-                let start_line_display = start_line + 1;
-                let (output_text, details) = if truncation.first_line_exceeds_limit {
-                    let first_line_size = format_size(all_lines[start_line].len());
-                    let msg = format!(
-                        "[Line {start_line_display} is {first_line_size}, exceeds {} limit. Use bash: sed -n '{start_line_display}p' {} | head -c {}]",
-                        format_size(DEFAULT_MAX_BYTES),
-                        input.path,
-                        DEFAULT_MAX_BYTES
-                    );
-                    truncation.total_lines = total_file_lines as i64;
-                    truncation.total_bytes = text_content.len() as i64;
-                    (
-                        msg,
-                        Some(ReadToolDetails {
-                            truncation: Some(truncation),
-                        }),
-                    )
-                } else if truncation.truncated {
-                    let output_lines_usize = truncation.output_lines.max(0) as usize;
-                    let end_line_display = start_line_display + output_lines_usize.saturating_sub(1);
-                    let next_offset = end_line_display + 1;
-                    let mut text = truncation.content.clone();
-                    if truncation.truncated_by == Some(TruncatedBy::Lines) {
-                        text.push_str(&format!(
-                            "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines}. Use offset={next_offset} to continue.]"
-                        ));
-                    } else {
-                        text.push_str(&format!(
-                            "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
-                            format_size(DEFAULT_MAX_BYTES)
-                        ));
-                    }
-                    truncation.total_lines = total_file_lines as i64;
-                    truncation.total_bytes = text_content.len() as i64;
-                    (
-                        text,
-                        Some(ReadToolDetails {
-                            truncation: Some(truncation),
-                        }),
-                    )
-                } else if let Some(limited_len) = user_limited_lines
-                    && start_line + limited_len < total_file_lines
-                {
-                    let remaining = total_file_lines - (start_line + limited_len);
-                    let next_offset = start_line + limited_len + 1;
-                    let text = format!(
-                        "{}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]",
-                        truncation.content
-                    );
-                    (text, None)
+                let truncation = truncate_head(&selected_content, None);
+                let first_line_bytes = if truncation.first_line_exceeds_limit {
+                    all_lines[start_line].len()
                 } else {
-                    (truncation.content, None)
+                    0
                 };
-
-                let details_val = details.and_then(|d| serde_json::to_value(&d).ok());
-
-                Ok(AgentToolResult {
-                    content: vec![UserContentBlock::Text(TextContent::new(output_text.clone()))],
-                    details: details_val,
-                    structured_content: Some(Value::String(output_text)),
-                    ..Default::default()
-                })
+                format_text_read_result(
+                    &input.path,
+                    start_line,
+                    limit_opt,
+                    offset_val,
+                    SelectedReadLines {
+                        total_file_lines,
+                        truncation,
+                        first_line_bytes,
+                    },
+                )
             })
         }),
         render_call: Some(renderers::read::render_call()),
         render_result: Some(renderers::read::render_result()),
+    })
+}
+
+struct SelectedReadLines {
+    total_file_lines: usize,
+    truncation: TruncationResult,
+    first_line_bytes: usize,
+}
+
+async fn select_lines_from_stream(
+    first_chunk: Option<Vec<u8>>,
+    mut stream: Option<ReadByteStream>,
+    start_line: usize,
+    limit: Option<usize>,
+    signal: Option<pi_js::abort::AbortSignal>,
+) -> pi_js::Result<SelectedReadLines> {
+    let end_line = limit.map(|l| start_line.saturating_add(l));
+    let mut decoder = Utf8StreamDecoder::with_options(TextDecoderOptions {
+        fatal: false,
+        ignore_bom: true,
+    });
+    let mut stored_lines: Vec<String> = Vec::new();
+    let mut stored_bytes = 0usize;
+    let mut stored_past_caps = false;
+    let mut line = 0usize;
+    let mut selected_lines = 0usize;
+    let mut selected_bytes = 0usize;
+    let mut first_line_bytes = 0usize;
+    let mut last_line_empty = true;
+    let mut pieces: Option<Vec<String>> = Some(Vec::new());
+    let mut line_bytes = 0usize;
+    let mut line_has_text = false;
+
+    let mut feed_text = |text: &str| {
+        let bytes = text.as_bytes();
+        let mut position = 0usize;
+        let mut selection_start: Option<usize> = None;
+        loop {
+            let selected = line >= start_line && end_line.is_none_or(|e| line < e);
+            if selected && selection_start.is_none() {
+                selection_start = Some(position);
+            }
+            let newline = text[position..].find('\n').map(|rel| position + rel);
+            let end = newline.unwrap_or(text.len());
+            if selected && end > position {
+                let piece = &text[position..end];
+                line_has_text = true;
+                if let Some(ref mut p) = pieces {
+                    if line_bytes <= DEFAULT_MAX_BYTES {
+                        p.push(piece.to_string());
+                    }
+                    line_bytes += piece.len();
+                }
+            }
+            let Some(nl) = newline else {
+                break;
+            };
+            if selected {
+                if let Some(p) = pieces.take() {
+                    if selected_lines == 0 {
+                        first_line_bytes = line_bytes;
+                    }
+                    if stored_lines.len() > DEFAULT_MAX_LINES || stored_bytes > DEFAULT_MAX_BYTES {
+                        stored_past_caps = true;
+                    }
+                    let joined = p.concat();
+                    stored_bytes += joined.len() + usize::from(!stored_lines.is_empty());
+                    stored_lines.push(joined);
+                }
+                selected_lines += 1;
+                last_line_empty = !line_has_text;
+                pieces = if stored_past_caps { None } else { Some(Vec::new()) };
+                line_bytes = 0;
+                line_has_text = false;
+                if end_line == Some(line + 1)
+                    && let Some(sel_start) = selection_start.take()
+                {
+                    selected_bytes += bytes[sel_start..nl].len();
+                }
+            }
+            line += 1;
+            position = nl + 1;
+        }
+        if let Some(sel_start) = selection_start {
+            selected_bytes += bytes[sel_start..].len();
+        }
+    };
+
+    if let Some(first) = first_chunk {
+        let decoded = decoder.decode(&first, true);
+        if !decoded.is_empty() {
+            feed_text(&decoded);
+        }
+    }
+    if let Some(ref mut s) = stream {
+        while let Some(chunk_res) = s.next().await {
+            if signal.as_ref().is_some_and(|sig| sig.aborted()) {
+                return Err(pi_js::Error::msg("Operation aborted"));
+            }
+            let chunk = chunk_res?;
+            let decoded = decoder.decode(&chunk, true);
+            if !decoded.is_empty() {
+                feed_text(&decoded);
+            }
+        }
+    }
+    let tail = decoder.decode(&[], false);
+    if !tail.is_empty() {
+        feed_text(&tail);
+    }
+    if line >= start_line && end_line.is_none_or(|e| line < e) {
+        if let Some(p) = pieces.take() {
+            if selected_lines == 0 {
+                first_line_bytes = line_bytes;
+            }
+            stored_lines.push(p.concat());
+        }
+        selected_lines += 1;
+        last_line_empty = !line_has_text;
+    }
+
+    let mut truncation = truncate_head(&stored_lines.join("\n"), None);
+    truncation.total_lines = if selected_bytes == 0 {
+        0
+    } else {
+        (selected_lines - usize::from(last_line_empty)) as i64
+    };
+    truncation.total_bytes = selected_bytes as i64;
+    Ok(SelectedReadLines {
+        total_file_lines: line + 1,
+        truncation,
+        first_line_bytes,
+    })
+}
+
+fn format_text_read_result(
+    display_path: &str,
+    start_line: usize,
+    limit: Option<usize>,
+    offset_val: usize,
+    selected: SelectedReadLines,
+) -> pi_js::Result<AgentToolResult> {
+    let SelectedReadLines {
+        total_file_lines,
+        truncation,
+        first_line_bytes,
+    } = selected;
+    if start_line >= total_file_lines {
+        return Err(pi_js::Error::msg(format!(
+            "Offset {offset_val} is beyond end of file ({total_file_lines} lines total)"
+        )));
+    }
+    let user_limited_lines = limit.map(|l| (start_line + l).min(total_file_lines) - start_line);
+    let start_line_display = start_line + 1;
+    let (output_text, details) = if truncation.first_line_exceeds_limit {
+        let first_line_size = format_size(first_line_bytes);
+        let msg = format!(
+            "[Line {start_line_display} is {first_line_size}, exceeds {} limit. Use bash: sed -n '{start_line_display}p' {display_path} | head -c {}]",
+            format_size(DEFAULT_MAX_BYTES),
+            DEFAULT_MAX_BYTES
+        );
+        (
+            msg,
+            Some(ReadToolDetails {
+                truncation: Some(truncation),
+            }),
+        )
+    } else if truncation.truncated {
+        let output_lines_usize = truncation.output_lines.max(0) as usize;
+        let end_line_display = start_line_display + output_lines_usize.saturating_sub(1);
+        let next_offset = end_line_display + 1;
+        let mut text = truncation.content.clone();
+        if truncation.truncated_by == Some(TruncatedBy::Lines) {
+            text.push_str(&format!(
+                "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines}. Use offset={next_offset} to continue.]"
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
+                format_size(DEFAULT_MAX_BYTES)
+            ));
+        }
+        (
+            text,
+            Some(ReadToolDetails {
+                truncation: Some(truncation),
+            }),
+        )
+    } else if let Some(limited_len) = user_limited_lines
+        && start_line + limited_len < total_file_lines
+    {
+        let remaining = total_file_lines - (start_line + limited_len);
+        let next_offset = start_line + limited_len + 1;
+        let text = format!(
+            "{}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]",
+            truncation.content
+        );
+        (text, None)
+    } else {
+        (truncation.content, None)
+    };
+
+    let details_val = details.and_then(|d| serde_json::to_value(&d).ok());
+
+    Ok(AgentToolResult {
+        content: vec![UserContentBlock::Text(TextContent::new(output_text.clone()))],
+        details: details_val,
+        structured_content: Some(Value::String(output_text)),
+        ..Default::default()
     })
 }
 

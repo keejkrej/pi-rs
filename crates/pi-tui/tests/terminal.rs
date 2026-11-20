@@ -210,7 +210,7 @@ fn leaves_non_return_input_unchanged_apple() {
 fn queries_kitty_mode_before_enabling_modify_other_keys_fallback() {
     let mut harness = NegotiationHarness::new();
     let writes = harness.writes();
-    assert_eq!(writes[0], "\x1b[>7u\x1b[?u\x1b[c");
+    assert_eq!(writes[0], "\x1b[>7u\x1b[?u\x1b]7501;?\x1b\\\x1b[c");
     assert!(!writes.iter().any(|w| w == "\x1b[>4;2m"));
     assert!(!harness.terminal.kitty_protocol_active());
     harness.cleanup();
@@ -346,4 +346,177 @@ fn falls_back_to_columns_and_lines_before_default_dimensions() {
     let terminal = ProcessTerminal::new();
     assert_eq!(terminal.columns(), 123);
     assert_eq!(terminal.rows(), 45);
+}
+
+#[test]
+fn rewrites_esc_cr_to_csi_u_shift_enter_when_shift_is_pressed() {
+    // #11559
+    assert_eq!(normalize_native_shift_enter_input("\x1b\r", true, true), "\x1b[13;2u");
+    assert_eq!(normalize_native_shift_enter_input("\x1b\r", true, false), "\x1b\r");
+    assert_eq!(normalize_native_shift_enter_input("\x1b\r", false, true), "\x1b\r");
+}
+
+// #10607
+mod program_status_tests {
+    use pi_tui::program_status::{ProgramStatus, ProgramStatusState};
+
+    use super::*;
+
+    const WORKING: &str = "\x1b]7501;state=working:app=pi\x1b\\";
+    const CLEAR: &str = "\x1b]7501;state=clear\x1b\\";
+
+    #[test]
+    #[serial]
+    fn reports_latest_status_once_terminal_answers_query_before_da() {
+        let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", None)]);
+        let mut harness = NegotiationHarness::new();
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Working,
+            app: Some("pi".to_string()),
+            ..Default::default()
+        });
+        assert!(!harness.writes().iter().any(|w| w == WORKING));
+
+        harness.send("\x1b]7501;?\x1b\\");
+        assert_eq!(harness.get_input(), None);
+        assert_eq!(harness.writes().iter().filter(|w| w.as_str() == WORKING).count(), 1);
+        harness.send("\x1b[?62;4;52c");
+
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Done,
+            ..Default::default()
+        });
+        assert_eq!(
+            harness.writes().last().map(String::as_str),
+            Some("\x1b]7501;state=done\x1b\\")
+        );
+        harness.cleanup();
+    }
+
+    #[test]
+    #[serial]
+    fn reports_nothing_when_da_arrives_first_and_swallows_late_replies() {
+        let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", None)]);
+        let mut harness = NegotiationHarness::new();
+        harness.send("\x1b[?62;4;52c");
+        harness.send("\x1b]7501;?\x07");
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Working,
+            app: Some("pi".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(harness.get_input(), None);
+        assert!(!harness.writes().iter().any(|w| w.starts_with("\x1b]7501;state=")));
+        harness.cleanup();
+    }
+
+    #[test]
+    #[serial]
+    fn skips_query_when_pi_program_status_is_set() {
+        {
+            let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", Some("1"))]);
+            let mut harness = NegotiationHarness::new();
+            assert_eq!(harness.writes()[0], "\x1b[>7u\x1b[?u\x1b[c");
+            harness.terminal.set_program_status(ProgramStatus {
+                state: ProgramStatusState::Working,
+                app: Some("pi".to_string()),
+                ..Default::default()
+            });
+            assert_eq!(harness.writes().last().map(String::as_str), Some(WORKING));
+            harness.cleanup();
+        }
+        {
+            let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", Some("0"))]);
+            let mut harness = NegotiationHarness::new();
+            assert_eq!(harness.writes()[0], "\x1b[>7u\x1b[?u\x1b[c");
+            harness.terminal.set_program_status(ProgramStatus {
+                state: ProgramStatusState::Working,
+                app: Some("pi".to_string()),
+                ..Default::default()
+            });
+            assert!(!harness.writes().iter().any(|w| w == WORKING));
+            harness.cleanup();
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn does_not_let_da_reply_from_before_restart_end_new_query() {
+        let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", None)]);
+        let mut harness = NegotiationHarness::new();
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Working,
+            app: Some("pi".to_string()),
+            ..Default::default()
+        });
+        harness.terminal.stop();
+        start_negotiation_test(
+            &harness.terminal,
+            Arc::new({
+                let input = Arc::clone(&harness.input);
+                move |data| *input.lock().unwrap() = Some(data.to_string())
+            }),
+        );
+
+        // The first start's replies arrive late: its DA, then the second start's reply and DA.
+        harness.send("\x1b[?62;4;52c");
+        harness.send("\x1b]7501;?\x1b\\");
+        harness.send("\x1b[?62;4;52c");
+        assert_eq!(harness.writes().last().map(String::as_str), Some(WORKING));
+        assert_eq!(harness.get_input(), None);
+        harness.cleanup();
+    }
+
+    #[test]
+    #[serial]
+    fn clears_status_on_stop_and_reports_it_again_after_restart() {
+        let _env = EnvGuard::set_many(&[("PI_PROGRAM_STATUS", None)]);
+        let mut harness = NegotiationHarness::new();
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Working,
+            app: Some("pi".to_string()),
+            ..Default::default()
+        });
+        harness.send("\x1b]7501;?\x1b\\");
+        harness.terminal.stop();
+        assert!(harness.writes().iter().any(|w| w == CLEAR));
+
+        // Stopped: nothing is written until the restarted terminal confirms support again.
+        let writes_before_restart = harness.writes().len();
+        harness.terminal.set_program_status(ProgramStatus {
+            state: ProgramStatusState::Working,
+            app: Some("pi".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(harness.writes().len(), writes_before_restart);
+
+        start_negotiation_test(
+            &harness.terminal,
+            Arc::new({
+                let input = Arc::clone(&harness.input);
+                move |data| *input.lock().unwrap() = Some(data.to_string())
+            }),
+        );
+        harness.send("\x1b]7501;?\x1b\\");
+        assert_eq!(harness.writes().last().map(String::as_str), Some(WORKING));
+        harness.cleanup();
+    }
+}
+
+#[test]
+#[serial]
+fn set_title_replaces_control_characters_so_title_cannot_end_osc_sequence() {
+    let terminal = ProcessTerminal::new();
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let writes_clone = Arc::clone(&writes);
+    let _write = override_stdout_write(move |chunk| {
+        writes_clone.lock().unwrap().push(chunk.to_string());
+    });
+
+    terminal.set_title("pi - work\x07\x1b]52;c;Zm9v\x07\u{009b}2J - repo");
+    assert_eq!(
+        *writes.lock().unwrap(),
+        vec!["\x1b]0;pi - work ]52;c;Zm9v 2J - repo\x07"]
+    );
 }

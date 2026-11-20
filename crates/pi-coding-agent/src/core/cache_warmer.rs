@@ -7,11 +7,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::AgentMessage;
+use pi_ai::cache_warming::{
+    CACHE_WARMING_MAX_AGE_MS, CACHE_WARMING_MAX_IDLE_AGE_MS, CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS,
+    CacheWarmingAction as AiCacheWarmingAction, CacheWarmingDecision as AiCacheWarmingDecision,
+    CacheWarmingPhase as AiCacheWarmingPhase, evaluate_cache_warming, get_cache_warming_delay_ms as ai_delay_ms,
+    get_cache_warming_request_options, get_prompt_cache_ttl_ms as ai_prompt_cache_ttl_ms, is_cache_warming_replayable,
+};
 use pi_ai::models::ModelsSimpleStreamOptions;
-use pi_ai::utils::provider_env::get_provider_env_value;
 use pi_ai::{
-    AnyModel, AssistantMessageEventStream, CacheRetention, Context, Message, Model, SimpleStreamOptions, StopReason,
-    Usage, calculate_cost,
+    AssistantMessageEventStream, CacheRetention, Context, Message, Model, SimpleStreamOptions, StopReason, Usage,
 };
 use pi_js::abort::AbortController;
 use pi_js::error::Result;
@@ -21,57 +25,23 @@ use tokio::task::AbortHandle;
 use crate::core::session_manager::{SessionEntry, SessionManager, UsageEntry};
 use crate::core::settings_manager::CacheWarmingMode;
 
-/// Streaming warming never continues past this long after the real request that started it.
-const MAX_WARMING_AGE_MS: i64 = 60 * 60_000;
-/// Idle warming uses a shorter horizon because continuation estimates become less reliable with age.
-const MAX_IDLE_WARMING_AGE_MS: i64 = 30 * 60_000;
-/// A refresh is sent only when it is expected to save at least this many dollars.
-const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS: f64 = 0.05;
-/// Chance that a real request arrives before the cache entry expires while idle.
-const IDLE_CONTINUATION_PROBABILITY: f64 = 0.15;
-
 /// Refresh at 90% of the TTL while preserving at least ten seconds of margin.
 pub fn get_cache_warming_delay_ms(ttl_ms: i64) -> Option<i64> {
-    if ttl_ms <= 10_000 {
+    if ttl_ms < 0 {
         return None;
     }
-    let candidate = (((ttl_ms as f64) * 0.9).floor() as i64).min(ttl_ms - 10_000);
-    Some(candidate.max(1))
+    ai_delay_ms(ttl_ms as u64).and_then(|v| i64::try_from(v).ok())
 }
 
 /// Lifetime of the prompt cache entry a request writes, from the model's `prompt_cache`
 /// tier for the retention the request used.
 pub fn get_prompt_cache_ttl_ms(model: &Model, options: Option<&SimpleStreamOptions>) -> Option<i64> {
-    let retention = match options.and_then(|o| o.base.cache_retention) {
-        Some(r) => r,
-        None => {
-            let env_val = get_provider_env_value("PI_CACHE_RETENTION", options.and_then(|o| o.base.env.as_ref()));
-            if env_val.as_deref() == Some("long") {
-                CacheRetention::Long
-            } else {
-                CacheRetention::Short
-            }
-        }
-    };
-    let seconds = match retention {
-        CacheRetention::None => return None,
-        CacheRetention::Short => model.prompt_cache.as_ref()?.short?,
-        CacheRetention::Long => model.prompt_cache.as_ref()?.long?,
-    };
-    Some(seconds * 1000)
+    ai_prompt_cache_ttl_ms(model, options).and_then(|v| i64::try_from(v).ok())
 }
 
 /// Whether replaying the request with a one-token output cap leaves its cache entry untouched.
 pub fn is_replayable(model: &Model, options: Option<&SimpleStreamOptions>) -> bool {
-    if options.and_then(|o| o.reasoning).is_none() || model.api != "anthropic-messages" {
-        return true;
-    }
-    model
-        .compat
-        .as_ref()
-        .and_then(|c| c.as_anthropic_messages())
-        .and_then(|c| c.force_adaptive_thinking)
-        == Some(true)
+    is_cache_warming_replayable(model, options)
 }
 
 fn last_prompt_tokens(entries: &[SessionEntry]) -> i64 {
@@ -84,20 +54,6 @@ fn last_prompt_tokens(entries: &[SessionEntry]) -> i64 {
         }
     }
     0
-}
-
-fn price(model: &Model, input: i64, output: i64, cache_read: i64, cache_write: i64) -> f64 {
-    let mut usage = Usage {
-        input,
-        output,
-        cache_read,
-        cache_write,
-        cache_write_1h: None,
-        reasoning: None,
-        total_tokens: 0,
-        cost: Default::default(),
-    };
-    calculate_cost(&AnyModel::Chat(model.clone()), &mut usage).total
 }
 
 /// Action chosen for a scheduled cache refresh.
@@ -351,26 +307,19 @@ fn evaluate_decision(
     phase: CacheWarmingPhase,
     session_manager: &dyn CacheWarmerSessionStore,
 ) -> CacheWarmingDecision {
-    let prompt_tokens = last_prompt_tokens(&session_manager.get_branch());
-    let cache_hit_cost = price(model, 0, 0, prompt_tokens, 0);
-    let cache_miss_cost = if model.cost.cache_write > 0.0 {
-        price(model, 0, 0, 0, prompt_tokens)
-    } else {
-        price(model, prompt_tokens, 0, 0, 0)
+    let ai_phase = match phase {
+        CacheWarmingPhase::Streaming => AiCacheWarmingPhase::Streaming,
+        CacheWarmingPhase::Idle => AiCacheWarmingPhase::Idle,
     };
-    let warm_cost = price(model, 0, 1, prompt_tokens, 0);
-    let miss_cost = (cache_miss_cost - cache_hit_cost).max(0.0);
-    let continuation_probability = match phase {
-        CacheWarmingPhase::Idle => IDLE_CONTINUATION_PROBABILITY,
-        CacheWarmingPhase::Streaming => 1.0,
-    };
-    let economics_available = prompt_tokens > 0 && (cache_hit_cost > 0.0 || cache_miss_cost > 0.0);
-    let expected_savings = continuation_probability * miss_cost - warm_cost;
-    let action = if expected_savings >= CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS {
-        CacheWarmingAction::Warm
-    } else {
-        CacheWarmingAction::Stop
-    };
+    let AiCacheWarmingDecision {
+        warm_cost,
+        miss_cost,
+        continuation_probability,
+        expected_savings,
+        economics_available,
+        action,
+        ..
+    } = evaluate_cache_warming(model, last_prompt_tokens(&session_manager.get_branch()), ai_phase);
     CacheWarmingDecision {
         phase,
         warm_cost,
@@ -378,7 +327,10 @@ fn evaluate_decision(
         continuation_probability,
         expected_savings,
         economics_available,
-        action,
+        action: match action {
+            AiCacheWarmingAction::Warm => CacheWarmingAction::Warm,
+            AiCacheWarmingAction::Stop => CacheWarmingAction::Stop,
+        },
     }
 }
 
@@ -393,8 +345,8 @@ fn schedule_run(inner: &Arc<Mutex<WarmerInner>>, run_id: u64) {
         run.next_warm_at = now + run.delay_ms;
         run.refresh_deadline_at = run.next_warm_at + ((run.ttl_ms - run.delay_ms) / 2);
         let max_age = match run.phase {
-            CacheWarmingPhase::Idle => MAX_IDLE_WARMING_AGE_MS,
-            CacheWarmingPhase::Streaming => MAX_WARMING_AGE_MS,
+            CacheWarmingPhase::Idle => CACHE_WARMING_MAX_IDLE_AGE_MS as i64,
+            CacheWarmingPhase::Streaming => CACHE_WARMING_MAX_AGE_MS as i64,
         };
         let deadline = run.started_at + max_age;
         if run.next_warm_at > deadline || now >= deadline {
@@ -551,9 +503,7 @@ async fn execute_refresh(inner: Arc<Mutex<WarmerInner>>, run_id: u64) {
     }
 
     let mut replay_opts = request.options.clone();
-    replay_opts.base.base.max_tokens = Some(1);
-    replay_opts.base.base.max_retries = Some(0);
-    replay_opts.base.base.signal = Some(signal);
+    replay_opts.base = get_cache_warming_request_options(&request.options.base, signal);
 
     let stream = models.stream_simple(&request.model, &request.context, Some(replay_opts));
     let message = stream.result().await;
@@ -732,7 +682,7 @@ impl CacheWarmer {
                 Some("agent run settled")
             } else {
                 run.phase = CacheWarmingPhase::Idle;
-                let deadline = run.started_at + MAX_IDLE_WARMING_AGE_MS;
+                let deadline = run.started_at + CACHE_WARMING_MAX_IDLE_AGE_MS as i64;
                 if run.next_warm_at > deadline || pi_js::time::now_ms() >= deadline {
                     Some("30-minute idle safety limit reached")
                 } else {
@@ -870,17 +820,15 @@ pub fn format_cache_warming_status(status: &CacheWarmingStatus, now: Option<i64>
     }
 }
 
-/// One-line transcript text for persisted cache-warming usage.
-pub fn format_cache_warming_usage(entry: &UsageEntry) -> String {
-    let note = entry
-        .note
-        .as_deref()
+/// One-line transcript text for the total cost of one or more consecutive cache warms.
+pub fn format_cache_warming_usage(total_cost: f64, note: Option<&str>) -> String {
+    let note_text = note
         .filter(|s| !s.is_empty())
         .map(|n| format!(" ({n})"))
         .unwrap_or_default();
-    let formatted = format!("{:.6}", entry.usage.cost.total);
+    let formatted = format!("{total_cost:.6}");
     let cost = trim_cost_trailing_zeros(&formatted);
-    format!("Cache warmed{note}: ${cost}")
+    format!("Cache warmed{note_text}: ${cost}")
 }
 
 fn trim_cost_trailing_zeros(formatted: &str) -> String {

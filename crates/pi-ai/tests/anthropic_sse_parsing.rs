@@ -206,6 +206,40 @@ async fn forwards_parsed_provider_stream_events_in_order() {
     );
 }
 
+// Regression test for #9980.
+#[tokio::test]
+async fn uses_the_total_reported_by_openrouters_anthropic_messages_endpoint() {
+    let mut events = minimal_anthropic_events();
+    let mut delta: Value = pi_js::json::parse(&events[4].1).unwrap();
+    delta["usage"]["cost"] = json!(0.004);
+    delta["usage"]["is_byok"] = json!(false);
+    delta["usage"]["cost_details"] = json!({ "upstream_inference_cost": 0.003 });
+    events[4].1 = pi_js::json::stringify(&delta);
+
+    let mut model = get_model("openrouter", "anthropic/claude-haiku-4.5").unwrap();
+    model.provider = "openrouter-work".to_owned();
+    let result = stream_with_options(
+        &model,
+        &hello_context(1),
+        Some(AnthropicOptions {
+            client: Some(create_fake_anthropic_client(create_sse_response(&events))),
+            ..Default::default()
+        }),
+    )
+    .result()
+    .await;
+
+    assert_eq!(result.usage.cost.total, 0.004);
+    assert_eq!(result.usage.cost.total_from_provider, Some(true));
+    assert_ne!(
+        result.usage.cost.input
+            + result.usage.cost.output
+            + result.usage.cost.cache_read
+            + result.usage.cost.cache_write,
+        result.usage.cost.total
+    );
+}
+
 #[tokio::test]
 async fn keeps_signed_thinking_replayable_when_a_proxy_relabels_the_model() {
     let model = get_model("anthropic", "claude-opus-5").unwrap();

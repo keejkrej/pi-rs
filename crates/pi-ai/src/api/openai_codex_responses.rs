@@ -23,7 +23,7 @@ use crate::api::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::api::openai_responses_shared::{
     ConvertResponsesMessagesOptions, ConvertResponsesToolsOptions, ProcessResponsesStreamOptions,
     ResponsesEventJsonStream, convert_responses_messages, convert_responses_tools, create_pending_assistant_message,
-    process_responses_stream, response_to_sse_json_stream,
+    get_responses_tool_support, process_responses_stream, response_to_sse_json_stream,
 };
 use crate::api::simple_options::build_base_options;
 use crate::models::clamp_thinking_level;
@@ -40,9 +40,11 @@ use crate::utils::diagnostics::{
 use crate::utils::error_body::{format_provider_error, normalize_provider_error};
 use crate::utils::event_stream::{AssistantMessageEventStream, create_assistant_message_event_stream};
 use crate::utils::headers::headers_to_record;
-use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::text::get_system_message_text;
-use crate::utils::transcript::{get_declared_tools, get_initial_system_message, resolve_transcript};
+use crate::utils::transcript::{
+    get_declared_tools, get_initial_system_message, resolve_transcript, resolve_transcript_tools_with_support,
+};
 use crate::utils::uuid::uuidv7;
 
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -412,12 +414,15 @@ fn apply_raw_header_layer(headers: &mut Headers, layer: &IndexMap<String, String
 }
 
 fn build_base_codex_headers(
+    default_headers: &IndexMap<String, String>,
     model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,
 ) -> Headers {
+    // Defaults first so model and caller headers can override them, matching the other providers.
     let mut headers = Headers::new();
+    apply_raw_header_layer(&mut headers, default_headers);
     if let Some(mh) = model_headers {
         apply_raw_header_layer(&mut headers, mh);
     }
@@ -426,19 +431,18 @@ fn build_base_codex_headers(
     }
     headers.set("Authorization", &format!("Bearer {token}"));
     headers.set("chatgpt-account-id", account_id);
-    headers.set("originator", "pi");
-    headers.set("User-Agent", &get_pi_user_agent());
     headers
 }
 
 fn build_sse_headers(
+    default_headers: &IndexMap<String, String>,
     model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,
     session_id: Option<&str>,
 ) -> Headers {
-    let mut headers = build_base_codex_headers(model_headers, additional_headers, account_id, token);
+    let mut headers = build_base_codex_headers(default_headers, model_headers, additional_headers, account_id, token);
     headers.set("OpenAI-Beta", "responses=experimental");
     headers.set("accept", "text/event-stream");
     headers.set("content-type", "application/json");
@@ -452,13 +456,14 @@ fn build_sse_headers(
 }
 
 fn build_websocket_headers(
+    default_headers: &IndexMap<String, String>,
     model_headers: Option<&IndexMap<String, String>>,
     additional_headers: Option<&ProviderHeaders>,
     account_id: &str,
     token: &str,
     request_id: &str,
 ) -> Headers {
-    let mut headers = build_base_codex_headers(model_headers, additional_headers, account_id, token);
+    let mut headers = build_base_codex_headers(default_headers, model_headers, additional_headers, account_id, token);
     headers.delete("accept");
     headers.delete("content-type");
     headers.delete("OpenAI-Beta");
@@ -488,11 +493,21 @@ fn build_request_body(
     let compat = model.compat.as_ref().and_then(|c| c.as_openai_responses());
     let supports_strict_mode = compat.and_then(|c| c.supports_strict_mode).unwrap_or(true);
     let supports_grammar_tools = compat.and_then(|c| c.supports_open_ai_grammar_tools).unwrap_or(false);
-    let supports_mid_convo = compat
-        .and_then(|c| c.supports_mid_convo_system_messages)
-        .unwrap_or(false);
+    let supports_mid_convo = compat.and_then(|c| c.supports_mid_convo_system_messages);
+    let supports_additional_tools = compat.and_then(|c| c.supports_additional_tools).unwrap_or(false);
+    let supports_tool_search = compat.and_then(|c| c.supports_tool_search).unwrap_or(false);
+    let tool_support = get_responses_tool_support(
+        supports_mid_convo == Some(true),
+        supports_additional_tools,
+        supports_tool_search,
+    );
+    let transcript_tools = resolve_transcript_tools_with_support(&context.messages, tool_support);
 
-    let declared_tools = get_declared_tools(&context.messages);
+    let tool_opts = ConvertResponsesToolsOptions {
+        strict: Some(supports_strict_mode),
+        supports_openai_grammar_tools: Some(supports_grammar_tools),
+        ..Default::default()
+    };
     let msg_opts = ConvertResponsesMessagesOptions {
         include_system_prompt: Some(false),
         grammar_tool_input_properties: if grammar_props.is_empty() {
@@ -500,21 +515,14 @@ fn build_request_body(
         } else {
             Some(grammar_props.clone())
         },
-        ..Default::default()
+        supports_mid_convo_system_messages: supports_mid_convo,
+        supports_additional_tools,
+        supports_tool_search,
+        tool_options: Some(tool_opts.clone()),
+        configuration_update_effort: None,
     };
-    let mut context_for_items = context.clone();
-    if !supports_mid_convo && context_for_items.messages.len() > 1 {
-        let mut filtered = Vec::with_capacity(context_for_items.messages.len());
-        for (idx, m) in context_for_items.messages.iter().enumerate() {
-            if idx == 0 || !matches!(m, crate::types::Message::System(_)) {
-                filtered.push(m.clone());
-            }
-        }
-        context_for_items.messages = filtered;
-    }
-
     let providers = codex_tool_call_providers();
-    let messages = convert_responses_messages(model, &context_for_items, &providers, Some(&msg_opts));
+    let messages = convert_responses_messages(model, context, &providers, Some(&msg_opts));
 
     let initial_sys = get_initial_system_message(&context.messages);
     let instructions = initial_sys
@@ -567,13 +575,8 @@ fn build_request_body(
         body.insert("service_tier".to_string(), Value::String(tier.clone()));
     }
 
-    if !declared_tools.is_empty() {
-        let tool_opts = ConvertResponsesToolsOptions {
-            strict: Some(supports_strict_mode),
-            supports_openai_grammar_tools: Some(supports_grammar_tools),
-            ..Default::default()
-        };
-        let mut converted = convert_responses_tools(&declared_tools, Some(&tool_opts))?;
+    if !transcript_tools.request_tools.is_empty() {
+        let mut converted = convert_responses_tools(&transcript_tools.request_tools, Some(&tool_opts))?;
         if supports_strict_mode {
             // Codex expects `strict: null` rather than `false` when strict mode is enabled on the
             // endpoint but a tool does not opt in.
@@ -1445,7 +1448,20 @@ async fn run_codex_stream(
         Some(id) if !id.is_empty() => id,
         _ => uuidv7(None)?,
     };
+    // Codex expects an originator on every request; it is not attribution.
+    let mut identity_headers = IndexMap::new();
+    identity_headers.insert("originator".to_string(), "pi".to_string());
+    for (k, v) in get_identity_headers(
+        ClientIdentityTarget {
+            provider: &model.provider,
+            base_url: &model.base_url,
+        },
+        options.base.identity.as_ref(),
+    ) {
+        identity_headers.insert(k, v);
+    }
     let sse_headers = build_sse_headers(
+        &identity_headers,
         model.headers.as_ref(),
         options.base.headers.as_ref(),
         &account_id,
@@ -1453,6 +1469,7 @@ async fn run_codex_stream(
         codex_session_id.as_deref(),
     );
     let ws_headers = build_websocket_headers(
+        &identity_headers,
         model.headers.as_ref(),
         options.base.headers.as_ref(),
         &account_id,

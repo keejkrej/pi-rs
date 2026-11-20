@@ -75,6 +75,7 @@ fn warm_usage() -> Usage {
             cache_read: 0.01,
             cache_write: 0.0,
             total: 0.01,
+            total_from_provider: None,
         },
     }
 }
@@ -97,6 +98,7 @@ fn response(model: &Model, stop_reason: StopReason) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 
@@ -594,6 +596,7 @@ fn formats_status_and_usage_entries() {
         cache_read: 0.02940725,
         cache_write: 0.0,
         total: 0.02949725,
+        total_from_provider: None,
     };
     let adaptive = adaptive_model();
     let entry = SessionManager::in_memory(None, None, None)
@@ -607,7 +610,7 @@ fn formats_status_and_usage_entries() {
         )
         .unwrap();
     assert_eq!(
-        format_cache_warming_usage(&entry),
+        format_cache_warming_usage(entry.usage.cost.total, entry.note.as_deref()),
         "Cache warmed (extension override): $0.029497"
     );
 }

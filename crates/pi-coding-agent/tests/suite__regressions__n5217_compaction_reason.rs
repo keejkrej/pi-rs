@@ -45,6 +45,7 @@ fn test_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn mock_assistant(text: &str) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 0,
+        duration_ms: None,
     }
 }
 

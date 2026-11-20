@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use pi_ai::auth::oauth::openai_codex::openai_codex_oauth;
 use pi_ai::auth::types::{
-    AuthEvent, AuthInteraction, AuthPrompt, AuthPromptKind, AuthSelectOption, OAuthCredential, ProviderAuthInteraction,
+    AuthEvent, AuthInteraction, AuthPrompt, AuthPromptKind, AuthSelectOption, LoginOptions, OAuthCredential,
+    ProviderAuthInteraction,
 };
 use pi_js::abort::{AbortController, AbortSignal};
 use pi_js::b64::btoa;
@@ -119,6 +120,7 @@ fn login_device_code_interaction(
                     verification_uri,
                     interval_seconds,
                     expires_in_seconds,
+                    ..
                 } = ev
                 {
                     device_infos.lock().unwrap().push(DeviceInfo {
@@ -354,6 +356,7 @@ async fn offers_browser_login_first_and_uses_the_selected_openai_codex_device_co
                     verification_uri,
                     interval_seconds,
                     expires_in_seconds,
+                    ..
                 } = ev
                 {
                     di_c.lock().unwrap().push(DeviceInfo {
@@ -746,4 +749,74 @@ async fn falls_back_to_the_pasted_redirect_url_when_the_fixed_callback_port_is_t
         form.get("redirect_uri").map(String::as_str),
         Some("http://localhost:1455/auth/callback")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn uses_the_apps_agent_name_as_the_browser_login_originator() {
+    let _blocker = TcpListener::bind("127.0.0.1:1455").await.ok();
+    let _guard = mock_fetch(|_| {
+        Box::pin(async {
+            Ok(json_resp(
+                &json!({
+                    "access_token": create_access_token("acct"),
+                    "refresh_token": "refresh",
+                    "expires_in": 3600
+                }),
+                200,
+            ))
+        })
+    });
+
+    let auth_url = Arc::new(Mutex::new(String::new()));
+    let au_n = auth_url.clone();
+    let au_p = auth_url.clone();
+    let interaction = ProviderAuthInteraction::new(
+        Arc::new(CodexInteraction {
+            notify_fn: move |ev| {
+                if let AuthEvent::AuthUrl { url, .. } = ev {
+                    *au_n.lock().unwrap() = url;
+                }
+            },
+            prompt_fn: move |prompt| {
+                let au = au_p.clone();
+                Box::pin(async move {
+                    match prompt.kind {
+                        AuthPromptKind::Select { .. } => Ok("browser".to_owned()),
+                        AuthPromptKind::ManualCode { .. } => {
+                            let parsed = url::Url::parse(&au.lock().unwrap()).unwrap();
+                            let state = parsed
+                                .query_pairs()
+                                .find(|(k, _)| k == "state")
+                                .map(|(_, v)| v.into_owned())
+                                .unwrap_or_default();
+                            Ok(format!(
+                                "http://localhost:1455/auth/callback?code=pasted-code&state={state}"
+                            ))
+                        }
+                        other => panic!("unexpected prompt: {other:?}"),
+                    }
+                })
+            },
+        }),
+        AbortController::new().signal(),
+    );
+
+    openai_codex_oauth()
+        .login(
+            interaction,
+            Some(LoginOptions {
+                agent_name: Some("my-app".to_owned()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let parsed = url::Url::parse(&auth_url.lock().unwrap()).unwrap();
+    let originator = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "originator")
+        .map(|(_, v)| v.into_owned());
+    assert_eq!(originator.as_deref(), Some("my-app"));
 }

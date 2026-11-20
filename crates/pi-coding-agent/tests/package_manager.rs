@@ -246,7 +246,7 @@ async fn detects_package_manager_name_and_git_dependency_install_args() {
     assert_eq!(fx.pm.get_package_manager_name().unwrap(), "npm");
     assert_eq!(
         fx.pm.get_git_dependency_install_args().unwrap(),
-        vec!["install", "--omit=dev", "--legacy-peer-deps"]
+        vec!["install", "--omit=dev", "--legacy-peer-deps", "--no-audit", "--no-fund"]
     );
 
     fx.settings_manager.set_npm_command(Some(vec!["pnpm.cmd".to_owned()]));
@@ -750,4 +750,426 @@ async fn updates_and_installs_git_packages_with_mocks_and_real_local_repo() {
     let list = fx.pm.list_configured_packages().unwrap();
     assert!(!list.is_empty());
     let _: Value = json!({});
+}
+
+#[tokio::test]
+async fn resolves_changelog_path_metadata_and_ignores_parent_traversal() {
+    let fx = PmFixture::new();
+
+    // 1. Manifest changelogPath
+    let pkg1 = fx.root.join("changelog-manifest-pkg");
+    let ext1 = PmFixture::write(&pkg1.join("src/index.ts"), "export default function() {}");
+    let ch1 = PmFixture::write(&pkg1.join("docs/CHANGELOG.md"), "## [1.0.0]\n\n- Initial release");
+    PmFixture::write(
+        &pkg1.join("package.json"),
+        &json!({
+            "name": "changelog-manifest-pkg",
+            "pi": {
+                "extensions": ["src/index.ts"],
+                "changelogPath": "docs/CHANGELOG.md"
+            }
+        })
+        .to_string(),
+    );
+    let res1 = fx
+        .pm
+        .resolve_extension_sources(&[pkg1.to_string_lossy().into_owned()], false, false)
+        .await
+        .unwrap();
+    let e1 = res1.extensions.iter().find(|r| r.path == ext1).unwrap();
+    assert_eq!(e1.metadata.changelog_path.as_deref(), Some(ch1.as_str()));
+
+    // 2. Convention CHANGELOG.md
+    let pkg2 = fx.root.join("changelog-convention-pkg");
+    let ext2 = PmFixture::write(&pkg2.join("extensions/index.ts"), "export default function() {}");
+    let ch2 = PmFixture::write(&pkg2.join("CHANGELOG.md"), "## [1.0.0]\n\n- Initial release");
+    let res2 = fx
+        .pm
+        .resolve_extension_sources(&[pkg2.to_string_lossy().into_owned()], false, false)
+        .await
+        .unwrap();
+    let e2 = res2.extensions.iter().find(|r| r.path == ext2).unwrap();
+    assert_eq!(e2.metadata.changelog_path.as_deref(), Some(ch2.as_str()));
+
+    // 3. Auto-discover extensions when manifest only declares changelogPath
+    let pkg3 = fx.root.join("changelog-only-manifest-pkg");
+    let ext3 = PmFixture::write(&pkg3.join("extensions/index.ts"), "export default function() {}");
+    let ch3 = PmFixture::write(&pkg3.join("CHANGELOG.md"), "## [1.0.0]\n\n- Initial release");
+    PmFixture::write(
+        &pkg3.join("package.json"),
+        &json!({
+            "name": "changelog-only-manifest-pkg",
+            "pi": { "changelogPath": "CHANGELOG.md" }
+        })
+        .to_string(),
+    );
+    let res3 = fx
+        .pm
+        .resolve_extension_sources(&[pkg3.to_string_lossy().into_owned()], false, false)
+        .await
+        .unwrap();
+    let e3 = res3.extensions.iter().find(|r| r.path == ext3).unwrap();
+    assert_eq!(e3.metadata.changelog_path.as_deref(), Some(ch3.as_str()));
+
+    // 4. Rejects changelogPath escaping package root
+    PmFixture::write(&fx.root.join("CHANGELOG.md"), "## [1.0.0]\n\n- Outside");
+    let pkg4 = fx.root.join("unsafe-changelog-pkg");
+    let ext4 = PmFixture::write(&pkg4.join("src/index.ts"), "export default function() {}");
+    PmFixture::write(
+        &pkg4.join("CHANGELOG.md"),
+        "## [1.0.0]\n\n- Fallback should not be used",
+    );
+    PmFixture::write(
+        &pkg4.join("package.json"),
+        &json!({
+            "name": "unsafe-changelog-pkg",
+            "pi": {
+                "extensions": ["src/index.ts"],
+                "changelogPath": "../CHANGELOG.md"
+            }
+        })
+        .to_string(),
+    );
+    let res4 = fx
+        .pm
+        .resolve_extension_sources(&[pkg4.to_string_lossy().into_owned()], false, false)
+        .await
+        .unwrap();
+    let e4 = res4.extensions.iter().find(|r| r.path == ext4).unwrap();
+    assert_eq!(e4.metadata.changelog_path, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn passes_realpath_prefix_when_agent_dir_is_symlink_11358() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real_agent = tmp.path().join("dotfiles/agent");
+    let linked_agent = tmp.path().join("linked-agent");
+    fs::create_dir_all(&real_agent).unwrap();
+    std::os::unix::fs::symlink(&real_agent, &linked_agent).unwrap();
+
+    let cwd = tmp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    let settings = SettingsManager::create(
+        cwd.to_string_lossy().as_ref(),
+        Some(linked_agent.to_string_lossy().as_ref()),
+        Some(SettingsManagerCreateOptions {
+            project_trusted: Some(true),
+        }),
+    );
+    let pm = DefaultPackageManager::new(PackageManagerOptions {
+        cwd: cwd.to_string_lossy().into_owned(),
+        agent_dir: linked_agent.to_string_lossy().into_owned(),
+        settings_manager: settings,
+        builtin_extensions: Vec::new(),
+    });
+    let runner = Arc::new(MockRunner::with_hooks(None, None, None));
+    pm.set_command_runner(Some(Arc::clone(&runner) as Arc<dyn PackageCommandRunner>));
+
+    pm.install("npm:@scope/pkg", false).await.unwrap();
+    pm.remove("npm:@scope/pkg", false).await.unwrap();
+
+    let real_npm_root = fs::canonicalize(&real_agent).unwrap().join("npm");
+    let real_prefix = real_npm_root.to_string_lossy().into_owned();
+    let calls = runner.recorded();
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "install",
+            "@scope/pkg",
+            "--prefix",
+            &real_prefix,
+            "--legacy-peer-deps",
+            "--no-audit",
+            "--no-fund"
+        ]
+    );
+    assert_eq!(
+        calls[1].args,
+        vec![
+            "uninstall",
+            "@scope/pkg",
+            "--prefix",
+            &real_prefix,
+            "--legacy-peer-deps",
+            "--no-audit",
+            "--no-fund"
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn expands_tilde_in_exclusion_and_exact_patterns_10765() {
+    let fx = PmFixture::new();
+    let home = fx.root.to_string_lossy().into_owned();
+    let _home_guard = EnvGuard::set("HOME", Some(&home));
+
+    for name in ["keep", "glob-excluded", "exact-excluded"] {
+        PmFixture::write(
+            &fx.root.join(format!("extra/skills/{name}/SKILL.md")),
+            &format!("---\nname: {name}\ndescription: {name}\n---\n"),
+        );
+    }
+    fx.settings_manager.set_skill_paths(vec![
+        "~/extra/skills".to_owned(),
+        "!~/extra/skills/glob-*".to_owned(),
+        "-~/extra/skills/exact-excluded".to_owned(),
+    ]);
+
+    let result = fx.pm.resolve(None).await.unwrap();
+    assert!(
+        result
+            .skills
+            .iter()
+            .any(|r| r.path.ends_with("keep/SKILL.md") && r.enabled)
+    );
+    assert!(
+        result
+            .skills
+            .iter()
+            .any(|r| r.path.ends_with("glob-excluded/SKILL.md") && !r.enabled)
+    );
+    assert!(
+        result
+            .skills
+            .iter()
+            .any(|r| r.path.ends_with("exact-excluded/SKILL.md") && !r.enabled)
+    );
+}
+
+#[tokio::test]
+async fn records_install_failures_without_aborting_resolve_11088() {
+    let fx = PmFixture::new();
+    let runner = Arc::new(MockRunner::with_hooks(
+        Some(Arc::new(|_, _, _| {
+            Err(Error::msg("npm install broken-package failed with code 1"))
+        })),
+        None,
+        None,
+    ));
+    fx.pm.set_command_runner(Some(runner));
+    let _ = fx
+        .settings_manager
+        .set_project_packages(vec![PackageSource::String("npm:broken-package".to_owned())]);
+
+    let result = fx.pm.resolve(None).await.unwrap();
+    let failures = result.install_failures.unwrap_or_default();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].source, "npm:broken-package");
+    assert_eq!(failures[0].scope, SourceScope::Project);
+    assert!(
+        failures[0]
+            .message
+            .contains("npm install broken-package failed with code 1")
+    );
+    assert!(result.extensions.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn emits_update_result_and_stale_warning_progress_events() {
+    let _offline_clear = EnvGuard::set("PI_OFFLINE", None);
+    let fx = PmFixture::new();
+
+    // 1. Emit Start -> Complete -> Result for version upgrade
+    let installed_path = Path::new(&fx.cwd).join(".pi/npm/node_modules/example");
+    PmFixture::write(
+        &installed_path.join("package.json"),
+        r#"{"name":"example","version":"1.0.0"}"#,
+    );
+    let _ = fx
+        .settings_manager
+        .set_project_packages(vec![PackageSource::String("npm:example@^1.0.0".to_owned())]);
+
+    let inst_c = installed_path.clone();
+    let runner = Arc::new(MockRunner::with_hooks(
+        Some(Arc::new(move |_, _, _| {
+            PmFixture::write(&inst_c.join("package.json"), r#"{"name":"example","version":"1.2.0"}"#);
+            Ok(())
+        })),
+        Some(Arc::new(|_, _, _, _| Ok(r#"["1.0.0","1.2.0"]"#.to_owned()))),
+        None,
+    ));
+    fx.pm.set_command_runner(Some(runner));
+    let events = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
+    let events_c = Arc::clone(&events);
+    fx.pm.set_progress_callback(Some(Arc::new(move |ev| {
+        events_c.lock().unwrap().push(ev);
+    })));
+    fx.pm.update(Some("npm:example")).await.unwrap();
+    let recorded = events.lock().unwrap().clone();
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|e| (e.event_type, e.source.as_str(), e.message.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                ProgressEventType::Start,
+                "npm:example@^1.0.0",
+                Some("Updating npm:example@^1.0.0...")
+            ),
+            (ProgressEventType::Complete, "npm:example@^1.0.0", None),
+            (
+                ProgressEventType::Result,
+                "npm:example@^1.0.0",
+                Some("npm:example@^1.0.0 (project) 1.0.0 -> 1.2.0")
+            ),
+        ]
+    );
+
+    // 2. Warn when npm update leaves installed version unchanged
+    let fx2 = PmFixture::new();
+    let stale_path = Path::new(&fx2.agent_dir).join("npm/node_modules/stale-pkg");
+    let fresh_path = Path::new(&fx2.agent_dir).join("npm/node_modules/fresh-pkg");
+    PmFixture::write(
+        &stale_path.join("package.json"),
+        r#"{"name":"stale-pkg","version":"1.0.0"}"#,
+    );
+    PmFixture::write(
+        &fresh_path.join("package.json"),
+        r#"{"name":"fresh-pkg","version":"1.0.0"}"#,
+    );
+    fx2.settings_manager.set_packages(vec![
+        PackageSource::String("npm:stale-pkg".to_owned()),
+        PackageSource::String("npm:fresh-pkg".to_owned()),
+    ]);
+    let fresh_c = fresh_path.clone();
+    let runner2 = Arc::new(MockRunner::with_hooks(
+        Some(Arc::new(move |_, _, _| {
+            PmFixture::write(
+                &fresh_c.join("package.json"),
+                r#"{"name":"fresh-pkg","version":"1.0.1"}"#,
+            );
+            Ok(())
+        })),
+        Some(Arc::new(|_, _, _, _| Ok(r#""1.0.1""#.to_owned()))),
+        None,
+    ));
+    fx2.pm.set_command_runner(Some(runner2));
+    let events2 = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
+    let events2_c = Arc::clone(&events2);
+    fx2.pm.set_progress_callback(Some(Arc::new(move |ev| {
+        events2_c.lock().unwrap().push(ev);
+    })));
+    fx2.pm.update(None).await.unwrap();
+    let warnings: Vec<ProgressEvent> = events2
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event_type == ProgressEventType::Progress)
+        .cloned()
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].source, "npm:stale-pkg");
+    let msg = warnings[0].message.as_deref().unwrap_or("");
+    assert!(msg.contains("is still 1.0.0") && msg.contains("1.0.1"), "msg={msg}");
+}
+
+#[tokio::test]
+#[serial]
+async fn refreshes_temporary_git_and_npm_sources_cleanly_11375() {
+    let _offline_clear = EnvGuard::set("PI_OFFLINE", None);
+    let fx = PmFixture::new();
+
+    // 1. Branch-pinned temporary git source refreshes (fetches/checks out)
+    let git_branch_src = "git:github.com/example/repo@main";
+    let ParsedSource::Git(ref git_branch) = fx.pm.parse_source(git_branch_src) else {
+        panic!("expected git");
+    };
+    let git_temp = fx.pm.get_git_install_path(git_branch, SourceScope::Temporary).unwrap();
+    PmFixture::write(
+        &Path::new(&git_temp).join("extensions/index.ts"),
+        "export default function() {};",
+    );
+    let git_runner = Arc::new(MockRunner::with_hooks(None, None, None));
+    fx.pm
+        .set_command_runner(Some(Arc::clone(&git_runner) as Arc<dyn PackageCommandRunner>));
+    let res = fx
+        .pm
+        .resolve_extension_sources(&[git_branch_src.to_owned()], false, true)
+        .await
+        .unwrap();
+    assert!(
+        res.extensions
+            .iter()
+            .any(|r| r.path.ends_with("extensions/index.ts") && r.enabled)
+    );
+    assert!(
+        git_runner
+            .recorded()
+            .iter()
+            .any(|c| c.kind == "run" && c.command == "git" && c.args.first().map(String::as_str) == Some("fetch"))
+    );
+
+    // 2. Commit-SHA temporary git source whose checked-out HEAD matches ref skips update
+    let sha_src = "git:github.com/example/repo@abc1234";
+    let ParsedSource::Git(ref git_sha) = fx.pm.parse_source(sha_src) else {
+        panic!("expected git");
+    };
+    let sha_temp = fx.pm.get_git_install_path(git_sha, SourceScope::Temporary).unwrap();
+    fs::create_dir_all(&sha_temp).unwrap();
+    let sha_runner = Arc::new(MockRunner::with_hooks(
+        None,
+        Some(Arc::new(|cmd, args, _, _| {
+            if cmd == "git" && args.first() == Some(&"rev-parse") {
+                return Ok("ABC1234def5678901234567890123456789012345\n".to_owned());
+            }
+            Ok(String::new())
+        })),
+        None,
+    ));
+    fx.pm
+        .set_command_runner(Some(Arc::clone(&sha_runner) as Arc<dyn PackageCommandRunner>));
+    let _ = fx
+        .pm
+        .resolve_extension_sources(&[sha_src.to_owned()], false, true)
+        .await
+        .unwrap();
+    assert!(!sha_runner.recorded().iter().any(|c| c.kind == "run"));
+
+    // 3. Unpinned temporary npm source refreshes when newer version exists, keeping cached install on failure
+    let npm_src = "npm:example";
+    let ParsedSource::Npm(ref npm_parsed) = fx.pm.parse_source(npm_src) else {
+        panic!("expected npm");
+    };
+    let npm_temp = fx.pm.get_npm_install_path(npm_parsed, SourceScope::Temporary).unwrap();
+    PmFixture::write(
+        &Path::new(&npm_temp).join("package.json"),
+        r#"{"name":"example","version":"1.0.0"}"#,
+    );
+    PmFixture::write(
+        &Path::new(&npm_temp).join("extensions/index.ts"),
+        "export default function() {};",
+    );
+    let npm_runner = Arc::new(MockRunner::with_hooks(
+        Some(Arc::new(|_, _, _| Err(Error::msg("network down")))),
+        Some(Arc::new(|cmd, args, _, _| {
+            if cmd == "npm" && args.first() == Some(&"view") {
+                return Ok(r#""1.1.0""#.to_owned());
+            }
+            Ok(String::new())
+        })),
+        None,
+    ));
+    fx.pm
+        .set_command_runner(Some(Arc::clone(&npm_runner) as Arc<dyn PackageCommandRunner>));
+    let npm_res = fx
+        .pm
+        .resolve_extension_sources(&[npm_src.to_owned()], false, true)
+        .await
+        .unwrap();
+    assert!(
+        npm_res
+            .extensions
+            .iter()
+            .any(|r| r.path.ends_with("extensions/index.ts") && r.enabled)
+    );
+    assert!(
+        npm_runner
+            .recorded()
+            .iter()
+            .any(|c| c.kind == "run" && c.args.iter().any(|a| a == "example@latest"))
+    );
 }

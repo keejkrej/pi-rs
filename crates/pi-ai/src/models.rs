@@ -10,29 +10,34 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use pi_js::abort::{AbortController, AbortReason, AbortSignal};
 use pi_js::{BoxFuture, Error, Result};
 
-use crate::api::lazy::lazy_stream;
 use crate::auth::context::default_provider_auth_context;
 use crate::auth::credential_store::InMemoryCredentialStore;
-use crate::auth::resolve::{AuthResolutionOverrides, resolve_provider_auth};
+use crate::auth::resolve::{AuthResolutionOverrides, refresh_stored_oauth_credential, resolve_provider_auth};
 use crate::auth::types::{
     ApiKeyAuthInput, AuthCheck, AuthContext, AuthInteraction, AuthOperationOptions, AuthResult, AuthType, Credential,
     CredentialStore, LoginOptions, ModifyCredentialFn, ProviderAuth, ProviderAuthInteraction,
 };
 use crate::models_store::{InMemoryModelsStore, ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions};
+use crate::telemetry::{ModelRequestObserver, observe_model_request};
 use crate::types::{
-    AnyModel, ApiStreamOptions, AssistantImages, AssistantMessage, ClassifierContext, ClassifierModel,
-    ClassifierOptions, ClassifierResult, Context, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle,
-    ImageModel, ImagesContext, ImagesOptions, Model, ModelCostRates, ModelThinkingLevel, ModelType, ProviderClassifier,
-    ProviderEnv, ProviderHeaders, ProviderImages, ProviderStreams, SimpleStreamOptions, TranscriptContext, Usage,
-    UsageCost,
+    AnyModel, ApiStreamOptions, AssistantImages, AssistantMessage, AssistantMessageEvent, ClassifierContext,
+    ClassifierModel, ClassifierOptions, ClassifierResult, Context, DeferredCancelOptions, DeferredFetchOptions,
+    DeferredHandle, ImageModel, ImagesContext, ImagesOptions, Model, ModelCostRates, ModelThinkingLevel, ModelType,
+    ProviderClassifier, ProviderEnv, ProviderHeaders, ProviderImages, ProviderStreams, SimpleStreamOptions, StopReason,
+    TranscriptContext, Usage, UsageCost,
 };
 use crate::utils::abort::{operation_signal, race_with_abort_signal};
 use crate::utils::event_stream::AssistantMessageEventStream;
+use crate::utils::identity::{
+    ClientIdentity, ClientIdentityTarget, get_opencode_session_headers, merge_client_identity,
+};
 use crate::utils::model_operations::{
-    assert_chat_model, assert_classifier_model, assert_image_model, classifier_error_result, image_error_result,
+    assert_chat_model, assert_classifier_input_supported, assert_classifier_model, assert_image_model,
+    classifier_error_result, image_error_result,
 };
 use crate::utils::transcript::normalize_context;
 
+pub use crate::telemetry::AI_TELEMETRY_SCHEMA;
 pub use crate::utils::model_operations::{get_model_type, is_model_type};
 pub use crate::utils::models_error::{ModelsError, ModelsErrorCode};
 
@@ -64,6 +69,12 @@ pub struct ModelsPublication {
 
 pub type PublishModels = Arc<dyn Fn(ModelsPublication) -> BoxFuture<Result<bool>> + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshModelsAuth {
+    Credential,
+    Configured,
+}
+
 pub struct RefreshModelsContext {
     /// Effective configured credential. OAuth credentials are refreshed before network access.
     pub credential: Option<Credential>,
@@ -78,6 +89,8 @@ pub struct RefreshModelsContext {
     pub force: Option<bool>,
     /// Always present, including when the public refresh caller omits its optional signal.
     pub signal: AbortSignal,
+    /// Base URL of the registered provider, including wrapper overrides outside the provider.
+    pub base_url: Option<String>,
 }
 
 pub type FetchModels = Arc<dyn Fn(RefreshModelsContext) -> BoxFuture<Result<Vec<AnyModel>>> + Send + Sync>;
@@ -174,6 +187,11 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// What the network phase of `refresh_models` needs: `"credential"` (default) or `"configured"`.
+    fn refresh_models_auth(&self) -> RefreshModelsAuth {
+        RefreshModelsAuth::Credential
+    }
+
     /// `None` means `filterModels` was omitted.
     fn filter_models(&self, models: &[Model], credential: Option<&Credential>) -> Option<Vec<Model>> {
         let _ = (models, credential);
@@ -253,6 +271,8 @@ pub trait Provider: Send + Sync {
 #[derive(Clone)]
 pub struct Models {
     inner: Arc<ModelsInner>,
+    // PORT: Per-handle default identity layered by `with_client_identity` above `inner.identity`.
+    pub(crate) identity_override: Option<ClientIdentity>,
 }
 
 pub type MutableModels = Models;
@@ -262,6 +282,7 @@ struct ModelsInner {
     credentials: Arc<dyn CredentialStore + Send + Sync>,
     models_store: Arc<dyn ModelsStore + Send + Sync>,
     auth_context: Arc<dyn AuthContext>,
+    identity: Option<ClientIdentity>,
     refresh_generations: Mutex<IndexMap<String, i64>>,
     refresh_controllers: Mutex<IndexMap<String, Arc<AbortController>>>,
     publication_chains: Mutex<IndexMap<String, Arc<AsyncMutex<()>>>>,
@@ -284,6 +305,7 @@ struct AppliedRequest {
     api_key: Option<String>,
     headers: Option<ProviderHeaders>,
     env: Option<ProviderEnv>,
+    identity: Option<ClientIdentity>,
 }
 
 fn abort_error(signal: &AbortSignal) -> Error {
@@ -302,10 +324,129 @@ where
     }
 }
 
+fn create_setup_error_message(
+    model: &Model,
+    error: &Error,
+    timestamp: i64,
+    stop_reason: StopReason,
+) -> AssistantMessage {
+    AssistantMessage {
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        provider_thinking_level: None,
+        thinking_level: None,
+        diagnostics: None,
+        usage: Usage::default(),
+        stop_reason,
+        deferred: None,
+        error_message: Some(error.to_string()),
+        raw_stop_reason: None,
+        end_turn: None,
+        timestamp,
+        duration_ms: None,
+    }
+}
+
+fn observed_lazy_stream<F>(
+    model: &Model,
+    observer: ModelRequestObserver,
+    signal: Option<AbortSignal>,
+    setup: F,
+) -> AssistantMessageEventStream
+where
+    F: Future<Output = Result<AssistantMessageEventStream>> + Send + 'static,
+{
+    use futures::StreamExt;
+
+    let started_at = pi_js::time::now_ms();
+    let outer = AssistantMessageEventStream::new();
+    let outer_clone = outer.clone();
+    let model_owned = model.clone();
+
+    tokio::spawn(async move {
+        match setup.await {
+            Ok(mut inner) => {
+                let mut result: Option<AssistantMessage> = None;
+                while let Some(event) = inner.next().await {
+                    match &event {
+                        AssistantMessageEvent::Done { message, .. } => {
+                            result = Some(message.clone());
+                        }
+                        AssistantMessageEvent::Error { error, .. } => {
+                            result = Some(error.clone());
+                        }
+                        _ => {}
+                    }
+                    outer_clone.push(event.clone());
+                    observer.on_event(&event);
+                }
+                if let Some(res) = inner.try_result() {
+                    result = Some(res);
+                }
+                outer_clone.end(result.clone());
+                let final_res = outer_clone.try_result().or(result);
+                observer.on_result(final_res.as_ref());
+            }
+            Err(error) => {
+                let reason = if signal.as_ref().is_some_and(AbortSignal::aborted) {
+                    StopReason::Aborted
+                } else {
+                    StopReason::Error
+                };
+                let message = create_setup_error_message(&model_owned, &error, started_at, reason);
+                let event = AssistantMessageEvent::Error {
+                    reason,
+                    error: message.clone(),
+                };
+                outer_clone.push(event.clone());
+                observer.on_event(&event);
+                outer_clone.end(Some(message));
+                let final_msg = outer_clone.try_result();
+                observer.on_result(final_msg.as_ref());
+            }
+        }
+    });
+
+    outer
+}
+
+fn lazy_stream_error(model: &Model, signal: Option<AbortSignal>, error: Error) -> AssistantMessageEventStream {
+    let started_at = pi_js::time::now_ms();
+    let outer = AssistantMessageEventStream::new();
+    let outer_clone = outer.clone();
+    let model_owned = model.clone();
+    tokio::spawn(async move {
+        let reason = if signal.as_ref().is_some_and(AbortSignal::aborted) {
+            StopReason::Aborted
+        } else {
+            StopReason::Error
+        };
+        let message = create_setup_error_message(&model_owned, &error, started_at, reason);
+        outer_clone.push(AssistantMessageEvent::Error {
+            reason,
+            error: message.clone(),
+        });
+        outer_clone.end(Some(message));
+    });
+    outer
+}
+
 impl Models {
     /// Create a new [`Models`] registry with optional credential/model stores and auth context.
     pub fn new(options: Option<CreateModelsOptions>) -> Self {
         create_models(options)
+    }
+
+    pub(crate) fn with_identity_override(&self, identity: ClientIdentity) -> Self {
+        let merged = merge_client_identity(&[self.identity_override.as_ref(), Some(&identity)]);
+        Self {
+            inner: Arc::clone(&self.inner),
+            identity_override: merged,
+        }
     }
 
     /// Upsert/replace by provider.id. Provider ids are unique.
@@ -480,14 +621,21 @@ impl Models {
                         return Ok(());
                     }
 
-                    let credential = models_handle
-                        .resolve_refresh_credential(provider.as_ref(), stored_credential.as_ref(), &combined_signal)
+                    let network = models_handle
+                        .resolve_network_refresh(provider.as_ref(), stored_credential.as_ref(), &combined_signal)
                         .await?;
-                    let Some(cred) = credential else {
+                    let Some(net_cred) = network else {
                         return Ok(());
                     };
                     models_handle
-                        .run_provider_refresh_phase(provider, Some(&cred), true, force, generation, &combined_signal)
+                        .run_provider_refresh_phase(
+                            provider,
+                            net_cred.as_ref(),
+                            true,
+                            force,
+                            generation,
+                            &combined_signal,
+                        )
                         .await?;
                     Ok(())
                 };
@@ -787,27 +935,43 @@ impl Models {
         let transcript = normalize_context(context);
         let models_handle = self.clone();
         let model_owned = model.clone();
-        lazy_stream(model, async move {
+        let telemetry_opt = options.as_ref().and_then(|o| o.base.base.telemetry.as_ref());
+        let telemetry_ctx_opt = options.as_ref().and_then(|o| o.base.base.telemetry_context.as_ref());
+        let observer = observe_model_request(model, telemetry_opt, telemetry_ctx_opt, None, false);
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
+        observed_lazy_stream(model, observer, signal, async move {
             let any_model = AnyModel::Chat(model_owned.clone());
             let provider = models_handle.require_chat_provider(&model_owned)?;
-            let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+            let (api_key, env, headers, signal, identity, session_id, transform_headers) = match options.as_ref() {
                 Some(o) => (
                     o.base.base.api_key.as_deref(),
                     o.base.base.env.as_ref(),
                     o.base.base.headers.as_ref(),
                     o.base.base.signal.as_ref(),
+                    o.base.base.identity.as_ref(),
+                    o.base.base.session_id.as_deref(),
                     o.transform_headers.as_ref(),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None, None),
             };
             let applied = models_handle
-                .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+                .apply_auth(
+                    &any_model,
+                    api_key,
+                    env,
+                    headers,
+                    signal,
+                    identity,
+                    session_id,
+                    transform_headers,
+                )
                 .await?;
             let request_model = applied.request_model.into_chat().unwrap_or(model_owned);
             let mut request_options = options.map(|o| o.base).unwrap_or_default();
             request_options.base.api_key = applied.api_key;
             request_options.base.headers = applied.headers;
             request_options.base.env = applied.env;
+            request_options.base.identity = applied.identity;
             Ok(provider.stream(&request_model, &transcript, Some(request_options)))
         })
     }
@@ -830,27 +994,44 @@ impl Models {
         let transcript = normalize_context(context);
         let models_handle = self.clone();
         let model_owned = model.clone();
-        lazy_stream(model, async move {
+        let telemetry_opt = options.as_ref().and_then(|o| o.base.base.telemetry.as_ref());
+        let telemetry_ctx_opt = options.as_ref().and_then(|o| o.base.base.telemetry_context.as_ref());
+        let reasoning = options.as_ref().and_then(|o| o.base.reasoning);
+        let observer = observe_model_request(model, telemetry_opt, telemetry_ctx_opt, reasoning, false);
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
+        observed_lazy_stream(model, observer, signal, async move {
             let any_model = AnyModel::Chat(model_owned.clone());
             let provider = models_handle.require_chat_provider(&model_owned)?;
-            let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+            let (api_key, env, headers, signal, identity, session_id, transform_headers) = match options.as_ref() {
                 Some(o) => (
                     o.base.base.api_key.as_deref(),
                     o.base.base.env.as_ref(),
                     o.base.base.headers.as_ref(),
                     o.base.base.signal.as_ref(),
+                    o.base.base.identity.as_ref(),
+                    o.base.base.session_id.as_deref(),
                     o.transform_headers.as_ref(),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None, None),
             };
             let applied = models_handle
-                .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+                .apply_auth(
+                    &any_model,
+                    api_key,
+                    env,
+                    headers,
+                    signal,
+                    identity,
+                    session_id,
+                    transform_headers,
+                )
                 .await?;
             let request_model = applied.request_model.into_chat().unwrap_or(model_owned);
             let mut request_options = options.map(|o| o.base).unwrap_or_default();
             request_options.base.api_key = applied.api_key;
             request_options.base.headers = applied.headers;
             request_options.base.env = applied.env;
+            request_options.base.identity = applied.identity;
             Ok(provider.stream_simple(&request_model, &transcript, Some(request_options)))
         })
     }
@@ -873,27 +1054,42 @@ impl Models {
         let models_handle = self.clone();
         let model_owned = model.clone();
         let handle_owned = handle.clone();
-        lazy_stream(model, async move {
+        let telemetry_opt = options.as_ref().and_then(|o| o.base.base.telemetry.as_ref());
+        let telemetry_ctx_opt = options.as_ref().and_then(|o| o.base.base.telemetry_context.as_ref());
+        let observer = observe_model_request(model, telemetry_opt, telemetry_ctx_opt, None, true);
+        let signal = options.as_ref().and_then(|o| o.base.base.signal.clone());
+        observed_lazy_stream(model, observer, signal, async move {
             let any_model = AnyModel::Chat(model_owned.clone());
             let provider = models_handle.require_chat_provider(&model_owned)?;
-            let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+            let (api_key, env, headers, signal, identity, transform_headers) = match options.as_ref() {
                 Some(o) => (
                     o.base.base.api_key.as_deref(),
                     o.base.base.env.as_ref(),
                     o.base.base.headers.as_ref(),
                     o.base.base.signal.as_ref(),
+                    o.base.base.identity.as_ref(),
                     o.transform_headers.as_ref(),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
             let applied = models_handle
-                .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+                .apply_auth(
+                    &any_model,
+                    api_key,
+                    env,
+                    headers,
+                    signal,
+                    identity,
+                    None,
+                    transform_headers,
+                )
                 .await?;
             let request_model = applied.request_model.into_chat().unwrap_or(model_owned.clone());
             let mut request_options = options.map(|o| o.base).unwrap_or_default();
             request_options.base.api_key = applied.api_key;
             request_options.base.headers = applied.headers;
             request_options.base.env = applied.env;
+            request_options.base.identity = applied.identity;
             provider
                 .fetch_deferred(&request_model, &handle_owned, Some(request_options))
                 .ok_or_else(|| {
@@ -922,24 +1118,35 @@ impl Models {
     ) -> Result<()> {
         let any_model = AnyModel::Chat(model.clone());
         let provider = self.require_chat_provider(model)?;
-        let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+        let (api_key, env, headers, signal, identity, transform_headers) = match options.as_ref() {
             Some(o) => (
                 o.base.api_key.as_deref(),
                 o.base.env.as_ref(),
                 o.base.headers.as_ref(),
                 o.base.signal.as_ref(),
+                o.base.identity.as_ref(),
                 o.transform_headers.as_ref(),
             ),
-            None => (None, None, None, None, None),
+            None => (None, None, None, None, None, None),
         };
         let applied = self
-            .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+            .apply_auth(
+                &any_model,
+                api_key,
+                env,
+                headers,
+                signal,
+                identity,
+                None,
+                transform_headers,
+            )
             .await?;
         let request_model = applied.request_model.into_chat().unwrap_or_else(|| model.clone());
         let mut request_options = options.map(|o| o.base).unwrap_or_default();
         request_options.api_key = applied.api_key;
         request_options.headers = applied.headers;
         request_options.env = applied.env;
+        request_options.identity = applied.identity;
         let fut = provider
             .cancel_deferred(&request_model, handle, Some(request_options))
             .ok_or_else(|| {
@@ -966,24 +1173,35 @@ impl Models {
         let res: Result<AssistantImages> = async {
             assert_image_model(&any_model)?;
             let provider = self.require_provider(&any_model)?;
-            let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+            let (api_key, env, headers, signal, identity, transform_headers) = match options.as_ref() {
                 Some(o) => (
                     o.base.base.api_key.as_deref(),
                     o.base.base.env.as_ref(),
                     o.base.base.headers.as_ref(),
                     o.base.base.signal.as_ref(),
+                    o.base.base.identity.as_ref(),
                     o.transform_headers.as_ref(),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
             let applied = self
-                .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+                .apply_auth(
+                    &any_model,
+                    api_key,
+                    env,
+                    headers,
+                    signal,
+                    identity,
+                    None,
+                    transform_headers,
+                )
                 .await?;
             let request_model = applied.request_model.into_image().unwrap_or_else(|| model.clone());
             let mut request_options = options.map(|o| o.base).unwrap_or_default();
             request_options.base.api_key = applied.api_key;
             request_options.base.headers = applied.headers;
             request_options.base.env = applied.env;
+            request_options.base.identity = applied.identity;
             let fut = provider
                 .generate_images(&request_model, context, Some(request_options))
                 .ok_or_else(|| {
@@ -1016,25 +1234,37 @@ impl Models {
         let any_model = AnyModel::Classifier(model.clone());
         let res: Result<ClassifierResult> = async {
             assert_classifier_model(&any_model)?;
+            assert_classifier_input_supported(model, context)?;
             let provider = self.require_provider(&any_model)?;
-            let (api_key, env, headers, signal, transform_headers) = match options.as_ref() {
+            let (api_key, env, headers, signal, identity, transform_headers) = match options.as_ref() {
                 Some(o) => (
                     o.base.base.api_key.as_deref(),
                     o.base.base.env.as_ref(),
                     o.base.base.headers.as_ref(),
                     o.base.base.signal.as_ref(),
+                    o.base.base.identity.as_ref(),
                     o.transform_headers.as_ref(),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
             let applied = self
-                .apply_auth(&any_model, api_key, env, headers, signal, transform_headers)
+                .apply_auth(
+                    &any_model,
+                    api_key,
+                    env,
+                    headers,
+                    signal,
+                    identity,
+                    None,
+                    transform_headers,
+                )
                 .await?;
             let request_model = applied.request_model.into_classifier().unwrap_or_else(|| model.clone());
             let mut request_options = options.map(|o| o.base).unwrap_or_default();
             request_options.base.api_key = applied.api_key;
             request_options.base.headers = applied.headers;
             request_options.base.env = applied.env;
+            request_options.base.identity = applied.identity;
             let fut = provider
                 .classify(&request_model, context, Some(request_options))
                 .ok_or_else(|| {
@@ -1210,6 +1440,7 @@ impl Models {
             allow_network,
             force: if allow_network { force } else { None },
             signal: signal.clone(),
+            base_url: provider.base_url().map(str::to_owned),
         };
 
         if let Some(fut) = provider.refresh_models(ctx) {
@@ -1218,6 +1449,23 @@ impl Models {
         } else {
             Ok(false)
         }
+    }
+
+    /// Credential (or `Some(None)` when `refresh_models_auth == Configured`) for the network refresh phase,
+    /// or `None` when the provider is not configured.
+    async fn resolve_network_refresh(
+        &self,
+        provider: &dyn Provider,
+        stored: Option<&Credential>,
+        signal: &AbortSignal,
+    ) -> Result<Option<Option<Credential>>> {
+        if provider.refresh_models_auth() == RefreshModelsAuth::Configured {
+            return Ok(self.check_provider_auth(provider, stored, signal).await?.map(|_| None));
+        }
+        Ok(self
+            .resolve_refresh_credential(provider, stored, signal)
+            .await?
+            .map(Some))
     }
 
     async fn resolve_refresh_credential(
@@ -1236,35 +1484,15 @@ impl Models {
             if signal.aborted() {
                 return Ok(None);
             }
-            let oauth_arc = Arc::clone(oauth);
-            let sig = signal.clone();
-            let modify_fn: ModifyCredentialFn = Box::new(move |current| {
-                Box::pin(async move {
-                    let Some(Credential::OAuth(cur_oauth)) = current else {
-                        return Ok(None);
-                    };
-                    if pi_js::time::now_ms() < cur_oauth.expires {
-                        return Ok(None);
-                    }
-                    let refreshed = oauth_arc.refresh(cur_oauth, sig).await?;
-                    Ok(Some(Credential::OAuth(refreshed)))
-                })
-            });
-            let post = self
-                .inner
-                .credentials
-                .modify(
-                    provider.id(),
-                    modify_fn,
-                    Some(AuthOperationOptions {
-                        signal: Some(signal.clone()),
-                    }),
-                )
-                .await?;
-            return Ok(match post {
-                Some(Credential::OAuth(o)) => Some(Credential::OAuth(o)),
-                _ => None,
-            });
+            return refresh_stored_oauth_credential(
+                self.inner.credentials.as_ref(),
+                provider.id(),
+                Arc::clone(oauth),
+                |current| pi_js::time::now_ms() >= current.expires,
+                signal,
+            )
+            .await
+            .map(|opt| opt.map(Credential::OAuth));
         }
 
         let Some(api_key) = provider.auth().api_key.as_ref() else {
@@ -1404,6 +1632,7 @@ impl Models {
         self.require_provider(&any)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apply_auth(
         &self,
         model: &AnyModel,
@@ -1411,6 +1640,8 @@ impl Models {
         env: Option<&ProviderEnv>,
         headers: Option<&ProviderHeaders>,
         signal: Option<&AbortSignal>,
+        request_identity: Option<&ClientIdentity>,
+        session_id: Option<&str>,
         transform_headers: Option<&TransformHeaders>,
     ) -> Result<AppliedRequest> {
         let _provider = self.require_provider(model)?;
@@ -1433,23 +1664,6 @@ impl Models {
             })?;
 
         let resolved_api_key = api_key.map(ToOwned::to_owned).or(resolution.auth.api_key);
-        let mut merged_headers = merge_headers(resolution.auth.headers.as_ref(), headers);
-        if let Some(transform) = transform_headers {
-            merged_headers = Some(transform(merged_headers.unwrap_or_default()).await?);
-        }
-
-        let merged_env = if resolution.env.is_some() || env.is_some() {
-            let mut out = resolution.env.unwrap_or_default();
-            if let Some(e) = env {
-                for (k, v) in e {
-                    out.insert(k.clone(), v.clone());
-                }
-            }
-            Some(out)
-        } else {
-            None
-        };
-
         let request_model = match (resolution.auth.base_url, model) {
             (Some(base_url), AnyModel::Chat(m)) => {
                 let mut cloned = m.clone();
@@ -1469,11 +1683,44 @@ impl Models {
             (_, other) => other.clone(),
         };
 
+        let opencode_headers: Option<ProviderHeaders> = get_opencode_session_headers(
+            ClientIdentityTarget {
+                provider: request_model.provider(),
+                base_url: request_model.base_url(),
+            },
+            session_id,
+        )
+        .map(|map| map.into_iter().map(|(k, v)| (k, Some(v))).collect());
+        let with_session = merge_headers(opencode_headers.as_ref(), resolution.auth.headers.as_ref());
+        let mut merged_headers = merge_headers(with_session.as_ref(), headers);
+        if let Some(transform) = transform_headers {
+            merged_headers = Some(transform(merged_headers.unwrap_or_default()).await?);
+        }
+
+        let merged_env = if resolution.env.is_some() || env.is_some() {
+            let mut out = resolution.env.unwrap_or_default();
+            if let Some(e) = env {
+                for (k, v) in e {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+            Some(out)
+        } else {
+            None
+        };
+
+        let identity = merge_client_identity(&[
+            self.inner.identity.as_ref(),
+            self.identity_override.as_ref(),
+            request_identity,
+        ]);
+
         Ok(AppliedRequest {
             request_model,
             api_key: resolved_api_key,
             headers: merged_headers,
             env: merged_env,
+            identity,
         })
     }
 }
@@ -1483,6 +1730,8 @@ pub struct CreateModelsOptions {
     pub credentials: Option<Arc<dyn CredentialStore + Send + Sync>>,
     pub models_store: Option<Arc<dyn ModelsStore + Send + Sync>>,
     pub auth_context: Option<Arc<dyn AuthContext>>,
+    /// Default identity of every request; a request's `identity` overrides it field by field.
+    pub identity: Option<ClientIdentity>,
 }
 
 /// `options` `None` is `{}`.
@@ -1498,10 +1747,12 @@ pub fn create_models(options: Option<CreateModelsOptions>) -> MutableModels {
                 .models_store
                 .unwrap_or_else(|| Arc::new(InMemoryModelsStore::new())),
             auth_context: opts.auth_context.unwrap_or_else(default_provider_auth_context),
+            identity: opts.identity,
             refresh_generations: Mutex::new(IndexMap::new()),
             refresh_controllers: Mutex::new(IndexMap::new()),
             publication_chains: Mutex::new(IndexMap::new()),
         }),
+        identity_override: None,
     }
 }
 
@@ -1544,6 +1795,7 @@ struct CreatedProvider {
     base_url: Option<String>,
     headers: Option<ProviderHeaders>,
     auth: ProviderAuth,
+    refresh_models_auth: RefreshModelsAuth,
     fetch_models: Option<FetchModels>,
     filter_models: Option<FilterModelsFn>,
     filter_all_models: Option<FilterAllModelsFn>,
@@ -1603,6 +1855,10 @@ impl Provider for CreatedProvider {
         &self.auth
     }
 
+    fn refresh_models_auth(&self) -> RefreshModelsAuth {
+        self.refresh_models_auth
+    }
+
     fn get_models(&self) -> Vec<Model> {
         self.current_models()
             .into_iter()
@@ -1653,6 +1909,7 @@ impl Provider for CreatedProvider {
                 allow_network: context.allow_network,
                 force: context.force,
                 signal: context.signal.clone(),
+                base_url: context.base_url.clone(),
             };
             let fetched = fetch(ctx_for_fetch).await?;
             if context.signal.aborted() {
@@ -1696,14 +1953,17 @@ impl Provider for CreatedProvider {
         if let Some(streams) = self.api_for(&model.api) {
             return streams.stream(model, context, options);
         }
+        let signal = options.as_ref().and_then(|o| o.signal.clone());
         let provider_id = self.id.clone();
         let model_api = model.api.clone();
-        lazy_stream(model, async move {
-            Err(Error::from(ModelsError::new(
+        lazy_stream_error(
+            model,
+            signal,
+            Error::from(ModelsError::new(
                 ModelsErrorCode::Stream,
                 format!("Provider {provider_id} has no API implementation for \"{model_api}\""),
-            )))
-        })
+            )),
+        )
     }
 
     fn stream_simple(
@@ -1715,14 +1975,17 @@ impl Provider for CreatedProvider {
         if let Some(streams) = self.api_for(&model.api) {
             return streams.stream_simple(model, context, options);
         }
+        let signal = options.as_ref().and_then(|o| o.signal.clone());
         let provider_id = self.id.clone();
         let model_api = model.api.clone();
-        lazy_stream(model, async move {
-            Err(Error::from(ModelsError::new(
+        lazy_stream_error(
+            model,
+            signal,
+            Error::from(ModelsError::new(
                 ModelsErrorCode::Stream,
                 format!("Provider {provider_id} has no API implementation for \"{model_api}\""),
-            )))
-        })
+            )),
+        )
     }
 
     fn fetch_deferred(
@@ -1737,14 +2000,17 @@ impl Provider for CreatedProvider {
         if let Some(fetch_fn) = self.api_for(&model.api).and_then(|s| s.fetch_deferred.as_ref()) {
             return Some(fetch_fn(model, handle, options));
         }
+        let signal = options.as_ref().and_then(|o| o.signal.clone());
         let provider_id = self.id.clone();
         let model_api = model.api.clone();
-        Some(lazy_stream(model, async move {
-            Err(Error::from(ModelsError::new(
+        Some(lazy_stream_error(
+            model,
+            signal,
+            Error::from(ModelsError::new(
                 ModelsErrorCode::Provider,
                 format!("Provider {provider_id} does not support deferred responses for \"{model_api}\""),
-            )))
-        }))
+            )),
+        ))
     }
 
     fn cancel_deferred(
@@ -1833,6 +2099,15 @@ impl Provider for CreatedProvider {
 /// Builds a provider from parts. At least one concrete implementation across
 /// `api` / `images` / `classifiers` is required; empty maps are rejected.
 pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider + Send + Sync>> {
+    create_provider_with_refresh_auth(input, RefreshModelsAuth::Credential)
+}
+
+/// Builds a provider with an explicit [`RefreshModelsAuth`] policy.
+/// PORT: Additive helper preserving [`CreateProviderOptions`] struct literals during Stage 1.
+pub fn create_provider_with_refresh_auth(
+    input: CreateProviderOptions,
+    refresh_models_auth: RefreshModelsAuth,
+) -> Result<Arc<dyn Provider + Send + Sync>> {
     let stream_count = match input.api.as_ref() {
         Some(CreateProviderApi::Single(_)) => 1,
         Some(CreateProviderApi::ByApi(map)) => map.len(),
@@ -1864,6 +2139,7 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider 
         base_url: input.base_url,
         headers: input.headers,
         auth: input.auth,
+        refresh_models_auth,
         fetch_models: input.fetch_models,
         filter_models: input.filter_models,
         filter_all_models: input.filter_all_models,
@@ -1915,6 +2191,7 @@ pub fn calculate_cost(model: &AnyModel, usage: &mut Usage) -> UsageCost {
     usage.cost.cache_write =
         (rates.cache_write * short_write as f64 + rates.input * 2.0 * long_write as f64) / 1_000_000.0;
     usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
+    usage.cost.total_from_provider = Some(false);
     usage.cost
 }
 

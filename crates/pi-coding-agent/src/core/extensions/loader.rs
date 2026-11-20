@@ -29,10 +29,11 @@ use super::types::{
     CustomMessageContent, CustomMessageDraft, EventBus, ExecOptions, Extension, ExtensionApi, ExtensionApiInner,
     ExtensionCommandContext, ExtensionContext, ExtensionFactory, ExtensionLoadState, ExtensionRuntime,
     ExtensionRuntimeInner, ExtensionToolContext, FlagOptions, FlagType, FlagValue, LoadExtensionErrorEntry,
-    LoadExtensionWarningEntry, LoadExtensionsResult, LoadedExtension, LocalEventBus, McpServerRegistry, ModelRegistry,
-    ProviderConfig, ReadonlySessionManager, RegisteredCommandOptions, RenderShell, ScopedModel, ShortcutOptions,
-    SyntheticSourceOptions, ToolAnnotations, ToolDefinition, ToolExposure, ToolNamespace, create_synthetic_source_info,
-    get_synthetic_path_source, is_synthetic_path,
+    LoadExtensionWarningEntry, LoadExtensionsResult, LoadedExtension, LocalEventBus, MarkdownMessageType,
+    MarkdownTransformerOptions, McpServerRegistry, ModelRegistry, ProviderConfig, ReadonlySessionManager,
+    RegisteredCommandOptions, RenderCallFn, RenderResultFn, RenderShell, ScopedModel, ShortcutOptions,
+    SyntheticSourceOptions, ToolAnnotations, ToolDefinition, ToolExposure, ToolNamespace, ToolReachScope,
+    ToolRendererResolver, ToolRenderers, create_synthetic_source_info, get_synthetic_path_source, is_synthetic_path,
 };
 use crate::config::{CONFIG_DIR_NAME, get_agent_dir};
 use crate::core::model_registry::ResolvedRequestAuth;
@@ -766,6 +767,7 @@ impl QuickJsExtensionVm {
                     "stderr": exec_res.stderr,
                     "code": exec_res.code,
                     "killed": exec_res.killed,
+                    "truncated": exec_res.truncated,
                 });
                 let h = self.vm.from_json_value(&val)?;
                 let r = deferred.resolve(&self.vm, &h);
@@ -1211,6 +1213,14 @@ impl QuickJsExtensionVm {
                 };
                 render_result_h.dispose();
 
+                let reaches_tools_h = obj.get_prop("reachesTools")?;
+                let reaches_tools_id = if reaches_tools_h.is_function() {
+                    Some(self.store_fn_handle(reaches_tools_h.clone())?)
+                } else {
+                    None
+                };
+                reaches_tools_h.dispose();
+
                 let prompt_snippet = def_val
                     .get("promptSnippet")
                     .and_then(|v| v.as_str())
@@ -1280,7 +1290,7 @@ impl QuickJsExtensionVm {
                     })
                 });
 
-                api.register_tool(ToolDefinition {
+                let mut tool_def = ToolDefinition {
                     name,
                     label,
                     description,
@@ -1300,7 +1310,17 @@ impl QuickJsExtensionVm {
                     execute,
                     render_call,
                     render_result,
-                })?;
+                };
+                if let Some(rt_id) = reaches_tools_id {
+                    let vm_weak = Arc::downgrade(self);
+                    tool_def = tool_def.with_reaches_tools(Arc::new(move |input: &Value| {
+                        let Some(vm_arc) = vm_weak.upgrade() else {
+                            return ToolReachScope::Names(Vec::new());
+                        };
+                        vm_arc.invoke_reaches_tools_sync(rt_id, input)
+                    }));
+                }
+                api.register_tool(tool_def)?;
                 self.vm.undefined()
             }
             "registerCommand" => {
@@ -1516,15 +1536,40 @@ impl QuickJsExtensionVm {
                 if !fn_h.is_function() {
                     return Err(pi_js::Error::msg("Markdown transformer must be a function"));
                 }
+                let options = arg1
+                    .filter(|h| !h.is_undefined() && !h.is_null())
+                    .map(|h| self.vm.to_json_value(h))
+                    .transpose()?
+                    .and_then(|v| serde_json::from_value::<MarkdownTransformerOptions>(v).ok())
+                    .filter(|o: &MarkdownTransformerOptions| {
+                        o.message_types.as_ref().is_some_and(|list| {
+                            !list.is_empty()
+                                && list.iter().all(|t| {
+                                    matches!(
+                                        t,
+                                        MarkdownMessageType::User
+                                            | MarkdownMessageType::Assistant
+                                            | MarkdownMessageType::AssistantThinking
+                                            | MarkdownMessageType::Custom
+                                            | MarkdownMessageType::Summary
+                                            | MarkdownMessageType::Changelog
+                                    )
+                                })
+                        }) || o.message_types.as_ref().is_some_and(|list| list.is_empty())
+                            || o.message_types.is_none()
+                    });
                 let fn_id = self.store_fn_handle(fn_h.clone())?;
                 let vm_weak = Arc::downgrade(self);
-                api.register_markdown_transformer(Arc::new(move |md, ctx| {
-                    let Some(vm_arc) = vm_weak.upgrade() else {
-                        return md.to_string();
-                    };
-                    let ctx_val = serde_json::to_value(ctx).unwrap_or(Value::Null);
-                    vm_arc.invoke_markdown_transformer_sync(fn_id, md, ctx_val)
-                }))?;
+                api.register_markdown_transformer_with_options(
+                    Arc::new(move |md, ctx| {
+                        let Some(vm_arc) = vm_weak.upgrade() else {
+                            return md.to_string();
+                        };
+                        let ctx_val = serde_json::to_value(ctx).unwrap_or(Value::Null);
+                        vm_arc.invoke_markdown_transformer_sync(fn_id, md, ctx_val)
+                    }),
+                    options,
+                )?;
                 self.vm.undefined()
             }
             "registerEntryRenderer" => {
@@ -1546,6 +1591,22 @@ impl QuickJsExtensionVm {
                         vm_arc.invoke_render_opt_sync(fn_id, vec![entry_val, opts_val])
                     }),
                 )?;
+                self.vm.undefined()
+            }
+            "registerToolRenderer" => {
+                let Some(fn_h) = arg0 else {
+                    return Err(pi_js::Error::msg("Tool renderer resolver function is required"));
+                };
+                if !fn_h.is_function() {
+                    return Err(pi_js::Error::msg("Tool renderer resolver must be a function"));
+                }
+                let fn_id = self.store_fn_handle(fn_h.clone())?;
+                let vm_weak = Arc::downgrade(self);
+                let resolver: ToolRendererResolver = Arc::new(move |tool_name, next| {
+                    let vm_arc = vm_weak.upgrade()?;
+                    vm_arc.invoke_tool_renderer_resolver_sync(fn_id, tool_name, next)
+                });
+                api.register_tool_renderer(resolver)?;
                 self.vm.undefined()
             }
             "sendMessage" => {
@@ -1631,6 +1692,10 @@ impl QuickJsExtensionVm {
                 let opts_val = payload.get("options").cloned().unwrap_or(Value::Null);
                 let timeout = opts_val.get("timeout").and_then(|v| v.as_u64());
                 let cwd = opts_val.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let max_buffer = opts_val
+                    .get("maxBuffer")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| usize::try_from(v).ok());
                 let api_c = api.clone();
                 let fut: BoxFuture<pi_js::Result<HostJsResult>> = Box::pin(async move {
                     let res = api_c
@@ -1641,6 +1706,7 @@ impl QuickJsExtensionVm {
                                 signal: None,
                                 timeout,
                                 cwd,
+                                max_buffer,
                             }),
                         )
                         .await?;
@@ -2830,6 +2896,189 @@ impl QuickJsExtensionVm {
             markdown.to_string()
         }
     }
+
+    fn invoke_reaches_tools_sync(&self, fn_id: u64, input: &Value) -> ToolReachScope {
+        let already_in_turn = ACTIVE_EXT_VM_ID.with(|c| c.get() == Some(self.id));
+        let run = || -> pi_js::Result<ToolReachScope> {
+            let fn_h = {
+                let reg = self.registries.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(h) = reg.fn_handles.get(&fn_id) else {
+                    return Ok(ToolReachScope::Names(Vec::new()));
+                };
+                h.dup()?
+            };
+            let input_h = self.vm.from_json_value(input)?;
+            let undef = self.vm.undefined()?;
+            let out_h = self.vm.call_function(&fn_h, &undef, &[input_h.clone()]);
+            fn_h.dispose();
+            input_h.dispose();
+            undef.dispose();
+            let scope = match out_h {
+                Ok(h) => {
+                    let parsed = match self.vm.to_json_value(&h) {
+                        Ok(Value::String(s)) if s == "all" => ToolReachScope::All,
+                        Ok(Value::Array(arr)) => ToolReachScope::Names(
+                            arr.into_iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+                        ),
+                        _ => ToolReachScope::Names(Vec::new()),
+                    };
+                    h.dispose();
+                    parsed
+                }
+                Err(_) => ToolReachScope::Names(Vec::new()),
+            };
+            Ok(scope)
+        };
+
+        if already_in_turn {
+            run().unwrap_or_else(|_| ToolReachScope::Names(Vec::new()))
+        } else if let Ok(_guard) = self.vm_lock.try_lock() {
+            enter_vm_turn(self.id, run).unwrap_or_else(|_| ToolReachScope::Names(Vec::new()))
+        } else {
+            ToolReachScope::Names(Vec::new())
+        }
+    }
+
+    fn invoke_tool_renderer_resolver_sync(
+        self: &Arc<Self>,
+        fn_id: u64,
+        tool_name: &str,
+        next: Box<dyn FnOnce() -> Option<ToolRenderers> + Send>,
+    ) -> Option<ToolRenderers> {
+        let already_in_turn = ACTIVE_EXT_VM_ID.with(|c| c.get() == Some(self.id));
+        let next_slot: Arc<Mutex<Option<Box<dyn FnOnce() -> Option<ToolRenderers> + Send>>>> =
+            Arc::new(Mutex::new(Some(next)));
+        let base_slot: Arc<Mutex<Option<ToolRenderers>>> = Arc::new(Mutex::new(None));
+        let run = || -> pi_js::Result<Option<ToolRenderers>> {
+            let fn_h = {
+                let reg = self.registries.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(h) = reg.fn_handles.get(&fn_id) else {
+                    return Ok(None);
+                };
+                h.dup()?
+            };
+            let name_h = self.vm.new_string(tool_name)?;
+            let vm_c = self.vm.clone();
+            let next_slot_c = Arc::clone(&next_slot);
+            let base_slot_c = Arc::clone(&base_slot);
+            let next_fn = self.vm.new_function(
+                "__pi_tool_renderer_next",
+                Arc::new(move |_this, _args| {
+                    let resolved = next_slot_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                        .and_then(|f| f());
+                    let Some(renderers) = resolved else {
+                        return vm_c.undefined();
+                    };
+                    *base_slot_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(renderers.clone());
+                    let obj = vm_c.new_object()?;
+                    if let Some(shell) = renderers.render_shell {
+                        let s = match shell {
+                            RenderShell::Default => "default",
+                            RenderShell::Self_ => "self",
+                        };
+                        let sh = vm_c.new_string(s)?;
+                        obj.set_prop("renderShell", &sh)?;
+                        sh.dispose();
+                    }
+                    let sentinel = vm_c.new_boolean(true)?;
+                    obj.set_prop("__piBaseRenderers", &sentinel)?;
+                    sentinel.dispose();
+                    Ok(obj)
+                }),
+            )?;
+            let undef = self.vm.undefined()?;
+            let out_h = self.vm.call_function(&fn_h, &undef, &[name_h.clone(), next_fn.clone()]);
+            fn_h.dispose();
+            name_h.dispose();
+            next_fn.dispose();
+            undef.dispose();
+            let Ok(h) = out_h else {
+                return Ok(None);
+            };
+            if h.is_null() || h.is_undefined() {
+                h.dispose();
+                return Ok(None);
+            }
+            if !h.is_object() {
+                h.dispose();
+                return Ok(None);
+            }
+            let base = base_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let is_passthrough = h
+                .get_prop("__piBaseRenderers")
+                .ok()
+                .map(|b| {
+                    let is_true = b.is_bool() && self.vm.to_json_value(&b).ok() == Some(Value::Bool(true));
+                    b.dispose();
+                    is_true
+                })
+                .unwrap_or(false);
+            if is_passthrough {
+                h.dispose();
+                return Ok(base);
+            }
+            let shell_h = h.get_prop("renderShell")?;
+            let render_shell: Option<RenderShell> = if !shell_h.is_undefined() && !shell_h.is_null() {
+                self.vm
+                    .to_json_value(&shell_h)
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v).ok())
+            } else {
+                base.as_ref().and_then(|b| b.render_shell)
+            };
+            shell_h.dispose();
+
+            let rc_h = h.get_prop("renderCall")?;
+            let render_call: Option<RenderCallFn> = if rc_h.is_function() {
+                let rc_id = self.store_fn_handle(rc_h.clone())?;
+                let vm_weak = Arc::downgrade(self);
+                Some(Arc::new(move |args, _theme, _ctx| {
+                    let Some(vm_arc) = vm_weak.upgrade() else {
+                        return Arc::new(TuiText::new(Some(""), None, None, None));
+                    };
+                    vm_arc.invoke_render_sync(rc_id, vec![args])
+                }))
+            } else {
+                base.as_ref().and_then(|b| b.render_call.clone())
+            };
+            rc_h.dispose();
+
+            let rr_h = h.get_prop("renderResult")?;
+            let render_result: Option<RenderResultFn> = if rr_h.is_function() {
+                let rr_id = self.store_fn_handle(rr_h.clone())?;
+                let vm_weak = Arc::downgrade(self);
+                Some(Arc::new(move |result, opts, _theme, _ctx| {
+                    let Some(vm_arc) = vm_weak.upgrade() else {
+                        return Arc::new(TuiText::new(Some(""), None, None, None));
+                    };
+                    let res_val = serde_json::to_value(&result).unwrap_or(Value::Null);
+                    let opts_val = serde_json::to_value(&opts).unwrap_or(Value::Null);
+                    vm_arc.invoke_render_sync(rr_id, vec![res_val, opts_val])
+                }))
+            } else {
+                base.as_ref().and_then(|b| b.render_result.clone())
+            };
+            rr_h.dispose();
+            h.dispose();
+
+            Ok(Some(ToolRenderers {
+                render_shell,
+                render_call,
+                render_result,
+            }))
+        };
+
+        if already_in_turn {
+            run().ok().flatten()
+        } else if let Ok(_guard) = self.vm_lock.try_lock() {
+            enter_vm_turn(self.id, run).ok().flatten()
+        } else {
+            None
+        }
+    }
 }
 
 struct TrustContextAdapter(super::types::ProjectTrustContext);
@@ -2946,6 +3195,7 @@ impl super::types::ExtensionContextBackend for TrustContextAdapter {
                 },
                 result: AgentToolResult::text("Nested tool calls are not available in this context"),
                 is_error: true,
+                duration_ms: None,
             }
         })
     }
@@ -3046,7 +3296,7 @@ async fn load_extension_module_factory(
     }
 
     let vm = QuickJsExtensionVm::create().await?;
-    let canonical = pi_js::fs::realpath(resolved_path).unwrap_or_else(|_| resolved_path.to_string());
+    let canonical = canonicalize_path(resolved_path);
     let Some(factory_fn_id) = vm.load_module_factory(&canonical).await? else {
         return Ok(None);
     };
@@ -3395,11 +3645,14 @@ const EXTENSION_BRIDGE_JS: &str = r#"
             registerMessageRenderer(customType, renderer) {
                 E.apiCall(apiId, "registerMessageRenderer", String(customType), renderer);
             },
-            registerMarkdownTransformer(transformer) {
-                E.apiCall(apiId, "registerMarkdownTransformer", transformer);
+            registerMarkdownTransformer(transformer, options) {
+                E.apiCall(apiId, "registerMarkdownTransformer", transformer, options);
             },
             registerEntryRenderer(customType, renderer) {
                 E.apiCall(apiId, "registerEntryRenderer", String(customType), renderer);
+            },
+            registerToolRenderer(resolver) {
+                E.apiCall(apiId, "registerToolRenderer", resolver);
             },
             sendMessage(msg, opts) { E.apiCall(apiId, "sendMessage", msg, opts); },
             sendUserMessage(content, opts) { E.apiCall(apiId, "sendUserMessage", content, opts); },

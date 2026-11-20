@@ -423,6 +423,8 @@ async fn login_openai_codex_device_code(interaction: &ProviderAuthInteraction) -
     interaction.notify(AuthEvent::DeviceCode {
         user_code: device.user_code.clone(),
         verification_uri: DEVICE_VERIFICATION_URI.to_owned(),
+        open_browser_on_confirm: None,
+        copy_code_on_confirm: None,
         interval_seconds: Some(device.interval_seconds),
         expires_in_seconds: Some(DEVICE_CODE_TIMEOUT_SECONDS),
     });
@@ -436,8 +438,15 @@ async fn login_openai_codex_device_code(interaction: &ProviderAuthInteraction) -
     .await
 }
 
-async fn login_openai_codex(interaction: &ProviderAuthInteraction) -> Result<OAuthCredential> {
-    let (verifier, state, url) = create_authorization_flow("pi").await?;
+async fn login_openai_codex(
+    interaction: &ProviderAuthInteraction,
+    options: Option<LoginOptions>,
+) -> Result<OAuthCredential> {
+    let originator = options
+        .and_then(|o| o.agent_name)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "pi".to_owned());
+    let (verifier, state, url) = create_authorization_flow(&originator).await?;
     let callback = start_oauth_callback_server(OAuthCallbackServerOptions {
         provider_name: "OpenAI".to_owned(),
         host: callback_host(),
@@ -507,7 +516,7 @@ impl OAuthAuth for OpenAICodexOAuth {
     async fn login(
         &self,
         interaction: ProviderAuthInteraction,
-        _options: Option<LoginOptions>,
+        options: Option<LoginOptions>,
     ) -> Result<OAuthCredential> {
         let method = interaction
             .prompt(AuthPrompt::select(
@@ -533,7 +542,7 @@ impl OAuthAuth for OpenAICodexOAuth {
         if method != OPENAI_CODEX_BROWSER_LOGIN_METHOD {
             return Err(Error::msg(format!("Unknown OpenAI Codex login method: {method}")));
         }
-        login_openai_codex(&interaction).await
+        login_openai_codex(&interaction, options).await
     }
 
     async fn refresh(&self, credential: OAuthCredential, signal: AbortSignal) -> Result<OAuthCredential> {

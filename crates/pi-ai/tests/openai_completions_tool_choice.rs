@@ -52,6 +52,7 @@ fn local_model(id: &str, name: &str, compat: Option<OpenAICompletionsCompat>) ->
         headers: None,
         sampling_params: None,
         compat: compat.map(ModelCompat::OpenAICompletions),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -477,6 +478,7 @@ async fn maps_groq_and_zai_reasoning_tool_stream_and_metadata() {
                     raw_stop_reason: None,
                     end_turn: None,
                     timestamp: 2,
+                    duration_ms: None,
                 }),
                 Message::ToolResult(ToolResultMessage {
                     tool_call_id: "call_1".to_owned(),
@@ -487,6 +489,7 @@ async fn maps_groq_and_zai_reasoning_tool_stream_and_metadata() {
                     nested_calls: None,
                     usage: None,
                     timestamp: 3,
+                    duration_ms: None,
                 }),
                 Message::User(UserMessage {
                     content: UserMessageContent::Text("Continue".to_owned()),
@@ -844,15 +847,15 @@ async fn accumulates_mixed_content_reasoning_and_parallel_tool_calls_independent
     assert_eq!(resp.content.len(), 6);
     assert_eq!(
         resp.content[0],
-        AssistantContentBlock::Text(TextContent::new("answer 1 answer 2\n"))
-    );
-    assert_eq!(
-        resp.content[1],
         AssistantContentBlock::Thinking(ThinkingContent {
             thinking: "think 1 think 2".to_owned(),
             thinking_signature: Some("reasoning_content".to_owned()),
             redacted: None,
         })
+    );
+    assert_eq!(
+        resp.content[1],
+        AssistantContentBlock::Text(TextContent::new("answer 1 answer 2\n"))
     );
     let mut by_idx: IndexMap<usize, Vec<&'static str>> = IndexMap::new();
     for ev in &events {
@@ -965,7 +968,7 @@ async fn checks_roles_metadata_usage_chat_template_opencode_deepseek_moonshot_an
         "xiaomi-token-plan-ams",
         "xiaomi-token-plan-sgp",
     ] {
-        let m = get_model(prov, "mimo-v2.5-pro").unwrap();
+        let m = get_model(prov, "mimo-v2.6-pro").unwrap();
         assert!(matches!(
             &m.compat,
             Some(ModelCompat::OpenAICompletions(c))
@@ -976,7 +979,12 @@ async fn checks_roles_metadata_usage_chat_template_opencode_deepseek_moonshot_an
         ));
     }
 
-    for prov in ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"] {
+    for prov in [
+        "qwen-token-plan",
+        "qwen-token-plan-cn",
+        "qwen-token-plan-individual",
+        "qwen-token-plan-individual-cn",
+    ] {
         let m = get_model(prov, "qwen3.7-max").unwrap();
         assert!(matches!(
             &m.compat,
@@ -1086,6 +1094,7 @@ async fn checks_roles_metadata_usage_chat_template_opencode_deepseek_moonshot_an
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 1,
+                duration_ms: None,
             })],
             tools: None,
         }),
@@ -1306,7 +1315,7 @@ async fn checks_roles_metadata_usage_chat_template_opencode_deepseek_moonshot_an
     assert_eq!(r_u3.usage.total_tokens, 105);
 
     // OpenRouter reasoning object + chat template kwargs + Ant Ling
-    let or_r1 = get_model("openrouter", "deepseek/deepseek-r1").unwrap();
+    let or_r1 = get_model("openrouter", "deepseek/deepseek-r1-0528").unwrap();
     let (por, _) = capture_simple_payload(
         &or_r1,
         Context {

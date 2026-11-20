@@ -65,6 +65,7 @@ fn make_model(id: &str, reasoning: bool, thinking_level_map: Option<ThinkingLeve
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 

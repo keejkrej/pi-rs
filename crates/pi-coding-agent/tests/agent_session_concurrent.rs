@@ -50,6 +50,7 @@ fn create_assistant_message(text: &str) -> AssistantMessage {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: pi_js::time::now_ms(),
+        duration_ms: None,
     }
 }
 
@@ -134,6 +135,7 @@ async fn create_abortable_session() -> (AgentSession, String) {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     (session, temp_dir)
 }
@@ -337,6 +339,7 @@ async fn should_queue_extension_origin_steering_messages_while_streaming() {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
 
@@ -472,6 +475,7 @@ async fn should_allow_prompt_after_previous_completes() {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
 
     session.prompt("First message", None).await.unwrap();
@@ -491,7 +495,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
         name: "dummy".to_string(),
         label: "dummy".to_string(),
         description: "Dummy tool".to_string(),
-        parameters: t::object([("q", t::string())]),
+        parameters: t::object([("q", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -664,6 +668,7 @@ async fn should_wait_for_queued_agent_events_before_emitting_tool_call() {
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
 
@@ -691,7 +696,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         name: "dummy".to_string(),
         label: "dummy".to_string(),
         description: "Dummy tool".to_string(),
-        parameters: t::object([("q", t::string())]),
+        parameters: t::object([("q", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -839,6 +844,7 @@ async fn should_persist_message_end_events_in_order_with_slow_extension_handlers
         session_start_event: None,
         initial_model: Some(model),
         initial_thinking_level: None,
+        default_tool_modifiers: None,
     });
     session.bind_extensions(ExtensionBindings::default()).await.unwrap();
 

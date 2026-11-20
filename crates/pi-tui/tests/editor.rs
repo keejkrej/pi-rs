@@ -16,7 +16,10 @@ use pi_tui::autocomplete::{
     CombinedAutocompleteProvider, CombinedCommand, GetSuggestionsOptions, SlashCommand,
 };
 use pi_tui::components::editor::{EditorCursor, EditorOptions, EditorTheme, SegmentData, word_wrap_line};
-use pi_tui::{Editor, TUI, TuiMainScreen, strip_terminal_sequences, visible_width};
+use pi_tui::{
+    Component, Editor, FAKE_CURSOR_START, TUI, TuiMainScreen, render_fake_cursor, strip_terminal_sequences,
+    visible_width,
+};
 use support::test_themes::default_editor_theme;
 use support::virtual_terminal::VirtualTerminal;
 
@@ -952,10 +955,8 @@ mod grapheme_aware_text_wrapping {
         // Cursor should be at end (after B)
         let lines = editor.render(width);
 
-        // The cursor (reverse video space) should be visible
-        // PORT: tui.rs skeleton predates FAKE_CURSOR_START; editor renders "\x1b[7m...\x1b[0m".
         let content_line = &lines[1];
-        assert!(content_line.contains("\x1b[7m"), "Should have fake cursor");
+        assert!(content_line.contains(FAKE_CURSOR_START), "Should have fake cursor");
 
         // Line should still be correct width
         assert_eq!(visible_width(content_line), width as i64);
@@ -1001,8 +1002,9 @@ mod grapheme_aware_text_wrapping {
             let mut lines = editor.render(width + padding_x);
             let mut content_lines = &lines[1..lines.len() - 1];
             assert_eq!(content_lines.len(), 1, "Should be 1 content line before wrap");
+            let fake_space = render_fake_cursor(" ");
             assert!(
-                content_lines[0].ends_with("\x1b[7m \x1b[0m"),
+                content_lines[0].ends_with(&fake_space),
                 "Cursor should be at end of line"
             );
 
@@ -2520,9 +2522,10 @@ mod autocomplete {
         });
         editor.set_autocomplete_provider(mock_provider);
 
-        // PORT: tui.rs skeleton predates Component::captures_viewport_input; omit capturesViewportInput asserts.
+        assert!(!editor.captures_viewport_input());
         editor.handle_input("/");
         flush_autocomplete().await;
+        assert!(editor.captures_viewport_input());
 
         editor.handle_input("\x1b[6~");
         editor.handle_input("\x1b[6~");
@@ -2530,6 +2533,7 @@ mod autocomplete {
         editor.handle_input("\r");
 
         assert_eq!(*submitted.lock().unwrap(), "/command-5");
+        assert!(!editor.captures_viewport_input());
     }
 
     #[tokio::test(start_paused = true)]

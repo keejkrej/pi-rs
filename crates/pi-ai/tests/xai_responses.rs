@@ -41,6 +41,7 @@ fn routes_every_built_in_xai_model_through_responses() {
             ModelThinkingLevel::Low,
             ModelThinkingLevel::Medium,
             ModelThinkingLevel::High,
+            ModelThinkingLevel::XHigh,
         ]
     );
     assert_eq!(
@@ -68,6 +69,7 @@ fn routes_every_built_in_xai_model_through_responses() {
             ModelThinkingLevel::Low,
             ModelThinkingLevel::Medium,
             ModelThinkingLevel::High,
+            ModelThinkingLevel::XHigh,
         ]
     );
 }

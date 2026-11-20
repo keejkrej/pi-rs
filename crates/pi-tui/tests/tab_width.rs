@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_tui::terminal::{Terminal, TerminalInputHandler, TerminalResizeHandler};
-use pi_tui::tui::{Component, OverlayOptions, SizeValue};
+use pi_tui::tui::{CURSOR_MARKER, Component, OverlayOptions, SizeValue};
 use pi_tui::tui_main_screen::TuiMainScreen;
 use pi_tui::utils::{extract_segments, normalize_terminal_output, slice_with_width, visible_width};
 
@@ -201,4 +201,28 @@ async fn tui_normalizes_tabs_before_sending_overlay_lines_to_terminal() {
     assert!(!terminal.raw_output().contains('\t'));
 
     tui.stop(None);
+}
+
+#[test]
+fn does_not_carry_cursor_markers_into_later_slices() {
+    // Regression for #9332: APC markers are positional metadata, not persistent style.
+    let line = format!("ab{CURSOR_MARKER}cdefghij");
+
+    let s1 = slice_with_width(&line, 4, 2, Some(true));
+    assert_eq!(s1.text, "ef");
+    assert_eq!(s1.width, 2);
+
+    let s2 = slice_with_width(&line, 6, 4, Some(true));
+    assert_eq!(s2.text, "ghij");
+    assert_eq!(s2.width, 4);
+}
+
+#[test]
+fn continues_to_carry_persistent_styling_into_later_slices() {
+    // Regression for #9332: excluding APC must not disable persistent SGR styling.
+    let line = "\x1b[31mabcdefghij\x1b[0m";
+
+    let s = slice_with_width(line, 4, 2, Some(true));
+    assert_eq!(s.text, "\x1b[31mef");
+    assert_eq!(s.width, 2);
 }

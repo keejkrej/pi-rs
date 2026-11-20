@@ -49,6 +49,8 @@ fn chains_markdown_transformers_with_user_message_context() {
                     message_type: MarkdownMessageType::User,
                     is_streaming: false,
                     available_width: 78,
+                    message_id: None,
+                    timestamp: None,
                 }
             );
             markdown.replace("$x^2$", "x²")

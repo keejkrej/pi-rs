@@ -1656,11 +1656,18 @@ impl SessionManagerInner {
     }
 
     fn append_entry(&mut self, entry: SessionEntry) -> Result<()> {
-        self.file_entries.push(FileEntry::from_session_entry(entry.clone()));
+        let previous_leaf_id = self.leaf_id.clone();
         let id = entry.id().to_owned();
+        self.file_entries.push(FileEntry::from_session_entry(entry.clone()));
         self.by_id.insert(id.clone(), entry.clone());
-        self.leaf_id = Some(id);
-        self.persist_entry(&entry)
+        self.leaf_id = Some(id.clone());
+        if let Err(err) = self.persist_entry(&entry) {
+            self.file_entries.pop();
+            self.by_id.shift_remove(&id);
+            self.leaf_id = previous_leaf_id;
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn get_entries(&self) -> Vec<SessionEntry> {
@@ -1800,7 +1807,7 @@ impl SessionManager {
 
     pub fn uses_default_session_dir(&self) -> bool {
         let g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        g.session_dir == get_default_session_dir_path(&g.cwd, None)
+        paths_equal(&g.session_dir, &get_default_session_dir_path(&g.cwd, None))
     }
 
     pub fn get_session_id(&self) -> String {
@@ -2395,7 +2402,7 @@ impl SessionManager {
             Some(d) => normalize_path(d, Default::default()),
             None => get_default_session_dir(cwd, None)?,
         };
-        let filter_cwd = session_dir.is_some() && dir != get_default_session_dir_path(cwd, None);
+        let filter_cwd = session_dir.is_some() && !paths_equal(&dir, &get_default_session_dir_path(cwd, None));
         let most_recent = find_most_recent_session(&dir, if filter_cwd { Some(cwd) } else { None });
         Self::init(cwd, &dir, most_recent.as_deref(), true, None, None)
     }
@@ -2480,7 +2487,7 @@ impl SessionManager {
             Some(d) => normalize_path(d, Default::default()),
             None => get_default_session_dir(cwd, None).ok()?,
         };
-        let filter_cwd = session_dir.is_some() && dir != get_default_session_dir_path(cwd, None);
+        let filter_cwd = session_dir.is_some() && !paths_equal(&dir, &get_default_session_dir_path(cwd, None));
         let resolved_cwd = resolve_path(cwd, None, PathInputOptions::default());
 
         let files = pi_js::fs::readdir(&dir).ok()?;
@@ -2513,7 +2520,7 @@ impl SessionManager {
             Some(d) => normalize_path(d, Default::default()),
             None => get_default_session_dir(cwd, None)?,
         };
-        let filter_cwd = session_dir.is_some() && dir != get_default_session_dir_path(cwd, None);
+        let filter_cwd = session_dir.is_some() && !paths_equal(&dir, &get_default_session_dir_path(cwd, None));
         let resolved_cwd = resolve_path(cwd, None, PathInputOptions::default());
         let include_session =
             |session: &SessionInfo| !filter_cwd || session_cwd_matches(Some(&session.cwd), &resolved_cwd);

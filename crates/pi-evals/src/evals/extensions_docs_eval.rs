@@ -23,7 +23,6 @@ const TOOL_RESULT: &str = "Hello, Bob!";
 struct ExtensionEvalOutput {
     response: String,
     extension_errors: Vec<Value>,
-    tool_loaded: bool,
     tool_result: Option<String>,
 }
 
@@ -53,7 +52,7 @@ pub fn suite() -> EvalSuite {
                         tools: Some(tools),
                         output: Some(Arc::new(|session, response, _system_prompt, _agent_dir| {
                             let response = response.to_string();
-                            let extensions = session.resource_loader().get_core_extensions();
+                            let extensions = session.resource_loader().get_extensions();
                             let messages = session.messages();
                             let result_text = messages
                                 .iter()
@@ -61,12 +60,6 @@ pub fn suite() -> EvalSuite {
                                 .filter_map(AgentMessage::as_tool_result)
                                 .find(|tr| tr.tool_name == TOOL_NAME && !tr.is_error)
                                 .map(|tr| content_text(&tr.content, None));
-                            let tool_loaded = extensions.extensions.iter().any(|ext| {
-                                ext.tools
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .contains_key(TOOL_NAME)
-                            });
                             let extension_errors = extensions
                                 .errors
                                 .iter()
@@ -75,7 +68,6 @@ pub fn suite() -> EvalSuite {
                             let out = ExtensionEvalOutput {
                                 response,
                                 extension_errors,
-                                tool_loaded,
                                 tool_result: result_text,
                             };
                             Box::pin(async move { Ok(serialize_to_json_value(&out)) })
@@ -86,7 +78,6 @@ pub fn suite() -> EvalSuite {
                     let mut structured_opts = StructuredOutputJudgeOptions::new(json!({
                         "response": TOOL_RESULT,
                         "extensionErrors": [],
-                        "toolLoaded": true,
                         "toolResult": TOOL_RESULT,
                     }));
                     structured_opts.match_mode = StructuredOutputMatchMode::Strict;

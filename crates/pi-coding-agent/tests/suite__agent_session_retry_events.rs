@@ -27,7 +27,7 @@ fn normalize_event_order(events: &[AgentSessionEvent]) -> Vec<String> {
         let label = match event {
             AgentSessionEvent::AgentStart => "agent_start".to_string(),
             AgentSessionEvent::AgentEnd { .. } => "agent_end".to_string(),
-            AgentSessionEvent::AgentSettled => "agent_settled".to_string(),
+            AgentSessionEvent::AgentSettled { .. } => "agent_settled".to_string(),
             AgentSessionEvent::TurnStart => "turn_start".to_string(),
             AgentSessionEvent::TurnEnd { .. } => "turn_end".to_string(),
             AgentSessionEvent::MessageStart { message } => {
@@ -533,7 +533,7 @@ async fn waits_for_the_full_loop_when_retry_recovery_produces_tool_calls() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -731,7 +731,7 @@ async fn emits_the_expected_event_order_for_a_tool_call_turn() {
         name: "echo".to_string(),
         label: "Echo".to_string(),
         description: "Echo text back".to_string(),
-        parameters: t::object([("text", t::string())]),
+        parameters: t::object([("text", t::string())]).into(),
         constrained_sampling: None,
         output_schema: None,
         execution_mode: None,
@@ -870,7 +870,7 @@ async fn emits_agent_end_for_error_responses() {
             .count(),
         1
     );
-    assert!(matches!(events.last(), Some(AgentSessionEvent::AgentSettled)));
+    assert!(matches!(events.last(), Some(AgentSessionEvent::AgentSettled { .. })));
     harness.cleanup();
 }
 
@@ -906,7 +906,7 @@ async fn emits_agent_end_for_aborted_runs_and_persists_the_aborted_assistant_mes
             .count(),
         1
     );
-    assert!(matches!(events.last(), Some(AgentSessionEvent::AgentSettled)));
+    assert!(matches!(events.last(), Some(AgentSessionEvent::AgentSettled { .. })));
     let msgs = harness.session.messages();
     match msgs.last() {
         Some(pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::Assistant(a))) => {

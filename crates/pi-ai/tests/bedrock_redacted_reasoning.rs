@@ -51,6 +51,7 @@ fn gpt_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -370,6 +371,7 @@ async fn replays_redacted_reasoning_as_reasoning_content_redacted_content() {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 2,
+                duration_ms: None,
             }),
             Message::User(UserMessage {
                 content: UserMessageContent::Text("continue".to_string()),
@@ -433,6 +435,7 @@ async fn replays_redacted_reasoning_before_tool_use_block_it_belongs_to() {
                 raw_stop_reason: None,
                 end_turn: None,
                 timestamp: 2,
+                duration_ms: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tool-1".to_string(),
@@ -443,6 +446,7 @@ async fn replays_redacted_reasoning_before_tool_use_block_it_belongs_to() {
                 nested_calls: None,
                 is_error: false,
                 timestamp: 3,
+                duration_ms: None,
             }),
         ],
         tools: None,

@@ -61,7 +61,7 @@ use crate::modes::interactive::session_share::{SessionShareDestination, ShareSes
 use crate::modes::interactive::theme::theme::{Theme, ThemeInfo};
 use crate::modes::interactive::theme::theme_controller::{InteractiveThemeController, ThemeSettingsSource};
 use crate::modes::interactive::tui_renderer::{InteractiveTui, InteractiveTuiReference};
-use crate::modes::json_event::{AgentSessionEvent, CompactionReason};
+use crate::modes::json_event::AgentSessionEvent;
 
 pub(crate) use crate::config::{
     APP_NAME, APP_TITLE, CONFIG_DIR_NAME, VERSION, get_agent_dir, get_auth_path, get_debug_log_path, get_docs_path,
@@ -195,388 +195,9 @@ impl From<crate::utils::tools_manager::ToolStatus> for ToolStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockedKind {
-    Permission,
-    Question,
-    Auth,
-}
-
-impl BlockedKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Permission => "permission",
-            Self::Question => "question",
-            Self::Auth => "auth",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockedStatus {
-    pub kind: BlockedKind,
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProgramStatusState {
-    Idle,
-    Working,
-    Blocked,
-    Done,
-    Error,
-    Clear,
-}
-
-impl ProgramStatusState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Working => "working",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-            Self::Error => "error",
-            Self::Clear => "clear",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProgramStatus {
-    pub state: ProgramStatusState,
-    pub app: Option<String>,
-    pub kind: Option<BlockedKind>,
-    pub message: Option<String>,
-}
-
-fn replace_control_chars(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| {
-            let code = c as u32;
-            if code < 32 || code == 127 { ' ' } else { c }
-        })
-        .collect()
-}
-
-fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> &str {
-    if input.len() <= max_bytes {
-        return input;
-    }
-    let mut end = 0;
-    for (idx, ch) in input.char_indices() {
-        let next = idx + ch.len_utf8();
-        if next > max_bytes {
-            break;
-        }
-        end = next;
-    }
-    &input[..end]
-}
-
-fn encode_base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[(triple & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn first_line_or_error(text: Option<&str>) -> String {
-    text.and_then(|t| t.split(['\r', '\n']).next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Error")
-        .to_string()
-}
-
-pub fn format_program_status(status: &ProgramStatus) -> String {
-    let mut pairs = vec![format!("state={}", status.state.as_str())];
-    if let Some(app) = &status.app
-        && !app.is_empty()
-        && app.len() <= 32
-        && app
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'))
-    {
-        pairs.push(format!("app={app}"));
-    }
-    if status.state == ProgramStatusState::Blocked
-        && let Some(kind) = status.kind
-    {
-        pairs.push(format!("kind={}", kind.as_str()));
-    }
-    let cleaned = replace_control_chars(status.message.as_deref().unwrap_or(""));
-    let trimmed = cleaned.trim();
-    let msg = truncate_utf8_bytes(trimmed, 2048);
-    if !msg.is_empty() {
-        pairs.push(format!("msg={}", encode_base64(msg.as_bytes())));
-    }
-    format!("\x1b]7501;{}\x1b\\", pairs.join(":"))
-}
-
-struct ProgramStatusStateInner {
-    run_active: bool,
-    compacting: bool,
-    run_result: ProgramStatus,
-    resting_status: ProgramStatus,
-    blocked: IndexMap<String, BlockedStatus>,
-    last_report_key: Option<String>,
-    last_status: Option<ProgramStatus>,
-}
-
-/// Reports interactive-mode state to the terminal (OSC 7501).
-#[derive(Clone)]
-pub struct ProgramStatusReporter {
-    get_terminal: Arc<dyn Fn() -> Arc<dyn Terminal> + Send + Sync>,
-    get_session_name: Arc<dyn Fn() -> Option<String> + Send + Sync>,
-    state: Arc<Mutex<ProgramStatusStateInner>>,
-}
-
-impl ProgramStatusReporter {
-    pub fn new(
-        get_terminal: Arc<dyn Fn() -> Arc<dyn Terminal> + Send + Sync>,
-        get_session_name: Arc<dyn Fn() -> Option<String> + Send + Sync>,
-    ) -> Self {
-        Self {
-            get_terminal,
-            get_session_name,
-            state: Arc::new(Mutex::new(ProgramStatusStateInner {
-                run_active: false,
-                compacting: false,
-                run_result: ProgramStatus {
-                    state: ProgramStatusState::Done,
-                    app: None,
-                    kind: None,
-                    message: None,
-                },
-                resting_status: ProgramStatus {
-                    state: ProgramStatusState::Idle,
-                    app: None,
-                    kind: None,
-                    message: None,
-                },
-                blocked: IndexMap::new(),
-                last_report_key: None,
-                last_status: None,
-            })),
-        }
-    }
-
-    pub fn handle_event(&self, event: &AgentSessionEvent) {
-        let should_report = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            match event {
-                AgentSessionEvent::AgentStart => {
-                    st.run_active = true;
-                    st.run_result = ProgramStatus {
-                        state: ProgramStatusState::Done,
-                        app: None,
-                        kind: None,
-                        message: None,
-                    };
-                    true
-                }
-                AgentSessionEvent::MessageEnd { message } => {
-                    if let AgentMessage::Message(pi_ai::Message::Assistant(assistant)) = message {
-                        st.run_result = if assistant.stop_reason == pi_ai::StopReason::Error {
-                            ProgramStatus {
-                                state: ProgramStatusState::Error,
-                                app: None,
-                                kind: None,
-                                message: Some(first_line_or_error(assistant.error_message.as_deref())),
-                            }
-                        } else {
-                            ProgramStatus {
-                                state: ProgramStatusState::Done,
-                                app: None,
-                                kind: None,
-                                message: None,
-                            }
-                        };
-                        true
-                    } else {
-                        false
-                    }
-                }
-                AgentSessionEvent::CompactionStart { .. } => {
-                    st.compacting = true;
-                    true
-                }
-                AgentSessionEvent::CompactionEnd {
-                    reason,
-                    aborted,
-                    error_message,
-                    ..
-                } => {
-                    st.compacting = false;
-                    if st.run_active {
-                        if *aborted {
-                            st.run_result = ProgramStatus {
-                                state: ProgramStatusState::Idle,
-                                app: None,
-                                kind: None,
-                                message: None,
-                            };
-                        } else if let Some(err) = error_message {
-                            st.run_result = ProgramStatus {
-                                state: ProgramStatusState::Error,
-                                app: None,
-                                kind: None,
-                                message: Some(first_line_or_error(Some(err))),
-                            };
-                        }
-                    } else if *aborted {
-                        st.resting_status = ProgramStatus {
-                            state: ProgramStatusState::Idle,
-                            app: None,
-                            kind: None,
-                            message: None,
-                        };
-                    } else if *reason == CompactionReason::Manual {
-                        st.resting_status = if let Some(err) = error_message {
-                            ProgramStatus {
-                                state: ProgramStatusState::Error,
-                                app: None,
-                                kind: None,
-                                message: Some(first_line_or_error(Some(err))),
-                            }
-                        } else {
-                            ProgramStatus {
-                                state: ProgramStatusState::Done,
-                                app: None,
-                                kind: None,
-                                message: None,
-                            }
-                        };
-                    }
-                    true
-                }
-                AgentSessionEvent::AgentSettled => {
-                    st.run_active = false;
-                    st.resting_status = st.run_result.clone();
-                    true
-                }
-                AgentSessionEvent::SessionInfoChanged { .. } => true,
-                _ => false,
-            }
-        };
-        if should_report {
-            self.report();
-        }
-    }
-
-    pub fn set_blocked(&self, source: &str, status: Option<BlockedStatus>) {
-        {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.blocked.shift_remove(source);
-            if let Some(status) = status {
-                st.blocked.insert(source.to_string(), status);
-            }
-        }
-        self.report();
-    }
-
-    pub fn reset(&self) {
-        {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.run_active = false;
-            st.compacting = false;
-            st.run_result = ProgramStatus {
-                state: ProgramStatusState::Done,
-                app: None,
-                kind: None,
-                message: None,
-            };
-            st.resting_status = ProgramStatus {
-                state: ProgramStatusState::Idle,
-                app: None,
-                kind: None,
-                message: None,
-            };
-        }
-        self.report();
-    }
-
-    pub fn last_status(&self) -> Option<ProgramStatus> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).last_status.clone()
-    }
-
-    pub fn report(&self) {
-        let session_name = (self.get_session_name)();
-        let status_opt = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut status = if let Some(blocked) = st.blocked.values().last() {
-                ProgramStatus {
-                    state: ProgramStatusState::Blocked,
-                    app: Some((*APP_NAME).to_string()),
-                    kind: Some(blocked.kind),
-                    message: Some(blocked.message.clone()),
-                }
-            } else if st.compacting {
-                ProgramStatus {
-                    state: ProgramStatusState::Working,
-                    app: Some((*APP_NAME).to_string()),
-                    kind: None,
-                    message: Some("Compacting context".to_string()),
-                }
-            } else if st.run_active {
-                ProgramStatus {
-                    state: ProgramStatusState::Working,
-                    app: Some((*APP_NAME).to_string()),
-                    kind: None,
-                    message: session_name,
-                }
-            } else {
-                let mut resting = st.resting_status.clone();
-                resting.app = Some((*APP_NAME).to_string());
-                if resting.state == ProgramStatusState::Done {
-                    resting.message = session_name;
-                }
-                resting
-            };
-            if status.app.is_none() {
-                status.app = Some((*APP_NAME).to_string());
-            }
-            let key = format!(
-                "{}:{}:{}:{}",
-                status.state.as_str(),
-                status.app.as_deref().unwrap_or(""),
-                status.kind.map(BlockedKind::as_str).unwrap_or(""),
-                status.message.as_deref().unwrap_or("")
-            );
-            if st.last_report_key.as_deref() == Some(key.as_str()) {
-                None
-            } else {
-                st.last_report_key = Some(key);
-                st.last_status = Some(status.clone());
-                Some(status)
-            }
-        };
-        if let Some(status) = status_opt
-            && pi_js::env::var("PI_PROGRAM_STATUS").as_deref() == Some("1")
-        {
-            let term = (self.get_terminal)();
-            term.write(&format_program_status(&status));
-        }
-    }
-}
+pub use crate::modes::interactive::program_status_reporter::{
+    BlockedKind, BlockedStatus, ProgramStatus, ProgramStatusReporter, ProgramStatusState, format_program_status,
+};
 
 /// Trait for components that support expand/collapse toggling.
 pub trait Expandable: Send + Sync {
@@ -1252,7 +873,7 @@ pub trait InteractiveRuntimeHost: Send + Sync {
     async fn dispose(&self);
 }
 
-pub(crate) fn sync_tui_keybindings(kb: &KeybindingsManager) {
+pub fn sync_tui_keybindings(kb: &KeybindingsManager) {
     pi_tui::set_keybindings(pi_tui::KeybindingsManager::new(
         KEYBINDINGS.clone(),
         Some(kb.get_user_bindings()),
@@ -1937,6 +1558,15 @@ impl InteractiveMode {
             .collect()
     }
 
+    pub fn extension_overlay_count(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extension_overlays
+            .len()
+    }
+
     pub fn signal_handler_count(&self) -> usize {
         self.inner
             .state
@@ -2571,6 +2201,7 @@ impl InteractiveModelRuntime for Arc<crate::core::model_runtime::ModelRuntime> {
         });
         let options = pi_ai::auth::types::LoginOptions {
             get_device_id: Some(Arc::new(move || device_id.clone())),
+            agent_name: None,
         };
         crate::core::model_runtime::ModelRuntime::login(self, provider_id, auth_type, wrapped, Some(options)).await?;
         Ok(())

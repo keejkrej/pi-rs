@@ -7,7 +7,7 @@ use pi_coding_agent::modes::interactive::theme::theme::{
     ThemeAppearance, ThemeBg, ThemeColor, ThemeStyle, ThemeStyleFg, ThemeToken, get_available_themes,
     get_theme_by_name, get_theme_export_colors, set_terminal_colors,
 };
-use pi_coding_agent::modes::interactive::theme::theme_json::ThemeColorValue;
+use pi_coding_agent::modes::interactive::theme::theme_schema::ThemeColorValue;
 use pi_tui::colors::ParseColorValue;
 use pi_tui::{Color, RgbColor, TerminalColors, color_to_oklch, color_to_rgb, parse_color, rgb_color};
 use pretty_assertions::assert_eq;

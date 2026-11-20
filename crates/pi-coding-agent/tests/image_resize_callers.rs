@@ -263,6 +263,7 @@ impl ExtensionContextBackend for ModelOverrideBackend {
                 },
                 result: Default::default(),
                 is_error: true,
+                duration_ms: None,
             }
         })
     }

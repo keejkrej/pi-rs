@@ -6,10 +6,13 @@ pub use crate::core::extensions::types::{MessageRenderOptions, MessageRenderer};
 pub use crate::core::messages::{CustomMessage, CustomMessageContent};
 use pi_ai::UserContentBlock;
 use pi_tui::components::box_::TuiBox;
-use pi_tui::components::markdown::DefaultTextStyle;
+use pi_tui::components::markdown::{DefaultTextStyle, MarkdownOptions};
 use pi_tui::{Component, Container, Markdown, MarkdownTheme, Spacer, Text, TuiMouseEvent, TuiMouseEventResult};
 
 use super::super::theme::theme::{ThemeBg, ThemeColor, get_markdown_theme, theme};
+use super::markdown_transform::{
+    MarkdownMessageType, MarkdownTransformer, create_markdown_transform_dynamic_with_meta,
+};
 
 struct CustomMessageState {
     custom_component: Option<Arc<dyn Component>>,
@@ -23,6 +26,9 @@ struct CustomMessageInner {
     custom_renderer: Option<MessageRenderer>,
     content_box: TuiBox,
     markdown_theme: MarkdownTheme,
+    markdown_transformers: Vec<MarkdownTransformer>,
+    message_id: Option<String>,
+    timestamp: Option<String>,
     state: Mutex<CustomMessageState>,
 }
 
@@ -39,6 +45,19 @@ impl CustomMessageComponent {
         custom_renderer: Option<MessageRenderer>,
         markdown_theme: Option<MarkdownTheme>,
         output_pad: Option<i64>,
+    ) -> Self {
+        Self::new_with_options(message, custom_renderer, markdown_theme, output_pad, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        message: CustomMessage,
+        custom_renderer: Option<MessageRenderer>,
+        markdown_theme: Option<MarkdownTheme>,
+        output_pad: Option<i64>,
+        markdown_transformers: Option<Vec<MarkdownTransformer>>,
+        message_id: Option<String>,
+        timestamp: Option<String>,
     ) -> Self {
         let pad = output_pad.unwrap_or(1);
         let container = Container::new();
@@ -57,6 +76,9 @@ impl CustomMessageComponent {
                 custom_renderer,
                 content_box,
                 markdown_theme: markdown_theme.unwrap_or_else(get_markdown_theme),
+                markdown_transformers: markdown_transformers.unwrap_or_default(),
+                message_id,
+                timestamp,
                 state: Mutex::new(CustomMessageState {
                     custom_component: None,
                     expanded: false,
@@ -158,7 +180,18 @@ impl CustomMessageComponent {
                 })),
                 ..Default::default()
             }),
-            None,
+            Some(MarkdownOptions {
+                preserve_ordered_list_markers: None,
+                preserve_backslash_escapes: None,
+                transform: Some(create_markdown_transform_dynamic_with_meta(
+                    MarkdownMessageType::Custom,
+                    Arc::new(|| false),
+                    self.inner.markdown_transformers.clone(),
+                    self.inner.message_id.clone(),
+                    self.inner.timestamp.clone(),
+                )),
+                render_latex: None,
+            }),
         )));
     }
 

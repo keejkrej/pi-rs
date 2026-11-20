@@ -20,7 +20,7 @@ use pi_coding_agent::core::extensions::types::{
 use pi_coding_agent::core::tools::with_file_mutation_queue;
 use pi_coding_agent::modes::interactive::theme::theme::get_markdown_theme;
 use pi_js::abort::AbortSignal;
-use pi_js::vendor::typebox::t;
+use pi_schema::t;
 use pi_tui::{Container, Markdown, Spacer, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -729,7 +729,7 @@ impl Extension for SubagentExtension {
                     "Which agent directories to use. Default: \"user\". Use \"both\" to include project-local agents."
                         .to_string(),
                 ),
-                r#default: Some("user".to_string()),
+                default_value: Some("user".to_string()),
             }),
         );
 
@@ -796,7 +796,7 @@ impl Extension for SubagentExtension {
             description,
             prompt_snippet: None,
             prompt_guidelines: None,
-            parameters: params_schema,
+            parameters: params_schema.into(),
             constrained_sampling: None,
             render_shell: None,
             prepare_arguments: None,

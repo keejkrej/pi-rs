@@ -37,11 +37,16 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use url::Url;
 
-use crate::api::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_schema_strict_sampling};
+use crate::api::constrained_sampling::{
+    get_json_schema_tool_parameters, prefers_json_schema_strict_sampling, resolve_json_schema_strict_sampling,
+};
 use crate::api::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamp_max_tokens_to_context, clamp_reasoning,
 };
-use crate::api::transform_messages::transform_messages;
+use crate::api::strict_tool_limits::{
+    has_exceeded_strict_tool_limits, is_strict_tool_limit_error_message, mark_strict_tool_limits_exceeded,
+};
+use crate::api::transform_messages::{split_error_tool_result_images, transform_messages};
 use crate::models::calculate_cost;
 use crate::types::{
     AnyModel, Api, ApiStreamOptions, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention,
@@ -49,14 +54,15 @@ use crate::types::{
     ProviderStreams, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
     ThinkingLevel, Tool, ToolCall, ToolChoice, ToolResultMessage, TranscriptContext, Usage, UsageCost,
 };
-use crate::utils::diagnostics::{AssistantMessageDiagnostic, append_assistant_message_diagnostic};
+use crate::utils::diagnostics::{AssistantMessageDiagnostic, DiagnosticErrorInfo, append_assistant_message_diagnostic};
 use crate::utils::error_body::{SdkErrorInfo, normalize_provider_error};
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::provider_headers_to_record;
-use crate::utils::json_parse::parse_streaming_json;
+use crate::utils::identity::{ClientIdentity, StandardUserAgentMode, UserAgentMode, get_client_version};
 use crate::utils::node_http_proxy::resolve_http_proxy_url_for_target;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::get_system_message_text;
 use crate::utils::transcript::{
     collapse_system_messages, get_current_tools, get_initial_system_message, without_initial_system_message,
@@ -262,6 +268,8 @@ impl BedrockOptions {
 
 const EMPTY_TEXT_PLACEHOLDER: &str = "<empty>";
 
+const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
 /// Matches the placeholder the Anthropic API path uses for redacted thinking.
 const REDACTED_THINKING_PLACEHOLDER: &str = "[Reasoning redacted]";
 
@@ -278,6 +286,12 @@ pub const CUSTOM_HEADERS_INTERCEPTOR_NAME: &str = "pi-ai-custom-headers";
 pub const RESPONSE_HEADERS_INTERCEPTOR_NAME: &str = "pi-ai-response-headers";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BedrockUserAgent {
+    Custom(String),
+    Pairs(Vec<(String, Option<String>)>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BedrockCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -288,6 +302,7 @@ pub struct BedrockCredentials {
 pub struct BedrockClientConfig {
     pub region: Option<String>,
     pub profile: Option<String>,
+    pub custom_user_agent: BedrockUserAgent,
     pub endpoint: Option<String>,
     pub credentials: Option<BedrockCredentials>,
     pub bearer_token: Option<String>,
@@ -353,12 +368,16 @@ pub fn override_bedrock_transport(
     BEDROCK_TRANSPORT.with(|s| s.set(Arc::new(f)))
 }
 
-#[derive(Clone, Default)]
-struct BlockScratch {
-    index: Option<i32>,
-    partial_json: Option<String>,
+/// Stream state of one open Bedrock content block, keyed by `contentBlockIndex` and kept off the content block
+/// so it never reaches partial messages.
+struct OpenBlock {
+    content_index: usize,
+    arguments: Option<ToolCallArgumentsStream>,
+    /// Encrypted reasoning deltas, joined into `thinkingSignature` when the block ends.
     redacted_chunks: Option<Vec<Vec<u8>>>,
 }
+
+type OpenBlocks = IndexMap<i32, OpenBlock>;
 
 fn non_empty_string(value: Option<&str>) -> Option<String> {
     value.filter(|s| !s.is_empty()).map(str::to_string)
@@ -509,6 +528,7 @@ fn supports_adaptive_thinking(model_id: &str, model_name: &str) -> bool {
             || s.contains("opus-5")
             || s.contains("sonnet-4-6")
             || s.contains("sonnet-5")
+            || s.contains("haiku-5")
             || s.contains("fable-5")
     })
 }
@@ -520,6 +540,21 @@ fn supports_native_xhigh_effort(model: &Model) -> bool {
             || s.contains("opus-4-8")
             || s.contains("opus-5")
             || s.contains("sonnet-5")
+            || s.contains("haiku-5")
+            || s.contains("fable-5")
+    })
+}
+
+/// Check if the model accepts `thinking.block_binding`. Opus 4.6 and Sonnet 4.6 reject it with
+/// "thinking.adaptive.block_binding: Extra inputs are not permitted".
+fn supports_thinking_block_binding(model: &Model) -> bool {
+    let candidates = get_model_match_candidates(&model.id, &model.name);
+    candidates.iter().any(|s| {
+        s.contains("opus-4-7")
+            || s.contains("opus-4-8")
+            || s.contains("opus-5")
+            || s.contains("sonnet-5")
+            || s.contains("haiku-5")
             || s.contains("fable-5")
     })
 }
@@ -593,7 +628,7 @@ fn supports_prompt_caching(model: &Model, env: Option<&ProviderEnv>) -> bool {
     }
     if candidates
         .iter()
-        .any(|s| s.contains("fable-5") || s.contains("opus-5") || s.contains("sonnet-5"))
+        .any(|s| s.contains("fable-5") || s.contains("opus-5") || s.contains("sonnet-5") || s.contains("haiku-5"))
     {
         return true;
     }
@@ -765,16 +800,20 @@ fn convert_tool_result_content(content: &[crate::types::UserContentBlock]) -> Re
     Ok(result)
 }
 
-fn make_tool_result_member(tool_result: &ToolResultMessage) -> Result<Value> {
+fn make_tool_result_member_from_content(
+    tool_call_id: &str,
+    content: &[crate::types::UserContentBlock],
+    is_error: bool,
+) -> Result<Value> {
     let mut inner = Map::new();
-    inner.insert("toolUseId".to_string(), Value::String(tool_result.tool_call_id.clone()));
+    inner.insert("toolUseId".to_string(), Value::String(tool_call_id.to_string()));
     inner.insert(
         "content".to_string(),
-        Value::Array(convert_tool_result_content(&tool_result.content)?),
+        Value::Array(convert_tool_result_content(content)?),
     );
     inner.insert(
         "status".to_string(),
-        Value::String(if tool_result.is_error { "error" } else { "success" }.to_string()),
+        Value::String(if is_error { "error" } else { "success" }.to_string()),
     );
     let mut wrapper = Map::new();
     wrapper.insert("toolResult".to_string(), Value::Object(inner));
@@ -909,19 +948,53 @@ fn convert_messages(
                 result.push(make_bedrock_message_json("assistant", content_blocks));
             }
             Message::ToolResult(tr) => {
+                // Collect all consecutive toolResult messages into a single user message;
+                // Claude rejects error tool results containing non-text, so split images out after them (#10794).
                 let mut tool_results = Vec::new();
-                tool_results.push(make_tool_result_member(tr)?);
+                let mut error_images = Vec::new();
+                let claude = is_anthropic_claude_model(model);
+                let mut push_tool_result = |tool_msg: &ToolResultMessage| -> Result<()> {
+                    let split = if claude {
+                        split_error_tool_result_images(tool_msg)
+                    } else {
+                        None
+                    };
+                    let content_slice = split
+                        .as_ref()
+                        .map(|s| s.content.as_slice())
+                        .unwrap_or(&tool_msg.content);
+                    tool_results.push(make_tool_result_member_from_content(
+                        &tool_msg.tool_call_id,
+                        content_slice,
+                        tool_msg.is_error,
+                    )?);
+                    if let Some(split) = split {
+                        error_images.push(text_block_json(split.caption));
+                        for image in split.images {
+                            let mut wrapper = Map::new();
+                            wrapper.insert(
+                                "image".to_string(),
+                                create_image_block_json(&image.mime_type, &image.data)?,
+                            );
+                            error_images.push(Value::Object(wrapper));
+                        }
+                    }
+                    Ok(())
+                };
+
+                push_tool_result(tr)?;
 
                 let mut j = i + 1;
                 while j < transformed_messages.len() {
                     if let Message::ToolResult(next_tr) = &transformed_messages[j] {
-                        tool_results.push(make_tool_result_member(next_tr)?);
+                        push_tool_result(next_tr)?;
                         j += 1;
                     } else {
                         break;
                     }
                 }
                 i = j - 1;
+                tool_results.extend(error_images);
                 result.push(make_bedrock_message_json("user", tool_results));
             }
             Message::System(_) => {
@@ -943,18 +1016,36 @@ fn convert_messages(
     Ok(result)
 }
 
+struct BedrockToolConfigResult {
+    tool_config: Option<Value>,
+    has_preferred_strict_tools: bool,
+}
+
 fn convert_tool_config(
     tools: &[Tool],
     tool_choice: Option<&BedrockToolChoice>,
     supports_strict_mode: bool,
-) -> Result<Option<Value>> {
+    disable_preferred_strict_tools: bool,
+) -> Result<BedrockToolConfigResult> {
     if tools.is_empty() || matches!(tool_choice, Some(BedrockToolChoice::None)) {
-        return Ok(None);
+        return Ok(BedrockToolConfigResult {
+            tool_config: None,
+            has_preferred_strict_tools: false,
+        });
     }
 
+    let mut has_preferred_strict_tools = false;
     let mut bedrock_tools = Vec::with_capacity(tools.len());
     for tool in tools {
-        let strict = resolve_json_schema_strict_sampling(tool, supports_strict_mode, None)?;
+        let preferred = prefers_json_schema_strict_sampling(tool);
+        let strict = if disable_preferred_strict_tools && preferred {
+            None
+        } else {
+            resolve_json_schema_strict_sampling(tool, supports_strict_mode, None)?
+        };
+        if strict == Some(true) && preferred {
+            has_preferred_strict_tools = true;
+        }
         let params = get_json_schema_tool_parameters(tool, strict)?;
         let mut input_schema = Map::new();
         input_schema.insert("json".to_string(), params.to_value());
@@ -999,7 +1090,10 @@ fn convert_tool_config(
         tool_config.insert("toolChoice".to_string(), choice);
     }
 
-    Ok(Some(Value::Object(tool_config)))
+    Ok(BedrockToolConfigResult {
+        tool_config: Some(Value::Object(tool_config)),
+        has_preferred_strict_tools,
+    })
 }
 
 fn is_lower_alnum_dash(s: &str) -> bool {
@@ -1083,6 +1177,37 @@ fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool 
     model_id.starts_with("us-gov.") || model_id.starts_with("arn:aws-us-gov:")
 }
 
+fn map_openai_gpt_effort(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+        ThinkingLevel::Max => "max",
+    }
+}
+
+fn map_openai_gpt_oss_effort(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
+    }
+}
+
+fn bedrock_user_agent(identity: Option<&ClientIdentity>) -> BedrockUserAgent {
+    let mode = identity.and_then(|id| id.user_agent.as_ref());
+    match mode {
+        Some(UserAgentMode::Custom { custom }) => BedrockUserAgent::Custom(custom.clone()),
+        Some(UserAgentMode::Standard(StandardUserAgentMode::Short)) => {
+            BedrockUserAgent::Pairs(vec![("pi".to_string(), None)])
+        }
+        Some(UserAgentMode::Standard(StandardUserAgentMode::Detailed)) | None => {
+            BedrockUserAgent::Pairs(vec![("pi".to_string(), Some(get_client_version(identity).to_string()))])
+        }
+    }
+}
+
 fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions) -> Option<Value> {
     let reasoning = options.reasoning?;
     if !model.reasoning {
@@ -1092,11 +1217,16 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
     if is_anthropic_claude_model(model) {
         // GovCloud Bedrock currently rejects the Claude thinking.display field.
         // Omit it there until the GovCloud Converse schema catches up.
-        let display = if is_gov_cloud_bedrock_target(model, options) {
+        let is_gov_cloud = is_gov_cloud_bedrock_target(model, options);
+        let display = if is_gov_cloud {
             None
         } else {
             Some(options.thinking_display.unwrap_or(BedrockThinkingDisplay::Summarized))
         };
+        // Replayed signed thinking blocks are bound to the system prompt and tools they were
+        // created with. Bedrock 400s on replay after either changes unless stale blocks are
+        // dropped, matching the Anthropic provider. Skipped on GovCloud like display.
+        let use_block_binding = !is_gov_cloud && supports_thinking_block_binding(model);
 
         let mut result = Map::new();
         let adaptive = supports_adaptive_thinking(&model.id, &model.name);
@@ -1106,6 +1236,14 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
             if let Some(d) = display {
                 thinking.insert("display".to_string(), Value::String(d.as_str().to_string()));
             }
+            if use_block_binding {
+                let mut mismatch = Map::new();
+                mismatch.insert(
+                    "prefix_mismatch_behavior".to_string(),
+                    Value::String("drop_block".to_string()),
+                );
+                thinking.insert("block_binding".to_string(), Value::Object(mismatch));
+            }
             let mut output_config = Map::new();
             output_config.insert(
                 "effort".to_string(),
@@ -1113,6 +1251,12 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
             );
             result.insert("thinking".to_string(), Value::Object(thinking));
             result.insert("output_config".to_string(), Value::Object(output_config));
+            if use_block_binding {
+                result.insert(
+                    "anthropic_beta".to_string(),
+                    Value::Array(vec![Value::String(THINKING_BINDING_CONTROLS_BETA.to_string())]),
+                );
+            }
         } else {
             let default_budget = match reasoning {
                 ThinkingLevel::Minimal => 1024,
@@ -1145,6 +1289,29 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
         }
 
         return Some(Value::Object(result));
+    }
+
+    let candidates = get_model_match_candidates(&model.id, &model.name);
+    if candidates.iter().any(|s| s.contains("gpt-oss")) {
+        let mut out = Map::new();
+        out.insert(
+            "reasoning_effort".to_string(),
+            Value::String(map_openai_gpt_oss_effort(reasoning).to_string()),
+        );
+        return Some(Value::Object(out));
+    }
+    if candidates.iter().any(|s| s.contains("gpt-")) {
+        let mapped = model
+            .thinking_level_map
+            .as_ref()
+            .and_then(|map| map.get(&thinking_level_to_model_level(reasoning)))
+            .and_then(|v| v.as_deref());
+        let effort = mapped.unwrap_or_else(|| map_openai_gpt_effort(reasoning));
+        let mut inner = Map::new();
+        inner.insert("effort".to_string(), Value::String(effort.to_string()));
+        let mut out = Map::new();
+        out.insert("reasoning".to_string(), Value::Object(inner));
+        return Some(Value::Object(out));
     }
 
     None
@@ -1208,6 +1375,7 @@ pub fn resolve_bedrock_client_config(model: &Model, options: &BedrockOptions) ->
     Ok(BedrockClientConfig {
         region,
         profile,
+        custom_user_agent: bedrock_user_agent(options.base.identity.as_ref()),
         endpoint,
         credentials,
         bearer_token: if use_bearer_token { bearer_token } else { None },
@@ -1648,7 +1816,7 @@ fn stream_error_to_json(code: Option<&str>, message: &str) -> Value {
 
 fn handle_content_block_start(
     start_val: &aws_sdk_bedrockruntime::types::ContentBlockStartEvent,
-    scratches: &mut Vec<BlockScratch>,
+    open_blocks: &mut OpenBlocks,
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
 ) {
@@ -1659,12 +1827,15 @@ fn handle_content_block_start(
     if let Ok(tu) = start.as_tool_use() {
         let block = ToolCall::new(tu.tool_use_id(), tu.name(), JsonObject::new());
         output.content.push(AssistantContentBlock::ToolCall(block));
-        scratches.push(BlockScratch {
-            index: Some(index),
-            partial_json: Some(String::new()),
-            redacted_chunks: None,
-        });
         let content_index = output.content.len() - 1;
+        open_blocks.insert(
+            index,
+            OpenBlock {
+                content_index,
+                arguments: Some(ToolCallArgumentsStream::new()),
+                redacted_chunks: None,
+            },
+        );
         stream.push(AssistantMessageEvent::ToolCallStart {
             content_index,
             partial: output.clone(),
@@ -1674,7 +1845,7 @@ fn handle_content_block_start(
 
 fn handle_content_block_delta(
     event: &aws_sdk_bedrockruntime::types::ContentBlockDeltaEvent,
-    scratches: &mut Vec<BlockScratch>,
+    open_blocks: &mut OpenBlocks,
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
 ) {
@@ -1682,19 +1853,21 @@ fn handle_content_block_delta(
     let Some(delta) = event.delta() else {
         return;
     };
-    let found_idx = scratches.iter().position(|s| s.index == Some(content_block_index));
 
     if let Ok(delta_text) = delta.as_text() {
-        let index = match found_idx {
-            Some(idx) => idx,
+        let content_index = match open_blocks.get(&content_block_index) {
+            Some(open) => open.content_index,
             None => {
                 output.content.push(AssistantContentBlock::Text(TextContent::new("")));
-                scratches.push(BlockScratch {
-                    index: Some(content_block_index),
-                    partial_json: None,
-                    redacted_chunks: None,
-                });
                 let idx = output.content.len() - 1;
+                open_blocks.insert(
+                    content_block_index,
+                    OpenBlock {
+                        content_index: idx,
+                        arguments: None,
+                        redacted_chunks: None,
+                    },
+                );
                 stream.push(AssistantMessageEvent::TextStart {
                     content_index: idx,
                     partial: output.clone(),
@@ -1702,52 +1875,54 @@ fn handle_content_block_delta(
                 idx
             }
         };
-        if let Some(AssistantContentBlock::Text(tb)) = output.content.get_mut(index) {
+        if let Some(AssistantContentBlock::Text(tb)) = output.content.get_mut(content_index) {
             tb.text.push_str(delta_text);
             stream.push(AssistantMessageEvent::TextDelta {
-                content_index: index,
+                content_index,
                 delta: delta_text.clone(),
                 partial: output.clone(),
             });
         }
     } else if let Ok(tool_use_delta) = delta.as_tool_use() {
-        if let Some(index) = found_idx
-            && let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(index)
+        if let Some(open) = open_blocks.get_mut(&content_block_index)
+            && let Some(args) = open.arguments.as_mut()
+            && let Some(AssistantContentBlock::ToolCall(tc)) = output.content.get_mut(open.content_index)
         {
             let input_delta = tool_use_delta.input();
-            let buf = scratches[index].partial_json.get_or_insert_with(String::new);
-            buf.push_str(input_delta);
-            tc.arguments = parse_streaming_json(Some(buf.as_str()));
+            tc.arguments = args.append(input_delta);
+            let content_index = open.content_index;
             stream.push(AssistantMessageEvent::ToolCallDelta {
-                content_index: index,
+                content_index,
                 delta: input_delta.to_string(),
                 partial: output.clone(),
             });
         }
     } else if let Ok(rc_delta) = delta.as_reasoning_content() {
-        let thinking_index = match found_idx {
-            Some(idx) => idx,
-            None => {
-                output.content.push(AssistantContentBlock::Thinking(ThinkingContent {
-                    thinking: String::new(),
-                    thinking_signature: Some(String::new()),
-                    redacted: None,
-                }));
-                scratches.push(BlockScratch {
-                    index: Some(content_block_index),
-                    partial_json: None,
-                    redacted_chunks: None,
-                });
-                let idx = output.content.len() - 1;
-                stream.push(AssistantMessageEvent::ThinkingStart {
+        if !open_blocks.contains_key(&content_block_index) {
+            output.content.push(AssistantContentBlock::Thinking(ThinkingContent {
+                thinking: String::new(),
+                thinking_signature: Some(String::new()),
+                redacted: None,
+            }));
+            let idx = output.content.len() - 1;
+            open_blocks.insert(
+                content_block_index,
+                OpenBlock {
                     content_index: idx,
-                    partial: output.clone(),
-                });
-                idx
-            }
-        };
+                    arguments: None,
+                    redacted_chunks: None,
+                },
+            );
+            stream.push(AssistantMessageEvent::ThinkingStart {
+                content_index: idx,
+                partial: output.clone(),
+            });
+        }
 
-        if let Some(AssistantContentBlock::Thinking(th)) = output.content.get_mut(thinking_index) {
+        if let Some(open) = open_blocks.get_mut(&content_block_index)
+            && let Some(AssistantContentBlock::Thinking(th)) = output.content.get_mut(open.content_index)
+        {
+            let thinking_index = open.content_index;
             let mut emitted_delta: Option<String> = None;
             match rc_delta {
                 ReasoningContentBlockDelta::Text(text) => {
@@ -1770,10 +1945,7 @@ fn handle_content_block_delta(
                             th.thinking.push_str(REDACTED_THINKING_PLACEHOLDER);
                             emitted_delta = Some(REDACTED_THINKING_PLACEHOLDER.to_string());
                         }
-                        scratches[thinking_index]
-                            .redacted_chunks
-                            .get_or_insert_with(Vec::new)
-                            .push(bytes.to_vec());
+                        open.redacted_chunks.get_or_insert_with(Vec::new).push(bytes.to_vec());
                     }
                 }
                 _ => {}
@@ -1789,71 +1961,82 @@ fn handle_content_block_delta(
     }
 }
 
-/// Encodes buffered encrypted reasoning into `thinking_signature` and drops the scratch
-/// buffer, mirroring TS `flushRedactedContent`.
-fn flush_redacted_content(block: &mut AssistantContentBlock, scratch: &mut BlockScratch) {
-    let AssistantContentBlock::Thinking(th) = block else {
+/// Encodes buffered encrypted reasoning into `thinking_signature`. The chunks stay in the stream state,
+/// never on the block.
+fn flush_redacted_content(open: &mut OpenBlock, output: &mut AssistantMessage) {
+    let Some(AssistantContentBlock::Thinking(th)) = output.content.get_mut(open.content_index) else {
         return;
     };
-    let Some(chunks) = scratch.redacted_chunks.take() else {
+    let Some(chunks) = open.redacted_chunks.take() else {
         return;
     };
     th.thinking_signature = Some(encode_redacted_content(&chunks));
 }
 
-/// Strips every streaming scratch field. Runs from the terminal paths as well as
-/// `contentBlockStop`, because a stream can settle without stopping each block.
-fn finalize_streaming_block(block: &mut AssistantContentBlock, scratch: &mut BlockScratch) {
-    scratch.index = None;
-    scratch.partial_json = None;
-    flush_redacted_content(block, scratch);
+/// Ends the stream state of blocks a stream settled without stopping.
+fn flush_open_blocks(open_blocks: &mut OpenBlocks, output: &mut AssistantMessage) {
+    for open in open_blocks.values_mut() {
+        flush_redacted_content(open, output);
+    }
+    open_blocks.clear();
 }
 
 fn handle_content_block_stop(
     event: &aws_sdk_bedrockruntime::types::ContentBlockStopEvent,
-    scratches: &mut [BlockScratch],
+    open_blocks: &mut OpenBlocks,
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
 ) {
-    let Some(index) = scratches
-        .iter()
-        .position(|s| s.index == Some(event.content_block_index()))
-    else {
+    let Some(mut open) = open_blocks.swap_remove(&event.content_block_index()) else {
         return;
     };
-    scratches[index].index = None;
+    let index = open.content_index;
+    enum StopKind {
+        Text(String),
+        Thinking(String),
+        ToolCall(ToolCall),
+    }
 
-    let Some(block) = output.content.get_mut(index) else {
-        return;
+    let kind = match output.content.get_mut(index) {
+        Some(AssistantContentBlock::Text(tb)) => StopKind::Text(tb.text.clone()),
+        Some(AssistantContentBlock::Thinking(_)) => {
+            flush_redacted_content(&mut open, output);
+            let content = match output.content.get(index) {
+                Some(AssistantContentBlock::Thinking(th)) => th.thinking.clone(),
+                _ => String::new(),
+            };
+            StopKind::Thinking(content)
+        }
+        Some(AssistantContentBlock::ToolCall(tc)) => {
+            if let Some(args) = open.arguments.take() {
+                let parsed = args.finish();
+                tc.arguments = parsed.arguments;
+                tc.arguments_error = parsed.arguments_error;
+            }
+            StopKind::ToolCall(tc.clone())
+        }
+        None => return,
     };
-    match block {
-        AssistantContentBlock::Text(tb) => {
-            let content = tb.text.clone();
+
+    match kind {
+        StopKind::Text(content) => {
             stream.push(AssistantMessageEvent::TextEnd {
                 content_index: index,
                 content,
                 partial: output.clone(),
             });
         }
-        AssistantContentBlock::Thinking(_) => {
-            flush_redacted_content(block, &mut scratches[index]);
-            let content = match block {
-                AssistantContentBlock::Thinking(th) => th.thinking.clone(),
-                _ => String::new(),
-            };
+        StopKind::Thinking(content) => {
             stream.push(AssistantMessageEvent::ThinkingEnd {
                 content_index: index,
                 content,
                 partial: output.clone(),
             });
         }
-        AssistantContentBlock::ToolCall(tc) => {
-            let partial_json = scratches[index].partial_json.take();
-            tc.arguments = parse_streaming_json(partial_json.as_deref());
-            let finalized = tc.clone();
+        StopKind::ToolCall(tool_call) => {
             stream.push(AssistantMessageEvent::ToolCallEnd {
                 content_index: index,
-                tool_call: finalized,
+                tool_call,
                 partial: output.clone(),
             });
         }
@@ -2242,16 +2425,14 @@ async fn race_abort<T>(
 }
 
 fn finalize_terminal_failure(
-    scratches: &mut [BlockScratch],
+    open_blocks: &mut OpenBlocks,
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
     signal: Option<&AbortSignal>,
     failure: &BedrockFailureInfo,
     response_request_id: Option<&str>,
 ) {
-    for (block, scratch) in output.content.iter_mut().zip(scratches.iter_mut()) {
-        finalize_streaming_block(block, scratch);
-    }
+    flush_open_blocks(open_blocks, output);
     let aborted = signal.is_some_and(AbortSignal::aborted);
     output.stop_reason = if aborted {
         StopReason::Aborted
@@ -2267,6 +2448,20 @@ fn finalize_terminal_failure(
         error: output.clone(),
     });
     stream.end(None);
+}
+
+fn should_retry_without_strict_tools(
+    signal: Option<&AbortSignal>,
+    disable_preferred_strict_tools: bool,
+    has_preferred_strict_tools: bool,
+    failure: &BedrockFailureInfo,
+) -> bool {
+    !signal.is_some_and(AbortSignal::aborted)
+        && !disable_preferred_strict_tools
+        && has_preferred_strict_tools
+        && failure.is_service_exception
+        && failure.error_code.as_deref() == Some("ValidationException")
+        && is_strict_tool_limit_error_message(&failure.message)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2305,8 +2500,9 @@ async fn run_bedrock_stream(
         raw_stop_reason: None,
         end_turn: None,
         timestamp: time::now_ms(),
+        duration_ms: None,
     };
-    let mut scratches: Vec<BlockScratch> = Vec::new();
+    let mut open_blocks: OpenBlocks = IndexMap::new();
     let mut response_request_id: Option<String> = None;
 
     let step: std::result::Result<(), BedrockFailureInfo> = async {
@@ -2338,163 +2534,255 @@ async fn run_bedrock_stream(
         let initial_system_prompt =
             get_initial_system_message(&normalized_context.messages).map(get_system_message_text);
 
-        let mut cmd_map = Map::new();
-        cmd_map.insert("modelId".to_string(), Value::String(model.id.clone()));
-        cmd_map.insert(
-            "messages".to_string(),
-            Value::Array(
-                convert_messages(&normalized_context, &model, cache_retention, options.base.env.as_ref())
-                    .map_err(BedrockFailureInfo::from)?,
-            ),
-        );
-        if let Some(sys) = build_system_prompt(
-            initial_system_prompt.as_deref(),
-            &model,
-            cache_retention,
-            options.base.env.as_ref(),
-        ) {
-            cmd_map.insert("system".to_string(), Value::Array(sys));
-        }
-        let mut ic_map = Map::new();
-        if let Some(max_tok) = inference_max_tokens {
-            ic_map.insert("maxTokens".to_string(), Value::from(max_tok));
-        }
-        if let Some(temp) = options.base.temperature {
-            if let Some(num) = serde_json::Number::from_f64(temp) {
-                ic_map.insert("temperature".to_string(), Value::Number(num));
-            }
-        }
-        cmd_map.insert("inferenceConfig".to_string(), Value::Object(ic_map));
+        let mut sdk_client: Option<BedrockRuntimeClient> = None;
 
-        let current_tools = get_current_tools(&normalized_context.messages);
-        if let Some(tc) = convert_tool_config(&current_tools, options.tool_choice.as_ref(), supports_strict_mode)
-            .map_err(BedrockFailureInfo::from)?
-        {
-            cmd_map.insert("toolConfig".to_string(), tc);
-        }
-        if let Some(additional) = build_additional_model_request_fields(&model, &options) {
-            cmd_map.insert("additionalModelRequestFields".to_string(), additional);
-        }
-        if let Some(req_meta) = &options.request_metadata {
-            let mut meta_map = Map::new();
-            for (k, v) in req_meta {
-                meta_map.insert(k.clone(), Value::String(v.clone()));
-            }
-            cmd_map.insert("requestMetadata".to_string(), Value::Object(meta_map));
-        }
+        let mut disable_preferred_strict_tools = has_exceeded_strict_tool_limits(options.base.session_id.as_deref());
+        let mut override_response: Option<BedrockTransportStreamResponse> = None;
+        let mut sdk_response: Option<aws_sdk_bedrockruntime::operation::converse_stream::ConverseStreamOutput> = None;
 
-        let mut command_input = Value::Object(cmd_map);
-        if let Some(on_payload) = &options.base.on_payload {
-            let next = on_payload(command_input.clone(), &model)
-                .await
-                .map_err(BedrockFailureInfo::from)?;
-            if let Some(replaced) = next {
-                command_input = replaced;
-            }
-        }
-
-        let input = value_to_converse_stream_input(&command_input).map_err(BedrockFailureInfo::from)?;
-
-        if let Some(transport) = transport_override {
-            let outcome = race_abort(
-                options.base.signal.as_ref(),
-                transport(BedrockTransportRequest {
-                    client_config,
-                    custom_headers,
-                    interceptor_names,
-                    command_input,
-                    input,
-                }),
+        loop {
+            let current_tools = get_current_tools(&normalized_context.messages);
+            let tool_cfg = convert_tool_config(
+                &current_tools,
+                options.tool_choice.as_ref(),
+                supports_strict_mode,
+                disable_preferred_strict_tools,
             )
-            .await
-            .map_err(BedrockFailureInfo::from)?
             .map_err(BedrockFailureInfo::from)?;
 
-            match outcome {
-                BedrockTransportOutcome::Error(err) => return Err(err.into()),
-                BedrockTransportOutcome::Stream(resp) => {
-                    response_request_id = normalize_diagnostic_value(resp.request_id.as_deref());
-                    if let Some(on_response) = &options.base.on_response {
-                        if let Some(status) = resp.http_status {
-                            let mut headers = resp.headers.clone();
-                            if headers.is_empty()
-                                && let Some(req_id) = &resp.request_id
-                            {
-                                headers.insert("x-amzn-requestid".to_string(), req_id.clone());
-                            }
-                            on_response(ProviderResponse { status, headers }, &model)
+            let mut cmd_map = Map::new();
+            cmd_map.insert("modelId".to_string(), Value::String(model.id.clone()));
+            cmd_map.insert(
+                "messages".to_string(),
+                Value::Array(
+                    convert_messages(&normalized_context, &model, cache_retention, options.base.env.as_ref())
+                        .map_err(BedrockFailureInfo::from)?,
+                ),
+            );
+            if let Some(sys) = build_system_prompt(
+                initial_system_prompt.as_deref(),
+                &model,
+                cache_retention,
+                options.base.env.as_ref(),
+            ) {
+                cmd_map.insert("system".to_string(), Value::Array(sys));
+            }
+            let mut ic_map = Map::new();
+            if let Some(max_tok) = inference_max_tokens {
+                ic_map.insert("maxTokens".to_string(), Value::from(max_tok));
+            }
+            if let Some(temp) = options.base.temperature
+                && let Some(num) = serde_json::Number::from_f64(temp)
+            {
+                ic_map.insert("temperature".to_string(), Value::Number(num));
+            }
+            cmd_map.insert("inferenceConfig".to_string(), Value::Object(ic_map));
+
+            if let Some(tc) = tool_cfg.tool_config {
+                cmd_map.insert("toolConfig".to_string(), tc);
+            }
+            if let Some(additional) = build_additional_model_request_fields(&model, &options) {
+                cmd_map.insert("additionalModelRequestFields".to_string(), additional);
+            }
+            if let Some(req_meta) = &options.request_metadata {
+                let mut meta_map = Map::new();
+                for (k, v) in req_meta {
+                    meta_map.insert(k.clone(), Value::String(v.clone()));
+                }
+                cmd_map.insert("requestMetadata".to_string(), Value::Object(meta_map));
+            }
+
+            let mut command_input = Value::Object(cmd_map);
+            if let Some(on_payload) = &options.base.on_payload {
+                let next = on_payload(command_input.clone(), &model)
+                    .await
+                    .map_err(BedrockFailureInfo::from)?;
+                if let Some(replaced) = next {
+                    command_input = replaced;
+                }
+            }
+
+            let input = value_to_converse_stream_input(&command_input).map_err(BedrockFailureInfo::from)?;
+
+            if let Some(transport) = &transport_override {
+                let outcome = race_abort(
+                    options.base.signal.as_ref(),
+                    transport(BedrockTransportRequest {
+                        client_config: client_config.clone(),
+                        custom_headers: custom_headers.clone(),
+                        interceptor_names: interceptor_names.clone(),
+                        command_input,
+                        input,
+                    }),
+                )
+                .await
+                .map_err(BedrockFailureInfo::from)?
+                .map_err(BedrockFailureInfo::from)?;
+
+                match outcome {
+                    BedrockTransportOutcome::Error(err) => {
+                        let failure = BedrockFailureInfo::from(err);
+                        if should_retry_without_strict_tools(
+                            options.base.signal.as_ref(),
+                            disable_preferred_strict_tools,
+                            tool_cfg.has_preferred_strict_tools,
+                            &failure,
+                        ) {
+                            disable_preferred_strict_tools = true;
+                            mark_strict_tool_limits_exceeded(options.base.session_id.as_deref());
+                            let mut details = JsonObject::new();
+                            details.insert(
+                                "reason".to_string(),
+                                JsonValue::String("strict_tool_limits_exceeded".to_string()),
+                            );
+                            append_assistant_message_diagnostic(
+                                &mut output,
+                                AssistantMessageDiagnostic {
+                                    r#type: "bedrock_strict_tools_fallback".to_string(),
+                                    timestamp: time::now_ms(),
+                                    error: Some(DiagnosticErrorInfo {
+                                        name: None,
+                                        message: failure.message,
+                                        stack: None,
+                                        code: None,
+                                    }),
+                                    details: Some(details),
+                                },
+                            );
+                            continue;
+                        }
+                        return Err(failure);
+                    }
+                    BedrockTransportOutcome::Stream(resp) => {
+                        override_response = Some(resp);
+                        break;
+                    }
+                }
+            } else {
+                check_aborted(options.base.signal.as_ref()).map_err(BedrockFailureInfo::from)?;
+                if sdk_client.is_none() {
+                    sdk_client = Some(
+                        build_bedrock_sdk_client(&client_config, custom_headers.as_ref(), response_capture.clone())
+                            .await,
+                    );
+                }
+                let client = sdk_client
+                    .as_ref()
+                    .expect("sdk_client initialized when transport_override is None");
+                let send_fut = client
+                    .converse_stream()
+                    .set_model_id(input.model_id)
+                    .set_messages(input.messages)
+                    .set_system(input.system)
+                    .set_inference_config(input.inference_config)
+                    .set_tool_config(input.tool_config)
+                    .set_additional_model_request_fields(input.additional_model_request_fields)
+                    .set_request_metadata(input.request_metadata)
+                    .send();
+
+                let send_res = race_abort(options.base.signal.as_ref(), send_fut)
+                    .await
+                    .map_err(BedrockFailureInfo::from)?;
+
+                let mut observed_raw_response = false;
+                if let Some(slot) = &response_capture
+                    && let Some(raw_resp) = take_captured_response(slot)
+                    && let Some(on_response) = &options.base.on_response
+                {
+                    observed_raw_response = true;
+                    on_response(raw_resp, &model).await.map_err(BedrockFailureInfo::from)?;
+                }
+
+                match send_res.map_err(failure_from_converse_stream_sdk_error) {
+                    Ok(response) => {
+                        let meta_req_id = response_request_id_from_output(&response);
+                        response_request_id = normalize_diagnostic_value(meta_req_id.as_deref());
+                        if !observed_raw_response
+                            && let Some(on_response) = &options.base.on_response
+                            && let Some(req_id) = meta_req_id
+                        {
+                            let mut headers = IndexMap::new();
+                            headers.insert("x-amzn-requestid".to_string(), req_id);
+                            on_response(ProviderResponse { status: 200, headers }, &model)
                                 .await
                                 .map_err(BedrockFailureInfo::from)?;
                         }
+                        sdk_response = Some(response);
+                        break;
                     }
-
-                    for item in resp.events {
-                        check_aborted(options.base.signal.as_ref()).map_err(BedrockFailureInfo::from)?;
-                        match item {
-                            BedrockTransportEvent::Sdk(ev) => {
-                                if let Some(on_event) = &options.base.on_provider_stream_event {
-                                    let raw = converse_stream_output_to_json(&ev);
-                                    on_event(&raw, &model).await.map_err(BedrockFailureInfo::from)?;
-                                }
-                                process_converse_event(&ev, &model, &mut scratches, &mut output, &stream)
-                                    .map_err(BedrockFailureInfo::from)?;
-                            }
-                            BedrockTransportEvent::StreamError(stream_err) => {
-                                if let Some(on_event) = &options.base.on_provider_stream_event {
-                                    let raw =
-                                        stream_error_to_json(stream_err.error_code.as_deref(), &stream_err.message);
-                                    on_event(&raw, &model).await.map_err(BedrockFailureInfo::from)?;
-                                }
-                                return Err(stream_err.into());
-                            }
+                    Err(failure) => {
+                        if should_retry_without_strict_tools(
+                            options.base.signal.as_ref(),
+                            disable_preferred_strict_tools,
+                            tool_cfg.has_preferred_strict_tools,
+                            &failure,
+                        ) {
+                            disable_preferred_strict_tools = true;
+                            mark_strict_tool_limits_exceeded(options.base.session_id.as_deref());
+                            let mut details = JsonObject::new();
+                            details.insert(
+                                "reason".to_string(),
+                                JsonValue::String("strict_tool_limits_exceeded".to_string()),
+                            );
+                            append_assistant_message_diagnostic(
+                                &mut output,
+                                AssistantMessageDiagnostic {
+                                    r#type: "bedrock_strict_tools_fallback".to_string(),
+                                    timestamp: time::now_ms(),
+                                    error: Some(DiagnosticErrorInfo {
+                                        name: None,
+                                        message: failure.message,
+                                        stack: None,
+                                        code: None,
+                                    }),
+                                    details: Some(details),
+                                },
+                            );
+                            continue;
                         }
+                        return Err(failure);
                     }
                 }
             }
-        } else {
-            check_aborted(options.base.signal.as_ref()).map_err(BedrockFailureInfo::from)?;
-            let client =
-                build_bedrock_sdk_client(&client_config, custom_headers.as_ref(), response_capture.clone()).await;
+        }
 
-            let send_fut = client
-                .converse_stream()
-                .set_model_id(input.model_id)
-                .set_messages(input.messages)
-                .set_system(input.system)
-                .set_inference_config(input.inference_config)
-                .set_tool_config(input.tool_config)
-                .set_additional_model_request_fields(input.additional_model_request_fields)
-                .set_request_metadata(input.request_metadata)
-                .send();
-
-            let send_res = race_abort(options.base.signal.as_ref(), send_fut)
-                .await
-                .map_err(BedrockFailureInfo::from)?;
-
-            let mut observed_raw_response = false;
-            if let Some(slot) = &response_capture
-                && let Some(raw_resp) = take_captured_response(slot)
-                && let Some(on_response) = &options.base.on_response
+        if let Some(resp) = override_response {
+            response_request_id = normalize_diagnostic_value(resp.request_id.as_deref());
+            if let Some(on_response) = &options.base.on_response
+                && let Some(status) = resp.http_status
             {
-                observed_raw_response = true;
-                on_response(raw_resp, &model).await.map_err(BedrockFailureInfo::from)?;
-            }
-
-            let mut response = send_res.map_err(failure_from_converse_stream_sdk_error)?;
-            let meta_req_id = response_request_id_from_output(&response);
-            response_request_id = normalize_diagnostic_value(meta_req_id.as_deref());
-
-            if !observed_raw_response
-                && let Some(on_response) = &options.base.on_response
-                && let Some(req_id) = meta_req_id
-            {
-                let mut headers = IndexMap::new();
-                headers.insert("x-amzn-requestid".to_string(), req_id);
-                on_response(ProviderResponse { status: 200, headers }, &model)
+                let mut headers = resp.headers.clone();
+                if headers.is_empty()
+                    && let Some(req_id) = &resp.request_id
+                {
+                    headers.insert("x-amzn-requestid".to_string(), req_id.clone());
+                }
+                on_response(ProviderResponse { status, headers }, &model)
                     .await
                     .map_err(BedrockFailureInfo::from)?;
             }
 
+            for item in resp.events {
+                check_aborted(options.base.signal.as_ref()).map_err(BedrockFailureInfo::from)?;
+                match item {
+                    BedrockTransportEvent::Sdk(ev) => {
+                        if let Some(on_event) = &options.base.on_provider_stream_event {
+                            let raw = converse_stream_output_to_json(&ev);
+                            on_event(&raw, &model).await.map_err(BedrockFailureInfo::from)?;
+                        }
+                        process_converse_event(&ev, &model, &mut open_blocks, &mut output, &stream)
+                            .map_err(BedrockFailureInfo::from)?;
+                    }
+                    BedrockTransportEvent::StreamError(stream_err) => {
+                        if let Some(on_event) = &options.base.on_provider_stream_event {
+                            let raw = stream_error_to_json(stream_err.error_code.as_deref(), &stream_err.message);
+                            on_event(&raw, &model).await.map_err(BedrockFailureInfo::from)?;
+                        }
+                        return Err(stream_err.into());
+                    }
+                }
+            }
+        } else if let Some(mut response) = sdk_response {
             loop {
                 let next_res = race_abort(options.base.signal.as_ref(), response.stream.recv())
                     .await
@@ -2506,7 +2794,7 @@ async fn run_bedrock_stream(
                             let raw = converse_stream_output_to_json(&ev);
                             on_event(&raw, &model).await.map_err(BedrockFailureInfo::from)?;
                         }
-                        process_converse_event(&ev, &model, &mut scratches, &mut output, &stream)
+                        process_converse_event(&ev, &model, &mut open_blocks, &mut output, &stream)
                             .map_err(BedrockFailureInfo::from)?;
                     }
                     Ok(None) => break,
@@ -2538,9 +2826,7 @@ async fn run_bedrock_stream(
             )));
         }
 
-        for (block, scratch) in output.content.iter_mut().zip(scratches.iter_mut()) {
-            finalize_streaming_block(block, scratch);
-        }
+        flush_open_blocks(&mut open_blocks, &mut output);
         stream.push(AssistantMessageEvent::Done {
             reason: output.stop_reason,
             message: output.clone(),
@@ -2552,7 +2838,7 @@ async fn run_bedrock_stream(
 
     if let Err(failure) = step {
         finalize_terminal_failure(
-            &mut scratches,
+            &mut open_blocks,
             &mut output,
             &stream,
             options.base.signal.as_ref(),
@@ -2572,7 +2858,7 @@ fn response_request_id_from_output(
 fn process_converse_event(
     item: &ConverseStreamOutput,
     model: &Model,
-    scratches: &mut Vec<BlockScratch>,
+    open_blocks: &mut OpenBlocks,
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
 ) -> Result<()> {
@@ -2588,13 +2874,13 @@ fn process_converse_event(
             });
         }
         ConverseStreamOutput::ContentBlockStart(ev) => {
-            handle_content_block_start(ev, scratches, output, stream);
+            handle_content_block_start(ev, open_blocks, output, stream);
         }
         ConverseStreamOutput::ContentBlockDelta(ev) => {
-            handle_content_block_delta(ev, scratches, output, stream);
+            handle_content_block_delta(ev, open_blocks, output, stream);
         }
         ConverseStreamOutput::ContentBlockStop(ev) => {
-            handle_content_block_stop(ev, scratches, output, stream);
+            handle_content_block_stop(ev, open_blocks, output, stream);
         }
         ConverseStreamOutput::MessageStop(ev) => {
             let reason = ev.stop_reason();

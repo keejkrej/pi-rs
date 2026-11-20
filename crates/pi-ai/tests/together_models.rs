@@ -23,7 +23,7 @@ fn registers_default_kimi_k3_model_via_openai_completions() {
 
     assert_eq!(model.input, vec![ModelInput::Text, ModelInput::Image]);
     assert_eq!(model.context_window, 1_048_576);
-    assert_eq!(model.max_tokens, 131_072);
+    assert_eq!(model.max_tokens, 1_048_576);
     assert_eq!(model.cost.input, 3.0);
     assert_eq!(model.cost.output, 15.0);
     assert_eq!(model.cost.cache_read, 0.3);
@@ -68,29 +68,16 @@ fn models_together_reasoning_controls_from_api_surface() {
     expected_ds.insert(ModelThinkingLevel::Minimal, None);
     expected_ds.insert(ModelThinkingLevel::Low, None);
     expected_ds.insert(ModelThinkingLevel::Medium, None);
+    expected_ds.insert(ModelThinkingLevel::High, Some("high".to_owned()));
+    expected_ds.insert(ModelThinkingLevel::XHigh, None);
     assert_eq!(deepseek.thinking_level_map.as_ref(), Some(&expected_ds));
     let ds_compat = deepseek
         .compat
         .as_ref()
         .and_then(ModelCompat::as_openai_completions)
         .expect("deepseek compat");
-    assert_eq!(ds_compat.supports_reasoning_effort, Some(false));
+    assert_eq!(ds_compat.supports_reasoning_effort, Some(true));
     assert_eq!(ds_compat.thinking_format, Some(ThinkingFormat::Together));
-
-    let minimax = get_model("together", "MiniMaxAI/MiniMax-M2.7").expect("MiniMax-M2.7");
-    let mut expected_mm = IndexMap::new();
-    expected_mm.insert(ModelThinkingLevel::Off, None);
-    expected_mm.insert(ModelThinkingLevel::Minimal, None);
-    expected_mm.insert(ModelThinkingLevel::Low, None);
-    expected_mm.insert(ModelThinkingLevel::Medium, None);
-    assert_eq!(minimax.thinking_level_map.as_ref(), Some(&expected_mm));
-    let mm_compat = minimax
-        .compat
-        .as_ref()
-        .and_then(ModelCompat::as_openai_completions)
-        .expect("minimax compat");
-    assert_eq!(mm_compat.thinking_format, None);
-    assert_eq!(mm_compat.supports_reasoning_effort, Some(false));
 }
 
 #[test]

@@ -152,12 +152,10 @@ async fn rejects_an_rpc_prompt_while_manual_compaction_is_in_progress() {
             .iter()
             .any(|ev| matches!(ev, pi_coding_agent::modes::json_event::AgentSessionEvent::AgentStart))
     );
-    assert!(
-        !harness
-            .events()
-            .iter()
-            .any(|ev| matches!(ev, pi_coding_agent::modes::json_event::AgentSessionEvent::AgentSettled))
-    );
+    assert!(!harness.events().iter().any(|ev| matches!(
+        ev,
+        pi_coding_agent::modes::json_event::AgentSessionEvent::AgentSettled { .. }
+    )));
 
     harness.cleanup();
 }

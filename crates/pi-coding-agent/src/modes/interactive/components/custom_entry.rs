@@ -11,6 +11,7 @@ use super::super::theme::theme::theme;
 struct CustomEntryState {
     custom_component: Option<Arc<dyn Component>>,
     expanded: bool,
+    output_pad: i64,
 }
 
 struct CustomEntryInner {
@@ -29,6 +30,10 @@ pub struct CustomEntryComponent {
 
 impl CustomEntryComponent {
     pub fn new(entry: CustomEntry, renderer: EntryRenderer) -> Self {
+        Self::new_with_output_pad(entry, renderer, None)
+    }
+
+    pub fn new_with_output_pad(entry: CustomEntry, renderer: EntryRenderer, output_pad: Option<i64>) -> Self {
         let comp = Self {
             inner: Arc::new(CustomEntryInner {
                 container: Container::new(),
@@ -37,6 +42,7 @@ impl CustomEntryComponent {
                 state: Mutex::new(CustomEntryState {
                     custom_component: None,
                     expanded: false,
+                    output_pad: output_pad.unwrap_or(1),
                 }),
             }),
         };
@@ -53,6 +59,21 @@ impl CustomEntryComponent {
             let mut state = self.inner.state.lock().unwrap();
             if state.expanded != expanded {
                 state.expanded = expanded;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.rebuild();
+        }
+    }
+
+    pub fn set_output_pad(&self, output_pad: i64) {
+        let changed = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.output_pad != output_pad {
+                state.output_pad = output_pad;
                 true
             } else {
                 false

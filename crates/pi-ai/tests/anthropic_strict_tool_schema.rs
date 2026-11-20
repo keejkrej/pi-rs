@@ -36,6 +36,7 @@ fn create_model() -> Model {
             supports_strict_tools: Some(true),
             ..Default::default()
         })),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -139,6 +140,29 @@ async fn only_sends_the_full_input_schema_for_strict_json_schema_tools() {
         Some(&json!({ "anyOf": [{ "type": "number" }, { "type": "null" }] }))
     );
     assert_eq!(input_schema.get("title"), Some(&json!("StrictLookupInput")));
+}
+
+// https://github.com/earendil-works/pi/issues/9557
+#[tokio::test]
+async fn keeps_root_definitions_in_non_strict_schemas_so_property_refs_resolve() {
+    let settings = json!({
+        "type": "object",
+        "properties": { "verbose": { "type": "boolean" } }
+    });
+    for (ref_str, key, val) in [
+        ("#/$defs/Settings", "$defs", json!({ "Settings": settings.clone() })),
+        ("#/definitions/Settings", "definitions", json!({ "Settings": settings })),
+    ] {
+        let mut raw = json!({
+            "type": "object",
+            "properties": { "settings": { "$ref": ref_str } },
+            "required": ["settings"],
+        });
+        raw.as_object_mut().unwrap().insert(key.to_owned(), val.clone());
+        let tool = capture_first_tool(create_tool(Schema::from(raw.clone()), None)).await;
+        assert!(tool.get("strict").is_none());
+        assert_eq!(tool.get("input_schema"), Some(&raw));
+    }
 }
 
 #[tokio::test]

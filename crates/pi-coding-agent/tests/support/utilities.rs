@@ -117,6 +117,7 @@ pub fn assistant_msg(text: &str) -> AgentMessage {
         error_message: None,
         raw_stop_reason: None,
         end_turn: None,
+        duration_ms: None,
         timestamp: pi_js::time::now_ms(),
     }))
 }

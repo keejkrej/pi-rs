@@ -25,6 +25,8 @@ static INLINE_MARKDOWN_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?\[[^\]\n]+\]\()([^\s)]+)((?:\s+[^)]*)?\))").expect("valid regex"));
 static VERSION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"##\s+\[?(\d+)\.(\d+)\.(\d+)\]?").expect("valid regex"));
+static LEADING_VERSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^v?(\d+)\.(\d+)\.(\d+)").expect("valid regex"));
 
 fn entry_version(entry: &ChangelogEntry) -> String {
     format!("{}.{}.{}", entry.major, entry.minor, entry.patch)
@@ -211,26 +213,33 @@ pub fn compare_versions(v1: &ChangelogEntry, v2: &ChangelogEntry) -> i64 {
     v1.patch - v2.patch
 }
 
-/// Get entries newer than `last_version`.
-pub fn get_new_entries(entries: &[ChangelogEntry], last_version: &str) -> Vec<ChangelogEntry> {
-    let mut parts = last_version.split('.');
-    let parse_part = |s: Option<&str>| -> i64 {
-        s.and_then(|v| {
-            let n = pi_js::num::number(v);
-            if n.is_finite() { Some(n as i64) } else { None }
-        })
-        .unwrap_or(0)
-    };
+/// Get entries newer than `last_version`, or `None` when `last_version` has no `major.minor.patch` to compare against.
+pub fn parse_new_entries(entries: &[ChangelogEntry], last_version: &str) -> Option<Vec<ChangelogEntry>> {
+    // Read only the leading major.minor.patch, like the changelog headings, so a prerelease such as
+    // 0.1.5-20261020.7 counts as 0.1.5 and its notes are not shown again on every launch (#11703).
+    let caps = LEADING_VERSION_RE
+        .captures(pi_js::str16::trim(last_version))
+        .ok()
+        .flatten()?;
     let last = ChangelogEntry {
-        major: parse_part(parts.next()),
-        minor: parse_part(parts.next()),
-        patch: parse_part(parts.next()),
+        major: caps.get(1)?.as_str().parse::<i64>().ok()?,
+        minor: caps.get(2)?.as_str().parse::<i64>().ok()?,
+        patch: caps.get(3)?.as_str().parse::<i64>().ok()?,
         content: String::new(),
     };
 
-    entries
-        .iter()
-        .filter(|entry| compare_versions(entry, &last) > 0)
-        .cloned()
-        .collect()
+    Some(
+        entries
+            .iter()
+            .filter(|entry| compare_versions(entry, &last) > 0)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Get entries newer than `last_version`.
+///
+/// PORT: Preserves `Vec` return for existing callers; see [`parse_new_entries`] for strict `Option` parsing.
+pub fn get_new_entries(entries: &[ChangelogEntry], last_version: &str) -> Vec<ChangelogEntry> {
+    parse_new_entries(entries, last_version).unwrap_or_default()
 }

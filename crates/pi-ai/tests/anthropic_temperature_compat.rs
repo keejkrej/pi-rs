@@ -40,6 +40,7 @@ fn make_custom_model(compat: Option<AnthropicMessagesCompat>) -> Model {
         headers: None,
         sampling_params: None,
         compat: compat.map(ModelCompat::AnthropicMessages),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -95,6 +96,12 @@ async fn omits_temperature_for_claude_opus_4_8() {
 #[tokio::test]
 async fn omits_default_temperature_for_claude_opus_4_7() {
     let payload = capture_payload(&get_model("anthropic", "claude-opus-4-7").unwrap(), Some(1.0)).await;
+    assert!(payload.get("temperature").is_none());
+}
+
+#[tokio::test]
+async fn omits_temperature_for_claude_sonnet_5() {
+    let payload = capture_payload(&get_model("anthropic", "claude-sonnet-5").unwrap(), Some(0.0)).await;
     assert!(payload.get("temperature").is_none());
 }
 

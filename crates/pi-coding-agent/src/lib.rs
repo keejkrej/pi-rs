@@ -26,7 +26,7 @@ pub use crate::config::{
 };
 pub use crate::core::agent_session::{
     AgentSession, AgentSessionConfig, AgentSessionEvent, AgentSessionEventListener, ModelCycleResult, ParsedSkillBlock,
-    PromptOptions, SessionStats, parse_skill_block,
+    PromptOptions, SessionStats, mark_runtime_stream_function, parse_skill_block,
 };
 pub use crate::core::auth_storage::{AuthStorage, ReadOnlyAuthStorage, read_stored_credential};
 pub use crate::core::cache_warmer::{CacheWarmingDecision, CacheWarmingStatus};
@@ -43,35 +43,38 @@ pub use crate::core::event_bus::{EventBus, EventBusController, create_event_bus}
 pub use crate::core::extensions::types::{
     AfterProviderResponseEvent, AgentActivityOutcome, AgentBeforeSettleEvent, AgentBeforeSettleEventResult,
     AgentEndEvent, AgentSettledEvent, AgentStartEvent, AppKeybinding, AutocompleteProviderFactory,
-    BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
-    BeforeProviderRequestEventResult, BoundaryContextPreview, BoundaryResult, BuildSystemPromptOptions,
-    CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult, CompactOptions, ContextEvent, ContextEventResult,
-    ContextUsage, ContextWithSystemEvent, EntryRenderOptions, EntryRenderer, ExecOptions, ExecResult,
-    ExecuteToolOptions, Extension, ExtensionAPI, ExtensionActions, ExtensionCommandContext,
+    BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeAgentStartMessageType, BeforeProviderHeadersEvent,
+    BeforeProviderRequestEvent, BeforeProviderRequestEventResult, BoundaryContextPreview, BoundaryResult,
+    BuildSystemPromptOptions, CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult, CompactOptions, ContextEvent,
+    ContextEventResult, ContextUsage, ContextWithSystemEvent, EntryRenderOptions, EntryRenderer, ExecOptions,
+    ExecResult, ExecuteToolOptions, Extension, ExtensionAPI, ExtensionActions, ExtensionCommandContext,
     ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent,
     ExtensionFactory, ExtensionFlag, ExtensionRuntime, ExtensionShortcut, ExtensionToolContext, ExtensionUIContext,
     ExtensionUIDialogOptions, ExtensionVirtualModel, ExtensionWidgetOptions, InlineExtension, InputEvent,
-    InputEventResult, InputSource, KeybindingsManager, LoadExtensionsResult, MarkdownTransformContext,
-    MarkdownTransformer, McpServersChangeEvent, MessageEndEvent, MessageEndEventResult, MessageRenderOptions,
-    MessageRenderer, MessageStartEvent, MessageUpdateEvent, ModelSelectEvent, ModelSelectSource,
-    NormalizedBuildSystemPromptOptions, ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision,
-    ProjectTrustEventResult, ProjectTrustHandler, ProviderConfig, ProviderModelConfig, ProviderStreamEvent,
-    RegisteredCommand, RegisteredTool, ResolvedCommand, ResourcesDiscoverEvent, ResourcesDiscoverResult,
-    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult,
-    SessionBeforeSwitchEvent, SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult,
-    SessionBoundaryDraft, SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
-    SessionShutdownEvent, SessionStartEvent, SessionTreeEvent, SlashCommandInfo, SlashCommandSource, SourceInfo,
-    TerminalInputHandler, ThinkingLevelSelectEvent, ToolAnnotations, ToolCallEvent, ToolCallEventResult,
-    ToolDefinition, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolExposure, ToolInfo,
-    ToolLoadoutChanges, ToolNamespace, ToolRenderResultOptions, ToolResultEvent, ToolResultEventResult, TurnEndEvent,
+    InputEventResult, InputSource, KeybindingHints, KeybindingsManager, LoadExtensionsResult, MarkdownMessageType,
+    MarkdownTransformContext, MarkdownTransformer, MarkdownTransformerOptions, MarkdownTransformerRegistration,
+    McpServersChangeEvent, MessageEndEvent, MessageEndEventResult, MessageRenderOptions, MessageRenderer,
+    MessageStartEvent, MessageUpdateEvent, ModelSelectEvent, ModelSelectSource, NormalizedBuildSystemPromptOptions,
+    ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision, ProjectTrustEventResult, ProjectTrustHandler,
+    ProviderConfig, ProviderModelConfig, ProviderStreamEvent, RegisteredCommand, RegisteredTool, ResolvedCommand,
+    ResourcesDiscoverEvent, ResourcesDiscoverResult, SessionBeforeCompactEvent, SessionBeforeCompactResult,
+    SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
+    SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionBoundaryDraft, SessionCompactEvent,
+    SessionCompactFailedEvent, SessionInfoChangedEvent, SessionShutdownEvent, SessionStartEvent, SessionTreeEvent,
+    SlashCommandInfo, SlashCommandSource, SourceInfo, TerminalInputHandler, ThinkingLevelSelectEvent, ToolAnnotations,
+    ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolExecutionEndEvent, ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent, ToolExposure, ToolInfo, ToolLoadoutChanges, ToolNamespace, ToolReachScope,
+    ToolRenderResultOptions, ToolRendererResolver, ToolRenderers, ToolResultEvent, ToolResultEventResult, TurnEndEvent,
     TurnEndEventResult, TurnStartEvent, UserBashEvent, UserBashEventResult,
 };
 pub use crate::core::model_registry::ModelRegistry;
 pub use crate::core::model_runtime::{
     CreateModelRuntimeOptions, ModelRuntime, ModelRuntimeAuthOverrides, ModelRuntimeCreateOptions,
 };
+pub use crate::core::package_manager::PackageInstallFailure;
 pub use crate::core::resource_loader::{
     DefaultResourceLoader, DefaultResourceLoaderOptions, ResourceDiagnostic, ResourceLoader,
+    format_package_install_warning,
 };
 pub use crate::core::sdk::{
     AgentSessionRuntime, AgentSessionRuntimeDiagnostic, AgentSessionServices, CreateAgentSessionFromServicesOptions,

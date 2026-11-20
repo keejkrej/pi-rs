@@ -148,6 +148,8 @@ async fn logs_in_with_device_authorization_flow() {
             verification_uri: "https://www.kimi.com/code?user_code=ABCD-1234".to_owned(),
             interval_seconds: Some(5.0),
             expires_in_seconds: Some(600.0),
+            copy_code_on_confirm: None,
+            open_browser_on_confirm: None,
         }]
     );
 

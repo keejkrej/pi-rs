@@ -219,7 +219,8 @@ pub fn resolve_vertex_request_config(model: &Model, options: &GoogleVertexOption
         _ => API_VERSION.to_owned(),
     };
     let base_url_resource_scope = custom_base_url.as_ref().map(|_| RESOURCE_SCOPE_COLLECTION);
-    let headers = build_google_headers(model.headers.as_ref(), options.base.headers.as_ref()).unwrap_or_default();
+    let headers =
+        build_google_headers(model, options.base.headers.as_ref(), options.base.identity.as_ref()).unwrap_or_default();
 
     if let Some(key) = api_key {
         Ok(VertexRequestConfig {

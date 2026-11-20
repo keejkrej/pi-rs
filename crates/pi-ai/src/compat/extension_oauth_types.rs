@@ -34,6 +34,10 @@ pub struct OAuthDeviceCodeInfo {
     pub user_code: String,
     pub verification_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_browser_on_confirm: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_code_on_confirm: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub interval_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_seconds: Option<f64>,

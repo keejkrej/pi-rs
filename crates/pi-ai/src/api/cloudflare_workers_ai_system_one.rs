@@ -1,11 +1,15 @@
 //! Port of packages/ai/src/api/cloudflare-workers-ai-system-one.ts
 
 use serde_json::{Map, Value, json};
+use url::Url;
 
 use pi_js::{Error, Result};
 
-use crate::api::system_one_shared::{SystemOneTransport, SystemOneWireRequest, classify_system_one};
-use crate::types::{ClassifierContext, ClassifierModel, ClassifierOptions, ClassifierResult};
+use crate::api::classifier_shared::is_record;
+use crate::api::system_one_shared::{
+    ResolvedSystemOneCompat, SystemOneTransport, SystemOneWireRequest, classify_system_one, serialize_to_value,
+};
+use crate::types::{ClassifierContext, ClassifierModel, ClassifierOptions, ClassifierResult, SystemOneImageInput};
 
 const LABEL: &str = "Cloudflare Workers AI";
 
@@ -42,39 +46,56 @@ impl SystemOneTransport for CloudflareWorkersAISystemOneTransport {
         LABEL
     }
 
-    fn url(&self, model: &ClassifierModel) -> Result<String> {
+    fn detect_compat(&self, model: &ClassifierModel) -> ResolvedSystemOneCompat {
+        ResolvedSystemOneCompat {
+            image_input: if model.id.starts_with("@cf/cloudflare/clef") {
+                SystemOneImageInput::Images
+            } else {
+                SystemOneImageInput::Assets
+            },
+            send_image_opt_in_header: false,
+        }
+    }
+
+    fn url(&self, model: &ClassifierModel) -> Result<Url> {
         let base = format!("{}/", model.base_url.trim_end_matches('/'));
-        let parsed = url::Url::parse(&base).map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
-        let joined = parsed
+        let parsed = Url::parse(&base).map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
+        parsed
             .join("run")
-            .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))?;
-        Ok(joined.to_string())
+            .map_err(|e| Error::js("TypeError", format!("Invalid URL: {e}")))
     }
 
     fn payload(&self, model: &ClassifierModel, request: SystemOneWireRequest) -> Value {
         json!({
             "model": model.id,
-            "input": request,
+            "input": serialize_to_value(&request),
         })
     }
 
     fn output<'a>(&self, body: &'a Value) -> Result<&'a Map<String, Value>> {
+        if !is_record(body) {
+            return Err(Error::msg(format!("{LABEL} returned an unexpected response")));
+        }
         let Some(root) = body.as_object() else {
             return Err(Error::msg(format!("{LABEL} returned an unexpected response")));
         };
         if root.get("success") == Some(&Value::Bool(false)) {
             return Err(Error::msg(cloudflare_error_message(root.get("errors"))));
         }
-        let Some(run) = root.get("result").and_then(Value::as_object) else {
+        let Some(result) = root.get("result").and_then(Value::as_object) else {
             return Err(Error::msg(format!("{LABEL} returned an unexpected response")));
         };
-        if run.get("state").and_then(Value::as_str) != Some("Completed") {
+        if result.contains_key("answers") {
+            return Ok(result);
+        }
+        if result.get("state").and_then(Value::as_str) != Some("Completed") {
             return Err(Error::msg(format!(
                 "{LABEL} run did not complete (state: {})",
-                format_state_value(run.get("state"))
+                format_state_value(result.get("state"))
             )));
         }
-        run.get("result")
+        result
+            .get("result")
             .and_then(Value::as_object)
             .ok_or_else(|| Error::msg(format!("{LABEL} returned an unexpected response")))
     }

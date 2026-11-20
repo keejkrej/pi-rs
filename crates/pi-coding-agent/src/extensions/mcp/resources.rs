@@ -7,10 +7,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::core::extensions::types::{ToolAnnotations, ToolDefinition};
+pub use crate::core::mcp_servers::{LIST_MCP_RESOURCE_TEMPLATES_TOOL, LIST_MCP_RESOURCES_TOOL, READ_MCP_RESOURCE_TOOL};
 use crate::extensions::mcp::config::McpExposure;
 use crate::extensions::mcp::tools::{
-    ConvertMcpResultOptions, McpToolDetails, READ_MCP_RESOURCE_TOOL, limit_mcp_content, to_model_content,
-    to_tool_exposure,
+    ConvertMcpResultOptions, McpToolDetails, limit_mcp_content, to_model_content, to_tool_exposure,
 };
 use pi_agent_core::AgentToolResult;
 use pi_ai::{TextContent, UserContentBlock};
@@ -21,9 +21,6 @@ use pi_mcp::{
     ContentBlock, ListResourceTemplatesResult, ListResourcesResult, McpRequestOptions, ReadResourceResult, Resource,
     ResourceTemplate,
 };
-
-pub const LIST_MCP_RESOURCES_TOOL: &str = "list_mcp_resources";
-pub const LIST_MCP_RESOURCE_TEMPLATES_TOOL: &str = "list_mcp_resource_templates";
 
 #[async_trait]
 pub trait McpResourceServer: Send + Sync {
@@ -43,7 +40,7 @@ pub trait McpResourceServer: Send + Sync {
 static MCP_APP_MIME_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"(?i);\s*profile\s*=\s*"?mcp-app"?"#).expect("valid mcp-app mime regex"));
 
-pub fn is_mcp_app_resource(uri: Option<&str>, mime_type: Option<&str>) -> bool {
+fn is_mcp_app_resource(uri: Option<&str>, mime_type: Option<&str>) -> bool {
     uri.is_some_and(|u| u.starts_with("ui://")) || mime_type.is_some_and(|m| MCP_APP_MIME_RE.is_match(m))
 }
 

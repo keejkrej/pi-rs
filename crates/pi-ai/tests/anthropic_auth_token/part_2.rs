@@ -127,6 +127,7 @@ fn anthropic_model() -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -387,12 +388,7 @@ async fn lets_explicit_request_headers_override_anthropic_auth_token() {
 #[tokio::test]
 async fn uses_pis_user_agent_by_default_for_anthropic_messages_requests() {
     let captured = Arc::new(Mutex::new(None));
-    let expected_ua = format!(
-        "pi ({} {}; {})",
-        pi_js::env::platform(),
-        pi_js::env::os_release(),
-        pi_js::env::arch()
-    );
+    let expected_ua = pi_ai::utils::identity::format_user_agent(None);
 
     stream(
         &anthropic_model(),

@@ -47,6 +47,7 @@ fn vllm_model(compat: OpenAICompletionsCompat) -> Model {
         headers: None,
         sampling_params: None,
         compat: Some(ModelCompat::OpenAICompletions(compat)),
+        sampling_params_by_thinking_level: None,
     }
 }
 

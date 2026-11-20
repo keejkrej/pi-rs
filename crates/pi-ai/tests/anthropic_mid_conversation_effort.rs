@@ -45,6 +45,7 @@ fn managed_model(provider: &str) -> Model {
             supports_mid_convo_effort: Some(true),
             ..Default::default()
         })),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn assistant(model: &Model, level: Option<&str>) -> Message {
         raw_stop_reason: None,
         end_turn: None,
         timestamp: 1,
+        duration_ms: None,
     })
 }
 
@@ -83,7 +85,12 @@ fn user(text: &str, timestamp: i64) -> Message {
     })
 }
 
-async fn capture(model: &Model, context: Context, effort: Option<AnthropicEffort>) -> (Value, AssistantMessage) {
+async fn capture_with(
+    model: &Model,
+    context: Context,
+    effort: Option<AnthropicEffort>,
+    thinking_enabled: Option<bool>,
+) -> (Value, AssistantMessage) {
     let payload = Arc::new(Mutex::new(None));
     let p_c = payload.clone();
 
@@ -103,7 +110,7 @@ async fn capture(model: &Model, context: Context, effort: Option<AnthropicEffort
                 })),
                 ..Default::default()
             },
-            thinking_enabled: Some(true),
+            thinking_enabled,
             effort,
             ..Default::default()
         }),
@@ -113,6 +120,10 @@ async fn capture(model: &Model, context: Context, effort: Option<AnthropicEffort
 
     let captured = payload.lock().unwrap().take().expect("Expected payload capture");
     (captured, message)
+}
+
+async fn capture(model: &Model, context: Context, effort: Option<AnthropicEffort>) -> (Value, AssistantMessage) {
+    capture_with(model, context, effort, Some(true)).await
 }
 
 fn effort_messages(payload: &Value) -> Vec<Value> {
@@ -168,8 +179,8 @@ async fn reconstructs_an_exact_historical_marker_prefix_and_appends_the_current_
             "output_config": { "effort": "high" }
         }))
     );
-    assert_eq!(first_payload.get("output_config"), Some(&json!({ "effort": "high" })));
-    assert_eq!(second_payload.get("output_config"), Some(&json!({ "effort": "high" })));
+    assert_eq!(first_payload.get("output_config"), Some(&json!({ "effort": "low" })));
+    assert_eq!(second_payload.get("output_config"), Some(&json!({ "effort": "low" })));
     assert_eq!(
         second_payload.get("thinking"),
         Some(&json!({
@@ -405,5 +416,136 @@ fn generates_exact_model_and_transport_gates() {
     assert!(matches!(
         &opus5.compat,
         Some(ModelCompat::AnthropicMessages(c)) if c.allowed_fallback_models.is_none()
+    ));
+}
+
+#[tokio::test]
+async fn sends_plain_disabled_thinking_without_effort_when_off_is_supported() {
+    let mut model = managed_model("anthropic");
+    let mut level_map: ThinkingLevelMap = IndexMap::new();
+    level_map.insert(ModelThinkingLevel::Minimal, None);
+    level_map.insert(ModelThinkingLevel::Low, Some("low".to_owned()));
+    level_map.insert(ModelThinkingLevel::Medium, Some("medium".to_owned()));
+    level_map.insert(ModelThinkingLevel::High, Some("high".to_owned()));
+    level_map.insert(ModelThinkingLevel::Max, Some("max".to_owned()));
+    model.thinking_level_map = Some(level_map);
+
+    let (payload, message) = capture_with(
+        &model,
+        Context {
+            system_prompt: None,
+            messages: vec![
+                user("one", 1),
+                assistant(&model, Some("low")),
+                user("two", 2),
+                assistant(&model, Some("medium")),
+                user("three", 3),
+            ],
+            tools: None,
+        },
+        None,
+        Some(false),
+    )
+    .await;
+    assert_eq!(payload.get("thinking"), Some(&json!({ "type": "disabled" })));
+    assert!(payload.get("output_config").is_none());
+    assert!(effort_messages(&payload).is_empty());
+    assert!(message.provider_thinking_level.is_none());
+}
+
+#[tokio::test]
+async fn keeps_adaptive_thinking_when_off_is_unsupported() {
+    let (payload, message) = capture_with(
+        &managed_model("anthropic"),
+        Context {
+            system_prompt: None,
+            messages: vec![user("one", 1)],
+            tools: None,
+        },
+        None,
+        Some(false),
+    )
+    .await;
+    assert_eq!(
+        payload
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(Value::as_str),
+        Some("adaptive")
+    );
+    assert_eq!(
+        effort_messages(&payload),
+        vec![json!({ "role": "system", "content": [], "output_config": { "effort": "high" } })]
+    );
+    assert_eq!(message.provider_thinking_level.as_deref(), Some("high"));
+}
+
+#[test]
+fn supports_off_only_on_managed_models_that_accept_disabled_thinking() {
+    for id in ["claude-opus-5", "claude-haiku-5-5"] {
+        let model = get_model("anthropic", id).unwrap();
+        assert!(matches!(
+            &model.compat,
+            Some(ModelCompat::AnthropicMessages(c)) if c.supports_mid_convo_effort == Some(true)
+        ));
+        assert!(
+            !matches!(
+                model
+                    .thinking_level_map
+                    .as_ref()
+                    .and_then(|m| m.get(&ModelThinkingLevel::Off)),
+                Some(None)
+            ),
+            "{id} should not set thinking_level_map.off to null"
+        );
+    }
+    for id in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+    ] {
+        let model = get_model("anthropic", id).unwrap();
+        assert_eq!(
+            model
+                .thinking_level_map
+                .as_ref()
+                .and_then(|m| m.get(&ModelThinkingLevel::Off))
+                .cloned(),
+            Some(None)
+        );
+    }
+}
+
+#[test]
+fn gates_fable_5_2_like_fable_5_1_and_keeps_only_fallbacks_that_accept_per_message_effort() {
+    let direct = get_model("anthropic", "claude-fable-5-2").unwrap();
+    assert!(matches!(
+        &direct.compat,
+        Some(ModelCompat::AnthropicMessages(c))
+            if c.supports_mid_convo_effort == Some(true) && c.supports_mid_convo_system_messages == Some(true)
+    ));
+    let level_map = direct.thinking_level_map.as_ref().unwrap();
+    assert_eq!(
+        level_map.get(&ModelThinkingLevel::XHigh),
+        Some(&Some("xhigh".to_owned()))
+    );
+    assert_eq!(level_map.get(&ModelThinkingLevel::Max), Some(&Some("max".to_owned())));
+    let fallbacks: Vec<&str> = match &direct.compat {
+        Some(ModelCompat::AnthropicMessages(c)) => c
+            .allowed_fallback_models
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|f| f.model.as_str())
+            .collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(fallbacks, vec!["claude-opus-5"]);
+
+    let or_fable = get_model("openrouter", "anthropic/claude-fable-5.2").unwrap();
+    assert!(matches!(
+        &or_fable.compat,
+        Some(ModelCompat::AnthropicMessages(c)) if c.supports_mid_convo_effort == Some(true)
     ));
 }

@@ -137,6 +137,7 @@ fn chat_model(provider: &str, id: &str) -> Model {
         headers: None,
         sampling_params: None,
         compat: None,
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -998,6 +999,7 @@ async fn builtin_models_exposes_openrouter_image_models_under_the_openrouter_pro
         credentials: None,
         models_store: None,
         auth_context: Some(Arc::new(InjectedOpenRouterAuthCtx)),
+        identity: None,
     }));
     let provider = models.get_provider("openrouter").unwrap();
     let images = models.get_models_of_type(ModelType::Image, Some("openrouter"));

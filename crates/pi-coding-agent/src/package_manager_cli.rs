@@ -1,14 +1,15 @@
 //! Port of packages/coding-agent/src/package-manager-cli.ts
 
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use pi_ai::models::ModelsRefreshOptions;
+use indexmap::IndexSet;
+use pi_ai::models::{ModelsError, ModelsErrorCode, ModelsRefreshOptions};
 use pi_js::abort::AbortController;
 use pi_js::console::{error as console_error, log as console_log, stdout_write};
-use pi_js::env::{cwd as env_cwd, pid as env_pid, platform as env_platform, var as env_var};
+use pi_js::env::{cwd as env_cwd, pid as env_pid, platform as env_platform, var as env_var, vars as env_vars};
 use pi_js::fetch::{Headers, Request, fetch};
 use pi_js::fs::{exists, mkdir, mkdtemp, read_to_string, readdir, rename, rm, write_file};
 use pi_js::path::{join, resolve};
@@ -20,20 +21,23 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::config::{
-    APP_NAME, CONFIG_DIR_NAME, InstallMethod, PACKAGE_NAME, SelfUpdateCommand, SelfUpdatePackageTarget, VERSION,
-    detect_install_method, get_agent_dir, get_package_dir, get_self_update_command,
-    get_self_update_unavailable_instruction,
+    APP_NAME, CONFIG_DIR_NAME, InstallChange, InstallMethod, PACKAGE_NAME, SelfUpdateCommand, SelfUpdatePackageTarget,
+    VERSION, detect_install_change, detect_install_method, get_agent_dir, get_configured_self_update_argv,
+    get_package_dir, get_self_update_command, get_self_update_unavailable_instruction,
+    make_configured_self_update_command,
 };
 use crate::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
 use crate::core::package_manager::{
-    DefaultPackageManager, PackageCommandRunner, PackageManagerOptions, ProgressEventType, ResolvedPaths,
+    DefaultPackageManager, PackageCommandRunner, PackageManagerOptions, ProgressAction, ProgressEventType,
+    ResolvedPaths, is_offline_mode_enabled,
 };
 use crate::core::project_trust::{
     AppMode, ProjectTrustContext, ProjectTrustExtensionHost, ProjectTrustUi, ResolveProjectTrustedOptions,
     RunnerProjectTrustExtensionHost, resolve_project_trusted,
 };
 use crate::core::resource_loader::{
-    CoreExtensionLoaderHost, DefaultResourceLoader, DefaultResourceLoaderOptions, InlineExtension, is_builtin_extension,
+    CoreExtensionLoaderHost, DefaultResourceLoader, DefaultResourceLoaderOptions, InlineExtension,
+    format_package_install_warning, is_builtin_extension,
 };
 use crate::core::settings_manager::{SettingsManager, SettingsManagerCreateOptions, SettingsScope};
 use crate::core::trust_manager::{ProjectTrustStore, has_trust_requiring_project_resources};
@@ -42,6 +46,7 @@ use crate::utils::child_process::{
 };
 use crate::utils::paths::{canonicalize_path, get_cwd_relative_path};
 use crate::utils::pi_user_agent::get_pi_user_agent;
+use crate::utils::text::strip_bom;
 use crate::utils::version_check::{
     VersionCheckOptions, format_version_check_error, get_latest_pi_release, is_newer_package_version,
 };
@@ -198,7 +203,7 @@ fn get_active_managed_install_root() -> Result<Option<String>> {
             )));
         }
     };
-    let parsed: Value = match serde_json::from_str(&raw) {
+    let parsed: Value = match serde_json::from_str(strip_bom(&raw)) {
         Ok(v) => v,
         Err(_) => {
             return Err(Error::msg(format!(
@@ -248,10 +253,11 @@ pub trait CliProcessRunner: Send + Sync {
 }
 
 async fn run_managed_npm_ci(stage_dir: &str, runner: Option<&dyn CliProcessRunner>) -> Result<()> {
+    // No age-gate override: the release lockfile pins every package, so npm never
+    // resolves versions and a configured min-release-age does not apply.
     let args = [
         "ci",
         "--ignore-scripts",
-        "--min-release-age=0",
         "--omit=dev",
         "--include=optional",
         "--no-fund",
@@ -351,6 +357,21 @@ fn activate_managed_release(managed_root: &str, version: &str) -> Result<()> {
     write_res
 }
 
+// Keep the active release and the one running this update, which other open
+// sessions likely still use and which allows rolling back by editing current-version.
+fn prune_managed_releases(managed_root: &str, active_version: &str) {
+    let releases_root = join(&[managed_root, "releases"]);
+    let Ok(entries) = readdir(&releases_root) else {
+        return;
+    };
+    for entry in entries {
+        if entry == active_version || entry == *VERSION || !MANAGED_RELEASE_VERSION_RE.is_match(&entry) {
+            continue;
+        }
+        let _ = rm(&join(&[&releases_root, &entry]), true, true);
+    }
+}
+
 fn cleanup_managed_staging(managed_root: &str) {
     let staging_root = join(&[managed_root, "staging"]);
     if let Ok(entries) = readdir(&staging_root) {
@@ -438,6 +459,7 @@ async fn run_managed_self_update_inner(
     if exists(&release_dir) {
         verify_managed_release(&release_dir, version, runner)?;
         activate_managed_release(managed_root, version)?;
+        prune_managed_releases(managed_root, version);
         return Ok(());
     }
 
@@ -458,6 +480,7 @@ async fn run_managed_self_update_inner(
     verify_managed_release(&created_stage, version, runner)?;
     rename(&created_stage, &release_dir)?;
     activate_managed_release(managed_root, version)?;
+    prune_managed_releases(managed_root, version);
     Ok(())
 }
 
@@ -875,15 +898,26 @@ async fn refresh_model_catalogs(agent_dir: &str) -> Result<()> {
             return Err(Error::msg("Model catalog refresh timed out."));
         }
         if !result.errors.is_empty() {
-            let details: Vec<String> = result
-                .errors
-                .iter()
-                .map(|(provider, error)| format!("{provider}: {error}"))
-                .collect();
-            return Err(Error::msg(format!(
-                "Could not refresh model catalogs: {}",
-                details.join("; ")
-            )));
+            let mut failures = Vec::new();
+            for (provider, error) in &result.errors {
+                // A stale login only affects that provider's catalog; the others are still worth refreshing.
+                if let Some(merr) = error.downcast_ref::<ModelsError>()
+                    && merr.code == ModelsErrorCode::OAuth
+                {
+                    console_error(&yellow(&format!(
+                        "Warning: skipped model catalog for {provider}: {}\nLog in again with `{} auth login {provider}` to refresh it.",
+                        merr.message, *APP_NAME
+                    )));
+                } else {
+                    failures.push(format!("{provider}: {error}"));
+                }
+            }
+            if !failures.is_empty() {
+                return Err(Error::msg(format!(
+                    "Could not refresh model catalogs: {}",
+                    failures.join("; ")
+                )));
+            }
         }
         Ok(())
     }
@@ -906,6 +940,9 @@ fn print_self_update_unavailable(
         *PACKAGE_NAME,
         npm_command,
         Some(update_package_target),
+    ));
+    console_error(&format!(
+        "To make `{app} update` run your own update command, set PI_SELF_UPDATE_COMMAND or the selfUpdateCommand setting."
     ));
 
     let fallback_entry = std::env::args().nth(1);
@@ -1047,6 +1084,76 @@ async fn run_self_update(command: &SelfUpdateCommand, runner: Option<&dyn CliPro
         }
     }
     Ok(())
+}
+
+/// Run the user-configured self-update command, then report the version installed on disk.
+async fn run_configured_self_update(
+    argv: &[String],
+    plan: &SelfUpdatePlan,
+    runner: Option<&dyn CliProcessRunner>,
+    columns: Option<usize>,
+) {
+    let command = make_configured_self_update_command(argv, &plan.package_name, &plan.version);
+    if let Some(ref note) = plan.note {
+        print_self_update_note(note, columns);
+    }
+    if let Err(err) = run_self_update(&command, runner).await {
+        console_error(&red(&format!("Error: {err}")));
+        set_process_exit_code(1);
+        return;
+    }
+    // Exit code 0 does not prove an update. Wrappers such as mise or Nix install each version into a
+    // new directory and leave this installation untouched, so fall back to the pi on PATH.
+    let change = detect_install_change(None);
+    let installed_version = if let Some(InstallChange::Updated(ver)) = change
+        && ver == plan.version
+    {
+        Some(ver)
+    } else {
+        read_version_on_path(runner)
+    };
+    if installed_version.as_deref() == Some(plan.version.as_str()) {
+        console_log(&green(&format!(
+            "Updated {} from {} to {}",
+            *APP_NAME, *VERSION, plan.version
+        )));
+        return;
+    }
+    let reported = installed_version.as_deref().unwrap_or("no version");
+    console_log(&yellow(&format!(
+        "Ran {}, but `{} --version` reports {reported}, not {}.",
+        command.display, *APP_NAME, plan.version
+    )));
+}
+
+/// Version printed by `pi --version` as resolved from PATH, the pi the user runs next.
+fn read_version_on_path(runner: Option<&dyn CliProcessRunner>) -> Option<String> {
+    let result = if let Some(runner) = runner {
+        runner.run_spawn_sync(*APP_NAME, &["--version"])
+    } else {
+        // PI_PACKAGE_DIR points at this installation and would make the new pi report the old version.
+        let mut env = env_vars();
+        env.shift_remove("PI_PACKAGE_DIR");
+        spawn_process_sync(
+            *APP_NAME,
+            &["--version"],
+            SpawnProcessOptions {
+                cwd: None,
+                env: Some(env),
+                stdin_piped: false,
+                stdout_piped: true,
+                stderr_piped: true,
+                windows_hide: false,
+                detached: false,
+            },
+        )
+    };
+    if result.status == Some(0) {
+        let trimmed = result.stdout.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    } else {
+        None
+    }
 }
 
 fn prepare_windows_npm_self_update() {
@@ -1269,6 +1376,19 @@ pub async fn handle_config_command(args: &[String], runtime_options: PackageComm
         global_resolved_paths.clone()
     };
 
+    let mut install_warnings: IndexSet<String> = IndexSet::new();
+    for failure in global_resolved_paths
+        .install_failures
+        .iter()
+        .flatten()
+        .chain(project_resolved_paths.install_failures.iter().flatten())
+    {
+        install_warnings.insert(format_package_install_warning(failure));
+    }
+    for warning in install_warnings {
+        console_error(&yellow(&format!("Warning: {warning}")));
+    }
+
     let flush_settings = settings_manager.clone();
     if let Some(select_config) = runtime_options.select_config {
         let input = ConfigSelectorInput {
@@ -1401,6 +1521,8 @@ pub async fn handle_package_command_with_runner(
     report_settings_errors(&settings_manager, "package command");
 
     let self_update_npm_command = settings_manager.get_global_settings().npm_command;
+    let configured_self_update_argv =
+        get_configured_self_update_argv(settings_manager.get_global_settings().self_update_command.as_deref());
     let flush_settings = settings_manager.clone();
 
     let package_manager = DefaultPackageManager::new(PackageManagerOptions {
@@ -1415,13 +1537,34 @@ pub async fn handle_package_command_with_runner(
     {
         package_manager.set_command_runner(Some(pkg_runner));
     }
-    package_manager.set_progress_callback(Some(Arc::new(|event| {
-        if event.event_type == ProgressEventType::Start {
-            if let Some(ref msg) = event.message {
-                stdout_write(&dim(&format!("{msg}\n")));
+    // Update result events describe a changed package, e.g. "npm:foo 1.2.0 -> 1.3.0".
+    let updated_packages = Arc::new(Mutex::new(Vec::<String>::new()));
+    // Progress messages are warnings, e.g. npm reinstalled the old version from stale registry metadata.
+    let warning_count = Arc::new(AtomicUsize::new(0));
+    {
+        let updated_packages = Arc::clone(&updated_packages);
+        let warning_count = Arc::clone(&warning_count);
+        package_manager.set_progress_callback(Some(Arc::new(move |event| {
+            if event.event_type == ProgressEventType::Result
+                && event.action == ProgressAction::Update
+                && let Some(ref msg) = event.message
+            {
+                updated_packages
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(msg.clone());
+            } else if event.event_type == ProgressEventType::Start {
+                if let Some(ref msg) = event.message {
+                    stdout_write(&dim(&format!("{msg}\n")));
+                }
+            } else if event.event_type == ProgressEventType::Progress
+                && let Some(ref msg) = event.message
+            {
+                warning_count.fetch_add(1, Ordering::Relaxed);
+                stdout_write(&yellow(&format!("{msg}\n")));
             }
-        }
-    })));
+        })));
+    }
 
     let run_result: Result<()> = (|| async {
         match options.command {
@@ -1514,14 +1657,41 @@ pub async fn handle_package_command_with_runner(
                         _ => None,
                     };
                     package_manager.update(update_source).await?;
-                    if let Some(src) = update_source {
-                        console_log(&green(&format!("Updated {src}")));
+                    let updated_list = updated_packages.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let warn_cnt = warning_count.load(Ordering::Relaxed);
+                    // Only claim "up to date" when the update actually checked and nothing warned.
+                    if is_offline_mode_enabled() {
+                        console_log(&yellow("Skipped package updates (offline mode)"));
+                    } else if updated_list.is_empty() && warn_cnt > 0 {
+                        console_log(&yellow(&if let Some(src) = update_source {
+                            format!("{src} was not updated, see the warnings above")
+                        } else {
+                            "No packages were updated, see the warnings above".to_owned()
+                        }));
+                    } else if updated_list.is_empty() {
+                        console_log(&green(&if let Some(src) = update_source {
+                            format!("{src} is already up to date")
+                        } else {
+                            "Packages are already up to date".to_owned()
+                        }));
                     } else {
-                        console_log(&green("Updated packages"));
+                        let count = updated_list.len();
+                        console_log(&green(&format!(
+                            "Updated {count} package{}:",
+                            if count == 1 { "" } else { "s" }
+                        )));
+                        for message in &updated_list {
+                            console_log(&format!("  {message}"));
+                        }
                     }
                 }
                 if update_target_includes_self(target) {
-                    let managed_install_root = get_active_managed_install_root()?;
+                    // A configured command is explicit user intent, so it replaces the managed install path too.
+                    let managed_install_root = if configured_self_update_argv.is_some() {
+                        None
+                    } else {
+                        get_active_managed_install_root()?
+                    };
                     if managed_install_root.is_some() && options.force {
                         console_error(&red(&format!(
                             "Managed {} installations do not support --force; rerun the installer to repair this installation.",
@@ -1533,6 +1703,16 @@ pub async fn handle_package_command_with_runner(
 
                     let plan = get_self_update_plan(options.force).await?;
                     if !plan.should_run {
+                        return Ok(());
+                    }
+                    if let Some(ref argv) = configured_self_update_argv {
+                        run_configured_self_update(
+                            argv,
+                            &plan,
+                            process_runner.as_deref(),
+                            runtime_options.columns,
+                        )
+                        .await;
                         return Ok(());
                     }
                     if let Some(ref managed_root) = managed_install_root {
@@ -1620,6 +1800,25 @@ pub async fn handle_package_command_with_runner(
                         "Updated {} from {} to {}",
                         *APP_NAME, *VERSION, plan.version
                     )));
+                    // The pi.dev installer migrates global npm installs to a managed install
+                    // that pins all dependencies. It does not migrate pnpm, yarn, or bun installs.
+                    if install_method == InstallMethod::Npm {
+                        let installer_command = if env_platform() == "win32" {
+                            "powershell -c \"irm https://pi.dev/install.ps1 | iex\""
+                        } else {
+                            "curl -fsSL https://pi.dev/install.sh | sh"
+                        };
+                        console_log("");
+                        console_log(&yellow(&format!(
+                            "This npm installation of {} does not pin its dependencies.",
+                            *APP_NAME
+                        )));
+                        console_log(&yellow(
+                            "Run the installer to migrate to a managed installation that does:",
+                        ));
+                        console_log("");
+                        console_log(&format!("  {}", bold(installer_command)));
+                    }
                 }
                 Ok(())
             }

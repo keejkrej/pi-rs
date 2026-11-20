@@ -709,7 +709,7 @@ impl RpcController {
 
         let ctrl_for_events = Arc::clone(self);
         let unsub = session.subscribe(Arc::new(move |event| {
-            let is_settled = matches!(event, AgentSessionEvent::AgentSettled);
+            let is_settled = matches!(event, AgentSessionEvent::AgentSettled { .. });
             if let Ok(json_event) = to_json_event(&event) {
                 ctrl_for_events.output(&json_event);
             }

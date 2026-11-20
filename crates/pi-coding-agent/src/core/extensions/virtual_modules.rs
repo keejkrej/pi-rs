@@ -566,6 +566,10 @@ pub(crate) fn install_host_globals(
                     .map(|s| s.to_string())
                     .unwrap_or_else(pi_js::env::cwd);
                 let timeout = opts_val.get("timeout").and_then(|v| v.as_u64());
+                let max_buffer = opts_val
+                    .get("maxBuffer")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| usize::try_from(v).ok());
                 let fut: BoxFuture<pi_js::Result<HostJsResult>> = Box::pin(async move {
                     let res = exec_command(
                         &cmd,
@@ -575,6 +579,7 @@ pub(crate) fn install_host_globals(
                             signal: None,
                             timeout,
                             cwd: Some(cwd.clone()),
+                            max_buffer,
                         }),
                     )
                     .await;
@@ -1402,12 +1407,35 @@ export function modelsAreEqual(a, b) {
 export function getProviders() { return []; }
 export function getModels() { return []; }
 export function getModel() { return undefined; }
+const EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+export function getSupportedThinkingLevels(model) {
+    if (!model || !model.reasoning) return ["off"];
+    return EXTENDED_THINKING_LEVELS.filter((level) => {
+        const mapped = model.thinkingLevelMap ? model.thinkingLevelMap[level] : undefined;
+        if (mapped === null) return false;
+        if (mapped === undefined && (level === "xhigh" || level === "max")) return false;
+        return true;
+    });
+}
+export function clampThinkingLevel(model, level) {
+    const available = getSupportedThinkingLevels(model);
+    if (available.includes(level)) return level;
+    const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
+    if (requestedIndex === -1) return available[0] ?? "off";
+    for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
+        if (available.includes(EXTENDED_THINKING_LEVELS[i])) return EXTENDED_THINKING_LEVELS[i];
+    }
+    for (let i = requestedIndex - 1; i >= 0; i--) {
+        if (available.includes(EXTENDED_THINKING_LEVELS[i])) return EXTENDED_THINKING_LEVELS[i];
+    }
+    return available[0] ?? "off";
+}
 export async function complete() { throw new Error("complete() in QuickJS guest requires host provider bridge"); }
 export async function completeSimple() { throw new Error("completeSimple() in QuickJS guest requires host provider bridge"); }
 "#;
 
 const MOD_PI_AI_MODELS: &str = r#"
-export { getModel, getModels, getProviders, modelsAreEqual } from "@earendil-works/pi-ai";
+export { clampThinkingLevel, getModel, getModels, getProviders, getSupportedThinkingLevels, modelsAreEqual } from "@earendil-works/pi-ai";
 "#;
 
 const MOD_PI_AI_OAUTH: &str = r#"
@@ -1425,7 +1453,7 @@ export const DEFAULT_THINKING_LEVEL = "off";
 const MOD_PI_CODING_AGENT: &str = r#"
 export { Key, Text, Container, Spacer, Box, Markdown, SettingsList, SelectList, CustomEditor } from "@earendil-works/pi-tui";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.5.2";
 export const APP_NAME = "pi";
 export const CONFIG_DIR_NAME = ".pi";
 export const DEFAULT_MAX_LINES = 2000;

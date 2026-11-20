@@ -227,6 +227,7 @@ async fn openai_responses_cache_retention_payloads() {
         "gpt-6-astra",
         "gpt-6-luna",
         "gpt-6-sol",
+        "gpt-6.1-terra",
     ] {
         assert!(get_model("openai", id).unwrap().prompt_cache.is_none(), "{id}");
     }
@@ -337,6 +338,7 @@ fn completions_model(compat: Option<OpenAICompletionsCompat>) -> Model {
         headers: None,
         sampling_params: None,
         compat: compat.map(ModelCompat::OpenAICompletions),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -378,7 +380,7 @@ async fn openai_completions_cache_retention_and_strict_tools() {
     assert!(p_false.get("prompt_cache_retention").is_none());
 
     for model_id in [
-        "deepseek-v4-flash",
+        "deepseek-v4.1-flash",
         "deepseek-v4-pro",
         "kimi-k2.5",
         "kimi-k2.6",

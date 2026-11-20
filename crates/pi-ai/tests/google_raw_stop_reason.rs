@@ -26,12 +26,7 @@ fn sample_context() -> Context {
 }
 
 fn pi_user_agent() -> String {
-    format!(
-        "pi ({} {}; {})",
-        pi_js::env::platform(),
-        pi_js::env::os_release(),
-        pi_js::env::arch()
-    )
+    pi_ai::utils::identity::format_user_agent(None)
 }
 
 fn sse_body_from_chunks(chunks: &[Value]) -> String {

@@ -11,7 +11,7 @@ use pi_coding_agent::core::extensions::types::{
     Extension, ExtensionApi, ExtensionContext, ExtensionFactory, ExtensionMode, InlineExtension, NotifyType,
     RegisteredCommandOptions, SessionStartEvent, SessionTreeEvent, Theme, ToolDefinition,
 };
-use pi_js::vendor::typebox::t;
+use pi_schema::t;
 use pi_tui::{Component, Text, matches_key, truncate_to_width};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -250,7 +250,7 @@ impl Extension for TodoExtension {
                 description: "Manage a todo list. Actions: list, add (text), toggle (id), clear".to_string(),
                 prompt_snippet: None,
                 prompt_guidelines: None,
-                parameters: params_schema,
+                parameters: params_schema.into(),
                 constrained_sampling: None,
                 render_shell: None,
                 prepare_arguments: None,

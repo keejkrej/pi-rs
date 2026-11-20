@@ -120,7 +120,11 @@ enum RenderSessionItemLocal {
     Custom(CustomEntry),
     Usage(UsageEntry),
     CompactionCost(CompactionCostNotice),
-    Message { msg: AgentMessage, entry_id: String },
+    Message {
+        msg: AgentMessage,
+        entry_id: String,
+        timestamp: String,
+    },
 }
 
 struct CustomEntryExpandable(CustomEntryComponent);
@@ -251,7 +255,7 @@ impl InteractiveMode {
     pub fn set_custom_editor_component(&self, factory: Option<EditorFactory>) {
         let (current_text, dialog_open, prev_autocomplete, border_color, padding_x, ac_max_vis, active_ind) = {
             let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            let current_text = st.editor.get_text();
+            let current_text = st.editor.get_expanded_text();
             let dialog_open = st.active_selector_dispose.is_some() || !st.extension_dialogs.is_empty();
             (
                 current_text,
@@ -330,7 +334,7 @@ impl InteractiveMode {
         }
     }
 
-    pub(crate) async fn show_extension_custom(
+    pub async fn show_extension_custom(
         &self,
         factory: CustomUiFactory,
         options: Option<ExtensionCustomOptions>,
@@ -1080,7 +1084,7 @@ impl InteractiveMode {
                         self.ui().request_render(None);
                     }
                     SessionEntry::CustomMessage(cm) if cm.display => {
-                        self.add_message_to_chat(
+                        self.add_message_to_chat_with_meta(
                             &create_custom_agent_message(
                                 &cm.custom_type,
                                 cm.content.clone(),
@@ -1089,6 +1093,8 @@ impl InteractiveMode {
                                 &cm.timestamp,
                             ),
                             false,
+                            Some(&cm.id),
+                            Some(&cm.timestamp),
                         );
                         self.ui().request_render(None);
                     }
@@ -1117,13 +1123,15 @@ impl InteractiveMode {
                             .cloned()
                             .collect();
                         self.render_session_entries(&before_entries, false, false);
-                        self.add_message_to_chat(
+                        self.add_message_to_chat_with_meta(
                             &create_compaction_summary_agent_message(
                                 &compaction.summary,
                                 compaction.tokens_before,
                                 &compaction.timestamp,
                             ),
                             false,
+                            Some(&compaction.id),
+                            Some(&compaction.timestamp),
                         );
                         if let Some(usage) = compaction.usage {
                             self.add_compaction_cost_notice(&CompactionCostNotice {
@@ -1448,7 +1456,7 @@ impl InteractiveMode {
                 self.ui().request_render(None);
             }
 
-            AgentSessionEvent::AgentSettled => {
+            AgentSessionEvent::AgentSettled { .. } => {
                 self.flush_pending_bash_components();
                 self.ui().request_render(None);
                 self.check_shutdown_requested().await;
@@ -1520,13 +1528,16 @@ impl InteractiveMode {
                     }
                 } else if let Some(res) = result {
                     let entries = self.session_manager().build_context_entries();
-                    if matches!(entries.first(), Some(SessionEntry::Compaction(_))) {
+                    if let Some(SessionEntry::Compaction(c)) = entries.first() {
+                        let comp_id = c.id.clone();
+                        let comp_ts = c.timestamp.clone();
                         self.clear_chat_container();
                         self.render_session_entries(&entries[1..], false, false);
-                        let now_iso = chrono::Utc::now().to_rfc3339();
-                        self.add_message_to_chat(
-                            &create_compaction_summary_agent_message(&res.summary, res.tokens_before, &now_iso),
+                        self.add_message_to_chat_with_meta(
+                            &create_compaction_summary_agent_message(&res.summary, res.tokens_before, &comp_ts),
                             false,
+                            Some(&comp_id),
+                            Some(&comp_ts),
                         );
                         if let Some(usage) = res.usage {
                             self.add_compaction_cost_notice(&CompactionCostNotice {
@@ -1782,34 +1793,40 @@ impl InteractiveMode {
         let Some(renderer) = self.session().extension_runner().get_entry_renderer(&entry.custom_type) else {
             return;
         };
-        let entry_comp = CustomEntryComponent::new(entry.clone(), renderer);
-        let tool_expanded = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .tool_output_expanded;
+        let (tool_expanded, output_pad, streaming_arc) = {
+            let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                st.tool_output_expanded,
+                st.output_pad,
+                st.streaming_component_arc.clone(),
+            )
+        };
+        let entry_comp = CustomEntryComponent::new_with_output_pad(entry.clone(), renderer, Some(output_pad));
         entry_comp.set_expanded(tool_expanded);
         if !entry_comp.has_content() {
             return;
         }
         let comp_arc: Arc<dyn Component> = Arc::new(entry_comp.clone());
-        let exp: Arc<dyn Expandable> = Arc::new(CustomEntryExpandable(entry_comp));
-        let streaming_arc = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .streaming_component_arc
-            .clone();
+        let exp: Arc<dyn Expandable> = Arc::new(CustomEntryExpandable(entry_comp.clone()));
+        let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| entry_comp.set_output_pad(p));
         if let Some(before) = streaming_arc {
-            self.insert_chat_component_before(comp_arc, &before, Some(exp), None);
+            self.insert_chat_component_before(comp_arc, &before, Some(exp), Some(pad_fn));
         } else {
-            self.add_chat_component(comp_arc, Some(exp), None, None);
+            self.add_chat_component(comp_arc, Some(exp), None, Some(pad_fn));
         }
     }
 
     pub fn add_message_to_chat(&self, message: &AgentMessage, populate_history: bool) {
+        self.add_message_to_chat_with_meta(message, populate_history, None, None);
+    }
+
+    pub fn add_message_to_chat_with_meta(
+        &self,
+        message: &AgentMessage,
+        populate_history: bool,
+        message_id: Option<&str>,
+        timestamp: Option<&str>,
+    ) {
         let (tool_output_expanded, hide_thinking_block, hidden_thinking_label, output_pad) = {
             let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -1819,6 +1836,8 @@ impl InteractiveMode {
                 st.output_pad,
             )
         };
+        let msg_id_owned = message_id.map(str::to_string);
+        let ts_owned = timestamp.map(str::to_string);
 
         match message {
             AgentMessage::Message(Message::User(_)) => {
@@ -1831,11 +1850,14 @@ impl InteractiveMode {
                 }
                 if let Some(skill_block) = parse_skill_block(&text_content) {
                     let user_after = skill_block.user_message.clone();
-                    let skill_comp = SkillInvocationMessageComponent::new(
+                    let skill_comp = SkillInvocationMessageComponent::new_with_options(
                         skill_block,
                         Some(self.get_markdown_theme_with_settings()),
+                        Some(output_pad),
+                        Some(self.get_markdown_transformers()),
+                        msg_id_owned.clone(),
+                        ts_owned.clone(),
                     );
-                    skill_comp.set_output_pad(output_pad);
                     skill_comp.set_expanded(tool_output_expanded);
                     let skill_arc: Arc<dyn Component> = Arc::new(skill_comp.clone());
                     let exp: Arc<dyn Expandable> = Arc::new(SkillInvocationExpandable(skill_comp.clone()));
@@ -1845,22 +1867,26 @@ impl InteractiveMode {
 
                     if let Some(user_text) = user_after {
                         self.add_chat_component(Arc::new(Spacer::new(Some(1))), None, None, None);
-                        let user_comp = UserMessageComponent::new(
+                        let user_comp = UserMessageComponent::new_with_meta(
                             &user_text,
                             Some(self.get_markdown_theme_with_settings()),
                             Some(output_pad),
                             Some(self.get_markdown_transformers()),
+                            msg_id_owned,
+                            ts_owned,
                         );
                         let user_arc: Arc<dyn Component> = Arc::new(user_comp.clone());
                         let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| user_comp.set_output_pad(p));
                         self.add_chat_component(user_arc, None, None, Some(pad_fn));
                     }
                 } else {
-                    let user_comp = UserMessageComponent::new(
+                    let user_comp = UserMessageComponent::new_with_meta(
                         &text_content,
                         Some(self.get_markdown_theme_with_settings()),
                         Some(output_pad),
                         Some(self.get_markdown_transformers()),
+                        msg_id_owned,
+                        ts_owned,
                     );
                     let user_arc: Arc<dyn Component> = Arc::new(user_comp.clone());
                     let pad_fn: Arc<dyn Fn(i64) + Send + Sync> = Arc::new(move |p| user_comp.set_output_pad(p));
@@ -1871,13 +1897,15 @@ impl InteractiveMode {
                 }
             }
             AgentMessage::Message(Message::Assistant(assistant)) => {
-                let comp = AssistantMessageComponent::new(
+                let comp = AssistantMessageComponent::new_with_meta(
                     Some(assistant.clone()),
                     Some(hide_thinking_block),
                     Some(self.get_markdown_theme_with_settings()),
                     Some(&hidden_thinking_label),
                     Some(output_pad),
                     Some(self.get_markdown_transformers()),
+                    msg_id_owned,
+                    ts_owned,
                 );
                 let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
                 let pad_comp = comp.clone();
@@ -1931,11 +1959,14 @@ impl InteractiveMode {
                             .session()
                             .extension_runner()
                             .get_message_renderer(&custom_msg.custom_type);
-                        let comp = CustomMessageComponent::new(
+                        let comp = CustomMessageComponent::new_with_options(
                             custom_msg,
                             renderer,
                             Some(self.get_markdown_theme_with_settings()),
                             Some(output_pad),
+                            Some(self.get_markdown_transformers()),
+                            msg_id_owned,
+                            ts_owned,
                         );
                         comp.set_expanded(tool_output_expanded);
                         let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
@@ -1947,11 +1978,14 @@ impl InteractiveMode {
                 Some("compactionSummary") => {
                     if let Ok(summary_msg) = serde_json::from_value::<CompactionSummaryMessage>(val.clone()) {
                         self.add_chat_component(Arc::new(Spacer::new(Some(1))), None, None, None);
-                        let comp = CompactionSummaryMessageComponent::new(
+                        let comp = CompactionSummaryMessageComponent::new_with_options(
                             summary_msg,
                             Some(self.get_markdown_theme_with_settings()),
+                            Some(output_pad),
+                            Some(self.get_markdown_transformers()),
+                            msg_id_owned,
+                            ts_owned,
                         );
-                        comp.set_output_pad(output_pad);
                         comp.set_expanded(tool_output_expanded);
                         let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
                         let exp: Arc<dyn Expandable> = Arc::new(CompactionSummaryExpandable(comp.clone()));
@@ -1962,11 +1996,14 @@ impl InteractiveMode {
                 Some("branchSummary") => {
                     if let Ok(summary_msg) = serde_json::from_value::<BranchSummaryMessage>(val.clone()) {
                         self.add_chat_component(Arc::new(Spacer::new(Some(1))), None, None, None);
-                        let comp = BranchSummaryMessageComponent::new(
+                        let comp = BranchSummaryMessageComponent::new_with_options(
                             summary_msg,
                             Some(self.get_markdown_theme_with_settings()),
+                            Some(output_pad),
+                            Some(self.get_markdown_transformers()),
+                            msg_id_owned,
+                            ts_owned,
                         );
-                        comp.set_output_pad(output_pad);
                         comp.set_expanded(tool_output_expanded);
                         let comp_arc: Arc<dyn Component> = Arc::new(comp.clone());
                         let exp: Arc<dyn Expandable> = Arc::new(BranchSummaryExpandable(comp.clone()));
@@ -2015,9 +2052,13 @@ impl InteractiveMode {
                 RenderSessionItemLocal::CompactionCost(notice) => {
                     self.add_compaction_cost_notice(&notice);
                 }
-                RenderSessionItemLocal::Message { msg, entry_id } => match &msg {
+                RenderSessionItemLocal::Message {
+                    msg,
+                    entry_id,
+                    timestamp,
+                } => match &msg {
                     AgentMessage::Message(Message::Assistant(assistant)) => {
-                        self.add_message_to_chat(&msg, false);
+                        self.add_message_to_chat_with_meta(&msg, false, Some(&entry_id), Some(&timestamp));
                         let settings = self.settings_manager();
                         for block in &assistant.content {
                             if let AssistantContentBlock::ToolCall(tc) = block {
@@ -2092,7 +2133,7 @@ impl InteractiveMode {
                         }
                     }
                     _ => {
-                        self.add_message_to_chat(&msg, populate_history);
+                        self.add_message_to_chat_with_meta(&msg, populate_history, Some(&entry_id), Some(&timestamp));
                     }
                 },
             }
@@ -2120,10 +2161,12 @@ impl InteractiveMode {
                     let messages = session_entry_to_context_messages(entry);
                     let has_msgs = !messages.is_empty();
                     let entry_id = entry.id().to_string();
+                    let timestamp = entry.timestamp().to_string();
                     for msg in messages {
                         items.push(RenderSessionItemLocal::Message {
                             msg,
                             entry_id: entry_id.clone(),
+                            timestamp: timestamp.clone(),
                         });
                     }
                     if has_msgs {
@@ -2180,13 +2223,11 @@ impl InteractiveMode {
         }
         let total_cost = Arc::new(std::sync::Mutex::new(entry.usage.cost.total));
         let cost_ref = Arc::clone(&total_cost);
-        let template_entry = entry.clone();
+        let note = entry.note.clone();
         let comp = ThemedText::new(
             Arc::new(move || {
                 let c = *cost_ref.lock().unwrap_or_else(|e| e.into_inner());
-                let mut e = template_entry.clone();
-                e.usage.cost.total = c;
-                theme().fg(ThemeColor::Dim, &format_cache_warming_usage(&e))
+                theme().fg(ThemeColor::Dim, &format_cache_warming_usage(c, note.as_deref()))
             }),
             Some(1),
             Some(0),

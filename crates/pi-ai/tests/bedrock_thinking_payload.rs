@@ -12,6 +12,16 @@ use pi_ai::types::{
 use pi_ai::utils::transcript::normalize_context;
 use serde_json::json;
 
+const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+fn adaptive_with_binding() -> JsonValue {
+    json!({
+        "type": "adaptive",
+        "display": "summarized",
+        "block_binding": { "prefix_mismatch_behavior": "drop_block" }
+    })
+}
+
 fn has_bedrock_credentials() -> bool {
     let env_non_empty = |name: &str| pi_js::env::var(name).filter(|v| !v.is_empty()).is_some();
     env_non_empty("AWS_PROFILE")
@@ -73,13 +83,16 @@ async fn uses_adaptive_thinking_for_claude_opus_4_8_when_reasoning_enabled() {
     let payload = capture_payload(&model, None).await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "high" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -101,13 +114,16 @@ async fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_opus_4_8() {
     .await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "xhigh" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -119,13 +135,16 @@ async fn uses_adaptive_thinking_for_claude_fable_5_when_reasoning_enabled() {
     let payload = capture_payload(model, None).await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "high" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -137,13 +156,16 @@ async fn uses_adaptive_thinking_for_claude_sonnet_5_when_reasoning_enabled() {
     let payload = capture_payload(model, None).await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "high" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -155,13 +177,16 @@ async fn uses_adaptive_thinking_for_claude_opus_5_when_reasoning_enabled() {
     let payload = capture_payload(model, None).await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "high" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -180,13 +205,16 @@ async fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_opus_5() {
     .await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "xhigh" })
     );
-    assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
 }
 
 #[tokio::test]
@@ -205,12 +233,47 @@ async fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_fable_5() {
     .await;
     assert_eq!(
         payload["additionalModelRequestFields"]["thinking"],
-        json!({ "type": "adaptive", "display": "summarized" })
+        adaptive_with_binding()
     );
     assert_eq!(
         payload["additionalModelRequestFields"]["output_config"],
         json!({ "effort": "xhigh" })
     );
+}
+
+// https://github.com/earendil-works/pi/issues/10324
+#[tokio::test]
+async fn sends_block_binding_and_the_binding_beta_for_claude_opus_5_5() {
+    let model = amazon_bedrock_models()
+        .get("global.anthropic.claude-opus-5-5")
+        .expect("global.anthropic.claude-opus-5-5");
+
+    let payload = capture_payload(model, None).await;
+    assert_eq!(
+        payload["additionalModelRequestFields"]["thinking"],
+        adaptive_with_binding()
+    );
+    assert_eq!(
+        payload["additionalModelRequestFields"]["anthropic_beta"],
+        json!([THINKING_BINDING_CONTROLS_BETA])
+    );
+}
+
+// Bedrock rejects block_binding on 4.6 models: "Extra inputs are not permitted" (#10324)
+#[tokio::test]
+async fn omits_block_binding_for_4_6_models() {
+    for model_id in [
+        "global.anthropic.claude-opus-4-6-v1",
+        "global.anthropic.claude-sonnet-4-6",
+    ] {
+        let model = amazon_bedrock_models().get(model_id).expect(model_id);
+        let payload = capture_payload(model, None).await;
+        assert_eq!(
+            payload["additionalModelRequestFields"]["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert!(payload["additionalModelRequestFields"].get("anthropic_beta").is_none());
+    }
 }
 
 #[tokio::test]
@@ -392,4 +455,122 @@ async fn application_inference_profile_falls_back_to_fixed_budget_thinking_via_m
         payload["additionalModelRequestFields"]["anthropic_beta"],
         json!(["interleaved-thinking-2025-05-14"])
     );
+}
+
+#[tokio::test]
+async fn sends_reasoning_effort_for_gpt_6_and_gpt_5_6_on_bedrock() {
+    for (reasoning, effort) in [
+        (ThinkingLevel::Minimal, "low"),
+        (ThinkingLevel::Low, "low"),
+        (ThinkingLevel::Medium, "medium"),
+        (ThinkingLevel::High, "high"),
+        (ThinkingLevel::XHigh, "xhigh"),
+        (ThinkingLevel::Max, "max"),
+    ] {
+        for id in [
+            "global.openai.gpt-6-sol",
+            "us.openai.gpt-6-luna",
+            "global.openai.gpt-5.6-sol",
+        ] {
+            let model = amazon_bedrock_models().get(id).expect(id);
+            let payload = capture_payload(
+                model,
+                Some(BedrockOptions {
+                    reasoning: Some(reasoning),
+                    ..BedrockOptions::default()
+                }),
+            )
+            .await;
+            assert_eq!(
+                payload["additionalModelRequestFields"],
+                json!({ "reasoning": { "effort": effort } }),
+                "{id}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn sends_reasoning_effort_when_only_model_name_identifies_a_gpt_model() {
+    let mut model = amazon_bedrock_models()
+        .get("global.openai.gpt-6-sol")
+        .expect("global.openai.gpt-6-sol")
+        .clone();
+    model.id = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile".to_string();
+    model.name = "GPT-6 Sol".to_string();
+
+    let payload = capture_payload(
+        &model,
+        Some(BedrockOptions {
+            reasoning: Some(ThinkingLevel::Medium),
+            ..BedrockOptions::default()
+        }),
+    )
+    .await;
+    assert_eq!(
+        payload["additionalModelRequestFields"],
+        json!({ "reasoning": { "effort": "medium" } })
+    );
+}
+
+#[tokio::test]
+async fn sends_flat_reasoning_effort_for_gpt_oss_clamped_to_high() {
+    let model = amazon_bedrock_models()
+        .get("openai.gpt-oss-120b-1:0")
+        .expect("openai.gpt-oss-120b-1:0");
+
+    for (reasoning, expected) in [
+        (ThinkingLevel::Minimal, "low"),
+        (ThinkingLevel::Medium, "medium"),
+        (ThinkingLevel::XHigh, "high"),
+    ] {
+        let payload = capture_payload(
+            model,
+            Some(BedrockOptions {
+                reasoning: Some(reasoning),
+                ..BedrockOptions::default()
+            }),
+        )
+        .await;
+        assert_eq!(
+            payload["additionalModelRequestFields"],
+            json!({ "reasoning_effort": expected })
+        );
+    }
+}
+
+#[tokio::test]
+async fn sends_no_reasoning_fields_when_bedrock_gpt_reasoning_is_off() {
+    let model = amazon_bedrock_models()
+        .get("global.openai.gpt-6-sol")
+        .expect("global.openai.gpt-6-sol");
+    let captured: Arc<Mutex<Option<JsonValue>>> = Arc::new(Mutex::new(None));
+    let captured_ref = Arc::clone(&captured);
+
+    let context = normalize_context(&make_context());
+    let mut s = stream_with_options(
+        model,
+        &context,
+        Some(BedrockOptions {
+            base: StreamOptions {
+                on_payload: Some(Arc::new(move |payload, _model| {
+                    let captured_inner = Arc::clone(&captured_ref);
+                    Box::pin(async move {
+                        *captured_inner.lock().unwrap() = Some(payload);
+                        Err(pi_js::Error::js("PayloadCaptured", "payload captured"))
+                    })
+                })),
+                ..StreamOptions::default()
+            },
+            ..BedrockOptions::default()
+        }),
+    );
+    while let Some(event) = s.next().await {
+        if matches!(event, AssistantMessageEvent::Error { .. }) {
+            break;
+        }
+    }
+
+    let payload = captured.lock().unwrap().clone().expect("expected payload");
+    assert!(payload.get("additionalModelRequestFields").is_none());
 }

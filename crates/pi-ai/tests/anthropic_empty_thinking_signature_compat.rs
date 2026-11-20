@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 fn make_model(allow_empty_signature: Option<bool>) -> Model {
     Model {
         r#type: None,
-        id: "mimo-v2.5-pro".to_owned(),
+        id: "mimo-v2.6-pro".to_owned(),
         name: "MiMo-V2.5-Pro".to_owned(),
         api: "anthropic-messages".to_owned(),
         provider: "xiaomi-token-plan-ams".to_owned(),
@@ -35,6 +35,7 @@ fn make_model(allow_empty_signature: Option<bool>) -> Model {
                 ..Default::default()
             })
         }),
+        sampling_params_by_thinking_level: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn make_context(
         raw_stop_reason: None,
         end_turn: None,
         timestamp: time::now_ms(),
+        duration_ms: None,
     };
     Context {
         system_prompt: None,
@@ -137,7 +139,7 @@ fn assistant_content(payload: &Value) -> &Vec<Value> {
 async fn converts_empty_signature_thinking_to_text_by_default() {
     let payload = capture_payload(
         &make_model(None),
-        &make_context("", "internal reasoning", "xiaomi-token-plan-ams", "mimo-v2.5-pro", None),
+        &make_context("", "internal reasoning", "xiaomi-token-plan-ams", "mimo-v2.6-pro", None),
     )
     .await;
     assert_eq!(
@@ -150,7 +152,7 @@ async fn converts_empty_signature_thinking_to_text_by_default() {
 async fn preserves_empty_thinking_text_when_the_signature_is_present() {
     let payload = capture_payload(
         &make_model(None),
-        &make_context("signed-thinking", "", "xiaomi-token-plan-ams", "mimo-v2.5-pro", None),
+        &make_context("signed-thinking", "", "xiaomi-token-plan-ams", "mimo-v2.6-pro", None),
     )
     .await;
     assert_eq!(
@@ -167,7 +169,7 @@ async fn preserves_empty_signature_thinking_when_allow_empty_signature_is_enable
             " ",
             "internal reasoning",
             "xiaomi-token-plan-ams",
-            "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             None,
         ),
     )
@@ -196,7 +198,7 @@ async fn preserves_unsigned_thinking_for_fireworks_models() {
         "accounts/fireworks/models/deepseek-v4p1-flash",
         "accounts/fireworks/models/qwen3p8-max",
         "accounts/fireworks/models/qwen3p8-2p4t-a95b",
-        "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+        "accounts/fireworks/models/ember-1",
     ] {
         let model = get_model("fireworks", model_id).unwrap();
         assert!(matches!(
@@ -213,42 +215,4 @@ async fn preserves_unsigned_thinking_for_fireworks_models() {
             ]
         );
     }
-}
-
-#[tokio::test]
-async fn still_converts_cross_model_fireworks_thinking_to_text() {
-    let model = get_model("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash").unwrap();
-    let payload = capture_payload(
-        &model,
-        &make_context(
-            "",
-            "internal reasoning",
-            "fireworks",
-            "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(
-        assistant_content(&payload),
-        &vec![json!({ "type": "text", "text": "internal reasoning" })]
-    );
-}
-
-#[tokio::test]
-async fn allows_empty_signatures_for_kimi_coding_k3() {
-    let model = get_model("kimi-coding", "k3").unwrap();
-    assert!(matches!(
-        &model.compat,
-        Some(ModelCompat::AnthropicMessages(c)) if c.allow_empty_signature == Some(true)
-    ));
-    let payload = capture_payload(
-        &model,
-        &make_context(" ", "internal reasoning", "kimi-coding", "k3", None),
-    )
-    .await;
-    assert_eq!(
-        assistant_content(&payload),
-        &vec![json!({ "type": "thinking", "thinking": "internal reasoning", "signature": "" })]
-    );
 }

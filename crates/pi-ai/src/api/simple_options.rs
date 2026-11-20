@@ -1,9 +1,20 @@
 //! Port of packages/ai/src/api/simple-options.ts
 
-use crate::types::{Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel, TranscriptContext};
+use crate::models::clamp_thinking_level;
+use crate::types::{
+    Model, ModelThinkingLevel, SamplingParams, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel,
+    TranscriptContext,
+};
 use crate::utils::estimate::estimate_context_tokens;
 
 const CONTEXT_SAFETY_TOKENS: i64 = 4096;
+// OpenRouter counts the input with its own tokenizer and rejects input + max_tokens above the
+// window before routing. It counted prose up to 12% above the provider's count (#10497).
+const CONTEXT_SAFETY_RATIO: f64 = 0.15;
+// The 15% margin is kept only while it leaves at least this much output. Otherwise (a nearly full
+// large window, or any small window such as a 32k local model) only the fixed margin is kept, and
+// output is capped at this size so an OpenRouter overcount still fits for a while before compaction.
+const MIN_OUTPUT_WITH_RATIO_MARGIN: i64 = 32768;
 const MIN_MAX_TOKENS: i64 = 1;
 
 /// Tokens always left for the answer when a thinking budget shares the response ceiling.
@@ -22,12 +33,56 @@ pub struct AdjustedMaxTokens {
     pub thinking_budget: i64,
 }
 
+/// Fit `max_tokens` into the context window, leaving room for the input being counted higher than estimated.
 pub fn clamp_max_tokens_to_context(model: &Model, context: &TranscriptContext, max_tokens: i64) -> i64 {
     if model.context_window <= 0 {
         return MIN_MAX_TOKENS.max(max_tokens);
     }
-    let available = model.context_window - estimate_context_tokens(context).tokens - CONTEXT_SAFETY_TOKENS;
-    max_tokens.min(MIN_MAX_TOKENS.max(available))
+    let input = estimate_context_tokens(context).tokens;
+    let ratio_margin = ((input as f64) * CONTEXT_SAFETY_RATIO).ceil() as i64;
+    let margin = CONTEXT_SAFETY_TOKENS.max(ratio_margin);
+    let mut room = model.context_window - input - margin;
+    if room < MIN_OUTPUT_WITH_RATIO_MARGIN {
+        room = MIN_OUTPUT_WITH_RATIO_MARGIN.min(model.context_window - input - CONTEXT_SAFETY_TOKENS);
+    }
+    max_tokens.min(MIN_MAX_TOKENS.max(room))
+}
+
+fn thinking_level_to_model(level: Option<ThinkingLevel>) -> ModelThinkingLevel {
+    match level {
+        None => ModelThinkingLevel::Off,
+        Some(ThinkingLevel::Minimal) => ModelThinkingLevel::Minimal,
+        Some(ThinkingLevel::Low) => ModelThinkingLevel::Low,
+        Some(ThinkingLevel::Medium) => ModelThinkingLevel::Medium,
+        Some(ThinkingLevel::High) => ModelThinkingLevel::High,
+        Some(ThinkingLevel::XHigh) => ModelThinkingLevel::XHigh,
+        Some(ThinkingLevel::Max) => ModelThinkingLevel::Max,
+    }
+}
+
+pub fn resolve_sampling_params(
+    model: &Model,
+    thinking_level: ModelThinkingLevel,
+    request_params: Option<&SamplingParams>,
+) -> Option<SamplingParams> {
+    let effective_thinking_level = clamp_thinking_level(model, thinking_level);
+    let thinking_level_params = model
+        .sampling_params_by_thinking_level
+        .as_ref()
+        .and_then(|map| map.get(&effective_thinking_level));
+    if model.sampling_params.is_none() && thinking_level_params.is_none() && request_params.is_none() {
+        return None;
+    }
+    let mut merged = SamplingParams::new();
+    for source in [model.sampling_params.as_ref(), thinking_level_params, request_params]
+        .into_iter()
+        .flatten()
+    {
+        for (k, v) in source {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Some(merged)
 }
 
 pub fn build_base_options(
@@ -42,19 +97,27 @@ pub fn build_base_options(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| base.and_then(|b| b.api_key.as_ref()).filter(|s| !s.is_empty()).cloned());
+    let sampling_params = resolve_sampling_params(
+        model,
+        thinking_level_to_model(options.and_then(|o| o.reasoning)),
+        base.and_then(|b| b.sampling_params.as_ref()),
+    );
 
     StreamOptions {
         temperature: base.and_then(|b| b.temperature),
-        sampling_params: base.and_then(|b| b.sampling_params.clone()),
+        sampling_params,
         max_tokens: Some(clamp_max_tokens_to_context(model, context, requested_max)),
         signal: base.and_then(|b| b.signal.clone()),
         telemetry_context: base.and_then(|b| b.telemetry_context.clone()),
+        telemetry: base.and_then(|b| b.telemetry.clone()),
         api_key: resolved_api_key,
         fetch: base.and_then(|b| b.fetch.clone()),
         transport: base.and_then(|b| b.transport),
         cache_retention: base.and_then(|b| b.cache_retention),
         session_id: base.and_then(|b| b.session_id.clone()),
+        disable_continuation: base.and_then(|b| b.disable_continuation),
         headers: base.and_then(|b| b.headers.clone()),
+        identity: base.and_then(|b| b.identity.clone()),
         on_payload: base.and_then(|b| b.on_payload.clone()),
         on_response: base.and_then(|b| b.on_response.clone()),
         on_provider_stream_event: base.and_then(|b| b.on_provider_stream_event.clone()),

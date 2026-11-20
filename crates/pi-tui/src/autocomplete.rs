@@ -195,11 +195,7 @@ fn build_fd_path_query(query: &str) -> String {
     }
 
     let has_trailing_separator = normalized.ends_with('/');
-    let trimmed = normalized.trim_matches('/');
-    if trimmed.is_empty() {
-        return normalized;
-    }
-
+    let trimmed = normalized.trim_start_matches('/');
     let separator_pattern = "[\\\\/]";
     let segments: Vec<String> = trimmed
         .split('/')

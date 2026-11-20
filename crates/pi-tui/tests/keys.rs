@@ -2,7 +2,8 @@
 
 use pi_js::env::testing::EnvGuard;
 use pi_tui::keys::{
-    Key, decode_kitty_printable, decode_printable_key, matches_key, parse_key, set_kitty_protocol_active,
+    Key, decode_kitty_printable, decode_printable_key, is_key_release, is_key_repeat, matches_key, parse_key,
+    set_kitty_protocol_active,
 };
 use serial_test::serial;
 
@@ -631,6 +632,8 @@ fn parses_special_keys() {
     assert_eq!(parse_key(" ").as_deref(), Some("space"));
     assert_eq!(parse_key("1").as_deref(), Some("1"));
     assert!(matches_key("1", "1"));
+    assert_eq!(parse_key("+").as_deref(), Some("+"));
+    assert!(matches_key("+", "+"));
 }
 
 #[test]
@@ -667,4 +670,54 @@ fn parses_legacy_function_and_modifier_sequences() {
 #[serial]
 fn parses_double_bracket_page_up() {
     assert_eq!(parse_key("\x1b[[5~").as_deref(), Some("pageUp"));
+}
+
+#[test]
+#[serial]
+fn matches_shifted_symbols_by_their_produced_character() {
+    let _kitty = KittyGuard::active(true);
+    assert!(matches_key("\x1b[61:43;2u", "+"));
+    assert!(matches_key("\x1b[61:43;2u", "shift+="));
+    assert_eq!(parse_key("\x1b[61:43;2u").as_deref(), Some("+"));
+    assert!(matches_key("\x1b[61:43;6u", "ctrl++"));
+    assert_eq!(parse_key("\x1b[61:43;6u").as_deref(), Some("ctrl++"));
+}
+
+#[test]
+#[serial]
+fn matches_xterm_modify_other_keys_shifted_plus() {
+    let _kitty = KittyGuard::active(false);
+    assert!(matches_key("\x1b[27;6;43~", "ctrl++"));
+    assert_eq!(parse_key("\x1b[27;6;43~").as_deref(), Some("ctrl++"));
+}
+
+#[test]
+#[serial]
+fn matches_kitty_function_keys_f1_to_f12_with_and_without_modifiers() {
+    let _kitty = KittyGuard::active(false);
+    assert!(matches_key("\x1b[P", "f1"));
+    assert!(matches_key("\x1b[Q", "f2"));
+    assert!(matches_key("\x1b[13~", "f3"));
+    assert!(matches_key("\x1b[S", "f4"));
+    assert!(matches_key("\x1b[1;5P", "ctrl+f1"));
+    assert!(!matches_key("\x1b[1;5P", "f1"));
+    assert!(matches_key("\x1b[1;2S", "shift+f4"));
+    assert!(matches_key("\x1b[15;5~", "ctrl+f5"));
+    assert!(matches_key("\x1b[24;3~", "alt+f12"));
+    assert!(matches_key("\x1b[15;1:2~", "f5"));
+    assert_eq!(parse_key("\x1b[P").as_deref(), Some("f1"));
+    assert_eq!(parse_key("\x1b[1;5P").as_deref(), Some("ctrl+f1"));
+    assert_eq!(parse_key("\x1b[13~").as_deref(), Some("f3"));
+    assert_eq!(parse_key("\x1b[21;2~").as_deref(), Some("shift+f10"));
+    assert_eq!(parse_key("\x1b[1;5R"), None);
+    assert!(is_key_release("\x1b[1;1:3P"));
+    assert!(is_key_repeat("\x1b[1;1:2S"));
+}
+
+#[test]
+#[serial]
+fn ignores_unmapped_kitty_functional_keys_such_as_f13_to_f35() {
+    assert_eq!(decode_kitty_printable("\x1b[57376u"), None);
+    assert_eq!(decode_kitty_printable("\x1b[57398;2u"), None);
+    assert_eq!(decode_printable_key("\x1b[57382u"), None);
 }

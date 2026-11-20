@@ -368,3 +368,48 @@ async fn delivers_late_replies_after_timeout_and_leaves_future_osc_10_11_4_uncon
 
     tui.stop(None);
 }
+
+#[tokio::test(start_paused = true)]
+async fn consumes_delayed_ghostty_color_fragments_without_typing_their_tail_or_opening_editor() {
+    let terminal = Arc::new(TestTerminal::new());
+    let tui = TuiMainScreen::new(terminal.clone(), None, None);
+    let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let inputs_ref = Arc::clone(&inputs);
+    tui.add_input_listener(Arc::new(move |data: &str| {
+        inputs_ref.lock().unwrap().push(data.to_string());
+        None
+    }));
+
+    let buffer = pi_tui::stdin_buffer::StdinBuffer::new(None);
+    let term_for_buf = Arc::clone(&terminal);
+    let _ = buffer.on_data(Arc::new(move |seq| term_for_buf.emit_input(seq)));
+
+    tui.start();
+    let tui_task = tui.clone();
+    let query = tokio::spawn(async move {
+        tui_task
+            .query_terminal_colors(QueryTerminalColorsOptions {
+                timeout_ms: 1000,
+                on_late_reply: None,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    // Captured from Ghostty 1.3.1 with Ayu Light, split at the reported tail.
+    buffer.process(pi_tui::stdin_buffer::StdinBufferData::Text("\x1b]4;1;rgb:eaea/6c"));
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+    buffer.process(pi_tui::stdin_buffer::StdinBufferData::Text("6c/6d6d\x07\x1b[?62;22c"));
+
+    let result = query.await.unwrap();
+    assert_eq!(result, TerminalColors::default());
+    assert!(inputs.lock().unwrap().is_empty());
+
+    // A real Ctrl+G must still reach the editor after the reply.
+    buffer.process(pi_tui::stdin_buffer::StdinBufferData::Text("\x07"));
+    assert_eq!(*inputs.lock().unwrap(), vec!["\x07".to_string()]);
+
+    buffer.destroy();
+    tui.stop(None);
+}

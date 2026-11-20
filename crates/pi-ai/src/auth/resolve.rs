@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pi_js::Result;
-use pi_js::abort::AbortSignal;
+use pi_js::abort::{AbortController, AbortSignal};
 
 use crate::auth::types::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthContext, AuthOperationOptions, AuthResult, Credential,
@@ -156,6 +156,94 @@ fn expires_soon(credential: &OAuthCredential, minimum_validity_ms: i64) -> bool 
     pi_js::time::now_ms().saturating_add(minimum_validity_ms) >= credential.expires
 }
 
+/// Refreshes an OAuth credential inside the store lock if `needs_refresh` holds.
+///
+/// Cancelling `signal` aborts only waiting for the store lock, never an in-flight `oauth.refresh`
+/// so rotated refresh tokens are always persisted.
+pub async fn refresh_stored_oauth_credential<F>(
+    credentials: &dyn CredentialStore,
+    provider_id: &str,
+    oauth: Arc<dyn OAuthAuth>,
+    needs_refresh: F,
+    signal: &AbortSignal,
+) -> Result<Option<OAuthCredential>>
+where
+    F: Fn(&OAuthCredential) -> bool + Send + Sync + 'static,
+{
+    signal.throw_if_aborted()?;
+
+    let lock_wait = Arc::new(AbortController::new());
+    let entered = Arc::new(AtomicBool::new(false));
+    let lock_wait_cb = Arc::clone(&lock_wait);
+    let entered_cb = Arc::clone(&entered);
+    let _abort_guard = signal.on_abort(move |reason| {
+        if !entered_cb.load(Ordering::SeqCst) {
+            lock_wait_cb.abort(Some(reason.clone()));
+        }
+    });
+    if signal.aborted() && !entered.load(Ordering::SeqCst) {
+        lock_wait.abort(signal.reason());
+    }
+
+    let oauth_for_modify = Arc::clone(&oauth);
+    let provider_id_owned = provider_id.to_owned();
+    let oauth_refresh_failed = Arc::new(AtomicBool::new(false));
+    let oauth_refresh_failed_flag = Arc::clone(&oauth_refresh_failed);
+    let entered_modify = Arc::clone(&entered);
+
+    let post = credentials
+        .modify(
+            provider_id,
+            Box::new(move |current| {
+                entered_modify.store(true, Ordering::SeqCst);
+                Box::pin(async move {
+                    let Some(Credential::OAuth(cur_oauth)) = current else {
+                        return Ok(None);
+                    };
+                    if !needs_refresh(&cur_oauth) {
+                        return Ok(None);
+                    }
+                    let refresh_signal = AbortSignal::timeout(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS);
+                    match oauth_for_modify.refresh(cur_oauth, refresh_signal).await {
+                        Ok(refreshed) => Ok(Some(Credential::OAuth(refreshed))),
+                        Err(err) => {
+                            oauth_refresh_failed_flag.store(true, Ordering::SeqCst);
+                            Err(ModelsError::with_cause(
+                                ModelsErrorCode::OAuth,
+                                format!("OAuth refresh failed for {provider_id_owned}"),
+                                err,
+                            )
+                            .into())
+                        }
+                    }
+                })
+            }),
+            Some(AuthOperationOptions {
+                signal: Some(lock_wait.signal()),
+            }),
+        )
+        .await
+        .map_err(|err| {
+            if oauth_refresh_failed.load(Ordering::SeqCst) {
+                err
+            } else if let Err(abort_err) = signal.throw_if_aborted() {
+                abort_err
+            } else {
+                ModelsError::with_cause(
+                    ModelsErrorCode::Auth,
+                    format!("Credential store modify failed for {provider_id}"),
+                    err,
+                )
+                .into()
+            }
+        })?;
+
+    match post {
+        Some(Credential::OAuth(cred)) => Ok(Some(cred)),
+        _ => Ok(None),
+    }
+}
+
 /// OAuth resolution with double-checked locking: tokens with less than five
 /// minutes remaining lock, re-check expiry under the lock, refresh once
 /// globally, and persist the rotated credential before release.
@@ -171,61 +259,19 @@ async fn resolve_stored_oauth(
     let mut credential = stored;
 
     if expires_soon(&credential, minimum_validity_ms) {
-        let oauth_for_modify = Arc::clone(&oauth);
-        let provider_id_owned = provider_id.to_owned();
-        let outer_signal = signal.clone();
-        let oauth_refresh_failed = Arc::new(AtomicBool::new(false));
-        let oauth_refresh_failed_flag = Arc::clone(&oauth_refresh_failed);
-
-        let post = credentials
-            .modify(
-                provider_id,
-                Box::new(move |current| {
-                    Box::pin(async move {
-                        let Some(Credential::OAuth(cur_oauth)) = current else {
-                            return Ok(None);
-                        };
-                        if !expires_soon(&cur_oauth, minimum_validity_ms) {
-                            return Ok(None);
-                        }
-                        let refresh_signal =
-                            AbortSignal::any(&[outer_signal, AbortSignal::timeout(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS)]);
-                        match oauth_for_modify.refresh(cur_oauth, refresh_signal).await {
-                            Ok(refreshed) => Ok(Some(Credential::OAuth(refreshed))),
-                            Err(err) => {
-                                oauth_refresh_failed_flag.store(true, Ordering::SeqCst);
-                                Err(ModelsError::with_cause(
-                                    ModelsErrorCode::OAuth,
-                                    format!("OAuth refresh failed for {provider_id_owned}"),
-                                    err,
-                                )
-                                .into())
-                            }
-                        }
-                    })
-                }),
-                Some(AuthOperationOptions {
-                    signal: Some(signal.clone()),
-                }),
-            )
-            .await
-            .map_err(|err| {
-                if oauth_refresh_failed.load(Ordering::SeqCst) {
-                    err
-                } else {
-                    ModelsError::with_cause(
-                        ModelsErrorCode::Auth,
-                        format!("Credential store modify failed for {provider_id}"),
-                        err,
-                    )
-                    .into()
-                }
-            })?;
-
-        let Some(Credential::OAuth(updated_oauth)) = post else {
+        let Some(updated_oauth) = refresh_stored_oauth_credential(
+            credentials,
+            provider_id,
+            Arc::clone(&oauth),
+            move |cur_oauth| expires_soon(cur_oauth, minimum_validity_ms),
+            signal,
+        )
+        .await?
+        else {
             return Ok(None);
         };
         credential = updated_oauth;
+        signal.throw_if_aborted()?;
 
         if min_oauth_validity_ms.is_some() && expires_soon(&credential, minimum_validity_ms) {
             return Err(ModelsError::new(

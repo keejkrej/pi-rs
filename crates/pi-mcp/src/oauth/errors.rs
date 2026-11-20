@@ -29,19 +29,20 @@ impl OAuthError {
 #[error("{message}")]
 pub struct OAuthIssuerMismatchError {
     pub message: String,
-    pub expected: String,
+    /// `None` when no authorization server metadata was discovered.
+    pub expected: Option<String>,
     /// `undefined` when an authorization response lacks the `iss` parameter its server promised (RFC 9207).
     pub received: Option<String>,
 }
 
 impl OAuthIssuerMismatchError {
-    pub fn new(expected: impl Into<String>, received: Option<String>) -> Self {
-        let expected = expected.into();
-        let expected_json = pi_js::json::stringify(&expected);
-        let received_json = match &received {
+    pub fn new(expected: Option<String>, received: Option<String>) -> Self {
+        let format = |issuer: &Option<String>| match issuer {
             None => "none".to_string(),
-            Some(r) => pi_js::json::stringify(r),
+            Some(v) => pi_js::json::stringify(v),
         };
+        let expected_json = format(&expected);
+        let received_json = format(&received);
         Self {
             message: format!("OAuth issuer mismatch: expected {expected_json}, received {received_json}"),
             expected,
@@ -104,6 +105,28 @@ impl McpOAuthAuthorizationRequiredError {
 }
 
 impl Default for McpOAuthAuthorizationRequiredError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Thrown by `McpOAuthServerStore.withRefreshLock()` when another process holds the refresh lock for the
+/// whole wait. `startMcpSignIn()` then skips the refresh and goes to the browser step.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct McpRefreshLockBusyError {
+    pub message: String,
+}
+
+impl McpRefreshLockBusyError {
+    pub fn new() -> Self {
+        Self {
+            message: "Another process is refreshing the MCP server's tokens".to_string(),
+        }
+    }
+}
+
+impl Default for McpRefreshLockBusyError {
     fn default() -> Self {
         Self::new()
     }

@@ -112,6 +112,7 @@ async fn applies_updated_top_level_prompt_settings_on_reload_after_startup() {
                                 max_tokens: m.max_tokens,
                                 sampling_params: m.sampling_params.clone(),
                                 compat: m.compat.clone(),
+                                sampling_params_by_thinking_level: None,
                             })
                         })
                         .collect();
